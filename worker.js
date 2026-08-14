@@ -1446,28 +1446,29 @@ async function handleUsage(body, env, cors) {
 
   // Uploads aus KV (täglich)
   let uploads = 0;
-  if (userId) {
-    const jetzt = new Date();
-    const tag = jetzt.toISOString().split('T')[0]; // YYYY-MM-DD
-    const val = await env.PROFIL_KV.get(`uploads:${userId}:${tag}`).catch(() => null);
-    uploads = val ? parseInt(val) : 0;
-  }
+  try {
+    if (userId && env.PROFIL_KV) {
+      const tag = new Date().toISOString().split('T')[0];
+      const val = await env.PROFIL_KV.get(`uploads:${userId}:${tag}`);
+      uploads = val ? parseInt(val) : 0;
+    }
+  } catch(e) { uploads = 0; }
 
-  // Nachrichten aus Supabase — userId als Key
+  // Nachrichten aus Supabase
   let nachrichten = 0;
-  const supabaseKey = userId || nutzername;
-  if (supabaseKey) {
-    try {
+  try {
+    const supabaseKey = userId || nutzername;
+    if (supabaseKey && env.SUPABASE_URL && env.SUPABASE_KEY) {
       const res = await fetch(`${env.SUPABASE_URL}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(supabaseKey)}&select=*`, {
         headers: { 'apikey': env.SUPABASE_KEY, 'Authorization': `Bearer ${env.SUPABASE_KEY}` }
       });
       const rows = await res.json();
       const heute = new Date().toISOString().split('T')[0];
-      if (rows.length > 0 && rows[0].letztes_datum === heute) {
+      if (Array.isArray(rows) && rows.length > 0 && rows[0].letztes_datum === heute) {
         nachrichten = rows[0].nachrichten_heute || 0;
       }
-    } catch(e) {}
-  }
+    }
+  } catch(e) { nachrichten = 0; }
 
   return new Response(JSON.stringify({
     nachrichten: { used: nachrichten, limit: 15, pct: Math.min(100, Math.round((nachrichten / 15) * 100)) },
