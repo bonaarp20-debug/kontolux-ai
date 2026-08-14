@@ -270,7 +270,7 @@ export default {
     }
 
     // Origin-Check — nur erlaubte Domains
-    if (!ALLOWED_ORIGINS.includes(origin)) {
+    if (origin && !ALLOWED_ORIGINS.includes(origin)) {
       return new Response('Forbidden', { status: 403, headers: cors });
     }
 
