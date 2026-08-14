@@ -406,6 +406,12 @@ async function checkNachrichtenLimit(nutzername, env, userId) {
   }
 
   const row = rows[0];
+  
+  // ✅ Sicherheitscheck: row muss valide sein
+  if (!row || typeof row !== 'object') {
+    return { erlaubt: true, anzahl: 1 };
+  }
+  
   const anzahl = row.letztes_datum === heute ? (row.nachrichten_heute || 0) : 0;
 
   if (anzahl >= LIMIT) {
