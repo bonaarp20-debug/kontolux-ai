@@ -277,7 +277,8 @@ export default {
     try {
       let body;
       try {
-        body = await request.json();
+        const rawText = await request.text();
+        body = JSON.parse(rawText);
       } catch (parseErr) {
         console.error('JSON Parse Error:', parseErr.message);
         const errorCors = getCORS(origin);
