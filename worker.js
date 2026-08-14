@@ -259,13 +259,16 @@ export default {
       });
     }
 
-    // ✅ /usage als GET — kein Body nötig, kein CORS Problem!
-    if (url.pathname === '/usage') {
+    // ✅ /usage als GET — vor JSON Parse!
+    if (request.method === 'GET' && url.pathname === '/usage') {
       const userId = url.searchParams.get('userId') || '';
       const nutzername = url.searchParams.get('nutzername') || '';
       return handleUsage({ userId, nutzername }, env, cors);
     }
-      const corsH = getCORS(origin); // ✅ Nutze dynamische CORS!
+
+    // PDF Result
+    if (request.method === 'GET' && url.pathname === '/pdf-result') {
+      const corsH = getCORS(origin);
       const userId = url.searchParams.get('userId');
       if (!userId) return new Response('Missing userId', { status: 400, headers: corsH });
       const result = await env.PDF_RESULTS.get(userId);
