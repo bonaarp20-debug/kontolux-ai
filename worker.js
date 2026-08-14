@@ -254,7 +254,7 @@ export default {
 
     // PDF Result — kein Origin-Check nötig (Browser-zu-Worker)
     if (request.method === 'GET' && url.pathname === '/pdf-result') {
-      const corsH = { 'Access-Control-Allow-Origin': 'https://app.kontolux-ai.de', 'Content-Type': 'application/json' };
+      const corsH = getCORS(origin); // ✅ Nutze dynamische CORS!
       const userId = url.searchParams.get('userId');
       if (!userId) return new Response('Missing userId', { status: 400, headers: corsH });
       const result = await env.PDF_RESULTS.get(userId);
@@ -299,7 +299,12 @@ export default {
 
       return new Response('Not found', { status: 404, headers: cors });
     } catch (e) {
-      return new Response('Fehler: ' + e.message, { status: 500, headers: cors });
+      console.error('Worker Error:', e.message, e.stack);
+      const errorCors = getCORS(origin);
+      return new Response(JSON.stringify({ error: 'Server Error', message: e.message }), { 
+        status: 500, 
+        headers: { ...errorCors, 'Content-Type': 'application/json' } 
+      });
     }
   },
 
@@ -786,17 +791,18 @@ async function verifyFirebaseToken(authHeader, env) {
 async function handleChat(body, env, cors = {}) {
   const { Nachricht, Verlauf, Nutzername, Profil, FristType, Datum, userId, ChatId, ErsteNachricht, Datei } = body;
 
-  // Nachrichtenlimit prüfen + Supabase hochzählen
-  const limit = await checkNachrichtenLimit(Nutzername, env, userId);
-  if (!limit.erlaubt) {
-    return new Response('Du hast dein heutiges Nachrichtenlimit erreicht. In den Einstellungen ⚙️ kannst du jederzeit sehen, wie viel Limit du noch frei hast und wann es sich zurücksetzt. Bis morgen! 👋', {
-      headers: { ...cors, 'Content-Type': 'text/plain' }
-    });
-  }
+  try {
+    // Nachrichtenlimit prüfen + Supabase hochzählen
+    const limit = await checkNachrichtenLimit(Nutzername, env, userId);
+    if (!limit.erlaubt) {
+      return new Response('Du hast dein heutiges Nachrichtenlimit erreicht. In den Einstellungen ⚙️ kannst du jederzeit sehen, wie viel Limit du noch frei hast und wann es sich zurücksetzt. Bis morgen! 👋', {
+        headers: { ...cors, 'Content-Type': 'text/plain' }
+      });
+    }
 
-  // Profil laden
-  const profil = await ladeProfil(userId, env);
-  const systemPrompt = buildSystemPrompt(profil || Profil, Datum, FristType, ErsteNachricht);
+    // Profil laden
+    const profil = await ladeProfil(userId, env);
+    const systemPrompt = buildSystemPrompt(profil || Profil, Datum, FristType, ErsteNachricht);
 
   // Verlauf parsen — Format: "Nutzer: ... | Kontolux AI: ..."
   const messages = [];
@@ -852,6 +858,16 @@ async function handleChat(body, env, cors = {}) {
     })
   });
 
+  // ✅ Fehlerbehandlung: Claude API muss ok sein!
+  if (!claudeRes.ok) {
+    const errText = await claudeRes.text();
+    console.error('Claude API Error:', claudeRes.status, errText.substring(0, 200));
+    return new Response(
+      JSON.stringify({ error: `Claude API Error: ${claudeRes.status}`, details: errText.substring(0, 100) }),
+      { status: claudeRes.status, headers: { ...cors, 'Content-Type': 'application/json' } }
+    );
+  }
+
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
   const encoder = new TextEncoder();
@@ -890,9 +906,16 @@ async function handleChat(body, env, cors = {}) {
     }
   })();
 
-  return new Response(readable, {
-    headers: { ...cors, 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' }
-  });
+    return new Response(readable, {
+      headers: { ...cors, 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' }
+    });
+  } catch(err) {
+    console.error('handleChat error:', err.message);
+    return new Response(JSON.stringify({ error: 'Chat error', details: err.message }), {
+      status: 500,
+      headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
 }
 
 // ── Stream Helper ────────────────────────────────────────
