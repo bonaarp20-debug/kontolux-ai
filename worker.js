@@ -215,9 +215,8 @@ async function handleBelegSpeichern(body, env, token, cors) {
 
 
 function getCORS(origin) {
-  const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
   return {
-    'Access-Control-Allow-Origin': allowed,
+    'Access-Control-Allow-Origin': 'https://app.kontolux-ai.de',
     'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Origin',
     'Access-Control-Max-Age': '86400',
@@ -250,7 +249,14 @@ export default {
     const cors = getCORS(origin);
 
     if (request.method === 'OPTIONS') {
-      return new Response(null, { headers: cors });
+      return new Response(null, { 
+        headers: {
+          'Access-Control-Allow-Origin': 'https://app.kontolux-ai.de',
+          'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Origin',
+          'Access-Control-Max-Age': '86400',
+        }
+      });
     }
 
     // PDF Result — kein Origin-Check nötig (Browser-zu-Worker)
@@ -278,12 +284,11 @@ export default {
     try {
       let body;
       try {
-        const rawText = await request.text();
-        body = JSON.parse(rawText);
+        body = await request.json();
       } catch (parseErr) {
         console.error('JSON Parse Error:', parseErr.message);
         const errorCors = getCORS(origin);
-        return new Response(JSON.stringify({ error: 'Invalid JSON' }), { 
+        return new Response(JSON.stringify({ error: 'Invalid JSON', details: parseErr.message }), { 
           status: 400, 
           headers: { ...errorCors, 'Content-Type': 'application/json' } 
         });
@@ -421,7 +426,7 @@ async function checkNachrichtenLimit(nutzername, env, userId) {
   }
 
   // Hochzählen
-  await fetch(`${env.SUPABASE_URL}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(key)}`, {
+  const patchRes = await fetch(`${env.SUPABASE_URL}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(key)}`, {
     method: 'PATCH',
     headers: {
       'apikey': env.SUPABASE_KEY,
@@ -431,6 +436,11 @@ async function checkNachrichtenLimit(nutzername, env, userId) {
     },
     body: JSON.stringify({ nachrichten_heute: anzahl + 1, letztes_datum: heute })
   });
+
+  if (!patchRes.ok) {
+    const errText = await patchRes.text();
+    console.error('Supabase PATCH Error:', patchRes.status, errText);
+  }
 
   return { erlaubt: true, anzahl: anzahl + 1 };
 }
