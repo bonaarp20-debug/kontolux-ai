@@ -275,15 +275,43 @@ export default {
     }
 
     try {
-      const body = await request.json();
+      let body;
+      try {
+        body = await request.json();
+      } catch (parseErr) {
+        console.error('JSON Parse Error:', parseErr.message);
+        const errorCors = getCORS(origin);
+        return new Response(JSON.stringify({ error: 'Invalid JSON' }), { 
+          status: 400, 
+          headers: { ...errorCors, 'Content-Type': 'application/json' } 
+        });
+      }
 
       // Firebase ID-Token verifizieren für alle geschützten Endpoints
       const authHeader = request.headers.get('Authorization');
-      const verifiedUid = await verifyFirebaseToken(authHeader, env);
+      let verifiedUid = null;
       const protectedPaths = ['/chat', '/image', '/document', '/frist', '/usage', '/datev-export'];
-      if (protectedPaths.includes(url.pathname) && !verifiedUid) {
-        return new Response('Unauthorized', { status: 401, headers: cors });
+      
+      if (protectedPaths.includes(url.pathname)) {
+        try {
+          verifiedUid = await verifyFirebaseToken(authHeader, env);
+          if (!verifiedUid) {
+            const errorCors = getCORS(origin);
+            return new Response(JSON.stringify({ error: 'Unauthorized' }), { 
+              status: 401, 
+              headers: { ...errorCors, 'Content-Type': 'application/json' } 
+            });
+          }
+        } catch (tokenErr) {
+          console.error('Token Error:', tokenErr.message);
+          const errorCors = getCORS(origin);
+          return new Response(JSON.stringify({ error: 'Token verification failed' }), { 
+            status: 401, 
+            headers: { ...errorCors, 'Content-Type': 'application/json' } 
+          });
+        }
       }
+      
       // Verifizierte UID überschreibt client-seitige userId
       if (verifiedUid && body.userId) body.userId = verifiedUid;
 
@@ -301,7 +329,7 @@ export default {
     } catch (e) {
       console.error('Worker Error:', e.message, e.stack);
       const errorCors = getCORS(origin);
-      return new Response(JSON.stringify({ error: 'Server Error', message: e.message }), { 
+      return new Response(JSON.stringify({ error: 'Server Error', details: e.message }), { 
         status: 500, 
         headers: { ...errorCors, 'Content-Type': 'application/json' } 
       });
