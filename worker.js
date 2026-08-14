@@ -219,7 +219,8 @@ function getCORS(origin) {
   return {
     'Access-Control-Allow-Origin': allowed,
     'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Origin',
+    'Access-Control-Max-Age': '86400',
   };
 }
 
@@ -245,7 +246,7 @@ function checkRateLimit(ip, limit = 20, windowMs = 10000) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const origin = request.headers.get('Origin') || '';
+    const origin = request.headers.get('Origin') || request.headers.get('X-Origin') || '';
     const cors = getCORS(origin);
 
     if (request.method === 'OPTIONS') {
@@ -874,7 +875,7 @@ async function handleChat(body, env, cors = {}) {
   // Modell-Routing: Haiku für einfache Tasks, Sonnet für komplexe
   const haikuTrigger = /rechnung|mahnung|tageseinnahmen|monatsabschluss|frist|steuer|ausgabe|einnahme|gewinn|prognose/i;
   const useHaiku = haikuTrigger.test(Nachricht) || FristType;
-  const model = useHaiku ? 'claude-haiku-4-5-20251001' : env.ANTHROPIC_MODEL;
+  const model = useHaiku ? 'claude-haiku-4-5-20251001' : (env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001');
 
   // Claude aufrufen und SSE parsen → reinen Text streamen
   const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
@@ -1036,7 +1037,7 @@ async function handleImage(body, env, cors = {}) {
       'content-type': 'application/json'
     },
     body: JSON.stringify({
-      model: env.ANTHROPIC_MODEL,
+      model: env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001',
       max_tokens: 1024,
       stream: true,
       system: systemPrompt,
