@@ -374,28 +374,49 @@ async function checkUploadLimit(userId, env) {
   }
 }
 
+// ── Supabase REST Basis-URL normalisieren (SUPABASE_URL kann mit oder ohne /rest/v1 gesetzt sein) ──
+function supabaseRestBase(env) {
+  return (env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1$/, '');
+}
+
 // ── Supabase: Nachrichtenlimit prüfen + hochzählen ────────
 async function checkNachrichtenLimit(nutzername, env, userId) {
   const key = userId || nutzername || 'anonym';
   const heute = new Date().toISOString().split('T')[0];
   const LIMIT = 15;
 
+  if (!env.SUPABASE_URL || !env.SUPABASE_KEY) {
+    console.error('checkNachrichtenLimit: SUPABASE_URL/SUPABASE_KEY fehlt in env!');
+    return { erlaubt: true, anzahl: 0 };
+  }
+
+  const base = supabaseRestBase(env);
+
   // Erst nach userId suchen, dann nach nutzername als Fallback
   let rows = [];
-  const resById = await fetch(`${env.SUPABASE_URL}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(key)}&select=*`, {
+  const resById = await fetch(`${base}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(key)}&select=*`, {
     headers: { 'apikey': env.SUPABASE_KEY, 'Authorization': `Bearer ${env.SUPABASE_KEY}` }
   });
+  if (!resById.ok) {
+    const errText = await resById.text();
+    console.error('checkNachrichtenLimit GET Error:', resById.status, errText, 'key=', key);
+    return { erlaubt: true, anzahl: 0 };
+  }
   rows = await resById.json();
+  if (!Array.isArray(rows)) {
+    console.error('checkNachrichtenLimit: GET lieferte kein Array:', JSON.stringify(rows).slice(0, 200), 'key=', key);
+    rows = [];
+  }
 
   // Fallback: alter Eintrag mit nutzername
   if (rows.length === 0 && nutzername && nutzername !== key) {
-    const resByName = await fetch(`${env.SUPABASE_URL}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(nutzername)}&select=*`, {
+    const resByName = await fetch(`${base}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(nutzername)}&select=*`, {
       headers: { 'apikey': env.SUPABASE_KEY, 'Authorization': `Bearer ${env.SUPABASE_KEY}` }
     });
-    const oldRows = await resByName.json();
-    if (oldRows.length > 0) {
+    const oldRows = resByName.ok ? await resByName.json() : [];
+    if (Array.isArray(oldRows) && oldRows.length > 0) {
       // Alten Eintrag auf userId migrieren
-      await fetch(`${env.SUPABASE_URL}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(nutzername)}`, {
+      await fetch(`${base}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(nutzername)}`, {
         method: 'PATCH',
         headers: { 'apikey': env.SUPABASE_KEY, 'Authorization': `Bearer ${env.SUPABASE_KEY}`, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
         body: JSON.stringify({ nutzer_name: key })
@@ -406,7 +427,7 @@ async function checkNachrichtenLimit(nutzername, env, userId) {
 
   if (rows.length === 0) {
     // Neuer Nutzer — Zeile anlegen
-    await fetch(`${env.SUPABASE_URL}/rest/v1/nutzer_limits`, {
+    const insertRes = await fetch(`${base}/rest/v1/nutzer_limits`, {
       method: 'POST',
       headers: {
         'apikey': env.SUPABASE_KEY,
@@ -416,15 +437,20 @@ async function checkNachrichtenLimit(nutzername, env, userId) {
       },
       body: JSON.stringify({ nutzer_name: key, nachrichten_heute: 1, letztes_datum: heute })
     });
+    if (!insertRes.ok) {
+      const errText = await insertRes.text();
+      console.error('checkNachrichtenLimit INSERT Error:', insertRes.status, errText, 'key=', key);
+    }
     return { erlaubt: true, anzahl: 1 };
   }
 
   const row = rows[0];
-  
+
   if (!row || typeof row !== 'object') {
+    console.error('checkNachrichtenLimit: row ungültig für key=', key, JSON.stringify(row));
     return { erlaubt: true, anzahl: 1 };
   }
-  
+
   const anzahl = row.letztes_datum === heute ? (row.nachrichten_heute || 0) : 0;
 
   if (anzahl >= LIMIT) {
@@ -433,7 +459,7 @@ async function checkNachrichtenLimit(nutzername, env, userId) {
 
   // ✅ Atomares Hochzählen - verhindert Race Conditions!
   const neueAnzahl = anzahl + 1;
-  const patchRes = await fetch(`${env.SUPABASE_URL}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(key)}`, {
+  const patchRes = await fetch(`${base}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(key)}`, {
     method: 'PATCH',
     headers: {
       'apikey': env.SUPABASE_KEY,
@@ -441,15 +467,20 @@ async function checkNachrichtenLimit(nutzername, env, userId) {
       'Content-Type': 'application/json',
       'Prefer': 'return=representation'
     },
-    body: JSON.stringify({ 
+    body: JSON.stringify({
       nachrichten_heute: row.letztes_datum === heute ? neueAnzahl : 1,
-      letztes_datum: heute 
+      letztes_datum: heute
     })
   });
 
   if (!patchRes.ok) {
     const errText = await patchRes.text();
-    console.error('Supabase PATCH Error:', patchRes.status, errText);
+    console.error('Supabase PATCH Error:', patchRes.status, errText, 'key=', key);
+  } else {
+    const updated = await patchRes.json().catch(() => null);
+    if (!Array.isArray(updated) || updated.length === 0) {
+      console.error('Supabase PATCH: 0 Zeilen aktualisiert für key=', key, '- nutzer_name matcht keine Zeile');
+    }
   }
 
   return { erlaubt: true, anzahl: neueAnzahl };
@@ -1459,7 +1490,7 @@ async function handleUsage(body, env, cors) {
   try {
     const supabaseKey = userId || nutzername;
     if (supabaseKey && env.SUPABASE_URL && env.SUPABASE_KEY) {
-      const res = await fetch(`${env.SUPABASE_URL}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(supabaseKey)}&select=*`, {
+      const res = await fetch(`${supabaseRestBase(env)}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(supabaseKey)}&select=*`, {
         headers: { 'apikey': env.SUPABASE_KEY, 'Authorization': `Bearer ${env.SUPABASE_KEY}` }
       });
       const rows = await res.json();
