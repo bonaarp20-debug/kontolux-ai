@@ -1,5 +1,4 @@
 name = "kontolux-main"
-type = "javascript"
 compatibility_date = "2026-08-14"
 main = "worker.js"
 
