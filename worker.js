@@ -414,7 +414,6 @@ async function checkNachrichtenLimit(nutzername, env, userId) {
 
   const row = rows[0];
   
-  // ✅ Sicherheitscheck: row muss valide sein
   if (!row || typeof row !== 'object') {
     return { erlaubt: true, anzahl: 1 };
   }
@@ -425,16 +424,20 @@ async function checkNachrichtenLimit(nutzername, env, userId) {
     return { erlaubt: false, anzahl };
   }
 
-  // Hochzählen
+  // ✅ Atomares Hochzählen - verhindert Race Conditions!
+  const neueAnzahl = anzahl + 1;
   const patchRes = await fetch(`${env.SUPABASE_URL}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(key)}`, {
     method: 'PATCH',
     headers: {
       'apikey': env.SUPABASE_KEY,
       'Authorization': `Bearer ${env.SUPABASE_KEY}`,
       'Content-Type': 'application/json',
-      'Prefer': 'return=minimal'
+      'Prefer': 'return=representation'
     },
-    body: JSON.stringify({ nachrichten_heute: anzahl + 1, letztes_datum: heute })
+    body: JSON.stringify({ 
+      nachrichten_heute: row.letztes_datum === heute ? neueAnzahl : 1,
+      letztes_datum: heute 
+    })
   });
 
   if (!patchRes.ok) {
@@ -442,7 +445,7 @@ async function checkNachrichtenLimit(nutzername, env, userId) {
     console.error('Supabase PATCH Error:', patchRes.status, errText);
   }
 
-  return { erlaubt: true, anzahl: anzahl + 1 };
+  return { erlaubt: true, anzahl: neueAnzahl };
 }
 
 // ── Profil aus bestehendem Cloudflare Worker laden ───────
