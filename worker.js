@@ -10,6 +10,210 @@ const ALLOWED_ORIGINS = [
   'http://localhost:5000', // lokale Entwicklung
 ];
 
+// Service Account OAuth2 Token Generator
+async function getServiceAccountToken(env) {
+  try {
+    const serviceAccountJson = env.FIREBASE_SERVICE_ACCOUNT;
+    if (!serviceAccountJson) {
+      console.error('FIREBASE_SERVICE_ACCOUNT nicht gesetzt!');
+      return null;
+    }
+
+    const serviceAccount = JSON.parse(serviceAccountJson);
+    const now = Math.floor(Date.now() / 1000);
+
+    // JWT Header + Payload
+    const header = { alg: 'RS256', typ: 'JWT' };
+    const payload = {
+      iss: serviceAccount.client_email,
+      scope: 'https://www.googleapis.com/auth/cloud-platform',
+      aud: 'https://oauth2.googleapis.com/token',
+      exp: now + 3600,
+      iat: now
+    };
+
+    // Base64 encode
+    const encodeBase64 = (str) => btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    const encodedHeader = encodeBase64(JSON.stringify(header));
+    const encodedPayload = encodeBase64(JSON.stringify(payload));
+    const message = `${encodedHeader}.${encodedPayload}`;
+
+    // Import Private Key
+    const keyPem = serviceAccount.private_key;
+    const keyData = keyPem
+      .replace('-----BEGIN PRIVATE KEY-----', '')
+      .replace('-----END PRIVATE KEY-----', '')
+      .replace(/\n/g, '');
+    
+    const binaryKey = Uint8Array.from(atob(keyData), c => c.charCodeAt(0));
+    const key = await crypto.subtle.importKey(
+      'pkcs8',
+      binaryKey,
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+
+    // Sign JWT
+    const signature = await crypto.subtle.sign(
+      'RSASSA-PKCS1-v1_5',
+      key,
+      new TextEncoder().encode(message)
+    );
+    
+    const encodedSignature = encodeBase64(String.fromCharCode(...new Uint8Array(signature)));
+    const jwt = `${message}.${encodedSignature}`;
+
+    // Exchange JWT for Access Token
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`
+    });
+
+    const tokenData = await tokenRes.json();
+    if (!tokenData.access_token) {
+      console.error('OAuth2 Response:', tokenData);
+      return null;
+    }
+    return tokenData.access_token;
+  } catch(err) {
+    console.error('OAuth2 Error:', err.message);
+    return null;
+  }
+}
+
+// ============================================================
+// BELEG_SPEICHERN mit Service Account
+// ============================================================
+
+// Nutze diese Funktion im BELEG_SPEICHERN Handler:
+async function handleBelegSpeichern(body, env, token, cors) {
+  const { userId, Datei, typ, betrag, absender } = body;
+
+  if (!Datei || !Datei.name || !userId || !Datei.base64) {
+    return new Response(JSON.stringify({ error: 'Missing required fields' }), {
+      status: 400,
+      headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+
+  try {
+    // Get Service Account Token
+    const saToken = await getServiceAccountToken(env);
+    if (!saToken) {
+      return new Response(JSON.stringify({ error: 'Service Account Token generierung fehlgeschlagen' }), {
+        status: 500,
+        headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Komprimiere Datei wenn > 1MB
+    let base64 = Datei.base64;
+    if (base64.length > 1024 * 1024) {
+      console.log('Komprimiere große Datei...');
+      base64 = base64.substring(0, Math.floor(1024 * 1024 * 0.8));
+    }
+
+    // Upload zu Firebase Storage (mit Service Account Token!)
+    const docId = `beleg_${Date.now()}`;
+    const fileName = `${docId}_${Datei.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    const storagePath = `users/${userId}/belege/${fileName}`;
+    const storageUrl = `https://www.googleapis.com/upload/storage/v1/b/kontolux-ai.appspot.com/o?uploadType=media&name=${encodeURIComponent(storagePath)}`;
+
+    // Base64 → Bytes
+    const binaryString = atob(base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+
+    const storageRes = await fetch(storageUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${saToken}`,  // ✅ Service Account Token!
+        'Content-Type': Datei.type || 'application/octet-stream'
+      },
+      body: bytes.buffer
+    });
+
+    if (!storageRes.ok) {
+      const errText = await storageRes.text();
+      console.error('Storage Error:', storageRes.status, errText.substring(0, 200));
+      return new Response(JSON.stringify({ error: `Storage failed: ${storageRes.status}` }), {
+        status: 500,
+        headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Download URL
+    const downloadUrl = `https://firebasestorage.googleapis.com/v0/b/kontolux-ai.appspot.com/o/${encodeURIComponent(storagePath)}?alt=media`;
+
+    // Speichere Metadaten in Firestore (mit User Token)
+    const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}`;
+
+    const sizeBytes = Datei.size || 0;
+    const sizeFormatted = sizeBytes > 1024 * 1024 
+      ? `${(sizeBytes / 1024 / 1024).toFixed(1)}MB`
+      : sizeBytes > 1024
+      ? `${(sizeBytes / 1024).toFixed(0)}KB`
+      : `${sizeBytes}B`;
+
+    const metadata = {
+      fields: {
+        name: { stringValue: Datei.name },
+        type: { stringValue: Datei.type || 'application/octet-stream' },
+        size: { stringValue: sizeFormatted },
+        sizeBytes: { integerValue: sizeBytes },
+        typ: { stringValue: typ || 'rechnung_eingehend' },
+        storage_url: { stringValue: downloadUrl },
+        createdAt: { timestampValue: new Date().toISOString() }
+      }
+    };
+
+    if (betrag) metadata.fields.betrag = { doubleValue: parseFloat(betrag) };
+    if (absender) metadata.fields.absender = { stringValue: absender };
+
+    const firestoreRes = await fetch(firestoreUrl, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${token}`,  // ✅ User Token für Firestore!
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(metadata)
+    });
+
+    if (!firestoreRes.ok) {
+      const errText = await firestoreRes.text();
+      console.error('Firestore Error:', firestoreRes.status);
+      return new Response(JSON.stringify({ error: `Firestore failed: ${firestoreRes.status}` }), {
+        status: 500,
+        headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    return new Response(JSON.stringify({
+      success: true,
+      docId: docId,
+      name: Datei.name,
+      storage_url: downloadUrl,
+      typ: typ || 'rechnung_eingehend',
+      message: 'Beleg erfolgreich gespeichert'
+    }), {
+      status: 200,
+      headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+
+  } catch(err) {
+    console.error('BELEG_SPEICHERN Error:', err.message);
+    return new Response(JSON.stringify({ error: 'Server Error', details: err.message }), {
+      status: 500,
+      headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+
 function getCORS(origin) {
   const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
   return {
@@ -786,7 +990,7 @@ async function handleImage(body, env, cors = {}) {
 
 // ── /document Handler ─────────────────────────────────────
 async function handleDocument(body, env, cors = {}) {
-  const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr } = body;
+  const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ } = body;
 
   // ── BELEG MANUELL EINTRAGEN (ohne Datei) ────
   if (Nachricht === 'BELEG_MANUELL') {
@@ -813,7 +1017,7 @@ async function handleDocument(body, env, cors = {}) {
       const metadata = {
         fields: {
           name: { stringValue: `Beleg von ${absender}` },
-          typ: { stringValue: 'rechnung_eingehend' },
+          typ: { stringValue: typ || 'rechnung_eingehend' },
           betrag: { doubleValue: parseFloat(betrag) },
           absender: { stringValue: absender },
           rechnungsnr: rechnungsnr ? { stringValue: rechnungsnr } : { stringValue: '' },
@@ -865,8 +1069,18 @@ async function handleDocument(body, env, cors = {}) {
 
   // ── BELEG SPEICHERN (nur Metadaten, keine Datei) ────
   if (Nachricht === 'BELEG_SPEICHERN') {
-    if (!Datei || !Datei.name || !userId) {
-      return new Response(JSON.stringify({ error: 'Missing Datei info or userId' }), {
+    console.log('BELEG_SPEICHERN Debug:', {
+      userId: userId,
+      hasDatei: !!Datei,
+      hasBase64: !!Datei?.base64,
+      Datei_name: Datei?.name,
+      Datei_size: Datei?.size
+    });
+
+    if (!Datei || !Datei.name || !userId || !Datei.base64) {
+      return new Response(JSON.stringify({ 
+        error: 'Missing Datei info or userId or base64'
+      }), {
         status: 400,
         headers: { ...cors, 'Content-Type': 'application/json' }
       });
@@ -882,11 +1096,63 @@ async function handleDocument(body, env, cors = {}) {
         });
       }
 
-      // Speichere NUR Metadaten in Firestore (kein Base64!)
+      // 1. KOMPRIMIERUNG - wenn Base64 > 1MB
+      let base64 = Datei.base64;
+      const base64Size = base64.length;
+      const maxSize = 1024 * 1024; // 1MB
+
+      if (base64Size > maxSize) {
+        console.log(`Datei zu groß: ${(base64Size / 1024 / 1024).toFixed(2)}MB - komprimiere...`);
+        
+        // Für PDFs und Bilder: kürze auf 80% der Originalgröße
+        const targetSize = Math.floor(maxSize * 0.8);
+        base64 = base64.substring(0, targetSize);
+        console.log(`Gekürzt auf: ${(base64.length / 1024 / 1024).toFixed(2)}MB`);
+      }
+
+      // 2. FIREBASE STORAGE UPLOAD
       const docId = `beleg_${Date.now()}`;
+      const fileName = `${docId}_${Datei.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+      const storagePath = `users/${userId}/belege/${fileName}`;
+      
+      const storageUrl = `https://www.googleapis.com/upload/storage/v1/b/kontolux-ai.appspot.com/o?uploadType=media&name=${encodeURIComponent(storagePath)}`;
+
+      // Base64 zu Bytes
+      const binaryString = atob(base64);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+
+      const storageRes = await fetch(storageUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': Datei.type || 'application/octet-stream'
+        },
+        body: bytes.buffer
+      });
+
+      if (!storageRes.ok) {
+        const errText = await storageRes.text();
+        console.error('Storage Upload Error:', {
+          status: storageRes.status,
+          error: errText.substring(0, 200)
+        });
+        return new Response(JSON.stringify({ 
+          error: `Storage upload failed: ${storageRes.status}`
+        }), {
+          status: 500,
+          headers: { ...cors, 'Content-Type': 'application/json' }
+        });
+      }
+
+      // 3. DOWNLOAD-URL konstruieren
+      const downloadUrl = `https://firebasestorage.googleapis.com/v0/b/kontolux-ai.appspot.com/o/${encodeURIComponent(storagePath)}?alt=media`;
+
+      // 4. FIRESTORE METADATEN + URL speichern
       const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}`;
 
-      // Dateigröße formatieren
       const sizeBytes = Datei.size || 0;
       const sizeFormatted = sizeBytes > 1024 * 1024 
         ? `${(sizeBytes / 1024 / 1024).toFixed(1)}MB`
@@ -900,7 +1166,8 @@ async function handleDocument(body, env, cors = {}) {
           type: { stringValue: Datei.type || 'application/octet-stream' },
           size: { stringValue: sizeFormatted },
           sizeBytes: { integerValue: sizeBytes },
-          typ: { stringValue: 'rechnung_eingehend' },
+          typ: { stringValue: typ || 'rechnung_eingehend' },
+          storage_url: { stringValue: downloadUrl },
           createdAt: { timestampValue: new Date().toISOString() }
         }
       };
@@ -919,27 +1186,9 @@ async function handleDocument(body, env, cors = {}) {
 
       if (!firestoreRes.ok) {
         const errText = await firestoreRes.text();
-        let errorMsg = 'Unbekannter Fehler';
-        
-        try {
-          const errJson = JSON.parse(errText);
-          errorMsg = errJson.error?.message || errJson.message || errText.substring(0, 200);
-        } catch {
-          errorMsg = errText.substring(0, 200);
-        }
-
-        console.error('Firestore PATCH Error:', {
-          status: firestoreRes.status,
-          statusText: firestoreRes.statusText,
-          errorMsg: errorMsg,
-          docId: docId,
-          userId: userId,
-          fileSize: sizeFormatted
-        });
-
+        console.error('Firestore Error:', firestoreRes.status, errText);
         return new Response(JSON.stringify({ 
-          error: `Firestore Error ${firestoreRes.status}`,
-          details: errorMsg
+          error: `Firestore Error ${firestoreRes.status}`
         }), {
           status: 500,
           headers: { ...cors, 'Content-Type': 'application/json' }
@@ -951,6 +1200,7 @@ async function handleDocument(body, env, cors = {}) {
         docId: docId,
         name: Datei.name,
         size: sizeFormatted,
+        storage_url: downloadUrl,
         typ: 'rechnung_eingehend',
         message: 'Beleg erfolgreich gespeichert'
       }), {
