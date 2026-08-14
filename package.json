@@ -1,0 +1,13 @@
+{
+  "name": "kontolux-main",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "wrangler": "^4.0.0"
+  },
+  "devDependencies": {}
+}
