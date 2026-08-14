@@ -259,8 +259,12 @@ export default {
       });
     }
 
-    // PDF Result — kein Origin-Check nötig (Browser-zu-Worker)
-    if (request.method === 'GET' && url.pathname === '/pdf-result') {
+    // ✅ /usage als GET — kein Body nötig, kein CORS Problem!
+    if (url.pathname === '/usage') {
+      const userId = url.searchParams.get('userId') || '';
+      const nutzername = url.searchParams.get('nutzername') || '';
+      return handleUsage({ userId, nutzername }, env, cors);
+    }
       const corsH = getCORS(origin); // ✅ Nutze dynamische CORS!
       const userId = url.searchParams.get('userId');
       if (!userId) return new Response('Missing userId', { status: 400, headers: corsH });
@@ -297,7 +301,7 @@ export default {
       // Firebase ID-Token verifizieren für alle geschützten Endpoints
       const authHeader = request.headers.get('Authorization');
       let verifiedUid = null;
-      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/usage', '/datev-export'];
+      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export'];
       
       if (protectedPaths.includes(url.pathname)) {
         try {
