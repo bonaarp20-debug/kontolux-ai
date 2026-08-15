@@ -6,13 +6,12 @@
 const ALLOWED_ORIGINS = [
   'https://app.kontolux-ai.de',
   'https://kontolux-ai.de',
-  'https://app.kontolux-ai.de',
   'http://localhost:5000', // lokale Entwicklung
 ];
 
 function getCORS(origin) {
   return {
-    'Access-Control-Allow-Origin': 'https://app.kontolux-ai.de',
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : 'https://app.kontolux-ai.de',
     'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Origin',
     'Access-Control-Max-Age': '86400',
@@ -45,28 +44,21 @@ export default {
     const cors = getCORS(origin);
 
     if (request.method === 'OPTIONS') {
-      return new Response(null, { 
-        headers: {
-          'Access-Control-Allow-Origin': 'https://app.kontolux-ai.de',
-          'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Origin',
-          'Access-Control-Max-Age': '86400',
-        }
-      });
+      return new Response(null, { headers: cors });
     }
 
     // ✅ /usage als GET — vor JSON Parse! Token-Pflicht: sonst könnte jeder mit
     // einer beliebigen userId die Nachrichten-/Upload-Zahlen fremder Nutzer abfragen.
     if (request.method === 'GET' && url.pathname === '/usage') {
       const nutzername = url.searchParams.get('nutzername') || '';
-      const usageUid = await verifyFirebaseToken(request.headers.get('Authorization'), env);
-      if (!usageUid) {
+      const usageVerified = await verifyFirebaseToken(request.headers.get('Authorization'), env);
+      if (!usageVerified) {
         return new Response(JSON.stringify({ error: 'Unauthorized' }), {
           status: 401,
           headers: { ...cors, 'Content-Type': 'application/json' }
         });
       }
-      return handleUsage({ userId: usageUid, nutzername }, env, cors);
+      return handleUsage({ userId: usageVerified.uid, nutzername }, env, cors);
     }
 
     // PDF Result
@@ -107,28 +99,31 @@ export default {
       // Firebase ID-Token verifizieren für alle geschützten Endpoints
       const authHeader = request.headers.get('Authorization');
       let verifiedUid = null;
-      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export'];
-      
+      // ✅ /usage und /abo mit aufgenommen — sonst kann jeder ohne Token fremde
+      // Nutzungszahlen abfragen bzw. beliebige E-Mail-Adressen an/abmelden.
+      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/usage', '/abo', '/delete-account-data'];
+
       if (protectedPaths.includes(url.pathname)) {
         try {
-          verifiedUid = await verifyFirebaseToken(authHeader, env);
-          if (!verifiedUid) {
+          const verified = await verifyFirebaseToken(authHeader, env);
+          if (!verified) {
             const errorCors = getCORS(origin);
-            return new Response(JSON.stringify({ error: 'Unauthorized' }), { 
-              status: 401, 
-              headers: { ...errorCors, 'Content-Type': 'application/json' } 
+            return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+              status: 401,
+              headers: { ...errorCors, 'Content-Type': 'application/json' }
             });
           }
+          verifiedUid = verified.uid;
         } catch (tokenErr) {
           console.error('Token Error:', tokenErr.message);
           const errorCors = getCORS(origin);
-          return new Response(JSON.stringify({ error: 'Token verification failed' }), { 
-            status: 401, 
-            headers: { ...errorCors, 'Content-Type': 'application/json' } 
+          return new Response(JSON.stringify({ error: 'Token verification failed' }), {
+            status: 401,
+            headers: { ...errorCors, 'Content-Type': 'application/json' }
           });
         }
       }
-      
+
       // Verifizierte UID überschreibt client-seitige userId
       if (verifiedUid && body.userId) body.userId = verifiedUid;
 
@@ -141,6 +136,7 @@ export default {
       if (url.pathname === '/usage')    return handleUsage(body, env, cors);
       if (url.pathname === '/datev-export') return handleDatevExport(body, env, cors);
       if (url.pathname === '/kontakt')   return handleKontakt(body, env, cors);
+      if (url.pathname === '/delete-account-data') return handleDeleteAccountData(body, env, cors);
 
       return new Response('Not found', { status: 404, headers: cors });
     } catch (e) {
@@ -299,36 +295,6 @@ async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
   }
 
   return { erlaubt: true, anzahl: neueAnzahl };
-}
-
-// ── PROFIL_UPDATE aus Antwort parsen + speichern ─────────
-async function speichereProfil(userId, antwort, env) {
-  if (!userId || !antwort.includes('PROFIL_UPDATE:')) return antwort;
-
-  const match = antwort.match(/PROFIL_UPDATE:([^\n]+)/);
-  if (!match || match[1].trim() === 'keine') return antwort.replace(/\nPROFIL_UPDATE:[^\n]*/g, '').trim();
-
-  const updates = match[1].trim().split(',');
-  const profilRaw = await env.PROFIL_KV.get(userId) || '';
-  const profilMap = {};
-
-  // Bestehendes Profil parsen
-  for (const line of profilRaw.split('\n')) {
-    const [k, v] = line.split('=');
-    if (k && v) profilMap[k.trim()] = v.trim();
-  }
-
-  // Updates eintragen
-  for (const update of updates) {
-    const [k, v] = update.split('=');
-    if (k && v) profilMap[k.trim()] = v.trim();
-  }
-
-  // Zurückschreiben
-  const neuesProfil = Object.entries(profilMap).map(([k, v]) => `${k}=${v}`).join('\n');
-  await env.PROFIL_KV.put(userId, neuesProfil);
-
-  return antwort.replace(/\nPROFIL_UPDATE:[^\n]*/g, '').trim();
 }
 
 // ── System-Prompt bauen ───────────────────────────────────
@@ -604,71 +570,19 @@ FORMAT (ganz am Ende): PROFIL_UPDATE:schluessel=wert,schluessel=wert`;
   return basis;
 }
 
-// ── Claude API aufrufen (ohne Streaming) ──────────────────────
-async function claudeCall(messages, systemPrompt, env, model = null) {
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'x-api-key': env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-      'content-type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: model || env.ANTHROPIC_MODEL,
-      max_tokens: 1024,
-      system: systemPrompt,
-      messages
-    })
-  });
-  const data = await response.json();
-  return data.content?.[0]?.text || '';
-}
-
-// ── Vollständige Antwort von Claude lesen ────────────────
-async function getFullResponse(claudeRes) {
-  const reader = claudeRes.body.getReader();
-  const decoder = new TextDecoder();
-  let fullText = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    const chunk = decoder.decode(value);
-    const lines = chunk.split('\n');
-    for (const line of lines) {
-      if (line.startsWith('data: ')) {
-        const dataStr = line.slice(6).trim();
-        if (dataStr === '[DONE]') continue;
-        try {
-          const data = JSON.parse(dataStr);
-          if (data.type === 'content_block_delta' && data.delta?.text) {
-            fullText += data.delta.text;
-          }
-        } catch (e) {}
-      }
-    }
-  }
-  return fullText;
-}
-
-function textResponse(text) {
-  return new Response(text, {
-    headers: { ...cors, 'Content-Type': 'text/plain; charset=utf-8' }
-  });
-}
-
 // ── /chat Handler ─────────────────────────────────────────
 // ── Firebase ID-Token verifizieren ────────────────────────────────────────
 // Token Cache — in-memory, reset bei Worker-Neustart
 const tokenCache = new Map();
 
+// Gibt { uid, email } des verifizierten Tokens zurück, oder null.
 async function verifyFirebaseToken(authHeader, env) {
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
   const token = authHeader.slice(7);
 
   // Cache prüfen (55 Minuten)
   const cached = tokenCache.get(token);
-  if (cached && Date.now() < cached.expiry) return cached.uid;
+  if (cached && Date.now() < cached.expiry) return { uid: cached.uid, email: cached.email };
 
   try {
     const res = await fetch(
@@ -679,11 +593,12 @@ async function verifyFirebaseToken(authHeader, env) {
     if (!res.ok) return null;
     const data = await res.json();
     const uid = data.users?.[0]?.localId || null;
+    const email = data.users?.[0]?.email || null;
     if (uid) {
-      tokenCache.set(token, { uid, expiry: Date.now() + 55 * 60 * 1000 });
+      tokenCache.set(token, { uid, email, expiry: Date.now() + 55 * 60 * 1000 });
       if (tokenCache.size > 1000) tokenCache.clear(); // Speicher begrenzen
     }
-    return uid;
+    return uid ? { uid, email } : null;
   } catch(e) { return null; }
 }
 
@@ -797,7 +712,6 @@ async function handleChat(body, env, cors = {}, ctx) {
           } catch(e) {}
         }
       }
-      await speichereProfil(userId, fullText, env).catch(() => {});
     } finally {
       await writer.close();
     }
@@ -849,7 +763,6 @@ async function streamTextResponse(claudeRes, userId, env, cors) {
           } catch(e) {}
         }
       }
-      await speichereProfil(userId, fullText, env).catch(() => {});
     } finally {
       await writer.close();
     }
@@ -1295,6 +1208,40 @@ async function handleAbo(body, env, cors = {}) {
   }
 
   return new Response('OK', { headers: cors });
+}
+
+// ── /delete-account-data Handler ───────────────────────────
+// Löscht bei Account-Löschung serverseitige Daten, die der Client nicht
+// direkt erreichen kann (Supabase-Zeile fürs Nachrichtenlimit, sowie
+// defensiv einen evtl. noch vorhandenen alten PROFIL_KV-Eintrag). userId
+// wurde vom Router bereits durch die tokenverifizierte UID überschrieben.
+async function handleDeleteAccountData(body, env, cors = {}) {
+  const userId = body.userId;
+  if (!userId) {
+    return new Response(JSON.stringify({ error: 'Missing userId' }), {
+      status: 400,
+      headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+
+  try {
+    if (env.SUPABASE_URL && env.SUPABASE_KEY) {
+      const base = supabaseRestBase(env);
+      await fetch(`${base}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(userId)}`, {
+        method: 'DELETE',
+        headers: { 'apikey': env.SUPABASE_KEY, 'Authorization': `Bearer ${env.SUPABASE_KEY}` }
+      });
+    }
+  } catch(e) { console.error('Account-Löschung: Supabase-Zeile:', e.message); }
+
+  try {
+    if (env.PROFIL_KV) await env.PROFIL_KV.delete(userId);
+  } catch(e) { console.error('Account-Löschung: PROFIL_KV:', e.message); }
+
+  return new Response(JSON.stringify({ success: true }), {
+    status: 200,
+    headers: { ...cors, 'Content-Type': 'application/json' }
+  });
 }
 
 // ── /datev-debug Handler ──────────────────────────────────────
