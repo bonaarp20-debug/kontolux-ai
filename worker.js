@@ -61,6 +61,24 @@ export default {
       return handleUsage({ userId: usageVerified.uid, nutzername }, env, cors);
     }
 
+    // ✅ /check-upload-limit als GET — read-only Vorab-Check, ob der Nutzer noch
+    // uploaden darf. Wird vom Client VOR dem Firebase-Storage-Upload aufgerufen,
+    // damit bei erreichtem Limit keine verwaiste Datei im Storage landet.
+    if (request.method === 'GET' && url.pathname === '/check-upload-limit') {
+      const limitVerified = await verifyFirebaseToken(request.headers.get('Authorization'), env);
+      if (!limitVerified) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { ...cors, 'Content-Type': 'application/json' }
+        });
+      }
+      const limitResult = await peekUploadLimit(limitVerified.uid, env);
+      return new Response(JSON.stringify(limitResult), {
+        status: 200,
+        headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
     // PDF Result
     if (request.method === 'GET' && url.pathname === '/pdf-result') {
       const corsH = getCORS(origin);
@@ -160,8 +178,25 @@ function uploadLimitKey(userId, jetzt) {
   return `uploads:${userId}:${jetzt.getFullYear()}-${String(jetzt.getMonth() + 1).padStart(2, '0')}`;
 }
 
-async function checkUploadLimit(userId, env) {
+// Nur lesen, NICHT hochzählen — für den Vorab-Check vor dem Storage-Upload
+// und vor dem eigentlichen Speichern (kein Zählen von Versuchen, die scheitern).
+async function peekUploadLimit(userId, env) {
   if (!userId) return { erlaubt: true };
+  const jetzt = new Date();
+  const key = uploadLimitKey(userId, jetzt);
+
+  try {
+    const val = await env.PROFIL_KV.get(key);
+    const anzahl = val ? parseInt(val) : 0;
+    return { erlaubt: anzahl < UPLOAD_LIMIT, anzahl };
+  } catch(e) {
+    return { erlaubt: true }; // Im Zweifel erlauben
+  }
+}
+
+// Zählt hoch — nur aufrufen, NACHDEM der Beleg erfolgreich gespeichert wurde.
+async function incrementUploadLimit(userId, env) {
+  if (!userId) return;
   const jetzt = new Date();
   const key = uploadLimitKey(userId, jetzt);
   const ttlSeconds = 35 * 86400; // 35 Tage — überlebt sicher den ganzen Kalendermonat
@@ -169,11 +204,9 @@ async function checkUploadLimit(userId, env) {
   try {
     const val = await env.PROFIL_KV.get(key);
     const anzahl = val ? parseInt(val) : 0;
-    if (anzahl >= UPLOAD_LIMIT) return { erlaubt: false, anzahl };
     await env.PROFIL_KV.put(key, String(anzahl + 1), { expirationTtl: ttlSeconds });
-    return { erlaubt: true, anzahl: anzahl + 1 };
   } catch(e) {
-    return { erlaubt: true }; // Im Zweifel erlauben
+    // Im Zweifel nicht zählen
   }
 }
 
@@ -778,12 +811,13 @@ async function handleImage(body, env, cors = {}, ctx) {
   const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei } = body;
 
   // Upload Limit prüfen
-  const uploadLimit = await checkUploadLimit(userId, env);
+  const uploadLimit = await peekUploadLimit(userId, env);
   if (!uploadLimit.erlaubt) {
     return new Response('Du hast dein monatliches Upload-Limit erreicht. Du kannst Kontolux AI weiterhin vollständig nutzen — Chat, Finanzkalender und manuelle Monatsabschlüsse funktionieren wie gewohnt. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand. 📊', {
       headers: { ...cors, 'Content-Type': 'text/plain' }
     });
   }
+  await incrementUploadLimit(userId, env);
 
   const limit = await checkNachrichtenLimit(Nutzername, env, userId, ctx);
   if (!limit.erlaubt) {
@@ -834,7 +868,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
     }
 
     try {
-      const uploadLimit = await checkUploadLimit(userId, env);
+      const uploadLimit = await peekUploadLimit(userId, env);
       if (!uploadLimit.erlaubt) {
         return new Response(JSON.stringify({ error: 'Upload-Limit erreicht' }), {
           status: 429,
@@ -877,6 +911,9 @@ async function handleDocument(body, env, cors = {}, ctx) {
         });
       }
 
+      // Erst jetzt zählen — Beleg ist tatsächlich gespeichert
+      await incrementUploadLimit(userId, env);
+
       return new Response(JSON.stringify({
         success: true,
         docId: docId,
@@ -914,7 +951,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
 
     try {
       // Upload Limit prüfen
-      const uploadLimit = await checkUploadLimit(userId, env);
+      const uploadLimit = await peekUploadLimit(userId, env);
       if (!uploadLimit.erlaubt) {
         return new Response(JSON.stringify({ error: 'Upload-Limit erreicht' }), {
           status: 429,
@@ -968,6 +1005,9 @@ async function handleDocument(body, env, cors = {}, ctx) {
         });
       }
 
+      // Erst jetzt zählen — Beleg ist tatsächlich gespeichert
+      await incrementUploadLimit(userId, env);
+
       return new Response(JSON.stringify({
         success: true,
         docId: docId,
@@ -996,12 +1036,13 @@ async function handleDocument(body, env, cors = {}, ctx) {
   // ── MONATSABSCHLUSS_PDF (bestehende Logik) ────────────────
   if (Nachricht === 'MONATSABSCHLUSS_PDF') {
     // Upload Limit prüfen
-    const uploadLimitMa = await checkUploadLimit(userId, env);
+    const uploadLimitMa = await peekUploadLimit(userId, env);
     if (!uploadLimitMa.erlaubt) {
       return new Response('Du hast dein monatliches Upload-Limit erreicht. Du kannst Kontolux AI weiterhin vollständig nutzen — Chat, Finanzkalender und manuelle Monatsabschlüsse funktionieren wie gewohnt. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand. 📊', {
         headers: { ...cors, 'Content-Type': 'text/plain' }
       });
     }
+    await incrementUploadLimit(userId, env);
     const systemPrompt = `Du bist ein Datenextraktions-Assistent. Extrahiere aus dem Dokument die Finanzdaten und antworte NUR mit einem JSON-Objekt ohne Backticks oder Markdown, in diesem Format: {"monat": "Januar", "jahr": 2026, "einnahmen_gesamt": 0, "ausgaben_gesamt": 0, "einnahmen_positionen": [{"bezeichnung": "...", "betrag": 0}], "ausgaben_positionen": [{"bezeichnung": "...", "betrag": 0}]}`;
 
     const messages = [{
@@ -1044,12 +1085,13 @@ async function handleDocument(body, env, cors = {}, ctx) {
   }
 
   // ── Normaler Dokument-Upload (Chat-Analyse) ──────────────
-  const uploadLimit = await checkUploadLimit(userId, env);
+  const uploadLimit = await peekUploadLimit(userId, env);
   if (!uploadLimit.erlaubt) {
     return new Response('Du hast dein monatliches Upload-Limit erreicht. Du kannst Kontolux AI weiterhin vollständig nutzen — Chat, Finanzkalender und manuelle Monatsabschlüsse funktionieren wie gewohnt. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand. 📊', {
       headers: { ...cors, 'Content-Type': 'text/plain' }
     });
   }
+  await incrementUploadLimit(userId, env);
 
   const limit = await checkNachrichtenLimit(Nutzername, env, userId, ctx);
   if (!limit.erlaubt) {
