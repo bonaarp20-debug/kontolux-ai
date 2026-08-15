@@ -8,5 +8,20 @@ command = ""
 [observability]
 enabled = true
 
-# Secrets werden automatisch aus GitHub Secrets injiziert
-# FIREBASE_SERVICE_ACCOUNT wird vom Workflow übergeben
+[[kv_namespaces]]
+binding = "PROFIL_KV"
+id = "388d8d32077c4f4e9190f77f423e9a96"
+
+[[kv_namespaces]]
+binding = "ABO_KV"
+id = "4af625d6126c460593f8f4b0a0c00a37"
+
+[[kv_namespaces]]
+binding = "PDF_RESULTS"
+id = "ee721a489b6f41ada490ff65e31104ed"
+
+[triggers]
+crons = ["0 8 1 * *"]
+
+[vars]
+ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"

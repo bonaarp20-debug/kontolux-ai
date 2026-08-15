@@ -10,210 +10,6 @@ const ALLOWED_ORIGINS = [
   'http://localhost:5000', // lokale Entwicklung
 ];
 
-// Service Account OAuth2 Token Generator
-async function getServiceAccountToken(env) {
-  try {
-    const serviceAccountJson = env.FIREBASE_SERVICE_ACCOUNT;
-    if (!serviceAccountJson) {
-      console.error('FIREBASE_SERVICE_ACCOUNT nicht gesetzt!');
-      return null;
-    }
-
-    const serviceAccount = JSON.parse(serviceAccountJson);
-    const now = Math.floor(Date.now() / 1000);
-
-    // JWT Header + Payload
-    const header = { alg: 'RS256', typ: 'JWT' };
-    const payload = {
-      iss: serviceAccount.client_email,
-      scope: 'https://www.googleapis.com/auth/cloud-platform',
-      aud: 'https://oauth2.googleapis.com/token',
-      exp: now + 3600,
-      iat: now
-    };
-
-    // Base64 encode
-    const encodeBase64 = (str) => btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-    const encodedHeader = encodeBase64(JSON.stringify(header));
-    const encodedPayload = encodeBase64(JSON.stringify(payload));
-    const message = `${encodedHeader}.${encodedPayload}`;
-
-    // Import Private Key
-    const keyPem = serviceAccount.private_key;
-    const keyData = keyPem
-      .replace('-----BEGIN PRIVATE KEY-----', '')
-      .replace('-----END PRIVATE KEY-----', '')
-      .replace(/\n/g, '');
-    
-    const binaryKey = Uint8Array.from(atob(keyData), c => c.charCodeAt(0));
-    const key = await crypto.subtle.importKey(
-      'pkcs8',
-      binaryKey,
-      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-      false,
-      ['sign']
-    );
-
-    // Sign JWT
-    const signature = await crypto.subtle.sign(
-      'RSASSA-PKCS1-v1_5',
-      key,
-      new TextEncoder().encode(message)
-    );
-    
-    const encodedSignature = encodeBase64(String.fromCharCode(...new Uint8Array(signature)));
-    const jwt = `${message}.${encodedSignature}`;
-
-    // Exchange JWT for Access Token
-    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`
-    });
-
-    const tokenData = await tokenRes.json();
-    if (!tokenData.access_token) {
-      console.error('OAuth2 Response:', tokenData);
-      return null;
-    }
-    return tokenData.access_token;
-  } catch(err) {
-    console.error('OAuth2 Error:', err.message);
-    return null;
-  }
-}
-
-// ============================================================
-// BELEG_SPEICHERN mit Service Account
-// ============================================================
-
-// Nutze diese Funktion im BELEG_SPEICHERN Handler:
-async function handleBelegSpeichern(body, env, token, cors) {
-  const { userId, Datei, typ, betrag, absender } = body;
-
-  if (!Datei || !Datei.name || !userId || !Datei.base64) {
-    return new Response(JSON.stringify({ error: 'Missing required fields' }), {
-      status: 400,
-      headers: { ...cors, 'Content-Type': 'application/json' }
-    });
-  }
-
-  try {
-    // Get Service Account Token
-    const saToken = await getServiceAccountToken(env);
-    if (!saToken) {
-      return new Response(JSON.stringify({ error: 'Service Account Token generierung fehlgeschlagen' }), {
-        status: 500,
-        headers: { ...cors, 'Content-Type': 'application/json' }
-      });
-    }
-
-    // Komprimiere Datei wenn > 1MB
-    let base64 = Datei.base64;
-    if (base64.length > 1024 * 1024) {
-      console.log('Komprimiere große Datei...');
-      base64 = base64.substring(0, Math.floor(1024 * 1024 * 0.8));
-    }
-
-    // Upload zu Firebase Storage (mit Service Account Token!)
-    const docId = `beleg_${Date.now()}`;
-    const fileName = `${docId}_${Datei.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-    const storagePath = `users/${userId}/belege/${fileName}`;
-    const storageUrl = `https://www.googleapis.com/upload/storage/v1/b/kontolux-ai.appspot.com/o?uploadType=media&name=${encodeURIComponent(storagePath)}`;
-
-    // Base64 → Bytes
-    const binaryString = atob(base64);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
-
-    const storageRes = await fetch(storageUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${saToken}`,  // ✅ Service Account Token!
-        'Content-Type': Datei.type || 'application/octet-stream'
-      },
-      body: bytes.buffer
-    });
-
-    if (!storageRes.ok) {
-      const errText = await storageRes.text();
-      console.error('Storage Error:', storageRes.status, errText.substring(0, 200));
-      return new Response(JSON.stringify({ error: `Storage failed: ${storageRes.status}` }), {
-        status: 500,
-        headers: { ...cors, 'Content-Type': 'application/json' }
-      });
-    }
-
-    // Download URL
-    const downloadUrl = `https://firebasestorage.googleapis.com/v0/b/kontolux-ai.appspot.com/o/${encodeURIComponent(storagePath)}?alt=media`;
-
-    // Speichere Metadaten in Firestore (mit User Token)
-    const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}`;
-
-    const sizeBytes = Datei.size || 0;
-    const sizeFormatted = sizeBytes > 1024 * 1024 
-      ? `${(sizeBytes / 1024 / 1024).toFixed(1)}MB`
-      : sizeBytes > 1024
-      ? `${(sizeBytes / 1024).toFixed(0)}KB`
-      : `${sizeBytes}B`;
-
-    const metadata = {
-      fields: {
-        name: { stringValue: Datei.name },
-        type: { stringValue: Datei.type || 'application/octet-stream' },
-        size: { stringValue: sizeFormatted },
-        sizeBytes: { integerValue: sizeBytes },
-        typ: { stringValue: typ || 'rechnung_eingehend' },
-        storage_url: { stringValue: downloadUrl },
-        createdAt: { timestampValue: new Date().toISOString() }
-      }
-    };
-
-    if (betrag) metadata.fields.betrag = { doubleValue: parseFloat(betrag) };
-    if (absender) metadata.fields.absender = { stringValue: absender };
-
-    const firestoreRes = await fetch(firestoreUrl, {
-      method: 'PATCH',
-      headers: {
-        'Authorization': `Bearer ${token}`,  // ✅ User Token für Firestore!
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(metadata)
-    });
-
-    if (!firestoreRes.ok) {
-      const errText = await firestoreRes.text();
-      console.error('Firestore Error:', firestoreRes.status);
-      return new Response(JSON.stringify({ error: `Firestore failed: ${firestoreRes.status}` }), {
-        status: 500,
-        headers: { ...cors, 'Content-Type': 'application/json' }
-      });
-    }
-
-    return new Response(JSON.stringify({
-      success: true,
-      docId: docId,
-      name: Datei.name,
-      storage_url: downloadUrl,
-      typ: typ || 'rechnung_eingehend',
-      message: 'Beleg erfolgreich gespeichert'
-    }), {
-      status: 200,
-      headers: { ...cors, 'Content-Type': 'application/json' }
-    });
-
-  } catch(err) {
-    console.error('BELEG_SPEICHERN Error:', err.message);
-    return new Response(JSON.stringify({ error: 'Server Error', details: err.message }), {
-      status: 500,
-      headers: { ...cors, 'Content-Type': 'application/json' }
-    });
-  }
-}
-
-
 function getCORS(origin) {
   return {
     'Access-Control-Allow-Origin': 'https://app.kontolux-ai.de',
@@ -243,7 +39,7 @@ function checkRateLimit(ip, limit = 20, windowMs = 10000) {
 
 // ── Haupt-Router ──────────────────────────────────────────
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const origin = request.headers.get('Origin') || request.headers.get('X-Origin') || '';
     const cors = getCORS(origin);
@@ -259,11 +55,18 @@ export default {
       });
     }
 
-    // ✅ /usage als GET — vor JSON Parse!
+    // ✅ /usage als GET — vor JSON Parse! Token-Pflicht: sonst könnte jeder mit
+    // einer beliebigen userId die Nachrichten-/Upload-Zahlen fremder Nutzer abfragen.
     if (request.method === 'GET' && url.pathname === '/usage') {
-      const userId = url.searchParams.get('userId') || '';
       const nutzername = url.searchParams.get('nutzername') || '';
-      return handleUsage({ userId, nutzername }, env, cors);
+      const usageUid = await verifyFirebaseToken(request.headers.get('Authorization'), env);
+      if (!usageUid) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { ...cors, 'Content-Type': 'application/json' }
+        });
+      }
+      return handleUsage({ userId: usageUid, nutzername }, env, cors);
     }
 
     // PDF Result
@@ -329,9 +132,9 @@ export default {
       // Verifizierte UID überschreibt client-seitige userId
       if (verifiedUid && body.userId) body.userId = verifiedUid;
 
-      if (url.pathname === '/chat')     return handleChat(body, env, cors);
-      if (url.pathname === '/image')    return handleImage(body, env, cors);
-      if (url.pathname === '/document') return handleDocument(body, env, cors);
+      if (url.pathname === '/chat')     return handleChat(body, env, cors, ctx);
+      if (url.pathname === '/image')    return handleImage(body, env, cors, ctx);
+      if (url.pathname === '/document') return handleDocument(body, env, cors, ctx);
       if (url.pathname === '/frist')    return handleFrist(body, env, cors);
       if (url.pathname === '/feedback') return handleFeedback(body, env, cors);
       if (url.pathname === '/abo')      return handleAbo(body, env, cors);
@@ -355,19 +158,23 @@ export default {
   }
 };
 
-// ── Upload Limit (10/Monat) via KV ──────────────────────────
+// ── Upload Limit (50/Monat) via KV ──────────────────────────
+const UPLOAD_LIMIT = 50;
+function uploadLimitKey(userId, jetzt) {
+  return `uploads:${userId}:${jetzt.getFullYear()}-${String(jetzt.getMonth() + 1).padStart(2, '0')}`;
+}
+
 async function checkUploadLimit(userId, env) {
   if (!userId) return { erlaubt: true };
   const jetzt = new Date();
-  const tag = jetzt.toISOString().split('T')[0]; // YYYY-MM-DD format
-  const key = `uploads:${userId}:${tag}`;
-  const LIMIT = 10; // 10 pro Tag
+  const key = uploadLimitKey(userId, jetzt);
+  const ttlSeconds = 35 * 86400; // 35 Tage — überlebt sicher den ganzen Kalendermonat
 
   try {
     const val = await env.PROFIL_KV.get(key);
     const anzahl = val ? parseInt(val) : 0;
-    if (anzahl >= LIMIT) return { erlaubt: false, anzahl };
-    await env.PROFIL_KV.put(key, String(anzahl + 1), { expirationTtl: 86400 }); // Verfällt nach 24h
+    if (anzahl >= UPLOAD_LIMIT) return { erlaubt: false, anzahl };
+    await env.PROFIL_KV.put(key, String(anzahl + 1), { expirationTtl: ttlSeconds });
     return { erlaubt: true, anzahl: anzahl + 1 };
   } catch(e) {
     return { erlaubt: true }; // Im Zweifel erlauben
@@ -380,7 +187,7 @@ function supabaseRestBase(env) {
 }
 
 // ── Supabase: Nachrichtenlimit prüfen + hochzählen ────────
-async function checkNachrichtenLimit(nutzername, env, userId) {
+async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
   const key = userId || nutzername || 'anonym';
   const heute = new Date().toISOString().split('T')[0];
   const LIMIT = 15;
@@ -457,46 +264,41 @@ async function checkNachrichtenLimit(nutzername, env, userId) {
     return { erlaubt: false, anzahl };
   }
 
-  // ✅ Atomares Hochzählen - verhindert Race Conditions!
+  // ✅ Hochzählen — läuft im Hintergrund weiter (ctx.waitUntil), blockiert nicht die Claude-Antwort.
   const neueAnzahl = anzahl + 1;
-  const patchRes = await fetch(`${base}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(key)}`, {
-    method: 'PATCH',
-    headers: {
-      'apikey': env.SUPABASE_KEY,
-      'Authorization': `Bearer ${env.SUPABASE_KEY}`,
-      'Content-Type': 'application/json',
-      'Prefer': 'return=representation'
-    },
-    body: JSON.stringify({
-      nachrichten_heute: row.letztes_datum === heute ? neueAnzahl : 1,
-      letztes_datum: heute
-    })
-  });
+  const doPatch = async () => {
+    const patchRes = await fetch(`${base}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(key)}`, {
+      method: 'PATCH',
+      headers: {
+        'apikey': env.SUPABASE_KEY,
+        'Authorization': `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation'
+      },
+      body: JSON.stringify({
+        nachrichten_heute: row.letztes_datum === heute ? neueAnzahl : 1,
+        letztes_datum: heute
+      })
+    });
 
-  if (!patchRes.ok) {
-    const errText = await patchRes.text();
-    console.error('Supabase PATCH Error:', patchRes.status, errText, 'key=', key);
-  } else {
-    const updated = await patchRes.json().catch(() => null);
-    if (!Array.isArray(updated) || updated.length === 0) {
-      console.error('Supabase PATCH: 0 Zeilen aktualisiert für key=', key, '- nutzer_name matcht keine Zeile');
+    if (!patchRes.ok) {
+      const errText = await patchRes.text();
+      console.error('Supabase PATCH Error:', patchRes.status, errText, 'key=', key);
+    } else {
+      const updated = await patchRes.json().catch(() => null);
+      if (!Array.isArray(updated) || updated.length === 0) {
+        console.error('Supabase PATCH: 0 Zeilen aktualisiert für key=', key, '- nutzer_name matcht keine Zeile');
+      }
     }
+  };
+
+  if (ctx && typeof ctx.waitUntil === 'function') {
+    ctx.waitUntil(doPatch().catch(e => console.error('Supabase PATCH Exception:', e.message, 'key=', key)));
+  } else {
+    await doPatch();
   }
 
   return { erlaubt: true, anzahl: neueAnzahl };
-}
-
-// ── Profil aus bestehendem Cloudflare Worker laden ───────
-async function ladeProfil(userId, env) {
-  if (!userId) return '';
-  try {
-    const res = await fetch(`https://tight-term-d6f2.jonadrews012.workers.dev?userId=${encodeURIComponent(userId)}`);
-    if (!res.ok) return '';
-    const text = await res.text();
-    return text || '';
-  } catch (e) {
-    return '';
-  }
 }
 
 // ── PROFIL_UPDATE aus Antwort parsen + speichern ─────────
@@ -545,7 +347,10 @@ Features:
 - Tageseinnahmen: täglich per Sprache/Text speichern ("Heute 150€ eingenommen")
 - Monatsabschluss aus Tageseinnahmen: auf Anfrage automatisch erstellen
 - Rechnungserstellung: rechtskonforme PDF nach §14 UStG ("Erstell mir eine Rechnung")
+- Mahnungserstellung: PDF-Mahnung bei überfälligen Zahlungen (Erinnerung, 1. und 2. Mahnung)
 - Rechnungsprüfung: hochgeladene Rechnungen auf §14 UStG prüfen
+- Belegarchiv (📥): Rechnungen/Belege hochladen oder manuell eintragen, jederzeit öffnen, Bezahlt/Offen-Status
+- DATEV-Export: Monatsabschlüsse als CSV für den Steuerberater exportieren (in den Einstellungen)
 - Dokumentenanalyse: PDFs/Bilder hochladen über 📎
 - Spracheingabe: Fragen per Mikrofon
 
@@ -590,15 +395,20 @@ Regeln:
 - Existierender Abschluss: erst fragen ob überschreiben
 
 
-## MONATSABSCHLUSS AUS TAGESDATEN
-Wenn Nutzer "Mach meinen Monatsabschluss" sagt und Tageseinnahmen im Profil vorhanden:
+## MONATSABSCHLUSS AUS TAGESDATEN UND BELEGARCHIV
+Wenn Nutzer "Mach meinen Monatsabschluss" sagt:
 1. Summiere Tageseinnahmen für den Monat aus dem Profil
-2. Sammle ALLE Ausgaben: aus Finanzkalender (Einträge im Profil) UND aus Chat-gespeicherten Ausgaben (ausgabe_YYYY-MM-DD Felder)
-3. **Überlappungs-Check:** Vergleiche beide Listen auf ähnliche Beträge/Beschreibungen. Wenn z.B. "Miete 850€" im Finanzkalender UND "Miete 850€" als Chat-Ausgabe → nur einmal zählen, Nutzer darauf hinweisen: "Ich habe [X] doppelt erkannt und nur einmal gezählt."
-4. Vorschlag: "Deine Einnahmen im [Monat]: [X]€. Ausgaben: [Y]€ (inkl. [N] Positionen). Gewinn: [Z]€ — speichern? (j/n)"
-5. Bei j → MONATSABSCHLUSS_SAVE
+2. Sammle ALLE Ausgaben-Quellen für den Monat aus dem Profil:
+   - Finanzkalender-Einträge ("Ausgaben/Verbindlichkeiten aus Finanzkalender")
+   - Chat-gespeicherte Ausgaben (ausgabe_YYYY-MM-DD Felder)
+   - Belegarchiv, eingehende Rechnungen ("Belegarchiv [Monat] — eingehende Rechnungen")
+3. Sammle zusätzliche Einnahmen-Quellen für den Monat aus dem Profil:
+   - Belegarchiv, ausgehende Rechnungen/Mahnungen ("Belegarchiv [Monat] — ausgehende Rechnungen/Mahnungen") — nur die als "bezahlt" markierten zählen als tatsächliche Einnahme; offene nennst du dem Nutzer, zählst sie aber nicht automatisch mit
+4. **Überlappungs-Check (WICHTIG, immer durchführen, bevor du zusammenfasst):** Vergleiche die Ausgaben-Quellen paarweise auf ähnliche Beträge/Beschreibungen/Absender (nicht nur Finanzkalender vs. Chat-Ausgaben, sondern auch gegen das Belegarchiv). Erkennst du eine wahrscheinliche Dopplung — z.B. "Miete 850€" im Finanzkalender UND eine Rechnung von einem Vermieter über einen ähnlichen Betrag im Belegarchiv — entscheide NICHT automatisch. Frag stattdessen konkret nach, z.B.: "Ich sehe Miete im Finanzkalender UND eine Rechnung im Belegarchiv — soll ich das als eine Position zählen oder getrennt?" Rechne erst nach der Antwort des Nutzers weiter. Nur wenn zwei Positionen aus derselben Quelle (z.B. zwei Chat-Ausgaben) eindeutig identisch sind, darfst du wie bisher direkt zusammenfassen und nur informieren: "Ich habe [X] doppelt erkannt und nur einmal gezählt."
+5. Vorschlag: "Deine Einnahmen im [Monat]: [X]€. Ausgaben: [Y]€ (inkl. [N] Positionen). Gewinn: [Z]€ — speichern? (j/n)"
+6. Bei j → MONATSABSCHLUSS_SAVE
 
-Falls keine Ausgaben bekannt → erst nachfragen.
+Falls weder Tagesdaten, Finanzkalender noch Belegarchiv etwas hergeben → erst nachfragen.
 
 
 ## DOKUMENT-UPLOAD ERKENNUNG
@@ -692,7 +502,7 @@ Wenn alle Infos vorhanden, antworte SO — nicht anders:
 "Super, ich erstelle deine Rechnung!"
 RECHNUNG_ERSTELLEN:absender_name=[Name/Firma],empfaenger_name=[Name],empfaenger_anrede=[Herr/Frau/Firma],empfaenger_adresse=[Straße;PLZ;Ort],leistung=[Beschreibung],leistungsdatum=[Datum],zahlungsziel=[Datum],betrag_netto=[Zahl],rechnungsnummer=[Nummer],steuernummer=[Nummer],eigene_adresse=[Straße;PLZ;Ort],bankverbindung=[IBAN],verwendungszweck=[Text]
 
-WICHTIG: Der RECHNUNG_ERSTELLEN Befehl MUSS in der Antwort stehen — sonst wird keine PDF erstellt. Keine Zusammenfassung schreiben, nur den Befehl. Nach der Erstellung fragen: "Wurde diese Rechnung bereits bezahlt? Dann speichere ich sie als Tageseinnahme."l.
+WICHTIG: Der RECHNUNG_ERSTELLEN Befehl MUSS in der Antwort stehen — sonst wird keine PDF erstellt. Keine Zusammenfassung schreiben, nur den Befehl. Nach der Erstellung fragen: "Wurde diese Rechnung bereits bezahlt? Dann speichere ich sie als Tageseinnahme."
 - Kommas in Werten durch Semikolon ersetzen
 - Betrag nur als Zahl ohne €
 - Bei KU: §19 Hinweis, kein Steuerausweis
@@ -736,7 +546,7 @@ Warnung wenn KU trotzdem USt ausweist (schuldet sie dann dem Finanzamt).
 
 
 ## WAS DU KANNST
-Einnahmen/Ausgaben tracken, Monatsabschlüsse, Jahresprognose, Steuerrücklagen, PDF-Rechnungen & Mahnungen erstellen, Rechnungen prüfen, Steuerfristen im Blick halten. Alle erstellten Rechnungen, Mahnungen und eingehenden Rechnungen werden automatisch unter "Dokumente" gespeichert — der Nutzer kann sie dort jederzeit öffnen und einsehen.
+Einnahmen/Ausgaben tracken, Monatsabschlüsse, Jahresprognose, Steuerrücklagen, PDF-Rechnungen & Mahnungen erstellen, Rechnungen prüfen, Steuerfristen im Blick halten, Belege archivieren (hochladen oder manuell eintragen, Bezahlt/Offen-Status), Monatsabschlüsse als CSV für den Steuerberater exportieren (DATEV-Export in den Einstellungen). Alle erstellten Rechnungen, Mahnungen und eingehenden Rechnungen werden automatisch im Belegarchiv gespeichert — der Nutzer kann sie dort jederzeit öffnen und einsehen.
 
 
 ## PROAKTIVES FEATURE-EMPFEHLEN
@@ -745,6 +555,8 @@ Einnahmen/Ausgaben tracken, Monatsabschlüsse, Jahresprognose, Steuerrücklagen,
 - Steuerrücklagen: → "Nenn mir deinen monatlichen Gewinn, ich rechne es aus"
 - Einnahmen/Ausgaben tracken: → Tageseinnahmen oder Monatsabschluss empfehlen
 - Rechnung schreiben: → "Sag mir wem und wofür, ich erstelle sie sofort"
+- Viele Belege/Rechnungen: → Belegarchiv empfehlen ("Lad sie im Belegarchiv hoch, dann hast du alles an einem Ort")
+- Steuerberater/Jahresabschluss erwähnt: → DATEV-Export empfehlen ("In den Einstellungen kannst du deine Abschlüsse als CSV für deinen Steuerberater exportieren")
 - Rechnungsprüfung: → "Lad die Rechnung hoch, ich prüfe sie auf §14 UStG"
 
 
@@ -763,7 +575,7 @@ Bei rechtlichen Fragen zu Kontolux als Produkt/Unternehmen immer antworten:
 
 
 ## TON
-Deutsch. Direkt — kein "grundsätzlich", "normalerweise", "du solltest". Erst die eine wichtigste Aussage, dann eine Folgefrage. Wenn eine Zahl berechenbar ist: nenn sie. Bei Einnahmen immer Steuerrücklage berechnen: 22% des Gewinns zurücklegen (Beispiel: 3.200€ Gewinn → 704€ zurücklegen). Nicht ankündigen was du tun kannst — einfach fragen was du brauchst um es zu tun.
+Deutsch. Direkt — kein "grundsätzlich", "normalerweise", "du solltest". Erst die eine wichtigste Aussage, dann eine Folgefrage. Wenn eine Zahl berechenbar ist: nenn sie. Bei Einnahmen immer Steuerrücklage berechnen: 28% des Gewinns zurücklegen (Beispiel: 3.200€ Gewinn → 896€ zurücklegen) — derselbe Satz, den auch die automatische Jahresprognose verwendet, damit die Zahl immer konsistent ist. Nicht ankündigen was du tun kannst — einfach fragen was du brauchst um es zu tun.
 
 ## CHAT-TITEL
 Wenn ErsteNachricht=true: Beginne deine Antwort mit TITEL:kurzer_titel_max_5_wörter\nANTWORT:
@@ -875,21 +687,19 @@ async function verifyFirebaseToken(authHeader, env) {
   } catch(e) { return null; }
 }
 
-async function handleChat(body, env, cors = {}) {
+async function handleChat(body, env, cors = {}, ctx) {
   const { Nachricht, Verlauf, Nutzername, Profil, FristType, Datum, userId, ChatId, ErsteNachricht, Datei } = body;
 
   try {
     // Nachrichtenlimit prüfen + Supabase hochzählen
-    const limit = await checkNachrichtenLimit(Nutzername, env, userId);
+    const limit = await checkNachrichtenLimit(Nutzername, env, userId, ctx);
     if (!limit.erlaubt) {
       return new Response('Du hast dein heutiges Nachrichtenlimit erreicht. In den Einstellungen ⚙️ kannst du jederzeit sehen, wie viel Limit du noch frei hast und wann es sich zurücksetzt. Bis morgen! 👋', {
         headers: { ...cors, 'Content-Type': 'text/plain' }
       });
     }
 
-    // Profil laden
-    const profil = await ladeProfil(userId, env);
-    const systemPrompt = buildSystemPrompt(profil || Profil, Datum, FristType, ErsteNachricht);
+    const systemPrompt = buildSystemPrompt(Profil, Datum, FristType, ErsteNachricht);
 
   // Verlauf parsen — Format: "Nutzer: ... | Kontolux AI: ..."
   const messages = [];
@@ -1051,7 +861,7 @@ async function streamTextResponse(claudeRes, userId, env, cors) {
 }
 
 // ── /image Handler ────────────────────────────────────────
-async function handleImage(body, env, cors = {}) {
+async function handleImage(body, env, cors = {}, ctx) {
   const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei } = body;
 
   // Upload Limit prüfen
@@ -1062,15 +872,14 @@ async function handleImage(body, env, cors = {}) {
     });
   }
 
-  const limit = await checkNachrichtenLimit(Nutzername, env, userId);
+  const limit = await checkNachrichtenLimit(Nutzername, env, userId, ctx);
   if (!limit.erlaubt) {
     return new Response('Du hast dein heutiges Nachrichtenlimit erreicht. In den Einstellungen ⚙️ kannst du jederzeit sehen, wie viel Limit du noch frei hast und wann es sich zurücksetzt. Bis morgen! 👋', {
       headers: { ...cors, 'Content-Type': 'text/plain' }
     });
   }
 
-  const profil = await ladeProfil(userId, env);
-  const systemPrompt = buildSystemPrompt(profil || Profil, Datum);
+  const systemPrompt = buildSystemPrompt(Profil, Datum);
 
   const messages = [{
     role: 'user',
@@ -1099,8 +908,8 @@ async function handleImage(body, env, cors = {}) {
 }
 
 // ── /document Handler ─────────────────────────────────────
-async function handleDocument(body, env, cors = {}) {
-  const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ } = body;
+async function handleDocument(body, env, cors = {}, ctx) {
+  const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt } = body;
 
   // ── BELEG MANUELL EINTRAGEN (ohne Datei) ────
   if (Nachricht === 'BELEG_MANUELL') {
@@ -1132,6 +941,7 @@ async function handleDocument(body, env, cors = {}) {
           absender: { stringValue: absender },
           rechnungsnr: rechnungsnr ? { stringValue: rechnungsnr } : { stringValue: '' },
           manuell: { booleanValue: true },
+          bezahlt: { booleanValue: !!bezahlt },
           createdAt: { timestampValue: new Date().toISOString() }
         }
       };
@@ -1177,19 +987,12 @@ async function handleDocument(body, env, cors = {}) {
     }
   }
 
-  // ── BELEG SPEICHERN (nur Metadaten, keine Datei) ────
+  // ── BELEG SPEICHERN (Datei ist bereits vom Client per Firebase-Storage-SDK
+  //    hochgeladen worden — hier kommt nur noch die fertige storageUrl + Metadaten an) ────
   if (Nachricht === 'BELEG_SPEICHERN') {
-    console.log('BELEG_SPEICHERN Debug:', {
-      userId: userId,
-      hasDatei: !!Datei,
-      hasBase64: !!Datei?.base64,
-      Datei_name: Datei?.name,
-      Datei_size: Datei?.size
-    });
-
-    if (!Datei || !Datei.name || !userId || !Datei.base64) {
-      return new Response(JSON.stringify({ 
-        error: 'Missing Datei info or userId or base64'
+    if (!storageUrl || !userId) {
+      return new Response(JSON.stringify({
+        error: 'Missing storageUrl or userId'
       }), {
         status: 400,
         headers: { ...cors, 'Content-Type': 'application/json' }
@@ -1206,65 +1009,11 @@ async function handleDocument(body, env, cors = {}) {
         });
       }
 
-      // 1. KOMPRIMIERUNG - wenn Base64 > 1MB
-      let base64 = Datei.base64;
-      const base64Size = base64.length;
-      const maxSize = 1024 * 1024; // 1MB
-
-      if (base64Size > maxSize) {
-        console.log(`Datei zu groß: ${(base64Size / 1024 / 1024).toFixed(2)}MB - komprimiere...`);
-        
-        // Für PDFs und Bilder: kürze auf 80% der Originalgröße
-        const targetSize = Math.floor(maxSize * 0.8);
-        base64 = base64.substring(0, targetSize);
-        console.log(`Gekürzt auf: ${(base64.length / 1024 / 1024).toFixed(2)}MB`);
-      }
-
-      // 2. FIREBASE STORAGE UPLOAD
       const docId = `beleg_${Date.now()}`;
-      const fileName = `${docId}_${Datei.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-      const storagePath = `users/${userId}/belege/${fileName}`;
-      
-      const storageUrl = `https://www.googleapis.com/upload/storage/v1/b/kontolux-ai.appspot.com/o?uploadType=media&name=${encodeURIComponent(storagePath)}`;
-
-      // Base64 zu Bytes
-      const binaryString = atob(base64);
-      const bytes = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-      }
-
-      const storageRes = await fetch(storageUrl, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': Datei.type || 'application/octet-stream'
-        },
-        body: bytes.buffer
-      });
-
-      if (!storageRes.ok) {
-        const errText = await storageRes.text();
-        console.error('Storage Upload Error:', {
-          status: storageRes.status,
-          error: errText.substring(0, 200)
-        });
-        return new Response(JSON.stringify({ 
-          error: `Storage upload failed: ${storageRes.status}`
-        }), {
-          status: 500,
-          headers: { ...cors, 'Content-Type': 'application/json' }
-        });
-      }
-
-      // 3. DOWNLOAD-URL konstruieren
-      const downloadUrl = `https://firebasestorage.googleapis.com/v0/b/kontolux-ai.appspot.com/o/${encodeURIComponent(storagePath)}?alt=media`;
-
-      // 4. FIRESTORE METADATEN + URL speichern
       const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}`;
 
-      const sizeBytes = Datei.size || 0;
-      const sizeFormatted = sizeBytes > 1024 * 1024 
+      const sizeBytes = size || 0;
+      const sizeFormatted = sizeBytes > 1024 * 1024
         ? `${(sizeBytes / 1024 / 1024).toFixed(1)}MB`
         : sizeBytes > 1024
         ? `${(sizeBytes / 1024).toFixed(0)}KB`
@@ -1272,12 +1021,13 @@ async function handleDocument(body, env, cors = {}) {
 
       const metadata = {
         fields: {
-          name: { stringValue: Datei.name },
-          type: { stringValue: Datei.type || 'application/octet-stream' },
+          name: { stringValue: name || 'Beleg' },
+          type: { stringValue: type || 'application/octet-stream' },
           size: { stringValue: sizeFormatted },
           sizeBytes: { integerValue: sizeBytes },
           typ: { stringValue: typ || 'rechnung_eingehend' },
-          storage_url: { stringValue: downloadUrl },
+          storage_url: { stringValue: storageUrl },
+          bezahlt: { booleanValue: !!bezahlt },
           createdAt: { timestampValue: new Date().toISOString() }
         }
       };
@@ -1297,7 +1047,7 @@ async function handleDocument(body, env, cors = {}) {
       if (!firestoreRes.ok) {
         const errText = await firestoreRes.text();
         console.error('Firestore Error:', firestoreRes.status, errText);
-        return new Response(JSON.stringify({ 
+        return new Response(JSON.stringify({
           error: `Firestore Error ${firestoreRes.status}`
         }), {
           status: 500,
@@ -1308,10 +1058,10 @@ async function handleDocument(body, env, cors = {}) {
       return new Response(JSON.stringify({
         success: true,
         docId: docId,
-        name: Datei.name,
+        name: name || 'Beleg',
         size: sizeFormatted,
-        storage_url: downloadUrl,
-        typ: 'rechnung_eingehend',
+        storage_url: storageUrl,
+        typ: typ || 'rechnung_eingehend',
         message: 'Beleg erfolgreich gespeichert'
       }), {
         status: 200,
@@ -1320,7 +1070,7 @@ async function handleDocument(body, env, cors = {}) {
 
     } catch(err) {
       console.error('BELEG_SPEICHERN Error:', err.message, err.stack);
-      return new Response(JSON.stringify({ 
+      return new Response(JSON.stringify({
         error: 'Server-Fehler beim Speichern',
         details: err.message
       }), {
@@ -1388,19 +1138,18 @@ async function handleDocument(body, env, cors = {}) {
     });
   }
 
-  const limit = await checkNachrichtenLimit(Nutzername, env, userId);
+  const limit = await checkNachrichtenLimit(Nutzername, env, userId, ctx);
   if (!limit.erlaubt) {
     return new Response('Du hast dein heutiges Nachrichtenlimit erreicht. In den Einstellungen ⚙️ kannst du jederzeit sehen, wie viel Limit du noch frei hast und wann es sich zurücksetzt. Bis morgen! 👋', {
       headers: { ...cors, 'Content-Type': 'text/plain' }
     });
   }
 
-  const profil = await ladeProfil(userId, env);
-  const systemPrompt = buildSystemPrompt(profil || Profil, Datum);
+  const systemPrompt = buildSystemPrompt(Profil, Datum);
 
   if (!Datei || !Datei.base64) {
     // Keine Datei → wie normaler Chat behandeln
-    return handleChat(body, env, cors);
+    return handleChat(body, env, cors, ctx);
   }
 
   const messages = [{
@@ -1436,6 +1185,10 @@ async function handleFrist(body, env, cors = {}) {
 
 // ── E-Mail senden via Resend ─────────────────────────────
 async function sendEmail(to, subject, html, env) {
+  if (!env.RESEND_API_KEY) {
+    console.error('sendEmail: RESEND_API_KEY fehlt in env!');
+    return false;
+  }
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
@@ -1449,6 +1202,10 @@ async function sendEmail(to, subject, html, env) {
       html
     })
   });
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error('sendEmail Resend Error:', res.status, errText, 'to=', to);
+  }
   return res.ok;
 }
 
@@ -1475,12 +1232,11 @@ async function handleKontakt(body, env, cors) {
 async function handleUsage(body, env, cors) {
   const { userId, nutzername } = body;
 
-  // Uploads aus KV (täglich)
+  // Uploads aus KV (monatlich)
   let uploads = 0;
   try {
     if (userId && env.PROFIL_KV) {
-      const tag = new Date().toISOString().split('T')[0];
-      const val = await env.PROFIL_KV.get(`uploads:${userId}:${tag}`);
+      const val = await env.PROFIL_KV.get(uploadLimitKey(userId, new Date()));
       uploads = val ? parseInt(val) : 0;
     }
   } catch(e) { uploads = 0; }
@@ -1503,7 +1259,7 @@ async function handleUsage(body, env, cors) {
 
   return new Response(JSON.stringify({
     nachrichten: { used: nachrichten, limit: 15, pct: Math.min(100, Math.round((nachrichten / 15) * 100)) },
-    uploads: { used: uploads, limit: 10, pct: Math.min(100, Math.round(uploads * 100 / 10)) }
+    uploads: { used: uploads, limit: UPLOAD_LIMIT, pct: Math.min(100, Math.round(uploads * 100 / UPLOAD_LIMIT)) }
   }), { headers: { ...cors, 'Content-Type': 'application/json' } });
 }
 
@@ -1620,12 +1376,20 @@ async function handleDatevExport(body, env, cors = {}) {
     const monatOrder = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
     abschluesse.sort((a, b) => monatOrder.indexOf(a.monat) - monatOrder.indexOf(b.monat));
 
+    // CSV-Feld escapen: in Anführungszeichen wenn Komma/Zeilenumbruch/Anführungszeichen enthalten,
+    // sonst zerstört z.B. ein Komma in einer frei eingegebenen Beschreibung die Spaltenstruktur.
+    const csvField = (val) => {
+      const s = String(val ?? '');
+      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const datumFuer = (monat) => `01.${String(monatOrder.indexOf(monat) + 1).padStart(2, '0')}.${jahr}`;
+
     // CSV generieren mit BOM (für Excel DE)
     const bom = '\uFEFF'; // UTF-8 BOM
     let csv = 'Datum,Einnahmen,Ausgaben,Gewinn\n';
 
     for (const abs of abschluesse) {
-      const datum = `01.${monatOrder.indexOf(abs.monat) + 1}.${jahr}`;
+      const datum = datumFuer(abs.monat);
       const ein = parseFloat(abs.einnahmen).toFixed(2);
       const aus = parseFloat(abs.ausgaben).toFixed(2);
       const gew = parseFloat(abs.gewinn).toFixed(2);
@@ -1638,7 +1402,7 @@ async function handleDatevExport(body, env, cors = {}) {
     for (const abs of abschluesse) {
       const fields = abs.positionsData;
       const monat = abs.monat;
-      const datum = `01.${monatOrder.indexOf(monat) + 1}.${jahr}`;
+      const datum = datumFuer(monat);
 
       // Einnahmen-Positionen
       const einnahmenPosArray = fields.einnahmen_positionen?.arrayValue?.values;
@@ -1647,14 +1411,14 @@ async function handleDatevExport(body, env, cors = {}) {
           const posFields = pos.mapValue?.fields || {};
           const beschreibung = posFields.bezeichnung?.stringValue || posFields.name?.stringValue || '';
           const betrag = parseFloat(
-            posFields.betrag?.doubleValue !== undefined 
-              ? posFields.betrag.doubleValue 
+            posFields.betrag?.doubleValue !== undefined
+              ? posFields.betrag.doubleValue
               : (posFields.betrag?.integerValue || 0)
           );
-          
+
           if (beschreibung && betrag > 0) {
             const betragStr = betrag.toFixed(2);
-            csv += `${datum},Einnahmen,${beschreibung},${betragStr}\n`;
+            csv += `${datum},Einnahmen,${csvField(beschreibung)},${betragStr}\n`;
           }
         }
       }
@@ -1666,14 +1430,14 @@ async function handleDatevExport(body, env, cors = {}) {
           const posFields = pos.mapValue?.fields || {};
           const beschreibung = posFields.bezeichnung?.stringValue || posFields.name?.stringValue || '';
           const betrag = parseFloat(
-            posFields.betrag?.doubleValue !== undefined 
-              ? posFields.betrag.doubleValue 
+            posFields.betrag?.doubleValue !== undefined
+              ? posFields.betrag.doubleValue
               : (posFields.betrag?.integerValue || 0)
           );
-          
+
           if (beschreibung && betrag > 0) {
             const betragStr = betrag.toFixed(2);
-            csv += `${datum},Ausgaben,${beschreibung},${betragStr}\n`;
+            csv += `${datum},Ausgaben,${csvField(beschreibung)},${betragStr}\n`;
           }
         }
       }
