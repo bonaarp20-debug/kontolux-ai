@@ -1727,6 +1727,6 @@ async function sendMonthlyReminders(env) {
         <p style="color:#888;font-size:12px;margin-top:24px">Du erhältst diese Mail weil du Erinnerungen aktiviert hast. <a href="https://app.kontolux-ai.de" style="color:#888">Abmelden</a></p>
       </div>
     `;
-    await sendEmail(email, `Dein Monatsabschluss für ${monat} wartet`, html, env);
+    await sendEmail(email, `Dein Monatsabschluss für ${monat} wartet`, html, env, 'Kontolux AI <jona@kontolux-ai.de>');
   }
 }
