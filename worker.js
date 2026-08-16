@@ -1040,6 +1040,49 @@ async function handleImage(body, env, cors = {}, ctx) {
   return streamTextResponse(claudeRes, userId, env, cors);
 }
 
+// Bucht einen bereits als bezahlt markierten Beleg (manueller Eintrag oder Datei-Upload im
+// Belegarchiv) als Tageseinnahme bzw. Tagesausgabe für heute — additiv, damit mehrere an einem
+// Tag bezahlte Belege sich korrekt aufsummieren statt sich gegenseitig zu überschreiben. Best
+// effort: ein Fehler hier darf das Speichern des Belegs selbst nicht verhindern.
+async function buchTagesBewegung(userId, token, richtung, betragNum, beschreibung) {
+  if (!userId || !token || !betragNum || isNaN(betragNum)) return;
+  const heute = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  if (richtung === 'einnahme') {
+    const url = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/tagesdaten/${heute}`;
+    const getRes = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+    let existing = 0;
+    if (getRes.ok) {
+      const data = await getRes.json();
+      existing = parseFloat(data.fields?.einnahmen?.doubleValue ?? data.fields?.einnahmen?.integerValue ?? 0) || 0;
+    }
+    const neu = Math.round((existing + betragNum) * 100) / 100;
+    await fetch(`${url}?updateMask.fieldPaths=datum&updateMask.fieldPaths=einnahmen`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ fields: { datum: { stringValue: heute }, einnahmen: { doubleValue: neu } } })
+    });
+  } else {
+    const url = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/profil/settings`;
+    const ausgabeKey = `ausgabe_${heute}`;
+    const beschreibungKey = `ausgabe_beschreibung_${heute}`;
+    const getRes = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+    let existing = 0;
+    if (getRes.ok) {
+      const data = await getRes.json();
+      const f = data.fields?.[ausgabeKey];
+      existing = parseFloat(f?.doubleValue ?? f?.integerValue ?? 0) || 0;
+    }
+    const neu = Math.round((existing + betragNum) * 100) / 100;
+    await fetch(`${url}?updateMask.fieldPaths=${encodeURIComponent(ausgabeKey)}&updateMask.fieldPaths=${encodeURIComponent(beschreibungKey)}`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ fields: { [ausgabeKey]: { doubleValue: neu }, [beschreibungKey]: { stringValue: beschreibung || '' } } })
+    });
+  }
+}
+
 // ── /document Handler ─────────────────────────────────────
 async function handleDocument(body, env, cors = {}, ctx) {
   const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz } = body;
@@ -1100,6 +1143,15 @@ async function handleDocument(body, env, cors = {}, ctx) {
 
       // Erst jetzt zählen — Beleg ist tatsächlich gespeichert
       await incrementUploadLimit(userId, env);
+
+      // Als bereits bezahlt markiert → direkt als Tageseinnahme/-ausgabe verbuchen, damit der
+      // Betrag ohne Umweg über den Chat im Monatsabschluss auftaucht.
+      if (bezahlt) {
+        try {
+          const richtung = (typ === 'rechnung_ausgehend' || typ === 'mahnung_ausgehend') ? 'einnahme' : 'ausgabe';
+          await buchTagesBewegung(userId, token, richtung, parseFloat(betrag), `Beleg von ${absender}`);
+        } catch(e) { console.warn('Tagesbewegung (BELEG_MANUELL):', e.message); }
+      }
 
       return new Response(JSON.stringify({
         success: true,
@@ -1194,6 +1246,15 @@ async function handleDocument(body, env, cors = {}, ctx) {
 
       // Erst jetzt zählen — Beleg ist tatsächlich gespeichert
       await incrementUploadLimit(userId, env);
+
+      // Als bereits bezahlt markiert UND mit Betrag hochgeladen → direkt als Tageseinnahme/
+      // -ausgabe verbuchen, damit der Betrag ohne Umweg über den Chat im Monatsabschluss auftaucht.
+      if (bezahlt && betrag) {
+        try {
+          const richtung = (typ === 'rechnung_ausgehend' || typ === 'mahnung_ausgehend') ? 'einnahme' : 'ausgabe';
+          await buchTagesBewegung(userId, token, richtung, parseFloat(betrag), absender ? `Beleg von ${absender}` : (name || 'Beleg'));
+        } catch(e) { console.warn('Tagesbewegung (BELEG_SPEICHERN):', e.message); }
+      }
 
       return new Response(JSON.stringify({
         success: true,
