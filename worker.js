@@ -117,9 +117,13 @@ export default {
       // Firebase ID-Token verifizieren für alle geschützten Endpoints
       const authHeader = request.headers.get('Authorization');
       let verifiedUid = null;
+      let verifiedEmail = null;
       // ✅ /usage und /abo mit aufgenommen — sonst kann jeder ohne Token fremde
       // Nutzungszahlen abfragen bzw. beliebige E-Mail-Adressen an/abmelden.
-      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/usage', '/abo', '/delete-account-data'];
+      // ✅ /send-verification-email geschützt — E-Mail kommt aus dem verifizierten
+      // Token, nie vom Client, sonst könnte jeder Verifizierungsmails an beliebige
+      // Adressen auslösen (Spam-Vektor).
+      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/usage', '/abo', '/delete-account-data', '/send-verification-email'];
 
       if (protectedPaths.includes(url.pathname)) {
         try {
@@ -132,6 +136,7 @@ export default {
             });
           }
           verifiedUid = verified.uid;
+          verifiedEmail = verified.email;
         } catch (tokenErr) {
           console.error('Token Error:', tokenErr.message);
           const errorCors = getCORS(origin);
@@ -155,6 +160,8 @@ export default {
       if (url.pathname === '/datev-export') return handleDatevExport(body, env, cors);
       if (url.pathname === '/kontakt')   return handleKontakt(body, env, cors);
       if (url.pathname === '/delete-account-data') return handleDeleteAccountData(body, env, cors);
+      if (url.pathname === '/send-verification-email') return handleSendVerificationEmail(verifiedEmail, env, cors);
+      if (url.pathname === '/send-password-reset') return handleSendPasswordReset(body, env, cors);
 
       return new Response('Not found', { status: 404, headers: cors });
     } catch (e) {
@@ -633,6 +640,184 @@ async function verifyFirebaseToken(authHeader, env) {
     }
     return uid ? { uid, email } : null;
   } catch(e) { return null; }
+}
+
+// ── Google-Admin-Zugriff (Firebase Admin Service Account) ────────────────
+// Wird nur für /send-verification-email und /send-password-reset gebraucht,
+// um Firebase-Aktionslinks per REST-API zu erzeugen OHNE dass Firebase
+// selbst eine E-Mail verschickt (returnOobLink) — den Versand übernimmt
+// stattdessen Resend mit eigenem Kontolux-Branding.
+let googleAccessTokenCache = null; // { token, expiry }
+
+function base64UrlFromBytes(bytes) {
+  let str = '';
+  for (let i = 0; i < bytes.length; i++) str += String.fromCharCode(bytes[i]);
+  return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64UrlFromString(str) {
+  return base64UrlFromBytes(new TextEncoder().encode(str));
+}
+
+function pemToArrayBuffer(pem) {
+  const b64 = pem
+    .replace(/-----BEGIN PRIVATE KEY-----/, '')
+    .replace(/-----END PRIVATE KEY-----/, '')
+    .replace(/\s+/g, '');
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+async function getGoogleAccessToken(env) {
+  if (googleAccessTokenCache && Date.now() < googleAccessTokenCache.expiry) {
+    return googleAccessTokenCache.token;
+  }
+  if (!env.FIREBASE_ADMIN_CLIENT_EMAIL || !env.FIREBASE_ADMIN_PRIVATE_KEY) {
+    throw new Error('FIREBASE_ADMIN_CLIENT_EMAIL/FIREBASE_ADMIN_PRIVATE_KEY fehlt in env!');
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: 'RS256', typ: 'JWT' };
+  const claims = {
+    iss: env.FIREBASE_ADMIN_CLIENT_EMAIL,
+    sub: env.FIREBASE_ADMIN_CLIENT_EMAIL,
+    aud: 'https://oauth2.googleapis.com/token',
+    scope: 'https://www.googleapis.com/auth/identitytoolkit',
+    iat: now,
+    exp: now + 3600
+  };
+  const unsigned = `${base64UrlFromString(JSON.stringify(header))}.${base64UrlFromString(JSON.stringify(claims))}`;
+
+  const key = await crypto.subtle.importKey(
+    'pkcs8',
+    pemToArrayBuffer(env.FIREBASE_ADMIN_PRIVATE_KEY),
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(unsigned));
+  const jwt = `${unsigned}.${base64UrlFromBytes(new Uint8Array(signature))}`;
+
+  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `grant_type=${encodeURIComponent('urn:ietf:params:oauth:grant-type:jwt-bearer')}&assertion=${encodeURIComponent(jwt)}`
+  });
+  if (!tokenRes.ok) {
+    const errText = await tokenRes.text();
+    throw new Error(`Google OAuth Token Error: ${tokenRes.status} ${errText}`);
+  }
+  const tokenData = await tokenRes.json();
+  googleAccessTokenCache = { token: tokenData.access_token, expiry: Date.now() + (tokenData.expires_in - 60) * 1000 };
+  return tokenData.access_token;
+}
+
+// requestType: 'VERIFY_EMAIL' | 'PASSWORD_RESET'. Gibt den Aktionslink zurück,
+// wirft bei ungültiger E-Mail/unbekanntem Account (Fehlercode landet in e.message).
+async function generateFirebaseActionLink(requestType, email, env) {
+  const accessToken = await getGoogleAccessToken(env);
+  const res = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      requestType,
+      email,
+      returnOobLink: true,
+      continueUrl: 'https://app.kontolux-ai.de'
+    })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const code = data?.error?.message || 'UNKNOWN_ERROR';
+    throw new Error(code);
+  }
+  return data.oobLink;
+}
+
+function emailShell(previewText, bodyHtml) {
+  return `
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0">${previewText}</div>
+  <div style="background:#eef3f8;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">
+    <div style="max-width:480px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #cfdce8">
+      <div style="background:#0f3a5f;padding:24px 32px;text-align:center">
+        <img src="https://app.kontolux-ai.de/logo-192.png" alt="Kontolux AI" width="44" height="44" style="border-radius:11px;display:block;margin:0 auto">
+      </div>
+      <div style="padding:32px">
+        ${bodyHtml}
+      </div>
+      <div style="padding:20px 32px;border-top:1px solid #cfdce8;text-align:center">
+        <p style="font-size:12px;color:#5d6e7f;margin:0">Kontolux AI · app.kontolux-ai.de</p>
+      </div>
+    </div>
+  </div>`;
+}
+
+function verificationEmailHtml(link) {
+  return emailShell('Bitte bestätige deine E-Mail-Adresse für Kontolux AI', `
+    <h1 style="font-size:19px;color:#0f1f2e;margin:0 0 16px">Bestätige deine E-Mail-Adresse</h1>
+    <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 24px">Willkommen bei Kontolux AI! Bitte bestätige deine E-Mail-Adresse, damit dein Konto vollständig abgesichert ist.</p>
+    <a href="${link}" style="display:inline-block;background:#1d5d96;color:#ffffff;padding:13px 28px;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px">E-Mail bestätigen</a>
+    <p style="font-size:12.5px;color:#5d6e7f;line-height:1.6;margin:24px 0 0">Falls der Button nicht funktioniert, kopiere diesen Link in deinen Browser:<br><a href="${link}" style="color:#1d5d96;word-break:break-all">${link}</a></p>
+    <p style="font-size:12.5px;color:#5d6e7f;line-height:1.6;margin:16px 0 0">Der Link ist aus Sicherheitsgründen zeitlich begrenzt gültig. Falls du kein Konto bei Kontolux AI erstellt hast, kannst du diese E-Mail ignorieren.</p>
+  `);
+}
+
+function passwordResetEmailHtml(link) {
+  return emailShell('Setze dein Kontolux-AI-Passwort zurück', `
+    <h1 style="font-size:19px;color:#0f1f2e;margin:0 0 16px">Passwort zurücksetzen</h1>
+    <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 24px">Wir haben eine Anfrage erhalten, das Passwort für dein Kontolux-AI-Konto zurückzusetzen. Klicke auf den Button, um ein neues Passwort zu vergeben.</p>
+    <a href="${link}" style="display:inline-block;background:#1d5d96;color:#ffffff;padding:13px 28px;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px">Neues Passwort vergeben</a>
+    <p style="font-size:12.5px;color:#5d6e7f;line-height:1.6;margin:24px 0 0">Falls der Button nicht funktioniert, kopiere diesen Link in deinen Browser:<br><a href="${link}" style="color:#1d5d96;word-break:break-all">${link}</a></p>
+    <p style="font-size:12.5px;color:#5d6e7f;line-height:1.6;margin:16px 0 0">Falls du das nicht warst, kannst du diese E-Mail ignorieren — dein Passwort bleibt unverändert.</p>
+  `);
+}
+
+// ── /send-verification-email Handler (authentifiziert) ───────────────────
+async function handleSendVerificationEmail(email, env, cors = {}) {
+  if (!email) {
+    return new Response(JSON.stringify({ error: 'Missing email' }), {
+      status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+  try {
+    const link = await generateFirebaseActionLink('VERIFY_EMAIL', email, env);
+    await sendEmail(email, 'Bestätige deine E-Mail-Adresse — Kontolux AI', verificationEmailHtml(link), env, 'Kontolux AI <jona@kontolux-ai.de>');
+    return new Response(JSON.stringify({ success: true }), {
+      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  } catch (err) {
+    console.error('send-verification-email Error:', err.message);
+    return new Response(JSON.stringify({ error: 'send-failed', details: err.message }), {
+      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// ── /send-password-reset Handler (öffentlich, wie zuvor sendPasswordResetEmail) ──
+async function handleSendPasswordReset(body, env, cors = {}) {
+  const email = (body.email || '').trim();
+  if (!email) {
+    return new Response(JSON.stringify({ error: 'Missing email' }), {
+      status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+  try {
+    const link = await generateFirebaseActionLink('PASSWORD_RESET', email, env);
+    await sendEmail(email, 'Passwort zurücksetzen — Kontolux AI', passwordResetEmailHtml(link), env, 'Kontolux AI <jona@kontolux-ai.de>');
+    return new Response(JSON.stringify({ success: true }), {
+      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  } catch (err) {
+    // EMAIL_NOT_FOUND etc. — als bekannten Auth-Fehlercode zurückgeben, damit
+    // das Frontend dieselbe freundliche Meldung wie zuvor anzeigen kann.
+    const code = /EMAIL_NOT_FOUND/.test(err.message) ? 'auth/user-not-found' : 'auth/unknown-error';
+    console.error('send-password-reset Error:', err.message);
+    return new Response(JSON.stringify({ error: 'send-failed', code }), {
+      status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
 }
 
 async function handleChat(body, env, cors = {}, ctx) {
@@ -1139,7 +1324,7 @@ async function handleFrist(body, env, cors = {}) {
 }
 
 // ── E-Mail senden via Resend ─────────────────────────────
-async function sendEmail(to, subject, html, env) {
+async function sendEmail(to, subject, html, env, from = 'Kontolux AI <info@kontolux-ai.de>') {
   if (!env.RESEND_API_KEY) {
     console.error('sendEmail: RESEND_API_KEY fehlt in env!');
     return false;
@@ -1151,7 +1336,7 @@ async function sendEmail(to, subject, html, env) {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      from: 'Kontolux AI <info@kontolux-ai.de>',
+      from,
       to: [to],
       subject,
       html
