@@ -123,7 +123,7 @@ export default {
       // ✅ /send-verification-email geschützt — E-Mail kommt aus dem verifizierten
       // Token, nie vom Client, sonst könnte jeder Verifizierungsmails an beliebige
       // Adressen auslösen (Spam-Vektor).
-      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/usage', '/abo', '/delete-account-data', '/send-verification-email'];
+      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/usage', '/abo', '/delete-account-data', '/send-verification-email', '/send-email-change-verification'];
 
       if (protectedPaths.includes(url.pathname)) {
         try {
@@ -162,6 +162,7 @@ export default {
       if (url.pathname === '/delete-account-data') return handleDeleteAccountData(body, env, cors);
       if (url.pathname === '/send-verification-email') return handleSendVerificationEmail(verifiedEmail, env, cors);
       if (url.pathname === '/send-password-reset') return handleSendPasswordReset(body, env, cors);
+      if (url.pathname === '/send-email-change-verification') return handleSendEmailChangeVerification(verifiedEmail, body, env, cors);
 
       return new Response('Not found', { status: 404, headers: cors });
     } catch (e) {
@@ -723,19 +724,22 @@ async function getGoogleAccessToken(env) {
   return tokenData.access_token;
 }
 
-// requestType: 'VERIFY_EMAIL' | 'PASSWORD_RESET'. Gibt den Aktionslink zurück,
-// wirft bei ungültiger E-Mail/unbekanntem Account (Fehlercode landet in e.message).
-async function generateFirebaseActionLink(requestType, email, env) {
+// requestType: 'VERIFY_EMAIL' | 'PASSWORD_RESET' | 'VERIFY_AND_CHANGE_EMAIL'. Gibt den
+// Aktionslink zurück, wirft bei ungültiger E-Mail/unbekanntem Account (Fehlercode landet
+// in e.message). newEmail ist nur für VERIFY_AND_CHANGE_EMAIL nötig.
+async function generateFirebaseActionLink(requestType, email, env, newEmail = null) {
   const accessToken = await getGoogleAccessToken(env);
+  const payload = {
+    requestType,
+    email,
+    returnOobLink: true,
+    continueUrl: 'https://app.kontolux-ai.de'
+  };
+  if (newEmail) payload.newEmail = newEmail;
   const res = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode', {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      requestType,
-      email,
-      returnOobLink: true,
-      continueUrl: 'https://app.kontolux-ai.de'
-    })
+    body: JSON.stringify(payload)
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -783,6 +787,16 @@ function passwordResetEmailHtml(link) {
   `);
 }
 
+function emailChangeEmailHtml(link, newEmail) {
+  return emailShell('Bestätige deine neue E-Mail-Adresse für Kontolux AI', `
+    <h1 style="font-size:19px;color:#0f1f2e;margin:0 0 16px">Neue E-Mail-Adresse bestätigen</h1>
+    <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 24px">Du hast angefordert, die E-Mail-Adresse deines Kontolux-AI-Kontos auf <strong>${newEmail}</strong> zu ändern. Klicke auf den Button, um die Änderung zu bestätigen.</p>
+    <a href="${link}" style="display:inline-block;background:#1d5d96;color:#ffffff;padding:13px 28px;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px">Neue E-Mail bestätigen</a>
+    <p style="font-size:12.5px;color:#5d6e7f;line-height:1.6;margin:24px 0 0">Falls der Button nicht funktioniert, kopiere diesen Link in deinen Browser:<br><a href="${link}" style="color:#1d5d96;word-break:break-all">${link}</a></p>
+    <p style="font-size:12.5px;color:#5d6e7f;line-height:1.6;margin:16px 0 0">Falls du das nicht warst, kannst du diese E-Mail ignorieren — die Adresse deines Kontos bleibt unverändert.</p>
+  `);
+}
+
 // ── /send-verification-email Handler (authentifiziert) ───────────────────
 async function handleSendVerificationEmail(email, env, cors = {}) {
   if (!email) {
@@ -823,6 +837,36 @@ async function handleSendPasswordReset(body, env, cors = {}) {
     // das Frontend dieselbe freundliche Meldung wie zuvor anzeigen kann.
     const code = /EMAIL_NOT_FOUND/.test(err.message) ? 'auth/user-not-found' : 'auth/unknown-error';
     console.error('send-password-reset Error:', err.message);
+    return new Response(JSON.stringify({ error: 'send-failed', code }), {
+      status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// ── /send-email-change-verification Handler (authentifiziert) ────────────
+// Ersetzt Firebases verifyBeforeUpdateEmail()-Client-Call: erzeugt den
+// Bestätigungslink über den Admin Service Account (kein Firebase-Mailversand,
+// returnOobLink) und verschickt ihn stattdessen custom-branded via Resend an
+// die NEUE Adresse. currentEmail kommt aus dem verifizierten Token, nie vom
+// Client — sonst könnte jeder fremde Konten umbiegen.
+async function handleSendEmailChangeVerification(currentEmail, body, env, cors = {}) {
+  const newEmail = (body.newEmail || '').trim();
+  if (!currentEmail || !newEmail) {
+    return new Response(JSON.stringify({ error: 'Missing email' }), {
+      status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+  try {
+    const link = await generateFirebaseActionLink('VERIFY_AND_CHANGE_EMAIL', currentEmail, env, newEmail);
+    await sendEmail(newEmail, 'Bestätige deine neue E-Mail-Adresse — Kontolux AI', emailChangeEmailHtml(link, newEmail), env, 'Kontolux AI <jona@kontolux-ai.de>');
+    return new Response(JSON.stringify({ success: true }), {
+      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  } catch (err) {
+    console.error('send-email-change-verification Error:', err.message);
+    let code = 'auth/unknown-error';
+    if (/EMAIL_EXISTS/.test(err.message)) code = 'auth/email-already-in-use';
+    else if (/INVALID_NEW_EMAIL|INVALID_EMAIL/.test(err.message)) code = 'auth/invalid-email';
     return new Response(JSON.stringify({ error: 'send-failed', code }), {
       status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
     });
@@ -1395,7 +1439,7 @@ async function handleFrist(body, env, cors = {}) {
 }
 
 // ── E-Mail senden via Resend ─────────────────────────────
-async function sendEmail(to, subject, html, env, from = 'Kontolux AI <info@kontolux-ai.de>') {
+async function sendEmail(to, subject, html, env, from = 'Kontolux AI <jona@kontolux-ai.de>') {
   if (!env.RESEND_API_KEY) {
     console.error('sendEmail: RESEND_API_KEY fehlt in env!');
     return false;
@@ -1427,13 +1471,13 @@ async function handleKontakt(body, env, cors) {
     return new Response('Fehlende Felder', { status: 400, headers: cors });
   }
 
-  const html = `
-    <h2>Neue Kontaktanfrage</h2>
-    <p><strong>Name:</strong> ${name}</p>
-    <p><strong>E-Mail:</strong> ${email}</p>
-    <p><strong>Nachricht:</strong></p>
-    <p>${nachricht.replace(/\n/g, '<br>')}</p>
-  `;
+  const html = emailShell(`Neue Kontaktanfrage von ${name}`, `
+    <h1 style="font-size:19px;color:#0f1f2e;margin:0 0 16px">Neue Kontaktanfrage</h1>
+    <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 6px"><strong>Name:</strong> ${name}</p>
+    <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 16px"><strong>E-Mail:</strong> <a href="mailto:${email}" style="color:#1d5d96">${email}</a></p>
+    <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 6px"><strong>Nachricht:</strong></p>
+    <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0">${nachricht.replace(/\n/g, '<br>')}</p>
+  `);
 
   await sendEmail('jona@kontolux-ai.de', `Kontaktanfrage von ${name}`, html, env);
   return new Response('OK', { headers: cors });
@@ -1478,14 +1522,14 @@ async function handleUsage(body, env, cors) {
 async function handleFeedback(body, env, cors = {}) {
   const { feedback, nutzername, gut, schlecht, wunsch, datum } = body;
 
-  const html = `
-    <h2>Neues Feedback von ${nutzername || 'Unbekannt'}</h2>
-    <p><strong>Datum:</strong> ${datum || new Date().toLocaleDateString('de-DE')}</p>
-    ${gut ? `<p><strong>Was gefällt:</strong> ${gut}</p>` : ''}
-    ${schlecht ? `<p><strong>Was stört:</strong> ${schlecht}</p>` : ''}
-    ${wunsch ? `<p><strong>Wunsch:</strong> ${wunsch}</p>` : ''}
-    ${feedback ? `<p><strong>Feedback:</strong> ${feedback}</p>` : ''}
-  `;
+  const html = emailShell(`Neues Feedback von ${nutzername || 'Unbekannt'}`, `
+    <h1 style="font-size:19px;color:#0f1f2e;margin:0 0 16px">Neues Feedback von ${nutzername || 'Unbekannt'}</h1>
+    <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 16px"><strong>Datum:</strong> ${datum || new Date().toLocaleDateString('de-DE')}</p>
+    ${gut ? `<p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 12px"><strong>Was gefällt:</strong> ${gut}</p>` : ''}
+    ${schlecht ? `<p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 12px"><strong>Was stört:</strong> ${schlecht}</p>` : ''}
+    ${wunsch ? `<p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 12px"><strong>Wunsch:</strong> ${wunsch}</p>` : ''}
+    ${feedback ? `<p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0"><strong>Feedback:</strong> ${feedback}</p>` : ''}
+  `);
 
   await sendEmail('jona@kontolux-ai.de', `Feedback von ${nutzername || 'Nutzer'}`, html, env);
   return new Response('OK', { headers: cors });
@@ -1717,16 +1761,14 @@ async function sendMonthlyReminders(env) {
 
   for (const key of keys.keys) {
     const email = key.name;
-    const html = `
-      <div style="font-family:-apple-system,sans-serif;max-width:500px;margin:0 auto">
-        <h2 style="color:#0f3a5f">Dein monatlicher Kontolux-Reminder 📊</h2>
-        <p>Hallo,</p>
-        <p>der <strong>${monat}</strong> ist vorbei — hast du deinen Monatsabschluss schon erstellt?</p>
-        <p>Öffne Kontolux AI, klick auf 📊 und erfasse deine Einnahmen und Ausgaben. Ich analysiere alles automatisch für dich.</p>
-        <a href="https://app.kontolux-ai.de" style="display:inline-block;background:#1d5d96;color:white;padding:12px 24px;border-radius:10px;text-decoration:none;font-weight:600;margin:16px 0">Zu Kontolux AI →</a>
-        <p style="color:#888;font-size:12px;margin-top:24px">Du erhältst diese Mail weil du Erinnerungen aktiviert hast. <a href="https://app.kontolux-ai.de" style="color:#888">Abmelden</a></p>
-      </div>
-    `;
+    const html = emailShell(`Dein monatlicher Kontolux-Reminder für ${monat}`, `
+      <h1 style="font-size:19px;color:#0f1f2e;margin:0 0 16px">Dein monatlicher Kontolux-Reminder 📊</h1>
+      <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 16px">Hallo,</p>
+      <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 16px">der <strong>${monat}</strong> ist vorbei — hast du deinen Monatsabschluss schon erstellt?</p>
+      <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 24px">Öffne Kontolux AI, klick auf 📊 und erfasse deine Einnahmen und Ausgaben. Ich analysiere alles automatisch für dich.</p>
+      <a href="https://app.kontolux-ai.de" style="display:inline-block;background:#1d5d96;color:#ffffff;padding:13px 28px;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px">Zu Kontolux AI →</a>
+      <p style="font-size:12.5px;color:#5d6e7f;line-height:1.6;margin:24px 0 0">Du erhältst diese Mail, weil du Erinnerungen aktiviert hast. <a href="https://app.kontolux-ai.de" style="color:#1d5d96">Abmelden</a></p>
+    `);
     await sendEmail(email, `Dein Monatsabschluss für ${monat} wartet`, html, env, 'Kontolux AI <jona@kontolux-ai.de>');
   }
 }
