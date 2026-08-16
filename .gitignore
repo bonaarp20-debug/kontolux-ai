@@ -1,0 +1,26 @@
+# Wrangler cache/state (local dev cache, KV/D1 simulation data, account info —
+# never commit; was accidentally tracked since the initial commit, now removed)
+.wrangler/
+
+# Wrangler config accidentally auto-generated in the wrong directory in the
+# past (this repo's real config is wrangler.toml, not wrangler.jsonc)
+wrangler.jsonc
+
+# Claude Code local settings
+.claude/
+
+# macOS
+.DS_Store
+
+# Dependency directories
+node_modules/
+
+# dotenv environment variables file
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+
+# Logs
+*.log
+npm-debug.log*
