@@ -1041,7 +1041,7 @@ async function handleImage(body, env, cors = {}, ctx) {
 
 // ── /document Handler ─────────────────────────────────────
 async function handleDocument(body, env, cors = {}, ctx) {
-  const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt } = body;
+  const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz } = body;
 
   // ── BELEG MANUELL EINTRAGEN (ohne Datei) ────
   if (Nachricht === 'BELEG_MANUELL') {
@@ -1074,6 +1074,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
           rechnungsnr: rechnungsnr ? { stringValue: rechnungsnr } : { stringValue: '' },
           manuell: { booleanValue: true },
           bezahlt: { booleanValue: !!bezahlt },
+          mwst_satz: { stringValue: mwst_satz || 'keine' },
           createdAt: { timestampValue: new Date().toISOString() }
         }
       };
