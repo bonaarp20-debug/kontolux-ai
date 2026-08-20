@@ -357,7 +357,7 @@ Features:
 - Mahnungserstellung: PDF-Mahnung bei überfälligen Zahlungen (Erinnerung, 1. und 2. Mahnung)
 - Rechnungsprüfung: hochgeladene Rechnungen auf §14 UStG prüfen
 - Belegarchiv (📥): Rechnungen/Belege hochladen oder manuell eintragen, jederzeit öffnen, Bezahlt/Offen-Status
-- DATEV-Export: Monatsabschlüsse als CSV für den Steuerberater exportieren (in den Einstellungen)
+- DATEV-Export: bezahlte Belege als DATEV-Buchungsstapel-CSV für den Steuerberater exportieren (in den Einstellungen, dort auch Berater-/Mandanten-Nr. einmalig hinterlegen)
 - Dokumentenanalyse: PDFs/Bilder hochladen über 📎
 - Spracheingabe: Fragen per Mikrofon
 
@@ -562,7 +562,7 @@ Warnung wenn KU trotzdem USt ausweist (schuldet sie dann dem Finanzamt).
 
 
 ## WAS DU KANNST
-Einnahmen/Ausgaben tracken, Monatsabschlüsse, Jahresprognose, Steuerrücklagen, PDF-Rechnungen & Mahnungen erstellen, Rechnungen prüfen, Steuerfristen im Blick halten, Belege archivieren (hochladen oder manuell eintragen, Bezahlt/Offen-Status), Monatsabschlüsse als CSV für den Steuerberater exportieren (DATEV-Export in den Einstellungen). Alle erstellten Rechnungen, Mahnungen und eingehenden Rechnungen werden automatisch im Belegarchiv gespeichert — der Nutzer kann sie dort jederzeit öffnen und einsehen.
+Einnahmen/Ausgaben tracken, Monatsabschlüsse, Jahresprognose, Steuerrücklagen, PDF-Rechnungen & Mahnungen erstellen, Rechnungen prüfen, Steuerfristen im Blick halten, Belege archivieren (hochladen oder manuell eintragen, Bezahlt/Offen-Status), bezahlte Belege als DATEV-Buchungsstapel-CSV für den Steuerberater exportieren (DATEV-Export in den Einstellungen). Alle erstellten Rechnungen, Mahnungen und eingehenden Rechnungen werden automatisch im Belegarchiv gespeichert — der Nutzer kann sie dort jederzeit öffnen und einsehen.
 
 
 ## PROAKTIVES FEATURE-EMPFEHLEN
@@ -572,7 +572,7 @@ Einnahmen/Ausgaben tracken, Monatsabschlüsse, Jahresprognose, Steuerrücklagen,
 - Einnahmen/Ausgaben tracken: → Tageseinnahmen oder Monatsabschluss empfehlen
 - Rechnung schreiben: → "Sag mir wem und wofür, ich erstelle sie sofort"
 - Viele Belege/Rechnungen: → Belegarchiv empfehlen ("Lad sie im Belegarchiv hoch, dann hast du alles an einem Ort")
-- Steuerberater/Jahresabschluss erwähnt: → DATEV-Export empfehlen ("In den Einstellungen kannst du deine Abschlüsse als CSV für deinen Steuerberater exportieren")
+- Steuerberater/Jahresabschluss erwähnt: → DATEV-Export empfehlen ("In den Einstellungen kannst du deine bezahlten Belege als DATEV-Buchungsstapel-CSV für deinen Steuerberater exportieren — trag dort einmalig Berater- und Mandanten-Nummer ein")
 - Rechnungsprüfung: → "Lad die Rechnung hoch, ich prüfe sie auf §14 UStG"
 
 
@@ -1171,7 +1171,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
           manuell: { booleanValue: true },
           bezahlt: { booleanValue: !!bezahlt },
           mwst_satz: { stringValue: mwst_satz || 'keine' },
-          createdAt: { timestampValue: new Date().toISOString() }
+          createdAt: { timestampValue: new Date().toISOString() },
+          ...(bezahlt ? { bezahlt_am: { stringValue: new Date().toISOString().split('T')[0] } } : {})
         }
       };
 
@@ -1275,6 +1276,9 @@ async function handleDocument(body, env, cors = {}, ctx) {
 
       if (betrag) metadata.fields.betrag = { doubleValue: parseFloat(betrag) };
       if (absender) metadata.fields.absender = { stringValue: absender };
+      if (mwst_satz) metadata.fields.mwst_satz = { stringValue: mwst_satz };
+      if (rechnungsnr) metadata.fields.rechnungsnr = { stringValue: rechnungsnr };
+      if (bezahlt) metadata.fields.bezahlt_am = { stringValue: new Date().toISOString().split('T')[0] };
 
       const firestoreRes = await fetch(firestoreUrl, {
         method: 'PATCH',
@@ -1586,8 +1590,91 @@ async function handleDeleteAccountData(body, env, cors = {}) {
   });
 }
 
-// ── /datev-debug Handler ──────────────────────────────────────
+// ── DATEV Buchungsstapel Helpers ──────────────────────────────
+// ISO-8859-1 (ANSI) ist ein direktes 1:1-Mapping von Codepoint 0-255 auf ein Byte —
+// DATEV erwartet diese Kodierung statt UTF-8. Zeichen außerhalb dieses Bereichs (z.B.
+// Emojis) werden zu '?', typografische Anführungszeichen/Gedankenstriche vorher auf
+// ihr ASCII-Äquivalent normalisiert, damit gängige Absender-/Beschreibungstexte nicht
+// unnötig verstümmelt werden.
+function toLatin1Bytes(str) {
+  const normalized = String(str ?? '')
+    .replace(/[–—]/g, '-')
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/…/g, '...');
+  const bytes = new Uint8Array(normalized.length);
+  for (let i = 0; i < normalized.length; i++) {
+    const code = normalized.charCodeAt(i);
+    bytes[i] = code <= 0xFF ? code : 0x3F;
+  }
+  return bytes;
+}
+
+// DATEV-Textfelder werden immer gequotet (auch wenn sie kein Semikolon enthalten) —
+// das entspricht dem offiziellen Format und ist robust gegen Sonderzeichen in frei
+// eingegebenen Absender-/Beschreibungstexten.
+function datevText(val, maxLen) {
+  let s = String(val ?? '').replace(/[\r\n]+/g, ' ');
+  if (maxLen) s = s.slice(0, maxLen);
+  return `"${s.replace(/"/g, '""')}"`;
+}
+
+// Belegdatum im DATEV-Buchungssatz ist TTMM (Tag+Monat, kein Jahr — das Jahr ergibt
+// sich aus dem Wirtschaftsjahr im Header).
+function datevTTMM(dateObj) {
+  const tt = String(dateObj.getDate()).padStart(2, '0');
+  const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
+  return `${tt}${mm}`;
+}
+
+function firestoreValue(field) {
+  if (!field) return null;
+  if (field.stringValue !== undefined) return field.stringValue;
+  if (field.doubleValue !== undefined) return field.doubleValue;
+  if (field.integerValue !== undefined) return parseFloat(field.integerValue);
+  if (field.booleanValue !== undefined) return field.booleanValue;
+  if (field.timestampValue !== undefined) return field.timestampValue;
+  return null;
+}
+
+function isKleinunternehmer(profilFields) {
+  const v = firestoreValue(profilFields?.kleinunternehmer);
+  return v === true || v === 'ja' || (typeof v === 'string' && v.startsWith('Ja'));
+}
+
+// BU-Schlüssel gemäß Vorgabe: 9 = 19% USt, 8 = 7% USt, 0 = §19 UStG Kleinunternehmer
+// (steuerfrei). Fehlt der mwst_satz (z.B. bei älteren Belegen ohne dieses Feld), wird
+// anhand des Kleinunternehmer-Status des Profils ein plausibler Default gewählt.
+function buSchluessel(mwstSatz, kleinunternehmer) {
+  if (mwstSatz === '19') return '9';
+  if (mwstSatz === '7') return '8';
+  if (mwstSatz === 'keine' || mwstSatz === '0') return '0';
+  return kleinunternehmer ? '0' : '9';
+}
+
+async function firestoreListAll(baseUrl, authHeader) {
+  const allDocs = [];
+  let pageToken = null;
+  do {
+    const url = `${baseUrl}?pageSize=300${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
+    const res = await fetch(url, { headers: { 'Authorization': `Bearer ${authHeader}` } });
+    if (!res.ok) {
+      const errorText = await res.text();
+      throw new Error(`Firestore read failed (${res.status}): ${errorText}`);
+    }
+    const data = await res.json();
+    if (Array.isArray(data.documents)) allDocs.push(...data.documents);
+    pageToken = data.nextPageToken || null;
+  } while (pageToken);
+  return allDocs;
+}
+
 // ── /datev-export Handler ─────────────────────────────────────────
+// Erzeugt einen DATEV-Buchungsstapel (EXTF-Format, Semikolon-getrennt, ANSI/ISO-8859-1)
+// direkt aus dem Belegarchiv (dokumente-Collection) — ein Buchungssatz pro tatsächlich
+// bezahltem Beleg (Ist-Versteuerung/EÜR: unbezahlte Rechnungen sind noch kein Zufluss/
+// Abfluss und werden bewusst NICHT gebucht, sonst würden offene, ggf. nie eingehende
+// Forderungen als Umsatz verbucht).
 async function handleDatevExport(body, env, cors = {}) {
   const { userId, jahr } = body;
 
@@ -1598,150 +1685,171 @@ async function handleDatevExport(body, env, cors = {}) {
     });
   }
 
-  try {
-    // Nutze den User's Firebase Token (wird vom Frontend mitgesendet + verifiziert)
-    const authHeader = body.token || '';
-    
-    if (!authHeader) {
-      return new Response(JSON.stringify({ error: 'No auth token' }), {
-        status: 401,
-        headers: { ...cors, 'Content-Type': 'application/json' }
-      });
-    }
-
-    // Firestore REST API mit User's Token
-    const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/monatsabschluesse`;
-
-    const res = await fetch(firestoreUrl, {
-      headers: {
-        'Authorization': `Bearer ${authHeader}`,
-        'Content-Type': 'application/json'
-      }
+  const authHeader = body.token || '';
+  if (!authHeader) {
+    return new Response(JSON.stringify({ error: 'No auth token' }), {
+      status: 401,
+      headers: { ...cors, 'Content-Type': 'application/json' }
     });
+  }
 
-    if (!res.ok) {
-      const errorText = await res.text();
-      console.error('Firestore Error:', errorText);
-      return new Response(JSON.stringify({ 
-        error: `Firestore read failed: ${res.status}` 
+  try {
+    const base = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}`;
+
+    // Profil (DATEV-Einstellungen + Kleinunternehmer-Status) + Belegarchiv parallel laden
+    const [profilRes, dokDocs] = await Promise.all([
+      fetch(`${base}/profil/settings`, { headers: { 'Authorization': `Bearer ${authHeader}` } }),
+      firestoreListAll(`${base}/dokumente`, authHeader)
+    ]);
+
+    const profilFields = profilRes.ok ? ((await profilRes.json()).fields || {}) : {};
+    const kleinunternehmer = isKleinunternehmer(profilFields);
+
+    const beraterNr = (firestoreValue(profilFields.datev_berater_nr) || '').toString().trim();
+    const mandantenNr = (firestoreValue(profilFields.datev_mandanten_nr) || '').toString().trim();
+    const bankkonto = (firestoreValue(profilFields.datev_bankkonto) || '').toString().trim();
+    const skr = (firestoreValue(profilFields.datev_skr) || 'SKR03').toString().trim();
+    const ausgabenGegenkonto = (firestoreValue(profilFields.datev_ausgaben_gegenkonto) || '').toString().trim()
+      || (skr === 'SKR04' ? '6300' : '4900');
+    let wjBeginn = (firestoreValue(profilFields.datev_wj_beginn) || '0101').toString().trim();
+    if (!/^\d{4}$/.test(wjBeginn)) wjBeginn = '0101';
+
+    if (!beraterNr || !mandantenNr || !bankkonto) {
+      return new Response(JSON.stringify({
+        error: 'DATEV-Einstellungen unvollständig',
+        details: 'Bitte trage Berater-Nummer, Mandanten-Nummer und Bankkonto in den Einstellungen ein, bevor du exportierst.'
       }), {
-        status: res.status,
+        status: 400,
         headers: { ...cors, 'Content-Type': 'application/json' }
       });
     }
 
-    const data = await res.json();
-    const documents = data.documents || [];
+    // Erlöskonto entsprechend Kontenrahmen — 8400 (SKR03) bzw. das SKR04-Äquivalent 4400,
+    // das Standard-Erlöskonto für Rechnungen; das BU-Schlüssel-Feld trägt die tatsächliche
+    // Steuerinformation je Buchungssatz.
+    const einnahmenGegenkonto = skr === 'SKR04' ? '4400' : '8400';
 
-    // Parse Monatsabschlüsse
-    const abschluesse = [];
-    for (const doc of documents) {
+    // Belege des gewünschten Jahres, tatsächlich bezahlt, mit Betrag > 0
+    const buchungen = [];
+    let skippedUnpaid = 0;
+
+    for (const doc of dokDocs) {
       const fields = doc.fields || {};
-      
-      const docJahr = fields.jahr?.integerValue || fields.jahr?.stringValue;
-      const monat = fields.monat?.stringValue || '';
-      
-      // Nur Dokumente des gewünschten Jahres
-      if (String(docJahr) !== String(jahr)) continue;
+      const bezahlt = firestoreValue(fields.bezahlt) === true;
+      const betrag = parseFloat(firestoreValue(fields.betrag)) || 0;
+      if (betrag <= 0) continue;
 
-      const einnahmen = parseFloat(
-        fields.einnahmen_gesamt?.doubleValue !== undefined 
-          ? fields.einnahmen_gesamt.doubleValue 
-          : (fields.einnahmen_gesamt?.integerValue || 0)
-      );
-      const ausgaben = parseFloat(
-        fields.ausgaben_gesamt?.doubleValue !== undefined 
-          ? fields.ausgaben_gesamt.doubleValue 
-          : (fields.ausgaben_gesamt?.integerValue || 0)
-      );
-      const gewinn = einnahmen - ausgaben;
+      const typ = firestoreValue(fields.typ) || 'rechnung_eingehend';
+      const istEinnahme = typ === 'rechnung_ausgehend' || typ === 'mahnung_ausgehend';
 
-      if (monat) {
-        abschluesse.push({ monat, einnahmen, ausgaben, gewinn, positionsData: fields });
+      // Bestmögliches Belegdatum: bezahlt_am (Zahlungseingang, falls erfasst) > datum
+      // (Rechnungs-/Belegdatum) > createdAt (Erstellungsdatum) als letzter Fallback.
+      const datumStr = firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum);
+      let belegDatum;
+      if (datumStr && /^\d{4}-\d{2}-\d{2}/.test(datumStr)) {
+        belegDatum = new Date(datumStr + 'T00:00:00');
+      } else if (firestoreValue(fields.createdAt)) {
+        belegDatum = new Date(firestoreValue(fields.createdAt));
+      } else {
+        belegDatum = new Date();
       }
-    }
+      if (isNaN(belegDatum.getTime())) belegDatum = new Date();
 
-    // Sortieren nach Monat (chronologisch)
-    const monatOrder = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
-    abschluesse.sort((a, b) => monatOrder.indexOf(a.monat) - monatOrder.indexOf(b.monat));
+      if (String(belegDatum.getFullYear()) !== String(jahr)) continue;
 
-    // CSV-Feld escapen: in Anführungszeichen wenn Komma/Zeilenumbruch/Anführungszeichen enthalten,
-    // sonst zerstört z.B. ein Komma in einer frei eingegebenen Beschreibung die Spaltenstruktur.
-    const csvField = (val) => {
-      const s = String(val ?? '');
-      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-    const datumFuer = (monat) => `01.${String(monatOrder.indexOf(monat) + 1).padStart(2, '0')}.${jahr}`;
+      if (!bezahlt) { skippedUnpaid++; continue; }
 
-    // CSV generieren mit BOM (für Excel DE)
-    const bom = '\uFEFF'; // UTF-8 BOM
-    let csv = 'Datum,Einnahmen,Ausgaben,Gewinn\n';
-
-    for (const abs of abschluesse) {
-      const datum = datumFuer(abs.monat);
-      const ein = parseFloat(abs.einnahmen).toFixed(2);
-      const aus = parseFloat(abs.ausgaben).toFixed(2);
-      const gew = parseFloat(abs.gewinn).toFixed(2);
-      csv += `${datum},${ein},${aus},${gew}\n`;
-    }
-
-    // Detaillierte Positionen hinzufügen (wenn vorhanden)
-    csv += '\nDatum,Typ,Beschreibung,Betrag\n';
-    
-    for (const abs of abschluesse) {
-      const fields = abs.positionsData;
-      const monat = abs.monat;
-      const datum = datumFuer(monat);
-
-      // Einnahmen-Positionen
-      const einnahmenPosArray = fields.einnahmen_positionen?.arrayValue?.values;
-      if (Array.isArray(einnahmenPosArray)) {
-        for (const pos of einnahmenPosArray) {
-          const posFields = pos.mapValue?.fields || {};
-          const beschreibung = posFields.bezeichnung?.stringValue || posFields.name?.stringValue || '';
-          const betrag = parseFloat(
-            posFields.betrag?.doubleValue !== undefined
-              ? posFields.betrag.doubleValue
-              : (posFields.betrag?.integerValue || 0)
-          );
-
-          if (beschreibung && betrag > 0) {
-            const betragStr = betrag.toFixed(2);
-            csv += `${datum},Einnahmen,${csvField(beschreibung)},${betragStr}\n`;
-          }
-        }
+      // Rechnungsnummer: bevorzugt das explizite Feld, sonst Best-Effort-Extraktion aus
+      // der Dokument-ID (ältere, vor diesem Fix erstellte Rechnungen/Mahnungen tragen die
+      // Nummer nur dort).
+      let rechnungsnr = firestoreValue(fields.rechnungsnr) || firestoreValue(fields.rechnungsnummer) || '';
+      if (!rechnungsnr) {
+        const idMatch = /^beleg_(?:rechnung|mahnung)_(.+)_\d+$/.exec(doc.name?.split('/').pop() || '');
+        if (idMatch) rechnungsnr = idMatch[1];
       }
 
-      // Ausgaben-Positionen
-      const ausgabenPosArray = fields.ausgaben_positionen?.arrayValue?.values;
-      if (Array.isArray(ausgabenPosArray)) {
-        for (const pos of ausgabenPosArray) {
-          const posFields = pos.mapValue?.fields || {};
-          const beschreibung = posFields.bezeichnung?.stringValue || posFields.name?.stringValue || '';
-          const betrag = parseFloat(
-            posFields.betrag?.doubleValue !== undefined
-              ? posFields.betrag.doubleValue
-              : (posFields.betrag?.integerValue || 0)
-          );
+      const absender = firestoreValue(fields.absender) || firestoreValue(fields.name) || '';
+      const mwstSatz = firestoreValue(fields.mwst_satz);
+      const bu = buSchluessel(mwstSatz, kleinunternehmer);
+      const gegenkonto = istEinnahme ? einnahmenGegenkonto : ausgabenGegenkonto;
+      const buchungstext = istEinnahme
+        ? `Rechnung ${absender}`.trim()
+        : `Beleg ${absender}`.trim();
 
-          if (beschreibung && betrag > 0) {
-            const betragStr = betrag.toFixed(2);
-            csv += `${datum},Ausgaben,${csvField(beschreibung)},${betragStr}\n`;
-          }
-        }
-      }
+      buchungen.push({
+        betrag,
+        sollHaben: istEinnahme ? 'S' : 'H',
+        konto: bankkonto,
+        gegenkonto,
+        bu,
+        belegDatum,
+        belegfeld1: rechnungsnr,
+        buchungstext
+      });
     }
 
-    const csvContent = bom + csv;
+    buchungen.sort((a, b) => a.belegDatum - b.belegDatum);
 
-    // Response mit Download-Header
-    return new Response(csvContent, {
+    if (buchungen.length === 0) {
+      return new Response(JSON.stringify({
+        error: 'Keine buchbaren Belege gefunden',
+        details: `Für ${jahr} wurden keine als bezahlt markierten Belege mit Betrag gefunden.${skippedUnpaid ? ` (${skippedUnpaid} unbezahlte Belege wurden übersprungen.)` : ''}`
+      }), {
+        status: 404,
+        headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const jahrNum = parseInt(jahr, 10);
+    const wjBeginnDate = `${jahrNum}${wjBeginn}`; // yyyyMMdd
+    const vonDatum = `${jahrNum}0101`;
+    const bisDatum = `${jahrNum}1231`;
+    const now = new Date();
+    const erzeugtAm = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}000`;
+
+    // Header-Zeile (EXTF-Kennsatz für Buchungsstapel, Formatversion 700/Kategorie 21)
+    const headerRow = [
+      '"EXTF"', '700', '21', '"Buchungsstapel"', '7',
+      erzeugtAm, '', '"RE"', '"Kontolux AI"', '',
+      beraterNr, mandantenNr, wjBeginnDate, '4',
+      vonDatum, bisDatum, `"Kontolux Export ${jahr}"`, '""',
+      '1', '0', '0', '"EUR"', '', '', '', ''
+    ].join(';');
+
+    const columnRow = [
+      'Umsatz (ohne Soll/Haben-Kz)', 'Soll/Haben-Kennzeichen', 'WKZ Umsatz', 'Kurs',
+      'Basis-Umsatz', 'WKZ Basis-Umsatz', 'Konto', 'Gegenkonto (ohne BU-Schlüssel)',
+      'BU-Schlüssel', 'Belegdatum', 'Belegfeld 1', 'Belegfeld 2', 'Skonto', 'Buchungstext',
+      'Postensperre', 'Diverse Adressnummer', 'Geschäftspartnerbank', 'Sachverhalt',
+      'Zinssperre', 'Beleglink'
+    ].map(h => datevText(h)).join(';');
+
+    const rows = buchungen.map(b => [
+      b.betrag.toFixed(2).replace('.', ','),
+      b.sollHaben,
+      '', '', '', '',
+      b.konto,
+      b.gegenkonto,
+      b.bu,
+      datevTTMM(b.belegDatum),
+      datevText(b.belegfeld1, 12),
+      '""',
+      '',
+      datevText(b.buchungstext, 60),
+      '', '', '', '', '', ''
+    ].join(';'));
+
+    const csvContent = [headerRow, columnRow, ...rows].join('\r\n') + '\r\n';
+
+    return new Response(toLatin1Bytes(csvContent), {
       status: 200,
       headers: {
         ...cors,
-        'Content-Type': 'text/csv; charset=utf-8',
-        'Content-Disposition': `attachment; filename="DATEV_KONTOLUX_${jahr}.csv"`,
-        'Cache-Control': 'no-cache'
+        'Content-Type': 'text/csv; charset=ISO-8859-1',
+        'Content-Disposition': `attachment; filename="EXTF_Buchungsstapel_${jahr}.csv"`,
+        'Cache-Control': 'no-cache',
+        'X-Datev-Exported-Count': String(buchungen.length),
+        'X-Datev-Skipped-Unpaid-Count': String(skippedUnpaid)
       }
     });
 
