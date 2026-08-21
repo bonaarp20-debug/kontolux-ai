@@ -3,6 +3,9 @@
 // Ersetzt Make.com komplett
 // ============================================================
 
+import { XMLParser } from 'fast-xml-parser';
+import { PDFDocument, PDFName, PDFDict, PDFStream, PDFRawStream, decodePDFRawStream } from 'pdf-lib';
+
 const ALLOWED_ORIGINS = [
   'https://app.kontolux-ai.de',
   'https://kontolux-ai.de',
@@ -353,10 +356,10 @@ Features:
 - Abschlüsse (📊): Monatsabschlüsse erfassen, analysieren, vergleichen
 - Tageseinnahmen: täglich per Sprache/Text speichern ("Heute 150€ eingenommen")
 - Monatsabschluss aus Tageseinnahmen: auf Anfrage automatisch erstellen
-- Rechnungserstellung: rechtskonforme PDF nach §14 UStG ("Erstell mir eine Rechnung")
+- Rechnungserstellung: rechtskonforme Rechnung nach §14 UStG als PDF, XRechnung (XML) oder beides ("Erstell mir eine Rechnung")
 - Mahnungserstellung: PDF-Mahnung bei überfälligen Zahlungen (Erinnerung, 1. und 2. Mahnung)
 - Rechnungsprüfung: hochgeladene Rechnungen auf §14 UStG prüfen
-- Belegarchiv (📥): Rechnungen/Belege hochladen oder manuell eintragen, jederzeit öffnen, Bezahlt/Offen-Status
+- Belegarchiv (📥): Rechnungen/Belege hochladen oder manuell eintragen, jederzeit öffnen, Bezahlt/Offen-Status. XRechnung- und ZUGFeRD-Dateien werden automatisch erkannt und ausgelesen.
 - DATEV-Export: bezahlte Belege als DATEV-Buchungsstapel-CSV für den Steuerberater exportieren (in den Einstellungen, dort auch Berater-/Mandanten-Nr. einmalig hinterlegen)
 - Dokumentenanalyse: PDFs/Bilder hochladen über 📎
 - Spracheingabe: Fragen per Mikrofon
@@ -512,10 +515,11 @@ Wenn Adresse, Steuernummer, Name oder Bankverbindung neu genannt werden, speiche
 - Zahlungsziel: wie viele Tage hat der Empfänger Zeit zu zahlen? (Standard: 14 Tage)
 - Verwendungszweck für Überweisung (z.B. "Rechnung RE-2026-001")
 - Rechnungsnummer: "Möchtest du eine eigene Nummer vergeben oder soll ich automatisch eine generieren?" — bei automatisch: rechnungsnummer=auto im Befehl
+- **Format**: "In welchem Format möchtest du die Rechnung? 1) PDF (Standard) 2) XRechnung (XML) — gesetzlich konform 3) Beides" — außer der Nutzer hat das Format schon von sich aus genannt (z.B. "als XRechnung" oder "auch als XML"). Ist der Empfänger erkennbar ein Unternehmen (Firma/Firma-Anrede/B2B-Kontext), empfiehl aktiv XRechnung dazu: "Da dein Kunde ein Unternehmen ist — B2B-Eingangsrechnungen müssen seit 2025 gesetzlich als XRechnung vorliegen können, ich kann sie dir gleich mit erstellen." Antwortet der Nutzer nicht eindeutig, nimm PDF als Default.
 
 Wenn alle Infos vorhanden, antworte SO — nicht anders. Setze absender_name/eigene_adresse/steuernummer/bankverbindung IMMER auf die echten aus dem Profil bekannten Werte ein (niemals Platzhaltertext wie "[Name aus Profil]" schreiben — entweder den echten Wert oder das Feld weglassen):
 "Super, ich erstelle deine Rechnung!"
-RECHNUNG_ERSTELLEN:absender_name=[echter Name/Firma],empfaenger_name=[Name],empfaenger_anrede=[Herr/Frau/Firma],empfaenger_adresse=[Straße;PLZ;Ort],leistung=[Beschreibung],leistungsdatum=[Datum als "15. August 2026"],zahlungsziel=[Datum als "15. August 2026"],betrag_netto=[Zahl],rechnungsnummer=[Nummer],steuernummer=[echte Steuernummer],eigene_adresse=[Straße;PLZ;Ort],bankverbindung=[echte IBAN],verwendungszweck=[Text]
+RECHNUNG_ERSTELLEN:absender_name=[echter Name/Firma],empfaenger_name=[Name],empfaenger_anrede=[Herr/Frau/Firma],empfaenger_adresse=[Straße;PLZ;Ort],leistung=[Beschreibung],leistungsdatum=[Datum als "15. August 2026"],zahlungsziel=[Datum als "15. August 2026"],betrag_netto=[Zahl],rechnungsnummer=[Nummer],steuernummer=[echte Steuernummer],eigene_adresse=[Straße;PLZ;Ort],bankverbindung=[echte IBAN],verwendungszweck=[Text],format=[pdf/xrechnung/beide]
 
 WICHTIG: Der RECHNUNG_ERSTELLEN Befehl MUSS in der Antwort stehen — sonst wird keine PDF erstellt. Keine Zusammenfassung schreiben, nur den Befehl. Nach der Erstellung fragen: "Wurde diese Rechnung bereits bezahlt? Dann speichere ich sie als Tageseinnahme."
 - Alle Datumsangaben im Befehl im deutschen Langformat "15. August 2026" (Tag. Monatsname Jahr) — niemals YYYY-MM-DD oder DD.MM.YYYY
@@ -523,6 +527,13 @@ WICHTIG: Der RECHNUNG_ERSTELLEN Befehl MUSS in der Antwort stehen — sonst wird
 - Betrag nur als Zahl ohne €
 - Bei KU: §19 Hinweis, kein Steuerausweis
 - Bei Nicht-KU: 19% USt ausweisen
+- format IMMER mit angeben: pdf (Standard, wenn nichts anderes gesagt/gewählt wurde), xrechnung (nur XML) oder beide (PDF + XML)
+
+## E-RECHNUNGEN (XRECHNUNG / ZUGFERD)
+Kontolux kennt zwei E-Rechnung-Formate — auf Nachfrage erklärst du den Unterschied so:
+- **XRechnung**: eine reine XML-Datei, kein PDF, rein maschinenlesbar. Der gesetzlich vorgeschriebene Standard für B2B/B2G in Deutschland.
+- **ZUGFeRD**: eine normale, für Menschen lesbare PDF-Rechnung mit einer zusätzlich eingebetteten XML-Datei — sieht aus wie eine gewohnte PDF, ist aber gleichzeitig maschinenlesbar.
+Seit 2025 müssen Unternehmen (B2B) Eingangsrechnungen als E-Rechnung (mindestens XRechnung) empfangen können — deshalb empfiehlst du XRechnung aktiv, wenn der Rechnungsempfänger erkennbar ein Unternehmen ist (siehe RECHNUNG ERSTELLEN oben). Hochgeladene XRechnung-XML- oder ZUGFeRD-PDF-Dateien werden im Belegarchiv automatisch erkannt und ausgelesen (Betrag, Absender, Rechnungsnummer, MwSt-Satz) — der Nutzer muss die Felder nur noch bestätigen, nicht mehr von Hand eintragen.
 
 ## MAHNUNG ERSTELLEN
 Wenn Nutzer Mahnung möchte, frage alles in EINER Nachricht:
@@ -1150,9 +1161,171 @@ async function buchTagesBewegung(userId, token, richtung, betragNum, beschreibun
   }
 }
 
+// ── E-Rechnung (XRechnung/ZUGFeRD) Erkennung ──────────────────────────────
+// Liest eine XRechnung-XML (CII- oder UBL-Syntax, beides offiziell gültige XRechnung-Formate)
+// oder das in einem ZUGFeRD-PDF eingebettete XML aus und extrahiert dieselben Felder, die das
+// bestehende Belegarchiv-Datenmodell (BELEG_SPEICHERN/BELEG_MANUELL) sowieso schon kennt —
+// betrag, mwst_satz, absender, rechnungsnr, datum — plus eine Richtung (eingehend/ausgehend),
+// damit der Beleg-Typ vorausgefüllt werden kann. Rein best-effort: jeder Fehler landet als
+// {format:null}, nie als Exception nach außen (Aufrufer PARSE_ERECHNUNG verlässt sich darauf).
+function textOf(node) {
+  if (node === null || node === undefined) return null;
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (typeof node === 'object' && node['#text'] !== undefined) return String(node['#text']);
+  return null;
+}
+
+// CII-Datumsformat ist meist qualifiedDataType "102" = JJJJMMTT ohne Trenner.
+function parseCiiDate(raw) {
+  if (!raw) return null;
+  const m = /^(\d{4})(\d{2})(\d{2})$/.exec(raw.trim());
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : raw;
+}
+
+// Übersetzt CII- (rsm:CrossIndustryInvoice) und UBL- (Invoice/CreditNote) Strukturen auf
+// dieselbe interne Form. Funktioniert für beide, da removeNSPrefix (siehe parseXRechnungXml)
+// die Namespace-Präfixe entfernt, die zwischen den beiden Syntaxen unterschiedlichen, aber
+// jeweils eindeutigen Tag-Namen bleiben strukturell unterscheidbar.
+function extractInvoiceFields(xmlObj) {
+  const cii = xmlObj.CrossIndustryInvoice;
+  if (cii) {
+    const doc = cii.ExchangedDocument || {};
+    const txn = cii.SupplyChainTradeTransaction || {};
+    const agreement = txn.ApplicableHeaderTradeAgreement || {};
+    const settlement = txn.ApplicableHeaderTradeSettlement || {};
+    const seller = agreement.SellerTradeParty || {};
+    const summation = settlement.SpecifiedTradeSettlementHeaderMonetarySummation || {};
+    let tax = settlement.ApplicableTradeTax;
+    if (Array.isArray(tax)) tax = tax[0];
+    const dateStr = textOf(doc.IssueDateTime?.DateTimeString) || textOf(doc.IssueDateTime);
+    return {
+      rechnungsnr: textOf(doc.ID),
+      datum: parseCiiDate(dateStr),
+      absender: textOf(seller.Name),
+      betrag: parseFloat(textOf(summation.GrandTotalAmount)) || null,
+      mwst_satz: parseFloat(textOf(tax?.RateApplicablePercent)),
+    };
+  }
+  const inv = xmlObj.Invoice || xmlObj.CreditNote;
+  if (inv) {
+    const supplier = inv.AccountingSupplierParty?.Party || {};
+    const sellerName = textOf(supplier.PartyName?.Name) || textOf(supplier.PartyLegalEntity?.RegistrationName);
+    let taxSub = inv.TaxTotal?.TaxSubtotal;
+    if (Array.isArray(taxSub)) taxSub = taxSub[0];
+    const percent = taxSub?.TaxCategory?.Percent;
+    return {
+      rechnungsnr: textOf(inv.ID),
+      datum: textOf(inv.IssueDate),
+      absender: sellerName,
+      betrag: parseFloat(textOf(inv.LegalMonetaryTotal?.PayableAmount)) || null,
+      mwst_satz: parseFloat(textOf(percent)),
+    };
+  }
+  return null;
+}
+
+async function parseXRechnungXml(text, sellerNameHint) {
+  const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', removeNSPrefix: true });
+  const xmlObj = parser.parse(text);
+  const fields = extractInvoiceFields(xmlObj);
+  if (!fields || (!fields.betrag && !fields.rechnungsnr)) return { format: null };
+  const richtung = (sellerNameHint && fields.absender && fields.absender.toLowerCase().includes(sellerNameHint.toLowerCase()))
+    ? 'ausgehend' : 'eingehend';
+  return {
+    format: 'xrechnung',
+    betrag: fields.betrag,
+    mwst_satz: isNaN(fields.mwst_satz) ? null : (fields.mwst_satz === 0 ? 'keine' : String(fields.mwst_satz)),
+    absender: fields.absender || null,
+    rechnungsnr: fields.rechnungsnr || null,
+    datum: fields.datum || null,
+    richtung
+  };
+}
+
+// Sucht im /Names /EmbeddedFiles-Baum eines PDFs nach einer eingebetteten XML-Datei.
+// ZUGFeRD/Factur-X-Konvention nennt sie meist factur-x.xml/zugferd-invoice.xml/xrechnung.xml,
+// der Name variiert aber je nach Rechnungsprogramm — deshalb wird jede eingebettete Datei
+// genommen, deren Name auf .xml endet, statt nur exakte Namensmatches zuzulassen.
+function findEmbeddedXml(pdfDoc) {
+  const catalog = pdfDoc.catalog;
+  const namesDict = catalog.lookup(PDFName.of('Names'), PDFDict);
+  const embeddedFiles = namesDict.lookup(PDFName.of('EmbeddedFiles'), PDFDict);
+  const namesArray = embeddedFiles.lookup(PDFName.of('Names'));
+  const entries = namesArray.asArray ? namesArray.asArray() : [];
+  for (let i = 0; i < entries.length; i += 2) {
+    const nameObj = entries[i];
+    const name = nameObj?.decodeText ? nameObj.decodeText() : String(nameObj);
+    if (!/\.xml$/i.test(name)) continue;
+    const fileSpec = pdfDoc.context.lookup(entries[i + 1], PDFDict);
+    const ef = fileSpec?.lookup(PDFName.of('EF'), PDFDict);
+    const fRef = ef?.get(PDFName.of('F')) || ef?.get(PDFName.of('UF'));
+    if (!fRef) continue;
+    const stream = pdfDoc.context.lookup(fRef, PDFStream);
+    const bytes = stream instanceof PDFRawStream ? decodePDFRawStream(stream).decode() : stream.getContents();
+    return { name, bytes };
+  }
+  return null;
+}
+
+// Haupteinstieg: rohe Datei-Bytes rein, erkanntes+ausgelesenes E-Rechnung-Ergebnis raus (oder
+// {format:null} wenn es keine ist / das Parsen scheitert). sellerNameHint ist userProfil.
+// absender_name — damit lässt sich eingehend/ausgehend heuristisch unterscheiden.
+export async function detectAndParseERechnung(bytes, filename, mimeType, sellerNameHint) {
+  try {
+    const isXml = /\.xml$/i.test(filename || '') || /xml/i.test(mimeType || '');
+    if (isXml) {
+      const text = new TextDecoder('utf-8').decode(bytes);
+      return await parseXRechnungXml(text, sellerNameHint);
+    }
+    const isPdf = /\.pdf$/i.test(filename || '') || /pdf/i.test(mimeType || '');
+    if (isPdf) {
+      const pdfDoc = await PDFDocument.load(bytes, { ignoreEncryption: true, throwOnInvalidObject: false });
+      const embedded = findEmbeddedXml(pdfDoc);
+      if (!embedded) return { format: null };
+      const text = new TextDecoder('utf-8').decode(embedded.bytes);
+      const result = await parseXRechnungXml(text, sellerNameHint);
+      if (result.format) result.format = 'zugferd';
+      return result;
+    }
+    return { format: null };
+  } catch (e) {
+    console.warn('detectAndParseERechnung:', e.message);
+    return { format: null };
+  }
+}
+
 // ── /document Handler ─────────────────────────────────────
 async function handleDocument(body, env, cors = {}, ctx) {
-  const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz } = body;
+  const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz, content, sellerNameHint, e_rechnung_format } = body;
+
+  // ── E-RECHNUNG PARSEN (Vorschau vor dem Speichern, kein Firestore-Write) ────
+  // Wird beim Auswählen einer .xml/.pdf-Datei im Belegarchiv-Upload-Modal aufgerufen, BEVOR der
+  // Nutzer auf "Speichern" klickt — damit die erkannten Felder die bestehenden Eingabefelder
+  // vorausfüllen und noch korrigiert werden können (siehe uploadBelegFile/BELEG_SPEICHERN, das
+  // unverändert bleibt und die ggf. korrigierten Felder wie bisher entgegennimmt). Zählt nicht
+  // gegen das Upload-Limit, da noch nichts gespeichert wird.
+  if (Nachricht === 'PARSE_ERECHNUNG') {
+    if (!content || !userId) {
+      return new Response(JSON.stringify({ format: null, error: 'Missing content or userId' }), {
+        status: 400,
+        headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+    try {
+      const bytes = Uint8Array.from(atob(content), c => c.charCodeAt(0));
+      const result = await detectAndParseERechnung(bytes, name || '', type || '', sellerNameHint || '');
+      return new Response(JSON.stringify(result), {
+        status: 200,
+        headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    } catch (err) {
+      console.error('PARSE_ERECHNUNG Error:', err.message);
+      return new Response(JSON.stringify({ format: null }), {
+        status: 200,
+        headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+  }
 
   // ── BELEG MANUELL EINTRAGEN (ohne Datei) ────
   if (Nachricht === 'BELEG_MANUELL') {
@@ -1294,6 +1467,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
       if (mwst_satz) metadata.fields.mwst_satz = { stringValue: mwst_satz };
       if (rechnungsnr) metadata.fields.rechnungsnr = { stringValue: rechnungsnr };
       if (bezahlt) metadata.fields.bezahlt_am = { stringValue: new Date().toISOString().split('T')[0] };
+      if (e_rechnung_format) metadata.fields.e_rechnung_format = { stringValue: e_rechnung_format };
 
       const firestoreRes = await fetch(firestoreUrl, {
         method: 'PATCH',
