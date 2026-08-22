@@ -1476,10 +1476,12 @@ async function handleDocument(body, env, cors = {}, ctx) {
       await incrementUploadLimit(userId, env);
 
       // Als bereits bezahlt markiert → direkt als Tageseinnahme/-ausgabe verbuchen, damit der
-      // Betrag ohne Umweg über den Chat im Monatsabschluss auftaucht.
-      if (bezahlt) {
+      // Betrag ohne Umweg über den Chat im Monatsabschluss auftaucht. Mahnungen sind rein
+      // informativ (Bezahlt/Offen nur für die Kundenübersicht) und lösen NIE eine Buchung aus —
+      // die tatsächliche Zahlung wurde bereits über die zugrunde liegende Rechnung gebucht.
+      if (bezahlt && typ !== 'mahnung_ausgehend') {
         try {
-          const richtung = (typ === 'rechnung_ausgehend' || typ === 'mahnung_ausgehend') ? 'einnahme' : 'ausgabe';
+          const richtung = typ === 'rechnung_ausgehend' ? 'einnahme' : 'ausgabe';
           await buchTagesBewegung(userId, token, richtung, parseFloat(betrag), `Beleg von ${absender}`);
         } catch(e) { console.warn('Tagesbewegung (BELEG_MANUELL):', e.message); }
       }
@@ -1610,9 +1612,12 @@ async function handleDocument(body, env, cors = {}, ctx) {
 
       // Als bereits bezahlt markiert UND mit Betrag hochgeladen → direkt als Tageseinnahme/
       // -ausgabe verbuchen, damit der Betrag ohne Umweg über den Chat im Monatsabschluss auftaucht.
-      if (bezahlt && betrag) {
+      // Mahnungen sind rein informativ (Bezahlt/Offen nur für die Kundenübersicht) und lösen
+      // NIE eine Buchung aus — die tatsächliche Zahlung wurde bereits über die zugrunde
+      // liegende Rechnung gebucht.
+      if (bezahlt && betrag && typ !== 'mahnung_ausgehend') {
         try {
-          const richtung = (typ === 'rechnung_ausgehend' || typ === 'mahnung_ausgehend') ? 'einnahme' : 'ausgabe';
+          const richtung = typ === 'rechnung_ausgehend' ? 'einnahme' : 'ausgabe';
           await buchTagesBewegung(userId, token, richtung, parseFloat(betrag), absender ? `Beleg von ${absender}` : (name || 'Beleg'));
         } catch(e) { console.warn('Tagesbewegung (BELEG_SPEICHERN):', e.message); }
       }
@@ -2049,7 +2054,11 @@ async function handleDatevExport(body, env, cors = {}) {
       if (betrag <= 0) continue;
 
       const typ = firestoreValue(fields.typ) || 'rechnung_eingehend';
-      const istEinnahme = typ === 'rechnung_ausgehend' || typ === 'mahnung_ausgehend';
+      // Mahnungen sind rein informativ und nie eine eigene Buchung — die zugrunde liegende
+      // Rechnung (separates dokumente-Dokument) ist der tatsächliche Buchungsbeleg. Eine bezahlte
+      // Mahnung hier mitzuzählen würde den Betrag doppelt in den Buchungsstapel aufnehmen.
+      if (typ === 'mahnung_ausgehend') continue;
+      const istEinnahme = typ === 'rechnung_ausgehend';
 
       // Bestmögliches Belegdatum: bezahlt_am (Zahlungseingang, falls erfasst) > datum
       // (Rechnungs-/Belegdatum) > createdAt (Erstellungsdatum) als letzter Fallback.
