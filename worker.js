@@ -85,8 +85,17 @@ export default {
     // PDF Result
     if (request.method === 'GET' && url.pathname === '/pdf-result') {
       const corsH = getCORS(origin);
-      const userId = url.searchParams.get('userId');
-      if (!userId) return new Response('Missing userId', { status: 400, headers: corsH });
+      // ✅ Token-Pflicht: sonst könnte jeder mit einer beliebigen fremden userId
+      // das generierte PDF (Name/Adresse/Bankverbindung/Steuernummer) eines anderen
+      // Nutzers abgreifen und via Read-then-Delete das Original zerstören.
+      const pdfVerified = await verifyFirebaseToken(request.headers.get('Authorization'), env);
+      if (!pdfVerified) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { ...corsH, 'Content-Type': 'application/json' }
+        });
+      }
+      const userId = pdfVerified.uid;
       const result = await env.PDF_RESULTS.get(userId);
       if (!result) return new Response('pending', { status: 202, headers: corsH });
       await env.PDF_RESULTS.delete(userId);
@@ -140,6 +149,19 @@ export default {
           }
           verifiedUid = verified.uid;
           verifiedEmail = verified.email;
+          // ✅ E-Mail-Verifizierungs-Hard-Block auch serverseitig durchsetzen — der
+          // Hard-Block in index.html (handleAuthedUser) ist rein clientseitig; ohne
+          // diese Prüfung könnte jeder unverifizierte Account mit gültigem Firebase-
+          // Token die kostenpflichtigen Endpoints (Anthropic-API-Aufrufe, E-Mail-Versand)
+          // direkt ansprechen und den Block umgehen.
+          const emailVerifiedRequiredPaths = ['/chat', '/image', '/document', '/frist', '/datev-export'];
+          if (emailVerifiedRequiredPaths.includes(url.pathname) && !verified.emailVerified) {
+            const errorCors = getCORS(origin);
+            return new Response(JSON.stringify({ error: 'E-Mail nicht verifiziert', code: 'email-not-verified' }), {
+              status: 403,
+              headers: { ...errorCors, 'Content-Type': 'application/json' }
+            });
+          }
         } catch (tokenErr) {
           console.error('Token Error:', tokenErr.message);
           const errorCors = getCORS(origin);
@@ -152,6 +174,9 @@ export default {
 
       // Verifizierte UID überschreibt client-seitige userId
       if (verifiedUid && body.userId) body.userId = verifiedUid;
+      // ✅ /abo: verifizierte E-Mail überschreibt client-seitige email — sonst könnte
+      // jeder eingeloggte Nutzer beliebige fremde Adressen an-/abmelden.
+      if (verifiedEmail && url.pathname === '/abo') body.email = verifiedEmail;
 
       if (url.pathname === '/chat')     return handleChat(body, env, cors, ctx);
       if (url.pathname === '/image')    return handleImage(body, env, cors, ctx);
@@ -651,7 +676,7 @@ Bei rechtlichen Fragen zu Kontolux als Produkt/Unternehmen immer antworten:
 
 
 ## TON
-Deutsch. Direkt — kein "grundsätzlich", "normalerweise", "du solltest". Erst die eine wichtigste Aussage, dann eine Folgefrage. Wenn eine Zahl berechenbar ist: nenn sie. Bei Einnahmen immer Steuerrücklage berechnen: 28% des Gewinns zurücklegen (Beispiel: 3.200€ Gewinn → 896€ zurücklegen) — derselbe Satz, den auch die automatische Jahresprognose verwendet, damit die Zahl immer konsistent ist. Nicht ankündigen was du tun kannst — einfach fragen was du brauchst um es zu tun.
+Deutsch. Direkt — kein "grundsätzlich", "normalerweise", "du solltest". Erst die eine wichtigste Aussage, dann eine Folgefrage. Wenn eine Zahl berechenbar ist: nenn sie. Bei Einnahmen, NUR wenn die Jahresgewinn-Prognose über dem Freibetrag liegt (siehe STEUERRÜCKLAGEN — STRIKTE REGELN oben — sonst NICHT erwähnen), Steuerrücklage berechnen: 28% des Gewinns zurücklegen (Beispiel: 3.200€ Gewinn → 896€ zurücklegen) — derselbe Satz, den auch die automatische Jahresprognose verwendet, damit die Zahl immer konsistent ist. Nicht ankündigen was du tun kannst — einfach fragen was du brauchst um es zu tun.
 
 ## CHAT-TITEL
 Wenn ErsteNachricht=true: Beginne deine Antwort mit TITEL:kurzer_titel_max_5_wörter\nANTWORT:
@@ -693,7 +718,7 @@ async function verifyFirebaseToken(authHeader, env) {
 
   // Cache prüfen (55 Minuten)
   const cached = tokenCache.get(token);
-  if (cached && Date.now() < cached.expiry) return { uid: cached.uid, email: cached.email };
+  if (cached && Date.now() < cached.expiry) return { uid: cached.uid, email: cached.email, emailVerified: cached.emailVerified };
 
   try {
     const res = await fetch(
@@ -705,11 +730,15 @@ async function verifyFirebaseToken(authHeader, env) {
     const data = await res.json();
     const uid = data.users?.[0]?.localId || null;
     const email = data.users?.[0]?.email || null;
+    // Google-Login-Nutzer gelten wie im Frontend-Hard-Block (index.html handleAuthedUser)
+    // immer als verifiziert, unabhängig vom rohen emailVerified-Flag.
+    const isGoogleUser = (data.users?.[0]?.providerUserInfo || []).some(p => p.providerId === 'google.com');
+    const emailVerified = isGoogleUser || !!data.users?.[0]?.emailVerified;
     if (uid) {
-      tokenCache.set(token, { uid, email, expiry: Date.now() + 55 * 60 * 1000 });
+      tokenCache.set(token, { uid, email, emailVerified, expiry: Date.now() + 55 * 60 * 1000 });
       if (tokenCache.size > 1000) tokenCache.clear(); // Speicher begrenzen
     }
-    return uid ? { uid, email } : null;
+    return uid ? { uid, email, emailVerified } : null;
   } catch(e) { return null; }
 }
 
@@ -1380,6 +1409,30 @@ async function handleDocument(body, env, cors = {}, ctx) {
         });
       }
 
+      // Duplikat-Check: nur der Chat-Upload-Pfad (DOKUMENT_SPEICHERN) hatte bisher einen —
+      // hier auf ein enges 10-Minuten-Fenster begrenzt (statt unbefristet wie beim Chat-Pfad),
+      // weil BELEG_MANUELL kein Rechnungsdatum kennt und sonst legitime wiederkehrende Belege
+      // mit gleichem Absender/Betrag (z.B. monatliche Miete) fälschlich blockiert würden —
+      // trifft damit gezielt den eigentlichen Bug-Fall (versehentlicher Doppel-Klick/-Upload).
+      try {
+        const dokBaseUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente`;
+        const existingDocs = await firestoreListAll(dokBaseUrl, token);
+        const windowStart = Date.now() - 10 * 60 * 1000;
+        const isDuplicate = existingDocs.some(d => {
+          const f = d.fields || {};
+          const createdAtMs = f.createdAt?.timestampValue ? new Date(f.createdAt.timestampValue).getTime() : 0;
+          if (createdAtMs < windowStart) return false;
+          const fBetrag = f.betrag?.doubleValue ?? f.betrag?.integerValue;
+          return f.absender?.stringValue === absender && parseFloat(fBetrag) === parseFloat(betrag) && (f.typ?.stringValue || 'rechnung_eingehend') === (typ || 'rechnung_eingehend');
+        });
+        if (isDuplicate) {
+          return new Response(JSON.stringify({ error: 'Dieser Beleg wurde soeben schon erfasst (möglicher Doppel-Upload). Falls es ein separater Beleg ist, versuche es in ein paar Minuten erneut.' }), {
+            status: 409,
+            headers: { ...cors, 'Content-Type': 'application/json' }
+          });
+        }
+      } catch(e) { console.warn('Duplikat-Check (BELEG_MANUELL):', e.message); }
+
       // Speichere DIREKT in Firestore (nur Metadaten, keine Datei)
       const docId = `beleg_manual_${Date.now()}`;
       const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}`;
@@ -1473,6 +1526,32 @@ async function handleDocument(body, env, cors = {}, ctx) {
           headers: { ...cors, 'Content-Type': 'application/json' }
         });
       }
+
+      // Duplikat-Check (gleiche Begründung wie bei BELEG_MANUELL): gleicher Dateiname
+      // ODER gleicher Absender+Betrag+Typ innerhalb der letzten 10 Minuten.
+      try {
+        const dokBaseUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente`;
+        const existingDocs = await firestoreListAll(dokBaseUrl, token);
+        const windowStart = Date.now() - 10 * 60 * 1000;
+        const isDuplicate = existingDocs.some(d => {
+          const f = d.fields || {};
+          if (name && f.name?.stringValue === name) {
+            const createdAtMs = f.createdAt?.timestampValue ? new Date(f.createdAt.timestampValue).getTime() : 0;
+            if (createdAtMs >= windowStart) return true;
+          }
+          if (!betrag || !absender) return false;
+          const createdAtMs = f.createdAt?.timestampValue ? new Date(f.createdAt.timestampValue).getTime() : 0;
+          if (createdAtMs < windowStart) return false;
+          const fBetrag = f.betrag?.doubleValue ?? f.betrag?.integerValue;
+          return f.absender?.stringValue === absender && parseFloat(fBetrag) === parseFloat(betrag) && (f.typ?.stringValue || 'rechnung_eingehend') === (typ || 'rechnung_eingehend');
+        });
+        if (isDuplicate) {
+          return new Response(JSON.stringify({ error: 'Dieser Beleg wurde soeben schon erfasst (möglicher Doppel-Upload). Falls es ein separater Beleg ist, versuche es in ein paar Minuten erneut.' }), {
+            status: 409,
+            headers: { ...cors, 'Content-Type': 'application/json' }
+          });
+        }
+      } catch(e) { console.warn('Duplikat-Check (BELEG_SPEICHERN):', e.message); }
 
       const docId = `beleg_${Date.now()}`;
       const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}`;
@@ -1807,6 +1886,10 @@ async function handleDeleteAccountData(body, env, cors = {}) {
   try {
     if (env.PROFIL_KV) await env.PROFIL_KV.delete(userId);
   } catch(e) { console.error('Account-Löschung: PROFIL_KV:', e.message); }
+
+  try {
+    if (env.PDF_RESULTS) await env.PDF_RESULTS.delete(userId);
+  } catch(e) { console.error('Account-Löschung: PDF_RESULTS:', e.message); }
 
   return new Response(JSON.stringify({ success: true }), {
     status: 200,
