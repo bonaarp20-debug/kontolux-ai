@@ -718,9 +718,19 @@ async function verifyFirebaseToken(authHeader, env) {
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
   const token = authHeader.slice(7);
 
-  // Cache prüfen (55 Minuten)
+  // Cache prüfen (5 Minuten) — NUR bei bereits verifiziertem Treffer aus dem Cache
+  // bedienen. Grund: derselbe Token wird vom Firebase-SDK bis zu ~1h wiederverwendet
+  // (auch von requestVerificationEmail, das noch VOR der Bestätigung aufgerufen wird).
+  // Würde ein "emailVerified:false"-Ergebnis mitgecacht, bliebe ein Nutzer nach dem
+  // Bestätigen seiner E-Mail fälschlich ausgesperrt, weil der Worker den veralteten
+  // Cache-Treffer nie erneut gegen Firebase prüft. Ein positiver Treffer kann dagegen
+  // unbedenklich gecacht werden — verifiziert wird nicht wieder unverifiziert. Die TTL
+  // ist zusätzlich auf 5 Minuten verkürzt (statt vormals 55) als zweite Absicherung,
+  // falls dieser Cache je wieder ungefiltert genutzt wird.
   const cached = tokenCache.get(token);
-  if (cached && Date.now() < cached.expiry) return { uid: cached.uid, email: cached.email, emailVerified: cached.emailVerified };
+  if (cached && Date.now() < cached.expiry && cached.emailVerified) {
+    return { uid: cached.uid, email: cached.email, emailVerified: cached.emailVerified };
+  }
 
   try {
     const res = await fetch(
@@ -737,7 +747,7 @@ async function verifyFirebaseToken(authHeader, env) {
     const isGoogleUser = (data.users?.[0]?.providerUserInfo || []).some(p => p.providerId === 'google.com');
     const emailVerified = isGoogleUser || !!data.users?.[0]?.emailVerified;
     if (uid) {
-      tokenCache.set(token, { uid, email, emailVerified, expiry: Date.now() + 55 * 60 * 1000 });
+      tokenCache.set(token, { uid, email, emailVerified, expiry: Date.now() + 5 * 60 * 1000 });
       if (tokenCache.size > 1000) tokenCache.clear(); // Speicher begrenzen
     }
     return uid ? { uid, email, emailVerified } : null;
