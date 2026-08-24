@@ -542,6 +542,13 @@ Nur BEZAHLTE eingehende Belege zählen (Ist-Versteuerung/EÜR — offene Rechnun
 
 Antwortmuster: "Deine Vorsteuer aus [Zeitraum]: [Summe]€ (aus [N] bezahlten Belegen mit bekanntem MwSt-Satz)." Bei fehlenden Sätzen ergänzen: "Für [M] Beleg(e) ist kein MwSt-Satz hinterlegt — die habe ich nicht mitgerechnet. Willst du sie nachtragen?"
 
+## VERSTEUERUNGSMETHODE (SOLL VS. IST) — Profil-Feld 'versteuerungsart'
+Der Nutzer wählt in Onboarding/Einstellungen eine Versteuerungsmethode (Profil-Feld 'versteuerungsart', beginnt mit "Ist" oder "Soll"). Ist das Feld nicht gesetzt → Istversteuerung annehmen (Standard für die meisten Selbstständigen unter 800.000€ Vorjahresumsatz, §20 UStG).
+
+- **Istversteuerung** (Standard): Umsatzsteuer entsteht bei Zahlungseingang. Das passt exakt zu Kontoluxs Tagesdaten (siehe EINZIGE QUELLE DER WAHRHEIT oben — dort wird ohnehin nur bei "bezahlt" gebucht). Keine besondere Erklärung nötig, Monatsabschluss- und UStVA-Zahlen aus den Tagesdaten sind für Istversteuerer bereits korrekt so wie sie sind.
+- **Sollversteuerung**: Umsatzsteuer entsteht bereits bei Rechnungsstellung, unabhängig vom Zahlungseingang. Da Kontoluxs Tagesdaten/Monatsabschluss nur bezahlte Beträge enthalten (Ist-Prinzip, technisch bislang nicht umstellbar), weise bei UStVA-Vorbereitung und beim Monatsabschluss für Nicht-Kleinunternehmer mit dieser Einstellung AKTIV darauf hin, dass zusätzlich die offenen (noch nicht bezahlten) ausgehenden Rechnungen aus dem Belegarchiv für den Berichtszeitraum bereits umsatzsteuerpflichtig sind, auch wenn sie in den Tagesdaten/Monatsabschluss-Zahlen noch nicht auftauchen — nenne sie einzeln mit Betrag und MwSt-Satz aus dem Belegarchiv-Kontext ("Belegarchiv ... ausgehende Rechnungen/Mahnungen ... offen"). Nur bei UStVA-/Umsatzsteuer-Fragen und beim Monatsabschluss ansprechen, nicht bei jeder normalen Nachricht.
+- Beim DATEV-Export zählt bei Sollversteuerung das Rechnungsdatum statt des Zahlungsdatums als Buchungsdatum (technisch bereits umgesetzt) — bei Rückfragen dazu erwähnen, aber nicht von dir aus ansprechen.
+
 ## PROFILDATEN HABEN VORRANG
 Wenn im Nutzerprofil konkrete Zahlen stehen (z.B. Miete: 1.000€ aus dem Finanzkalender), verwende IMMER diese Zahlen — schätze niemals selbst. Wenn du dir bei einer Zahl nicht sicher bist, frage den Nutzer statt zu raten. Falsche Zahlen sind schlimmer als keine Zahlen.
 
@@ -638,7 +645,7 @@ Einnahmen/Ausgaben tracken, Monatsabschlüsse, Jahresprognose, Steuerrücklagen,
 
 
 ## DATEV-EXPORT (Einstellungen → Exporte)
-Der Export erzeugt eine DATEV-Buchungsstapel-CSV (EXTF-Format) aus den bezahlten Belegen des gewählten Jahres, zum Import beim Steuerberater/in dessen DATEV-System. Nur Belege mit Status "bezahlt" werden gebucht (Ist-Versteuerung) — offene Rechnungen werden übersprungen, das steht am Ende im Export-Status.
+Der Export erzeugt eine DATEV-Buchungsstapel-CSV (EXTF-Format) aus den bezahlten Belegen des gewählten Jahres, zum Import beim Steuerberater/in dessen DATEV-System. Nur Belege mit Status "bezahlt" werden gebucht — offene Rechnungen werden übersprungen, das steht am Ende im Export-Status. Als Buchungsdatum zählt je nach gewählter Versteuerungsmethode (siehe VERSTEUERUNGSMETHODE oben) entweder der Zahlungseingang (Istversteuerung, Standard) oder das Rechnungsdatum (Sollversteuerung).
 
 Einmalig auszufüllende Felder in den DATEV-Einstellungen (dort per "Speichern" hinterlegen, der Nutzer bekommt sie von seinem Steuerberater):
 - **Berater-Nr.** (Pflicht) — Nummer des Steuerberaters bei DATEV, bis zu 7 Ziffern.
@@ -2028,6 +2035,9 @@ async function handleDatevExport(body, env, cors = {}) {
 
     const profilFields = profilRes.ok ? ((await profilRes.json()).fields || {}) : {};
     const kleinunternehmer = isKleinunternehmer(profilFields);
+    // Default = Istversteuerung, siehe Onboarding/Einstellungen ("versteuerungsart"-Feld,
+    // Standard für die meisten Selbstständigen unter 800.000€ Vorjahresumsatz).
+    const istSollversteuerung = (firestoreValue(profilFields.versteuerungsart) || '').toString().startsWith('Soll');
 
     const beraterNr = (firestoreValue(profilFields.datev_berater_nr) || '').toString().trim();
     const mandantenNr = (firestoreValue(profilFields.datev_mandanten_nr) || '').toString().trim();
@@ -2070,9 +2080,12 @@ async function handleDatevExport(body, env, cors = {}) {
       if (typ === 'mahnung_ausgehend') continue;
       const istEinnahme = typ === 'rechnung_ausgehend';
 
-      // Bestmögliches Belegdatum: bezahlt_am (Zahlungseingang, falls erfasst) > datum
-      // (Rechnungs-/Belegdatum) > createdAt (Erstellungsdatum) als letzter Fallback.
-      const datumStr = firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum);
+      // Belegdatum je nach Versteuerungsmethode: bei Istversteuerung (Standard) zählt der
+      // Zahlungseingang (bezahlt_am), bei Sollversteuerung das Rechnungsdatum (datum) — mit
+      // dem jeweils anderen Feld als Fallback, sonst createdAt als letzter Fallback.
+      const datumStr = istSollversteuerung
+        ? (firestoreValue(fields.datum) || firestoreValue(fields.bezahlt_am))
+        : (firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum));
       let belegDatum;
       if (datumStr && /^\d{4}-\d{2}-\d{2}/.test(datumStr)) {
         belegDatum = new Date(datumStr + 'T00:00:00');
