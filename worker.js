@@ -367,17 +367,61 @@ async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
   return { erlaubt: true, anzahl: neueAnzahl };
 }
 
+// ── Sachkonto-Mapping (SKR03/SKR04) ───────────────────────
+// Single Source of Truth für Kategorie → Sachkonto — wird sowohl in den System-Prompt
+// eingebettet (buildSachkontoTabelleText) als auch im DATEV-Export zur Auflösung des
+// tatsächlichen Gegenkontos verwendet (resolveSachkonto). WICHTIG: dieselbe Tabelle ist in
+// index.html gespiegelt (dort für den Belegarchiv-Regel-Vorschlag ohne API-Call) — bei
+// Änderungen beide Stellen synchron halten.
+const SACHKONTO_MAPPING = {
+  'Werbekosten':               { SKR03: '4650', SKR04: '6600' },
+  'Bürobedarf':                { SKR03: '4980', SKR04: '6800' },
+  'Telefon/Internet':          { SKR03: '4920', SKR04: '6805' },
+  'Reisekosten':                { SKR03: '4670', SKR04: '6830' },
+  'Fortbildung':                { SKR03: '4830', SKR04: '6811' },
+  'Kfz-Kosten':                 { SKR03: '4930', SKR04: '6820' },
+  'Miete/Raumkosten':           { SKR03: '4200', SKR04: '6310' },
+  'Wareneinkauf 19%':           { SKR03: '5400', SKR04: '3400' },
+  'Wareneinkauf 7%':            { SKR03: '5300', SKR04: '3300' },
+  'GWG bis 800€':               { SKR03: '0480', SKR04: '0670' },
+  'Versicherungen':             { SKR03: '4360', SKR04: '6400' },
+  'Steuerberater/Buchhaltung':  { SKR03: '4240', SKR04: '6825' },
+  'Bewirtung (70%)':            { SKR03: '4650', SKR04: '6650' },
+  'Sonstiges':                  { SKR03: '4980', SKR04: '6800' },
+  'Einnahmen 19%':              { SKR03: '8400', SKR04: '4400' },
+  'Einnahmen 7%':               { SKR03: '8300', SKR04: '4300' },
+  'Einnahmen steuerfrei':       { SKR03: '8200', SKR04: '4200' }
+};
+
+function resolveSachkonto(kategorie, skr) {
+  const eintrag = SACHKONTO_MAPPING[kategorie];
+  if (!eintrag) return null;
+  return skr === 'SKR04' ? eintrag.SKR04 : eintrag.SKR03;
+}
+
+function buildSachkontoTabelleText() {
+  return Object.entries(SACHKONTO_MAPPING)
+    .map(([kategorie, konten]) => `- ${kategorie}: ${konten.SKR03} (SKR04: ${konten.SKR04})`)
+    .join('\n');
+}
+
 // ── System-Blöcke bauen (Prompt Caching) ──────────────────
-// Baut das 'system'-Array für die Claude-API aus zwei Cache-Breakpoints:
-// 1. Steuerrecht-Dokument (identisch für alle Nutzer/Requests — bestmögliche Cache-Trefferquote)
-// 2. Der komplette System-Prompt inkl. interpolierter Nutzerdaten (Profil/Datum) — ändert sich
-//    zwar pro Nutzer/Nachricht, bleibt aber innerhalb einer Chat-Session oft mehrere Nachrichten
-//    lang identisch, weshalb sich ein eigener Cache-Breakpoint trotzdem lohnt.
-function buildSystemBlocks(systemPrompt, steuerrechtText) {
-  // 1h-TTL statt der 5min-Default-TTL — bei einem Chat-Tool liegen zwischen zwei Nachrichten
-  // desselben Nutzers (tippen, lesen, nachdenken) realistisch oft mehr als 5 Minuten, wodurch
-  // der Cache mit der Default-TTL ständig abläuft bevor er gelesen wird. Erfordert den Beta-
-  // Header 'extended-cache-ttl-2025-04-11' (siehe Fetch-Aufrufe an die Anthropic-API).
+// Baut das 'system'-Array für die Claude-API aus drei Blöcken, STRIKT in absteigender
+// Stabilität geordnet — das ist für Prompt Caching entscheidend: jeder cache_control-
+// Breakpoint cached den gesamten Prefix BIS EINSCHLIESSLICH seines eigenen Blocks. Käme der
+// sich ständig ändernde dynamische Block (Profil/Datum) VOR den stabilen Blöcken, würde jede
+// Profil-Änderung deren Cache mit invalidieren, obwohl ihr eigener Inhalt gleich bleibt.
+// Reihenfolge:
+// 1. Steuerrecht-Dokument — identisch für ALLE Nutzer/Requests, beste Cache-Trefferquote
+// 2. Statische System-Anweisungen — identisch für alle Requests (kein Profil mehr darin)
+// 3. Dynamischer Kontext (Profil/Datum/Frist-Typ) — ändert sich oft, deshalb zuletzt und ohne
+//    nennenswerten Cache-Nutzen; steht als eigener Block nur, damit die zwei Blöcke davor
+//    NICHT jedes Mal neu geschrieben werden müssen.
+// 1h-TTL statt der 5min-Default-TTL bei den ersten beiden Blöcken — bei einem Chat-Tool liegen
+// zwischen zwei Nachrichten desselben Nutzers (tippen, lesen, nachdenken) realistisch oft mehr
+// als 5 Minuten, wodurch der Cache mit der Default-TTL ständig abläuft bevor er gelesen wird.
+// Erfordert den Beta-Header 'extended-cache-ttl-2025-04-11' (siehe Fetch-Aufrufe an die API).
+function buildSystemBlocks(dynamicContext, steuerrechtText) {
   const blocks = [];
   if (steuerrechtText) {
     blocks.push({
@@ -386,13 +430,24 @@ function buildSystemBlocks(systemPrompt, steuerrechtText) {
       cache_control: { type: 'ephemeral', ttl: '1h' }
     });
   }
-  blocks.push({ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } });
+  blocks.push({ type: 'text', text: STATIC_SYSTEM_INSTRUCTIONS, cache_control: { type: 'ephemeral', ttl: '1h' } });
+  blocks.push({ type: 'text', text: dynamicContext });
   return blocks;
 }
 
 // ── System-Prompt bauen ───────────────────────────────────
-function buildSystemPrompt(profil, datum, fristType = null, ersteNachricht = false) {
-  const basis = `WICHTIG: Das heutige Datum ist ${datum}. Verwende ausschließlich dieses Jahr für alle Datums- und Jahresangaben, insbesondere beim PROFIL_UPDATE. Niemals ein anderes Jahr verwenden.
+// Statischer Teil des System-Prompts — identisch für JEDEN Request (kein Nutzerprofil, kein
+// Datum mehr darin interpoliert, siehe buildDynamicContext unten). Ein Modul-Level-Konstante
+// statt eine pro-Request neu gebaute Funktion, damit sie 1) nicht bei jedem Request neu
+// zusammengesetzt wird und 2) als EIGENER, stabiler Cache-Breakpoint vor den sich ständig
+// ändernden Nutzerdaten steht (siehe buildSystemBlocks) — Kosten-Optimierung: vorher war die
+// komplette Anweisung (mehrere tausend Token) MIT dem Profil in einem einzigen Cache-Block,
+// wodurch jede Profil-Änderung (neuer Tag, neue Ausgabe, gelernte Kategorie — passiert bei
+// aktiver Nutzung praktisch bei jeder Nachricht) den kompletten Block ungültig machte und
+// diese tausenden Token erneut als Cache-Write statt als günstigen Cache-Read abgerechnet
+// wurden. Jetzt bleibt dieser Block über beliebig viele Nachrichten/Nutzer hinweg identisch
+// und trifft den Cache fast immer.
+const STATIC_SYSTEM_INSTRUCTIONS = `Verwende für alle Datums- und Jahresangaben ausschließlich das Datum, das weiter unten im Abschnitt "AKTUELLE NUTZERDATEN" steht — insbesondere beim PROFIL_UPDATE. Niemals ein anderes Jahr annehmen oder erfinden.
 
 Du bist Kontolux, ein KI-Finanzassistent für Selbstständige und Kleinunternehmer in Deutschland.
 
@@ -417,9 +472,7 @@ Features:
 
 
 ## NUTZERKONTEXT
-${profil}
-Aktuelles Datum: ${datum}
-Sprich so als würdest du dich einfach erinnern — ohne zu erwähnen dass du diese Infos aus einem Profil kennst.
+Die eigentlichen Profildaten und das aktuelle Datum stehen im allerletzten Abschnitt dieses System-Prompts ("AKTUELLE NUTZERDATEN"). Sprich so als würdest du dich einfach erinnern — ohne zu erwähnen dass du diese Infos aus einem Profil kennst.
 
 ## STEUERLICHE GRENZEN UND FREIBETRÄGE
 Bevor du Steuerempfehlungen gibst, rechne immer zuerst den Jahresgewinn hoch und prüfe folgende Grenzen:
@@ -529,11 +582,11 @@ Wenn es eine Rechnung ist:
 - Speichere NICHT sofort — frage IMMER direkt im selben Zug nach der Richtung, egal wie eindeutig sie dir selbst erscheint:
 "Ich sehe eine Rechnung von/an [Name] über [Betrag]€ vom [Datum]. Ist das eine eingehende Rechnung (du bezahlst jemanden) oder eine ausgehende (du stellst sie einem Kunden)?"
 - Noch KEIN AUSGABE_UPDATE/DOKUMENT_SPEICHERN in dieser Nachricht — der Dateiinhalt (Betrag/Absender/Datum) steht jetzt in deiner eigenen Antwort im Gesprächsverlauf und geht dadurch nicht verloren, auch wenn die Datei in der nächsten Nachricht nicht erneut mitgeschickt wird. Vergiss diese Angaben in den folgenden Nachrichten NICHT — beziehe dich aktiv darauf, wenn der Nutzer nur kurz antwortet (z.B. nur "eingehend").
-- Antwortet der Nutzer mit "eingehend": kurze Bestätigung MIT Sachkonto (siehe SACHKONTO BEI BUCHUNGEN unten) + Befehle:
+- Antwortet der Nutzer mit "eingehend": kurze Bestätigung MIT Kategorie/Sachkonto/Buchungstext (siehe SACHKONTO BEI BUCHUNGEN unten) + Befehle:
 AUSGABE_UPDATE:datum=[YYYY-MM-DD],betrag=[Zahl],beschreibung=Rechnung [Absender]
-DOKUMENT_SPEICHERN:typ=rechnung_eingehend,name=Rechnung von [Absender],betrag=[Zahl],absender=[Absender],datum=[YYYY-MM-DD]
-- Antwortet der Nutzer mit "ausgehend": kurze Bestätigung MIT Sachkonto (Einnahmen-Konto, siehe SACHKONTO BEI BUCHUNGEN unten) + Befehl (KEIN AUSGABE_UPDATE — es ist keine eigene Ausgabe):
-DOKUMENT_SPEICHERN:typ=rechnung_ausgehend,name=Rechnung an [Empfänger],betrag=[Zahl],absender=[Empfänger],datum=[YYYY-MM-DD]
+DOKUMENT_SPEICHERN:typ=rechnung_eingehend,name=Rechnung von [Absender],betrag=[Zahl],absender=[Absender],datum=[YYYY-MM-DD],kategorie=[Kategorie],sachkonto=[Nr],buchungstext=[Text]
+- Antwortet der Nutzer mit "ausgehend": kurze Bestätigung MIT Kategorie/Sachkonto/Buchungstext (Einnahmen-Kategorie, siehe SACHKONTO BEI BUCHUNGEN unten) + Befehl (KEIN AUSGABE_UPDATE — es ist keine eigene Ausgabe):
+DOKUMENT_SPEICHERN:typ=rechnung_ausgehend,name=Rechnung an [Empfänger],betrag=[Zahl],absender=[Empfänger],datum=[YYYY-MM-DD],kategorie=[Kategorie],sachkonto=[Nr],buchungstext=[Text]
 
 Nicht zusätzlich fragen ob speichern — nach der Richtungs-Antwort direkt speichern und informieren. Nutzer kann widersprechen wenn er will.
 
@@ -561,23 +614,25 @@ AUSGABE_UPDATE:datum=[YYYY-MM-DD],betrag=[Zahl],beschreibung=[Text]
 Beim Abgleich: Vergleiche neue Ausgabe mit bekannten Ausgaben aus dem Profil (ausgabe_YYYY-MM-DD Felder). Bei gleichem Betrag + gleichem Absender/Empfänger im selben Monat gilt die Regel aus "DUPLIKAT-ERKENNUNG" oben (aktiv nachfragen, bei Bestätigung nur intern ignorieren, nichts löschen).
 
 ## SACHKONTO BEI BUCHUNGEN
-Bei JEDER Buchung (Ausgabe, Einnahme, Rechnung eingehend/ausgehend) immer das passende Sachkonto nennen — aus SKR03 oder SKR04, je nachdem was im Profil unter "datev_skr" steht (Standard: SKR03, falls nichts gesetzt ist).
+Bei JEDER Buchung (Ausgabe, Einnahme, Rechnung eingehend/ausgehend) immer Kategorie + passendes Sachkonto nennen — aus SKR03 oder SKR04, je nachdem was im Profil unter "datev_skr" steht (Standard: SKR03, falls nichts gesetzt ist). Kategorie und Sachkonto werden zusammen mit einem automatisch generierten Buchungstext im Belegarchiv gespeichert (siehe DOKUMENT_SPEICHERN unten) — das ist der eigentliche Zweck dieser Angabe, nicht nur Chat-Ausgabe.
 
-Häufige Sachkonten SKR03 (SKR04-Äquivalent in Klammern wo abweichend):
-- Einnahmen 19% USt: 8400 (SKR04: 4400)
-- Einnahmen 7% USt: 8300 (SKR04: 4300)
-- Wareneinkauf 19%: 5400 (SKR04: 3400)
-- Wareneinkauf 7%: 5300 (SKR04: 3300)
-- Bürobedarf: 4980 (SKR04: 6815)
-- Telefon/Internet: 4920 (SKR04: 6805)
-- Werbung/Marketing: 4650 (SKR04: 6600)
-- Reisekosten: 4670 (SKR04: 6650)
-- Fortbildung: 4830 (SKR04: 6822)
-- Kfz-Kosten: 4930 (SKR04: 6520)
-- Miete/Raumkosten: 4200 (SKR04: 6310)
-- GWG bis 800€ netto: 0480 (SKR04: 0670)
+Kategorie-Tabelle (SKR03, SKR04 in Klammern):
+${buildSachkontoTabelleText()}
 
-Passt keines der obigen Konten eindeutig → nicht raten, sondern kurz nachfragen welches Sachkonto der Nutzer (bzw. sein Steuerberater) dafür verwendet.
+Kategorie bestimmen — in dieser Reihenfolge:
+1. Steht im Profil-Kontext eine "Bekannte Absender-Kategorie" für genau diesen Absender → IMMER diese verwenden, nicht neu einschätzen.
+2. Sonst anhand des Absendernamens einschätzen, z.B.: Google* → Werbekosten, Amazon* → Wareneinkauf oder Bürobedarf (je nach erkennbarem Artikel), Telekom/Vodafone/O2 → Telefon/Internet, ADAC/Tankstelle → Kfz-Kosten, Hotel/Bahn/Flug → Reisekosten.
+3. Passt nichts eindeutig → nicht raten, sondern kurz nachfragen welche Kategorie passt.
+
+Buchungstext IMMER automatisch generieren im Format "[Absender] [Monat] [Jahr]" (z.B. "Google Ads August 2026") — der Nutzer muss nie selbst einen Buchungstext liefern.
+
+Format bei jeder Buchung mit erkennbarem Absender, z.B.:
+"Ich erkenne [Absender] → [Kategorie]
+Sachkonto: [Nr]
+Buchungstext: '[Buchungstext]'
+Passt das?"
+Trotzdem sofort speichern (nicht auf die Antwort warten, siehe "nicht zusätzlich fragen ob speichern" oben) — "Passt das?" ist eine Einladung zur Korrektur, keine Bedingung fürs Speichern. Korrigiert der Nutzer danach die Kategorie, sofort mit dem neuen Wert speichern:
+KATEGORIE_UPDATE:absender=[Absender],kategorie=[korrigierte Kategorie]
 
 ## PROAKTIV DENKEN
 Zahlen nennt → hochrechnen & Prognose. Ausgaben erwähnt → fragen ob als Betriebsausgabe erfasst. Frist naht → von sich aus hinweisen.
@@ -786,15 +841,24 @@ Regeln:
 
 FORMAT (ganz am Ende): PROFIL_UPDATE:schluessel=wert,schluessel=wert`;
 
+// Dynamischer Teil — ändert sich (fast) bei jedem Request (Profil-Inhalt, Datum, ggf.
+// Frist-Typ/Erste-Nachricht) und steht deshalb bewusst NACH dem großen statischen Block (siehe
+// buildSystemBlocks): so bleibt der stabile, teure Block cachebar, unabhängig davon wie oft
+// sich diese kleinen Nutzerdaten ändern.
+function buildDynamicContext(profil, datum, fristType = null, ersteNachricht = false) {
+  let dyn = `## AKTUELLE NUTZERDATEN
+WICHTIG: Das heutige Datum ist ${datum}. Verwende ausschließlich dieses Jahr für alle Datums- und Jahresangaben, insbesondere beim PROFIL_UPDATE. Niemals ein anderes Jahr verwenden.
+
+${profil}
+Aktuelles Datum: ${datum}`;
+
   if (ersteNachricht) {
-    return basis + '\n\nWICHTIG FÜR DIESE ERSTE NACHRICHT: Beginne deine Antwort IMMER mit TITEL:kurzer_titel_max_5_wörter\nANTWORT:deine_antwort — also genau so formatiert. Der Titel soll das Thema kurz beschreiben.';
+    dyn += '\n\nWICHTIG FÜR DIESE ERSTE NACHRICHT: Beginne deine Antwort IMMER mit TITEL:kurzer_titel_max_5_wörter\nANTWORT:deine_antwort — also genau so formatiert. Der Titel soll das Thema kurz beschreiben.';
+  } else if (fristType) {
+    dyn += `\n\n## GEFÜHRTE FRIST-VORBEREITUNG\nDer Frist-Typ ist: ${fristType}\nEine Frage pro Nachricht. Jede Antwort beginnt mit Schritt X von Y.`;
   }
 
-  if (fristType) {
-    return basis + `\n\n## GEFÜHRTE FRIST-VORBEREITUNG\nDer Frist-Typ ist: ${fristType}\nEine Frage pro Nachricht. Jede Antwort beginnt mit Schritt X von Y.`;
-  }
-
-  return basis;
+  return dyn;
 }
 
 // ── /chat Handler ─────────────────────────────────────────
@@ -1139,8 +1203,8 @@ async function handleChat(body, env, cors = {}, ctx) {
       });
     }
 
-    const systemPrompt = buildSystemPrompt(Profil, Datum, FristType, ErsteNachricht);
-    const system = buildSystemBlocks(systemPrompt, steuerrechtText);
+    const dynamicContext = buildDynamicContext(Profil, Datum, FristType, ErsteNachricht);
+    const system = buildSystemBlocks(dynamicContext, steuerrechtText);
 
   // Verlauf parsen — Format: "Nutzer: ... | Kontolux AI: ..."
   const messages = [];
@@ -1173,6 +1237,24 @@ async function handleChat(body, env, cors = {}, ctx) {
   const trimmedMessages = messages.length > MAX_VERLAUF
     ? messages.slice(messages.length - MAX_VERLAUF)
     : messages;
+
+  // Kosten-Optimierung: cache_control auf die letzte Nachricht setzt einen Cache-Breakpoint
+  // ÜBER DEN GESAMTEN BISHERIGEN GESPRÄCHSVERLAUF. Ohne das wird bei jeder neuen Nachricht der
+  // KOMPLETTE bisherige Verlauf (bis zu 20 Einträge) erneut als frische Input-Token abgerechnet
+  // — bei einem langen Gespräch zahlt Nachricht 15 für den gesamten Text von Nachricht 1-14 noch
+  // einmal mit. Mit dem Breakpoint hier liest die NÄCHSTE Nachricht in diesem Chat den
+  // identischen Prefix (dieser Verlauf + diese Nachricht) aus dem Cache statt ihn neu zu
+  // berechnen. Kürzere 5-Minuten-TTL (kein '1h' hier) bewusst: dieser Inhalt ist pro Gespräch
+  // einmalig (kein Cross-User-Reuse wie bei Steuerrecht/System-Anweisungen), ein teurer 1h-Write
+  // lohnt sich nur wenn er auch oft genug gelesen wird.
+  if (trimmedMessages.length > 0) {
+    const lastMsg = trimmedMessages[trimmedMessages.length - 1];
+    if (typeof lastMsg.content === 'string') {
+      lastMsg.content = [{ type: 'text', text: lastMsg.content, cache_control: { type: 'ephemeral' } }];
+    } else if (Array.isArray(lastMsg.content) && lastMsg.content.length > 0) {
+      lastMsg.content[lastMsg.content.length - 1].cache_control = { type: 'ephemeral' };
+    }
+  }
 
   // Modell-Routing: Haiku für einfache Tasks, Sonnet für komplexe
   const haikuTrigger = /rechnung|mahnung|tageseinnahmen|monatsabschluss|frist|steuer|ausgabe|einnahme|gewinn|prognose/i;
@@ -1320,8 +1402,8 @@ async function handleImage(body, env, cors = {}, ctx) {
     });
   }
 
-  const systemPrompt = buildSystemPrompt(Profil, Datum);
-  const system = buildSystemBlocks(systemPrompt, await loadSteuerrechtContext(env));
+  const dynamicContext = buildDynamicContext(Profil, Datum);
+  const system = buildSystemBlocks(dynamicContext, await loadSteuerrechtContext(env));
 
   const messages = [{
     role: 'user',
@@ -1528,7 +1610,7 @@ export async function detectAndParseERechnung(bytes, filename, mimeType, sellerN
 
 // ── /document Handler ─────────────────────────────────────
 async function handleDocument(body, env, cors = {}, ctx) {
-  const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz, content, sellerNameHint, e_rechnung_format, duplikatBestaetigt } = body;
+  const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz, content, sellerNameHint, e_rechnung_format, duplikatBestaetigt, kategorie, sachkonto, buchungstext } = body;
 
   // ── E-RECHNUNG PARSEN (Vorschau vor dem Speichern, kein Firestore-Write) ────
   // Wird beim Auswählen einer .xml/.pdf-Datei im Belegarchiv-Upload-Modal aufgerufen, BEVOR der
@@ -1617,7 +1699,10 @@ async function handleDocument(body, env, cors = {}, ctx) {
           bezahlt: { booleanValue: !!bezahlt },
           mwst_satz: { stringValue: mwst_satz || 'keine' },
           createdAt: { timestampValue: new Date().toISOString() },
-          ...(bezahlt ? { bezahlt_am: { stringValue: new Date().toISOString().split('T')[0] } } : {})
+          ...(bezahlt ? { bezahlt_am: { stringValue: new Date().toISOString().split('T')[0] } } : {}),
+          ...(kategorie ? { kategorie: { stringValue: kategorie } } : {}),
+          ...(sachkonto ? { sachkonto: { stringValue: sachkonto } } : {}),
+          ...(buchungstext ? { buchungstext: { stringValue: buchungstext } } : {})
         }
       };
 
@@ -1755,6 +1840,9 @@ async function handleDocument(body, env, cors = {}, ctx) {
       if (mwst_satz) metadata.fields.mwst_satz = { stringValue: mwst_satz };
       if (rechnungsnr) metadata.fields.rechnungsnr = { stringValue: rechnungsnr };
       if (bezahlt) metadata.fields.bezahlt_am = { stringValue: new Date().toISOString().split('T')[0] };
+      if (kategorie) metadata.fields.kategorie = { stringValue: kategorie };
+      if (sachkonto) metadata.fields.sachkonto = { stringValue: sachkonto };
+      if (buchungstext) metadata.fields.buchungstext = { stringValue: buchungstext };
       if (e_rechnung_format) metadata.fields.e_rechnung_format = { stringValue: e_rechnung_format };
 
       const firestoreRes = await fetch(firestoreUrl, {
@@ -1889,8 +1977,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
     return handleChat(body, env, cors, ctx);
   }
 
-  const systemPrompt = buildSystemPrompt(Profil, Datum);
-  const system = buildSystemBlocks(systemPrompt, await loadSteuerrechtContext(env));
+  const dynamicContext = buildDynamicContext(Profil, Datum);
+  const system = buildSystemBlocks(dynamicContext, await loadSteuerrechtContext(env));
 
   // Der Dateityp wurde bisher IMMER hart als 'application/pdf' an Claude gemeldet, egal was
   // tatsächlich hochgeladen wurde. Landet hier z.B. eine .xml-Rechnung, die checkForERechnung/
@@ -2298,10 +2386,17 @@ async function handleDatevExport(body, env, cors = {}) {
       const absender = firestoreValue(fields.absender) || firestoreValue(fields.name) || '';
       const mwstSatz = firestoreValue(fields.mwst_satz);
       const bu = buSchluessel(mwstSatz, kleinunternehmer);
-      const gegenkonto = istEinnahme ? einnahmenGegenkonto : ausgabenGegenkonto;
+      // Sachkonto wird IMMER frisch aus der gespeicherten Kategorie + der AKTUELLEN SKR03/04-
+      // Einstellung aufgelöst statt den zum Speicherzeitpunkt fixierten Rohwert zu übernehmen —
+      // sonst würde ein späterer SKR-Wechsel alte Belege mit dem falschen Kontenrahmen
+      // exportieren. Nur Belege ohne Kategorie (vor diesem Feature gespeichert) fallen auf das
+      // generische Gegenkonto zurück.
+      const kategorie = firestoreValue(fields.kategorie) || '';
+      const gegenkonto = resolveSachkonto(kategorie, skr) || (istEinnahme ? einnahmenGegenkonto : ausgabenGegenkonto);
       const buchungstext = istEinnahme
         ? `Rechnung ${absender}`.trim()
         : `Beleg ${absender}`.trim();
+      const belegfeld2 = firestoreValue(fields.buchungstext) || '';
 
       buchungen.push({
         betrag,
@@ -2311,6 +2406,7 @@ async function handleDatevExport(body, env, cors = {}) {
         bu,
         belegDatum,
         belegfeld1: rechnungsnr,
+        belegfeld2,
         buchungstext
       });
     }
@@ -2360,7 +2456,7 @@ async function handleDatevExport(body, env, cors = {}) {
       b.bu,
       datevTTMM(b.belegDatum),
       datevText(b.belegfeld1, 12),
-      '""',
+      datevText(b.belegfeld2, 30),
       '',
       datevText(b.buchungstext, 60),
       '', '', '', '', '', ''
