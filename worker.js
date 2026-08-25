@@ -374,15 +374,19 @@ async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
 //    zwar pro Nutzer/Nachricht, bleibt aber innerhalb einer Chat-Session oft mehrere Nachrichten
 //    lang identisch, weshalb sich ein eigener Cache-Breakpoint trotzdem lohnt.
 function buildSystemBlocks(systemPrompt, steuerrechtText) {
+  // 1h-TTL statt der 5min-Default-TTL — bei einem Chat-Tool liegen zwischen zwei Nachrichten
+  // desselben Nutzers (tippen, lesen, nachdenken) realistisch oft mehr als 5 Minuten, wodurch
+  // der Cache mit der Default-TTL ständig abläuft bevor er gelesen wird. Erfordert den Beta-
+  // Header 'extended-cache-ttl-2025-04-11' (siehe Fetch-Aufrufe an die Anthropic-API).
   const blocks = [];
   if (steuerrechtText) {
     blocks.push({
       type: 'text',
       text: `## DEUTSCHES STEUERRECHT FÜR SELBSTSTÄNDIGE\n${steuerrechtText}\n## ENDE STEUERRECHT`,
-      cache_control: { type: 'ephemeral' }
+      cache_control: { type: 'ephemeral', ttl: '1h' }
     });
   }
-  blocks.push({ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } });
+  blocks.push({ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } });
   return blocks;
 }
 
@@ -425,7 +429,13 @@ EINKOMMENSTEUER:
 - Vorauszahlungen werden nur festgesetzt wenn Steuerlast über 400€/Jahr
 
 UMSATZSTEUER:
-- Kleinunternehmer (§19 UStG) unter 25.000€ Jahresumsatz → keine UStVA, keine Umsatzsteuer
+- Kleinunternehmer (§19 UStG) unter 25.000€ Jahresumsatz → grundsätzlich keine UStVA, keine Umsatzsteuer — AUSSER bei Reverse-Charge-Leistungen, siehe Regel unten!
+
+KLEINUNTERNEHMER + REVERSE CHARGE — HARTE REGEL, KEINE AUSNAHME:
+Kleinunternehmer müssen TROTZDEM eine UStVA abgeben, wenn sie Reverse-Charge-Leistungen empfangen (§13b UStG) — z.B. Google Ads, Anthropic API, AWS, Zoom, Adobe oder jeder andere ausländische Dienstleister. Sag NIEMALS pauschal "du bist Kleinunternehmer, du stellst keine UStVA" ohne das zu prüfen.
+- Zeile 52 MUSS ausgefüllt werden — die Steuer nach §13b UStG wird geschuldet.
+- Zeile 67 BLEIBT LEER — kein Vorsteuerabzug für Kleinunternehmer!
+- Die Steuer aus Zeile 52 muss also tatsächlich ans Finanzamt gezahlt werden, ohne Gegenbuchung (anders als bei Regelbesteuerten, bei denen sich Zeile 52 und 67 gegenseitig aufheben).
 
 GEWERBESTEUER:
 - Freibetrag 24.500€ Gewerbeertrag — darunter keine Gewerbesteuer
@@ -479,9 +489,24 @@ Wenn Nutzer "Mach meinen Monatsabschluss" sagt:
 1. Summiere Tageseinnahmen für den Monat aus dem Profil (Tagesdaten)
 2. Summiere Ausgaben für den Monat aus dem Profil:
    - Finanzkalender-Einträge ("Ausgaben/Verbindlichkeiten aus Finanzkalender")
-   - Chat-gespeicherte Ausgaben (ausgabe_YYYY-MM-DD Felder)
+   - Chat-gespeicherte Ausgaben (ausgabe_YYYY-MM-DD Felder, Beschreibung im zugehörigen ausgabe_beschreibung_YYYY-MM-DD Feld desselben Datums)
 3. Belegarchiv-Beträge NICHT zusätzlich addieren (siehe EINZIGE QUELLE DER WAHRHEIT oben) — bezahlte Belege stecken bereits in 1./2. Offene (nicht bezahlte) Belege darfst du dem Nutzer als Hinweis nennen, zählst sie aber nicht mit.
-4. Vorschlag: "Deine Einnahmen im [Monat]: [X]€. Ausgaben: [Y]€. Gewinn: [Z]€ — speichern? (j/n)"
+4. Zeige NICHT nur die Gesamtsummen, sondern schlüssel jede einzelne Position aus den Tagesdaten/Ausgaben-Feldern einzeln auf — mit Datum, Beschreibung und Betrag, Einnahmen und Ausgaben jeweils in eigenem Block, in genau diesem Format:
+
+"[Monat] [Jahr]:
+
+Einnahmen: [Summe]€
+  → [TT.MM.] [Beschreibung]: [Betrag]€
+  → [TT.MM.] [Beschreibung]: [Betrag]€
+
+Ausgaben: [Summe]€
+  → [TT.MM.] [Beschreibung]: [Betrag]€
+  → [TT.MM.] [Beschreibung]: [Betrag]€
+
+Gewinn: [Summe]€
+Steuerrücklage (28%): [Betrag]€ — speichern? (j/n)"
+
+Fehlt bei einer Tagesposition die Beschreibung (alte Einträge vor dieser Funktion), schreibe "unbenannt" statt die Zeile wegzulassen. Steuerrücklage nur zeigen, wenn sie laut STEUERRÜCKLAGEN-Regeln unten überhaupt greift — sonst diese Zeile weglassen.
 5. Bei j → MONATSABSCHLUSS_SAVE
 6. Bei Nicht-Kleinunternehmern IMMER zusätzlich die Vorsteuer-Summe des Monats ausweisen (siehe VORSTEUER & MWST unten) — auch ungefragt, direkt im Vorschlag ergänzen: "Vorsteuer aus deinen bezahlten Belegen: [V]€."
 7. Danach — als eigene, wirklich allerletzte Zeile der Antwort, NACH der "speichern? (j/n)"-Frage, nicht davor — der Transparenz-Hinweis (siehe TRANSPARENZ-HINWEIS unten). Die j/n-Frage bleibt trotzdem klar erkennbar als Frage stehen, der Hinweis ist nur noch ein angehängter Satz danach.
@@ -495,14 +520,18 @@ Immer wenn du Einnahmen oder Ausgaben zusammenfasst oder einen Monatsabschluss m
 ## DOKUMENT-UPLOAD ERKENNUNG
 Wenn ein Nutzer ein PDF oder Bild hochlädt: lies den Inhalt direkt — kein Nachfragen nach Informationen die im Dokument stehen. Claude kann PDFs lesen.
 
-Wenn es eine **eingehende Rechnung** ist (von jemand anderem):
-- Lies Betrag, Absender und Datum direkt aus dem PDF
-- Schreibe die Antwort MIT dem Befehl in EINER Nachricht:
-"Ich sehe eine eingehende Rechnung von [Absender] über [Betrag]€ vom [Datum]. Ich speichere sie jetzt als Ausgabe und unter Dokumente."
+Wenn es eine Rechnung ist:
+- Lies Betrag, Absender/Empfänger und Datum direkt aus dem PDF
+- Speichere NICHT sofort — frage IMMER direkt im selben Zug nach der Richtung, egal wie eindeutig sie dir selbst erscheint:
+"Ich sehe eine Rechnung von/an [Name] über [Betrag]€ vom [Datum]. Ist das eine eingehende Rechnung (du bezahlst jemanden) oder eine ausgehende (du stellst sie einem Kunden)?"
+- Noch KEIN AUSGABE_UPDATE/DOKUMENT_SPEICHERN in dieser Nachricht — der Dateiinhalt (Betrag/Absender/Datum) steht jetzt in deiner eigenen Antwort im Gesprächsverlauf und geht dadurch nicht verloren, auch wenn die Datei in der nächsten Nachricht nicht erneut mitgeschickt wird. Vergiss diese Angaben in den folgenden Nachrichten NICHT — beziehe dich aktiv darauf, wenn der Nutzer nur kurz antwortet (z.B. nur "eingehend").
+- Antwortet der Nutzer mit "eingehend": kurze Bestätigung + Befehle:
 AUSGABE_UPDATE:datum=[YYYY-MM-DD],betrag=[Zahl],beschreibung=Rechnung [Absender]
 DOKUMENT_SPEICHERN:typ=rechnung_eingehend,name=Rechnung von [Absender],betrag=[Zahl],absender=[Absender],datum=[YYYY-MM-DD]
+- Antwortet der Nutzer mit "ausgehend": kurze Bestätigung + Befehl (KEIN AUSGABE_UPDATE — es ist keine eigene Ausgabe):
+DOKUMENT_SPEICHERN:typ=rechnung_ausgehend,name=Rechnung an [Empfänger],betrag=[Zahl],absender=[Empfänger],datum=[YYYY-MM-DD]
 
-Nicht fragen ob speichern — einfach speichern und informieren. Nutzer kann widersprechen wenn er will.
+Nicht zusätzlich fragen ob speichern — nach der Richtungs-Antwort direkt speichern und informieren. Nutzer kann widersprechen wenn er will.
 
 Wenn kein Rechnungsdokument: normal analysieren.
 
@@ -511,12 +540,13 @@ Wenn kein Rechnungsdokument: normal analysieren.
 Wenn Nutzer Einnahmen für einen Tag nennt → kurz zusammenfassen und fragen: "Soll ich das als Tageseinnahmen für [Datum] speichern? (j/n)"
 
 Bei Bestätigung → kurze Reaktion + Befehl:
-TAGES_UPDATE:datum=[YYYY-MM-DD],einnahmen=[Betrag]
+TAGES_UPDATE:datum=[YYYY-MM-DD],einnahmen=[Betrag],beschreibung=[Text]
 
 Regeln:
 - Datum: heute wenn nicht anders genannt, Format YYYY-MM-DD
 - Nur Zahl ohne €
 - Kein "j" nötig wenn Nutzer Datum explizit nennt ("Gestern hatte ich 200€") → direkt speichern
+- beschreibung: kurz, wer/was (z.B. "Webdesign Müller GmbH", "Beratung Schmidt") — wenn der Nutzer keine nennt, frag kurz nach ("Von wem/wofür?") statt das Feld leer zu lassen, da diese Angabe später im Monatsabschluss als Einzelposition auftaucht (siehe MONATSABSCHLUSS AUS TAGESDATEN unten)
 
 ## AUSGABEN SPEICHERN
 Wenn Nutzer eine Ausgabe nennt oder eine eingehende Rechnung hochlädt → fragen: "Soll ich [Beschreibung] über [Betrag]€ als Ausgabe für [Datum] speichern? (j/n)"
@@ -1125,6 +1155,7 @@ async function handleChat(body, env, cors = {}, ctx) {
     headers: {
       'x-api-key': env.ANTHROPIC_API_KEY,
       'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'extended-cache-ttl-2025-04-11',
       'content-type': 'application/json'
     },
     body: JSON.stringify({
@@ -1275,6 +1306,7 @@ async function handleImage(body, env, cors = {}, ctx) {
     headers: {
       'x-api-key': env.ANTHROPIC_API_KEY,
       'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'extended-cache-ttl-2025-04-11',
       'content-type': 'application/json'
     },
     body: JSON.stringify({
@@ -1870,10 +1902,11 @@ async function handleDocument(body, env, cors = {}, ctx) {
     headers: {
       'x-api-key': env.ANTHROPIC_API_KEY,
       'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'extended-cache-ttl-2025-04-11',
       'content-type': 'application/json'
     },
     body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
+      model: 'claude-haiku-4-5-20251001',
       max_tokens: 2048,
       stream: true,
       system,
