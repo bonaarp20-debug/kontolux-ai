@@ -191,6 +191,7 @@ export default {
       if (url.pathname === '/send-verification-email') return handleSendVerificationEmail(verifiedEmail, env, cors);
       if (url.pathname === '/send-password-reset') return handleSendPasswordReset(body, env, cors);
       if (url.pathname === '/send-email-change-verification') return handleSendEmailChangeVerification(verifiedEmail, body, env, cors);
+      if (url.pathname === '/admin/seed-steuerrecht') return handleSeedSteuerrecht(request, body, env, cors);
 
       return new Response('Not found', { status: 404, headers: cors });
     } catch (e) {
@@ -366,11 +367,32 @@ async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
   return { erlaubt: true, anzahl: neueAnzahl };
 }
 
+// ── System-Blöcke bauen (Prompt Caching) ──────────────────
+// Baut das 'system'-Array für die Claude-API aus zwei Cache-Breakpoints:
+// 1. Steuerrecht-Dokument (identisch für alle Nutzer/Requests — bestmögliche Cache-Trefferquote)
+// 2. Der komplette System-Prompt inkl. interpolierter Nutzerdaten (Profil/Datum) — ändert sich
+//    zwar pro Nutzer/Nachricht, bleibt aber innerhalb einer Chat-Session oft mehrere Nachrichten
+//    lang identisch, weshalb sich ein eigener Cache-Breakpoint trotzdem lohnt.
+function buildSystemBlocks(systemPrompt, steuerrechtText) {
+  const blocks = [];
+  if (steuerrechtText) {
+    blocks.push({
+      type: 'text',
+      text: `## DEUTSCHES STEUERRECHT FÜR SELBSTSTÄNDIGE\n${steuerrechtText}\n## ENDE STEUERRECHT`,
+      cache_control: { type: 'ephemeral' }
+    });
+  }
+  blocks.push({ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } });
+  return blocks;
+}
+
 // ── System-Prompt bauen ───────────────────────────────────
 function buildSystemPrompt(profil, datum, fristType = null, ersteNachricht = false) {
   const basis = `WICHTIG: Das heutige Datum ist ${datum}. Verwende ausschließlich dieses Jahr für alle Datums- und Jahresangaben, insbesondere beim PROFIL_UPDATE. Niemals ein anderes Jahr verwenden.
 
 Du bist Kontolux, ein KI-Finanzassistent für Selbstständige und Kleinunternehmer in Deutschland.
+
+Du hast Zugriff auf ein aktuelles deutsches Steuerrecht-Dokument als Kontext. Nutze es für alle Steuerfragen. Bei Unsicherheit weise den Nutzer darauf hin, einen Steuerberater zu konsultieren.
 
 ## DEINE APP UND FEATURES
 Du bist Kontolux AI — Finanztool mit KI-Unterstützung für Selbstständige in Deutschland. App: app.kontolux-ai.de
@@ -766,7 +788,7 @@ async function verifyFirebaseToken(authHeader, env) {
 // um Firebase-Aktionslinks per REST-API zu erzeugen OHNE dass Firebase
 // selbst eine E-Mail verschickt (returnOobLink) — den Versand übernimmt
 // stattdessen Resend mit eigenem Kontolux-Branding.
-let googleAccessTokenCache = null; // { token, expiry }
+let googleAccessTokenCache = {}; // { [scope]: { token, expiry } }
 
 function base64UrlFromBytes(bytes) {
   let str = '';
@@ -789,9 +811,14 @@ function pemToArrayBuffer(pem) {
   return bytes.buffer;
 }
 
-async function getGoogleAccessToken(env) {
-  if (googleAccessTokenCache && Date.now() < googleAccessTokenCache.expiry) {
-    return googleAccessTokenCache.token;
+// scope-parametrisiert (Default: Identity Toolkit für die Aktionslinks oben) — dasselbe
+// Service-Account/JWT-Signing wird auch für den Firestore-Admin-Zugriff (steuerrecht/de,
+// siehe loadSteuerrechtContext/seedSteuerrecht unten) mit dem 'datastore'-Scope wiederverwendet,
+// deshalb ein eigener Cache-Eintrag PRO Scope statt eines einzelnen globalen Tokens.
+async function getGoogleAccessToken(env, scope = 'https://www.googleapis.com/auth/identitytoolkit') {
+  const cached = googleAccessTokenCache[scope];
+  if (cached && Date.now() < cached.expiry) {
+    return cached.token;
   }
   if (!env.FIREBASE_ADMIN_CLIENT_EMAIL || !env.FIREBASE_ADMIN_PRIVATE_KEY) {
     throw new Error('FIREBASE_ADMIN_CLIENT_EMAIL/FIREBASE_ADMIN_PRIVATE_KEY fehlt in env!');
@@ -803,7 +830,7 @@ async function getGoogleAccessToken(env) {
     iss: env.FIREBASE_ADMIN_CLIENT_EMAIL,
     sub: env.FIREBASE_ADMIN_CLIENT_EMAIL,
     aud: 'https://oauth2.googleapis.com/token',
-    scope: 'https://www.googleapis.com/auth/identitytoolkit',
+    scope,
     iat: now,
     exp: now + 3600
   };
@@ -829,8 +856,61 @@ async function getGoogleAccessToken(env) {
     throw new Error(`Google OAuth Token Error: ${tokenRes.status} ${errText}`);
   }
   const tokenData = await tokenRes.json();
-  googleAccessTokenCache = { token: tokenData.access_token, expiry: Date.now() + (tokenData.expires_in - 60) * 1000 };
+  googleAccessTokenCache[scope] = { token: tokenData.access_token, expiry: Date.now() + (tokenData.expires_in - 60) * 1000 };
   return tokenData.access_token;
+}
+
+const FIRESTORE_SCOPE = 'https://www.googleapis.com/auth/datastore';
+
+// Lädt das deutsche Steuerrecht-Referenzdokument (Firestore: steuerrecht/de, Feld "inhalt")
+// per Admin-Token — best effort: schlägt der Read fehl (Dokument fehlt, Netzwerk etc.), liefert
+// die Funktion null zurück statt zu werfen, damit der Chat auch ohne dieses Dokument normal
+// weiterläuft (siehe Aufrufer in handleChat/handleImage/handleDocument).
+async function loadSteuerrechtContext(env) {
+  try {
+    const token = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const res = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/steuerrecht/de', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.fields?.inhalt?.stringValue || null;
+  } catch (e) {
+    console.error('loadSteuerrechtContext Error:', e.message);
+    return null;
+  }
+}
+
+// ── /admin/seed-steuerrecht (einmalige Datenpflege, per ADMIN_SEED_KEY-Header geschützt) ──
+// Schreibt/aktualisiert Firestore steuerrecht/de, Feld "inhalt" = kompletter JSON-Inhalt der
+// mitgeschickten Datei als String. Nutzt denselben Admin-Service-Account/JWT wie oben, nur mit
+// dem Firestore-('datastore')-statt dem Identity-Toolkit-Scope.
+async function handleSeedSteuerrecht(request, body, env, cors) {
+  const adminKey = request.headers.get('X-Admin-Key') || '';
+  if (!env.ADMIN_SEED_KEY || adminKey !== env.ADMIN_SEED_KEY) {
+    return new Response('Unauthorized', { status: 401, headers: cors });
+  }
+  const inhalt = typeof body === 'string' ? body : JSON.stringify(body);
+  try {
+    const token = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const res = await fetch(
+      'https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/steuerrecht/de?updateMask.fieldPaths=inhalt',
+      {
+        method: 'PATCH',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields: { inhalt: { stringValue: inhalt } } })
+      }
+    );
+    const resultText = await res.text();
+    return new Response(resultText, {
+      status: res.status,
+      headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  } catch (e) {
+    return new Response(JSON.stringify({ error: e.message }), {
+      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
 }
 
 // requestType: 'VERIFY_EMAIL' | 'PASSWORD_RESET' | 'VERIFY_AND_CHANGE_EMAIL'. Gibt den
@@ -986,15 +1066,21 @@ async function handleChat(body, env, cors = {}, ctx) {
   const { Nachricht, Verlauf, Nutzername, Profil, FristType, Datum, userId, ChatId, ErsteNachricht, Datei } = body;
 
   try {
-    // Nachrichtenlimit prüfen + Supabase hochzählen
-    const limit = await checkNachrichtenLimit(Nutzername, env, userId, ctx);
+    // Nachrichtenlimit-Check (Supabase) und Steuerrecht-Kontext (Firestore) sind unabhängig
+    // voneinander — parallel statt nacheinander laden, sonst käme die zusätzliche Firestore-
+    // Latenz bei JEDER Chat-Nachricht oben drauf.
+    const [limit, steuerrechtText] = await Promise.all([
+      checkNachrichtenLimit(Nutzername, env, userId, ctx),
+      loadSteuerrechtContext(env)
+    ]);
     if (!limit.erlaubt) {
-      return new Response('Du hast dein heutiges Nachrichtenlimit erreicht. In den Einstellungen ⚙️ kannst du jederzeit sehen, wie viel Limit du noch frei hast und wann es sich zurücksetzt. Bis morgen! 👋', {
+      return new Response('Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
         headers: { ...cors, 'Content-Type': 'text/plain' }
       });
     }
 
     const systemPrompt = buildSystemPrompt(Profil, Datum, FristType, ErsteNachricht);
+    const system = buildSystemBlocks(systemPrompt, steuerrechtText);
 
   // Verlauf parsen — Format: "Nutzer: ... | Kontolux AI: ..."
   const messages = [];
@@ -1043,9 +1129,9 @@ async function handleChat(body, env, cors = {}, ctx) {
     },
     body: JSON.stringify({
       model: model,
-      max_tokens: 1024,
+      max_tokens: 2048,
       stream: true,
-      system: systemPrompt,
+      system,
       messages: trimmedMessages
     })
   });
@@ -1168,12 +1254,13 @@ async function handleImage(body, env, cors = {}, ctx) {
 
   const limit = await checkNachrichtenLimit(Nutzername, env, userId, ctx);
   if (!limit.erlaubt) {
-    return new Response('Du hast dein heutiges Nachrichtenlimit erreicht. In den Einstellungen ⚙️ kannst du jederzeit sehen, wie viel Limit du noch frei hast und wann es sich zurücksetzt. Bis morgen! 👋', {
+    return new Response('Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
       headers: { ...cors, 'Content-Type': 'text/plain' }
     });
   }
 
   const systemPrompt = buildSystemPrompt(Profil, Datum);
+  const system = buildSystemBlocks(systemPrompt, await loadSteuerrechtContext(env));
 
   const messages = [{
     role: 'user',
@@ -1192,9 +1279,9 @@ async function handleImage(body, env, cors = {}, ctx) {
     },
     body: JSON.stringify({
       model: env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001',
-      max_tokens: 1024,
+      max_tokens: 2048,
       stream: true,
-      system: systemPrompt,
+      system,
       messages
     })
   });
@@ -1726,25 +1813,57 @@ async function handleDocument(body, env, cors = {}, ctx) {
 
   const limit = await checkNachrichtenLimit(Nutzername, env, userId, ctx);
   if (!limit.erlaubt) {
-    return new Response('Du hast dein heutiges Nachrichtenlimit erreicht. In den Einstellungen ⚙️ kannst du jederzeit sehen, wie viel Limit du noch frei hast und wann es sich zurücksetzt. Bis morgen! 👋', {
+    return new Response('Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
       headers: { ...cors, 'Content-Type': 'text/plain' }
     });
   }
-
-  const systemPrompt = buildSystemPrompt(Profil, Datum);
 
   if (!Datei || !Datei.base64) {
     // Keine Datei → wie normaler Chat behandeln
     return handleChat(body, env, cors, ctx);
   }
 
-  const messages = [{
-    role: 'user',
-    content: [
+  const systemPrompt = buildSystemPrompt(Profil, Datum);
+  const system = buildSystemBlocks(systemPrompt, await loadSteuerrechtContext(env));
+
+  // Der Dateityp wurde bisher IMMER hart als 'application/pdf' an Claude gemeldet, egal was
+  // tatsächlich hochgeladen wurde. Landet hier z.B. eine .xml-Rechnung, die checkForERechnung/
+  // handleERechnungChatUpload nicht als gültige XRechnung/ZUGFeRD erkannt hat (nicht-standard-
+  // konformes XML), versuchte Claude die XML-Bytes als PDF zu parsen — scheitert zuverlässig
+  // ("kann die Datei nicht lesen"), und da die Antwort dann nie ein DOKUMENT_SPEICHERN enthält,
+  // landet der Beleg auch nicht im Belegarchiv. PDF bleibt ein 'document'-Block, XML wird als
+  // reiner Text decodiert (Claude kann kein XML als 'document' lesen), alles andere bekommt
+  // eine klare Fehlermeldung statt einer stillen Falsch-Deklaration.
+  const dateiName = Datei.name || '';
+  const istPdf = Datei.type === 'application/pdf' || /\.pdf$/i.test(dateiName);
+  const istXml = !istPdf && (/xml/i.test(Datei.type || '') || /\.xml$/i.test(dateiName));
+
+  let userContent;
+  if (istPdf) {
+    userContent = [
       { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: Datei.base64 } },
       { type: 'text', text: Nachricht || 'Analysiere dieses Dokument.' }
-    ]
-  }];
+    ];
+  } else if (istXml) {
+    let xmlText;
+    try {
+      const bytes = Uint8Array.from(atob(Datei.base64), c => c.charCodeAt(0));
+      xmlText = new TextDecoder('utf-8').decode(bytes);
+    } catch (e) {
+      return new Response('Diese XML-Datei konnte nicht gelesen werden — sie scheint beschädigt zu sein. Bitte lade sie erneut hoch.', {
+        headers: { ...cors, 'Content-Type': 'text/plain' }
+      });
+    }
+    userContent = [
+      { type: 'text', text: `${Nachricht || 'Analysiere dieses Dokument.'}\n\nInhalt der Datei "${dateiName}":\n\n${xmlText}` }
+    ];
+  } else {
+    return new Response('Dieses Dateiformat kann ich leider nicht lesen. Bitte lade ein PDF oder ein Bild (JPG/PNG) hoch.', {
+      headers: { ...cors, 'Content-Type': 'text/plain' }
+    });
+  }
+
+  const messages = [{ role: 'user', content: userContent }];
 
   const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -1755,9 +1874,9 @@ async function handleDocument(body, env, cors = {}, ctx) {
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
+      max_tokens: 2048,
       stream: true,
-      system: systemPrompt,
+      system,
       messages
     })
   });
