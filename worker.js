@@ -529,10 +529,10 @@ Wenn es eine Rechnung ist:
 - Speichere NICHT sofort — frage IMMER direkt im selben Zug nach der Richtung, egal wie eindeutig sie dir selbst erscheint:
 "Ich sehe eine Rechnung von/an [Name] über [Betrag]€ vom [Datum]. Ist das eine eingehende Rechnung (du bezahlst jemanden) oder eine ausgehende (du stellst sie einem Kunden)?"
 - Noch KEIN AUSGABE_UPDATE/DOKUMENT_SPEICHERN in dieser Nachricht — der Dateiinhalt (Betrag/Absender/Datum) steht jetzt in deiner eigenen Antwort im Gesprächsverlauf und geht dadurch nicht verloren, auch wenn die Datei in der nächsten Nachricht nicht erneut mitgeschickt wird. Vergiss diese Angaben in den folgenden Nachrichten NICHT — beziehe dich aktiv darauf, wenn der Nutzer nur kurz antwortet (z.B. nur "eingehend").
-- Antwortet der Nutzer mit "eingehend": kurze Bestätigung + Befehle:
+- Antwortet der Nutzer mit "eingehend": kurze Bestätigung MIT Sachkonto (siehe SACHKONTO BEI BUCHUNGEN unten) + Befehle:
 AUSGABE_UPDATE:datum=[YYYY-MM-DD],betrag=[Zahl],beschreibung=Rechnung [Absender]
 DOKUMENT_SPEICHERN:typ=rechnung_eingehend,name=Rechnung von [Absender],betrag=[Zahl],absender=[Absender],datum=[YYYY-MM-DD]
-- Antwortet der Nutzer mit "ausgehend": kurze Bestätigung + Befehl (KEIN AUSGABE_UPDATE — es ist keine eigene Ausgabe):
+- Antwortet der Nutzer mit "ausgehend": kurze Bestätigung MIT Sachkonto (Einnahmen-Konto, siehe SACHKONTO BEI BUCHUNGEN unten) + Befehl (KEIN AUSGABE_UPDATE — es ist keine eigene Ausgabe):
 DOKUMENT_SPEICHERN:typ=rechnung_ausgehend,name=Rechnung an [Empfänger],betrag=[Zahl],absender=[Empfänger],datum=[YYYY-MM-DD]
 
 Nicht zusätzlich fragen ob speichern — nach der Richtungs-Antwort direkt speichern und informieren. Nutzer kann widersprechen wenn er will.
@@ -543,7 +543,7 @@ Wenn kein Rechnungsdokument: normal analysieren.
 ## TAGESEINNAHMEN SPEICHERN
 Wenn Nutzer Einnahmen für einen Tag nennt → kurz zusammenfassen und fragen: "Soll ich das als Tageseinnahmen für [Datum] speichern? (j/n)"
 
-Bei Bestätigung → kurze Reaktion + Befehl:
+Bei Bestätigung → kurze Reaktion MIT Sachkonto (Einnahmen-Konto, siehe SACHKONTO BEI BUCHUNGEN unten) + Befehl:
 TAGES_UPDATE:datum=[YYYY-MM-DD],einnahmen=[Betrag],beschreibung=[Text]
 
 Regeln:
@@ -555,10 +555,29 @@ Regeln:
 ## AUSGABEN SPEICHERN
 Wenn Nutzer eine Ausgabe nennt oder eine eingehende Rechnung hochlädt → fragen: "Soll ich [Beschreibung] über [Betrag]€ als Ausgabe für [Datum] speichern? (j/n)"
 
-Bei Bestätigung:
+Bei Bestätigung, kurze Reaktion MIT Sachkonto (siehe SACHKONTO BEI BUCHUNGEN unten), z.B. "Ich buche die [Betrag]€ [Beschreibung] als Ausgabe. Sachkonto: [Nr] ([Bezeichnung], [SKR03/SKR04]) ✓" + Befehl:
 AUSGABE_UPDATE:datum=[YYYY-MM-DD],betrag=[Zahl],beschreibung=[Text]
 
 Beim Abgleich: Vergleiche neue Ausgabe mit bekannten Ausgaben aus dem Profil (ausgabe_YYYY-MM-DD Felder). Bei gleichem Betrag + gleichem Absender/Empfänger im selben Monat gilt die Regel aus "DUPLIKAT-ERKENNUNG" oben (aktiv nachfragen, bei Bestätigung nur intern ignorieren, nichts löschen).
+
+## SACHKONTO BEI BUCHUNGEN
+Bei JEDER Buchung (Ausgabe, Einnahme, Rechnung eingehend/ausgehend) immer das passende Sachkonto nennen — aus SKR03 oder SKR04, je nachdem was im Profil unter "datev_skr" steht (Standard: SKR03, falls nichts gesetzt ist).
+
+Häufige Sachkonten SKR03 (SKR04-Äquivalent in Klammern wo abweichend):
+- Einnahmen 19% USt: 8400 (SKR04: 4400)
+- Einnahmen 7% USt: 8300 (SKR04: 4300)
+- Wareneinkauf 19%: 5400 (SKR04: 3400)
+- Wareneinkauf 7%: 5300 (SKR04: 3300)
+- Bürobedarf: 4980 (SKR04: 6815)
+- Telefon/Internet: 4920 (SKR04: 6805)
+- Werbung/Marketing: 4650 (SKR04: 6600)
+- Reisekosten: 4670 (SKR04: 6650)
+- Fortbildung: 4830 (SKR04: 6822)
+- Kfz-Kosten: 4930 (SKR04: 6520)
+- Miete/Raumkosten: 4200 (SKR04: 6310)
+- GWG bis 800€ netto: 0480 (SKR04: 0670)
+
+Passt keines der obigen Konten eindeutig → nicht raten, sondern kurz nachfragen welches Sachkonto der Nutzer (bzw. sein Steuerberater) dafür verwendet.
 
 ## PROAKTIV DENKEN
 Zahlen nennt → hochrechnen & Prognose. Ausgaben erwähnt → fragen ob als Betriebsausgabe erfasst. Frist naht → von sich aus hinweisen.
@@ -1509,7 +1528,7 @@ export async function detectAndParseERechnung(bytes, filename, mimeType, sellerN
 
 // ── /document Handler ─────────────────────────────────────
 async function handleDocument(body, env, cors = {}, ctx) {
-  const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz, content, sellerNameHint, e_rechnung_format } = body;
+  const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz, content, sellerNameHint, e_rechnung_format, duplikatBestaetigt } = body;
 
   // ── E-RECHNUNG PARSEN (Vorschau vor dem Speichern, kein Firestore-Write) ────
   // Wird beim Auswählen einer .xml/.pdf-Datei im Belegarchiv-Upload-Modal aufgerufen, BEVOR der
@@ -1558,12 +1577,13 @@ async function handleDocument(body, env, cors = {}, ctx) {
         });
       }
 
-      // Duplikat-Check: nur der Chat-Upload-Pfad (DOKUMENT_SPEICHERN) hatte bisher einen —
-      // hier auf ein enges 10-Minuten-Fenster begrenzt (statt unbefristet wie beim Chat-Pfad),
-      // weil BELEG_MANUELL kein Rechnungsdatum kennt und sonst legitime wiederkehrende Belege
-      // mit gleichem Absender/Betrag (z.B. monatliche Miete) fälschlich blockiert würden —
-      // trifft damit gezielt den eigentlichen Bug-Fall (versehentlicher Doppel-Klick/-Upload).
-      try {
+      // Enges 10-Minuten-Fenster als serverseitiges Backstop gegen Doppel-Klick/Netzwerk-Retry
+      // (Race Condition — der eigentliche, umfassende Duplikat-Check läuft bereits client-seitig
+      // vor diesem Request und lässt den Nutzer im Zweifel per Modal selbst entscheiden, siehe
+      // findeBelegDuplikat in index.html). Hat der Nutzer dort bereits bestätigt
+      // (duplikatBestaetigt), wird dieser Backstop übersprungen — sonst gäbe es keine
+      // Möglichkeit, eine bewusst bestätigte Dopplung tatsächlich zu speichern.
+      if (!duplikatBestaetigt) try {
         const dokBaseUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente`;
         const existingDocs = await firestoreListAll(dokBaseUrl, token);
         const windowStart = Date.now() - 10 * 60 * 1000;
@@ -1678,9 +1698,12 @@ async function handleDocument(body, env, cors = {}, ctx) {
         });
       }
 
-      // Duplikat-Check (gleiche Begründung wie bei BELEG_MANUELL): gleicher Dateiname
-      // ODER gleicher Absender+Betrag+Typ innerhalb der letzten 10 Minuten.
-      try {
+      // Enges 10-Minuten-Fenster als serverseitiges Backstop (gleiche Begründung wie bei
+      // BELEG_MANUELL oben) — client-seitig läuft bereits der umfassende Duplikat-Check über
+      // das gesamte Belegarchiv, der Nutzer entscheidet dort per Modal. duplikatBestaetigt
+      // überspringt diesen Backstop, sonst könnte eine bewusst bestätigte Dopplung nie
+      // tatsächlich gespeichert werden.
+      if (!duplikatBestaetigt) try {
         const dokBaseUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente`;
         const existingDocs = await firestoreListAll(dokBaseUrl, token);
         const windowStart = Date.now() - 10 * 60 * 1000;
