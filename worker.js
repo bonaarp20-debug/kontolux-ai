@@ -986,22 +986,39 @@ async function getGoogleAccessToken(env, scope = 'https://www.googleapis.com/aut
 
 const FIRESTORE_SCOPE = 'https://www.googleapis.com/auth/datastore';
 
+// In-Memory-Fallback (pro Worker-Isolate, überlebt mehrere Requests) für das Steuerrecht-
+// Dokument — siehe Begründung in loadSteuerrechtContext unten.
+let steuerrechtFallback = null;
+
 // Lädt das deutsche Steuerrecht-Referenzdokument (Firestore: steuerrecht/de, Feld "inhalt")
-// per Admin-Token — best effort: schlägt der Read fehl (Dokument fehlt, Netzwerk etc.), liefert
-// die Funktion null zurück statt zu werfen, damit der Chat auch ohne dieses Dokument normal
-// weiterläuft (siehe Aufrufer in handleChat/handleImage/handleDocument).
+// per Admin-Token. Bei Erfolg wird das Ergebnis zusätzlich in steuerrechtFallback zwischen-
+// gespeichert; schlägt ein SPÄTERER Versuch fehl (Netzwerk-Hiccup, Firestore-Rate-Limit,
+// Token-Refresh-Race), wird dieser Fallback statt null zurückgegeben. Das ist kein Nice-to-
+// have, sondern behebt einen konkreten Prompt-Caching-Bug: Ohne Fallback verschwindet bei
+// jedem Fehlschlag der komplette Steuerrecht-Block aus dem system-Array (siehe
+// buildSystemBlocks) — die Anthropic-API cached anhand des kompletten Prefixes, ein fehlender
+// Block verschiebt die restlichen Blöcke und lässt selbst den davon unabhängigen, riesigen
+// STATIC_SYSTEM_INSTRUCTIONS-Block als Cache-Miss durchfallen. Genau das erklärt Nachrichten,
+// die um ein Vielfaches teurer sind als üblich, obwohl es nicht die erste Nachricht im Chat
+// war. Nur wenn wirklich der ALLERERSTE Versuch in einem frischen Worker-Isolate fehlschlägt
+// (noch kein Fallback vorhanden), liefert die Funktion weiterhin null.
 async function loadSteuerrechtContext(env) {
   try {
     const token = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
     const res = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/steuerrecht/de', {
       headers: { 'Authorization': `Bearer ${token}` }
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.error('loadSteuerrechtContext: Firestore-Antwort nicht ok', res.status, '— nutze Fallback falls vorhanden');
+      return steuerrechtFallback;
+    }
     const data = await res.json();
-    return data.fields?.inhalt?.stringValue || null;
+    const inhalt = data.fields?.inhalt?.stringValue || null;
+    if (inhalt) steuerrechtFallback = inhalt;
+    return inhalt || steuerrechtFallback;
   } catch (e) {
-    console.error('loadSteuerrechtContext Error:', e.message);
-    return null;
+    console.error('loadSteuerrechtContext Error:', e.message, '— nutze Fallback falls vorhanden');
+    return steuerrechtFallback;
   }
 }
 
@@ -1436,41 +1453,51 @@ async function handleImage(body, env, cors = {}, ctx) {
 // Belegarchiv) als Tageseinnahme bzw. Tagesausgabe für heute — additiv, damit mehrere an einem
 // Tag bezahlte Belege sich korrekt aufsummieren statt sich gegenseitig zu überschreiben. Best
 // effort: ein Fehler hier darf das Speichern des Belegs selbst nicht verhindern.
+// Nutzt die Firestore :commit-API mit einem atomaren "increment"-Feld-Transform statt GET
+// (aktuellen Wert lesen) + PATCH (Summe zurückschreiben) — der vorherige Read-Modify-Write war
+// NICHT atomar: laufen zwei Buchungen desselben Tages/Nutzers zeitlich überlappend (z.B. zwei
+// Belege kurz hintereinander als bezahlt markiert), konnte die zweite den von der ersten noch
+// nicht gespeicherten Stand überschreiben — Lost-Update-Race, bestätigt bei einem konkreten
+// Nutzer-Datenabgleich (mehrere kleine Belegbeträge fehlten im Monatsabschluss). increment()
+// wird von Firestore serverseitig atomar auf den zum Zeitpunkt des Commits aktuellen Wert
+// angewendet, unabhängig von parallelen Schreibvorgängen — legt das Feld/Dokument bei Bedarf
+// auch neu an (Firestore-Semantik: increment auf ein nicht existierendes Feld startet bei 0).
 async function buchTagesBewegung(userId, token, richtung, betragNum, beschreibung) {
   if (!userId || !token || !betragNum || isNaN(betragNum)) return;
   const heute = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
   const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const commitUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:commit`;
 
   if (richtung === 'einnahme') {
-    const url = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/tagesdaten/${heute}`;
-    const getRes = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
-    let existing = 0;
-    if (getRes.ok) {
-      const data = await getRes.json();
-      existing = parseFloat(data.fields?.einnahmen?.doubleValue ?? data.fields?.einnahmen?.integerValue ?? 0) || 0;
-    }
-    const neu = Math.round((existing + betragNum) * 100) / 100;
-    await fetch(`${url}?updateMask.fieldPaths=datum&updateMask.fieldPaths=einnahmen`, {
-      method: 'PATCH',
+    // beschreibung wurde von den Aufrufern bisher immer schon mitgeschickt, aber nie
+    // gespeichert — dadurch tauchten Einnahmen aus dem Belegarchiv im Monatsabschluss als
+    // "unbenannt" auf, obwohl der Absender bekannt war.
+    const docName = `projects/kontolux-ai/databases/(default)/documents/users/${userId}/tagesdaten/${heute}`;
+    await fetch(commitUrl, {
+      method: 'POST',
       headers,
-      body: JSON.stringify({ fields: { datum: { stringValue: heute }, einnahmen: { doubleValue: neu } } })
+      body: JSON.stringify({
+        writes: [{
+          update: { name: docName, fields: { datum: { stringValue: heute }, beschreibung: { stringValue: beschreibung || '' } } },
+          updateMask: { fieldPaths: ['datum', 'beschreibung'] },
+          updateTransforms: [{ fieldPath: 'einnahmen', increment: { doubleValue: betragNum } }]
+        }]
+      })
     });
   } else {
-    const url = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/profil/settings`;
+    const docName = `projects/kontolux-ai/databases/(default)/documents/users/${userId}/profil/settings`;
     const ausgabeKey = `ausgabe_${heute}`;
     const beschreibungKey = `ausgabe_beschreibung_${heute}`;
-    const getRes = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
-    let existing = 0;
-    if (getRes.ok) {
-      const data = await getRes.json();
-      const f = data.fields?.[ausgabeKey];
-      existing = parseFloat(f?.doubleValue ?? f?.integerValue ?? 0) || 0;
-    }
-    const neu = Math.round((existing + betragNum) * 100) / 100;
-    await fetch(`${url}?updateMask.fieldPaths=${encodeURIComponent(ausgabeKey)}&updateMask.fieldPaths=${encodeURIComponent(beschreibungKey)}`, {
-      method: 'PATCH',
+    await fetch(commitUrl, {
+      method: 'POST',
       headers,
-      body: JSON.stringify({ fields: { [ausgabeKey]: { doubleValue: neu }, [beschreibungKey]: { stringValue: beschreibung || '' } } })
+      body: JSON.stringify({
+        writes: [{
+          update: { name: docName, fields: { [beschreibungKey]: { stringValue: beschreibung || '' } } },
+          updateMask: { fieldPaths: [beschreibungKey] },
+          updateTransforms: [{ fieldPath: ausgabeKey, increment: { doubleValue: betragNum } }]
+        }]
+      })
     });
   }
 }
@@ -1734,7 +1761,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
       if (bezahlt && typ !== 'mahnung_ausgehend') {
         try {
           const richtung = typ === 'rechnung_ausgehend' ? 'einnahme' : 'ausgabe';
-          await buchTagesBewegung(userId, token, richtung, parseFloat(betrag), `Beleg von ${absender}`);
+          const bewegungBeschreibung = richtung === 'einnahme' ? (absender || '') : `Beleg von ${absender}`;
+          await buchTagesBewegung(userId, token, richtung, parseFloat(betrag), bewegungBeschreibung);
         } catch(e) { console.warn('Tagesbewegung (BELEG_MANUELL):', e.message); }
       }
 
@@ -1876,7 +1904,10 @@ async function handleDocument(body, env, cors = {}, ctx) {
       if (bezahlt && betrag && typ !== 'mahnung_ausgehend') {
         try {
           const richtung = typ === 'rechnung_ausgehend' ? 'einnahme' : 'ausgabe';
-          await buchTagesBewegung(userId, token, richtung, parseFloat(betrag), absender ? `Beleg von ${absender}` : (name || 'Beleg'));
+          const bewegungBeschreibung = richtung === 'einnahme'
+            ? (absender || name || '')
+            : (absender ? `Beleg von ${absender}` : (name || 'Beleg'));
+          await buchTagesBewegung(userId, token, richtung, parseFloat(betrag), bewegungBeschreibung);
         } catch(e) { console.warn('Tagesbewegung (BELEG_SPEICHERN):', e.message); }
       }
 
