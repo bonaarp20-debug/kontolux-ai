@@ -835,6 +835,8 @@ Speichern: fixkosten=3000, steuerruecklage=30%, branche=Fotografie, einnahmequel
 
 NIEMALS Einnahmen- oder Ausgaben-SUMMEN eines Monats hier speichern (z.B. sowas wie einnahmen_juli_2026=3500 oder ausgaben_juli_2026=1200) — das verstößt gegen "EINZIGE QUELLE DER WAHRHEIT" oben: PROFIL_UPDATE-Felder werden roh und ungeprüft in jeden künftigen Chat-Kontext übernommen und würden dort als zusätzliche, nicht abgeglichene Zahl neben Tagesdaten/Finanzkalender/Monatsabschluss auftauchen → Doppelzählung. Nennt der Nutzer Einnahmen/Ausgaben für einen Monat, gehört das ausschließlich zu TAGES_UPDATE/AUSGABE_UPDATE (einzelne Tage) oder MONATSABSCHLUSS_SAVE (Monatssumme) — nie zu PROFIL_UPDATE.
 
+NIEMALS einen Schlüssel verwenden, der mit "ausgabe_" oder "einnahme"/"einnahmen_" beginnt (z.B. ausgabe_2026-08-16, ausgabe_beschreibung_2026-08-16) — das sind reservierte Buchungsfelder, die ausschließlich TAGES_UPDATE/AUSGABE_UPDATE/toggleBelegBezahlt schreiben dürfen. Ein hier versehentlich geschriebener Schlüssel dieser Form überschreibt den echten gebuchten Betrag mit Freitext und zerstört die Buchung.
+
 Regeln:
 - IMMER aktuelles Jahr aus Datum verwenden
 - Keine neuen Infos: PROFIL_UPDATE:keine
@@ -1255,23 +1257,20 @@ async function handleChat(body, env, cors = {}, ctx) {
     ? messages.slice(messages.length - MAX_VERLAUF)
     : messages;
 
-  // Kosten-Optimierung: cache_control auf die letzte Nachricht setzt einen Cache-Breakpoint
-  // ÜBER DEN GESAMTEN BISHERIGEN GESPRÄCHSVERLAUF. Ohne das wird bei jeder neuen Nachricht der
-  // KOMPLETTE bisherige Verlauf (bis zu 20 Einträge) erneut als frische Input-Token abgerechnet
-  // — bei einem langen Gespräch zahlt Nachricht 15 für den gesamten Text von Nachricht 1-14 noch
-  // einmal mit. Mit dem Breakpoint hier liest die NÄCHSTE Nachricht in diesem Chat den
-  // identischen Prefix (dieser Verlauf + diese Nachricht) aus dem Cache statt ihn neu zu
-  // berechnen. Kürzere 5-Minuten-TTL (kein '1h' hier) bewusst: dieser Inhalt ist pro Gespräch
-  // einmalig (kein Cross-User-Reuse wie bei Steuerrecht/System-Anweisungen), ein teurer 1h-Write
-  // lohnt sich nur wenn er auch oft genug gelesen wird.
-  if (trimmedMessages.length > 0) {
-    const lastMsg = trimmedMessages[trimmedMessages.length - 1];
-    if (typeof lastMsg.content === 'string') {
-      lastMsg.content = [{ type: 'text', text: lastMsg.content, cache_control: { type: 'ephemeral' } }];
-    } else if (Array.isArray(lastMsg.content) && lastMsg.content.length > 0) {
-      lastMsg.content[lastMsg.content.length - 1].cache_control = { type: 'ephemeral' };
-    }
-  }
+  // Kosten-Diagnose 2026-08-26 ergab: der Cache-Breakpoint auf der letzten Nachricht (früherer
+  // Versuch, den Gesprächsverlauf zu cachen) griff in der Praxis NIE — bestätigt live per
+  // wrangler-tail-Messung (cache_read_input_tokens blieb über mehrere Folge-Nachrichten exakt
+  // auf dem Wert der beiden stabilen System-Blöcke stehen, nie höher). Grund: dieser Breakpoint
+  // cached den GESAMTEN Prefix bis zu sich selbst — inklusive des dynamischen Kontext-Blocks
+  // (buildDynamicContext/AKTUELLE NUTZERDATEN, enthält das Profil mit Tagesdaten/Belegarchiv/
+  // Absender-Kategorien), der bei praktisch jeder Nachricht anders ist (neues Datum, neu
+  // gespeicherte Beträge, geänderte Salden). Ein einziges geändertes Byte irgendwo in diesem
+  // Block invalidiert den kompletten Cache-Eintrag — der Breakpoint zahlte also fast immer nur
+  // den ~1,25-fachen Schreib-Aufpreis, ohne je als Treffer gelesen zu werden. Entfernt: der
+  // volatile Anteil (Verlauf + aktuelle Nachricht) wird jetzt normal zum regulären Input-Preis
+  // gesendet, statt für einen Cache-Write zu zahlen, der praktisch nie eingelöst wird. Die
+  // beiden stabilen Blöcke (Steuerrecht, STATIC_SYSTEM_INSTRUCTIONS) bleiben wie gehabt gecacht
+  // — nur die für dieses Muster wirkungslose zusätzliche Ebene entfällt.
 
   // Modell-Routing: Haiku für einfache Tasks, Sonnet für komplexe
   const haikuTrigger = /rechnung|mahnung|tageseinnahmen|monatsabschluss|frist|steuer|ausgabe|einnahme|gewinn|prognose/i;
