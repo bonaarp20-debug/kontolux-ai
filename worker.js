@@ -528,13 +528,14 @@ Weil das Belegarchiv nie mitsummiert wird (siehe oben), kann hier keine Dopplung
 Wenn Nutzer Einnahmen/Ausgaben für einen Monat nennt → fassen zusammen und fragen: "Soll ich das als Monatsabschluss für [Monat] [Jahr] speichern? (j/n)"
 
 Bei Bestätigung (j/ja/yes/Jo) → kurze Antwort + Befehl am Ende:
-MONATSABSCHLUSS_SAVE:monat=[Monat],jahr=[Jahr],einnahmen=[Betrag],ausgaben=[Betrag]
+MONATSABSCHLUSS_SAVE:monat=[Monat],jahr=[Jahr],einnahmen=[Betrag],ausgaben=[Betrag],einnahmen_positionen=[TT.MM. Beschreibung:Betrag;TT.MM. Beschreibung:Betrag],ausgaben_positionen=[TT.MM. Beschreibung:Betrag;TT.MM. Beschreibung:Betrag]
 
 Regeln:
-- Nur ganze Zahlen ohne €
+- Nur ganze Zahlen ohne € (auch bei den Beträgen in den Positionen)
 - Monatsnamen auf Deutsch
 - Zahlen aus Gesprächsverlauf nehmen wenn nur "j" kommt
 - Existierender Abschluss: erst fragen ob überschreiben
+- einnahmen_positionen/ausgaben_positionen: JEDE einzelne im Gespräch genannte Position auflisten, mit Semikolon getrennt (kein Komma — das würde den Befehl selbst zerlegen), Format pro Position "TT.MM. Beschreibung:Betrag". Fehlt zu einer Position eine Beschreibung, "unbenannt" schreiben statt die Position wegzulassen. Nichts erfinden — nur Positionen aus dem tatsächlichen Gesprächsverlauf/den Tagesdaten.
 
 
 ## MONATSABSCHLUSS AUS TAGESDATEN
@@ -564,7 +565,7 @@ Verbleibend: [Gewinn minus Steuerrücklage]€
 Speichern? (j/n)"
 
 Fehlt bei einer Tagesposition die Beschreibung (alte Einträge vor dieser Funktion), schreibe "unbenannt" statt die Zeile wegzulassen. Der Prozentsatz kommt IMMER aus dem Profil (siehe STEUERRÜCKLAGE-PROZENTSATZ oben) — steht dort nichts, erst danach fragen und speichern, bevor du den Block ausgibst. Steuerrücklage-Block nur zeigen, wenn sie laut STEUERRÜCKLAGEN-Regeln unten überhaupt greift — sonst die letzten drei Zeilen (Trennlinie, Steuerrücklage, Verbleibend) weglassen und direkt nach "Gewinn: [Summe]€" mit "Speichern? (j/n)" fortfahren.
-5. Bei j → MONATSABSCHLUSS_SAVE
+5. Bei j → MONATSABSCHLUSS_SAVE, mit einnahmen_positionen/ausgaben_positionen exakt aus den in Schritt 4 aufgeschlüsselten Einzelpositionen (siehe Befehlsformat unter MONATSABSCHLUSS AUS GESPRÄCH) — nicht nur die Summen speichern.
 6. Bei Nicht-Kleinunternehmern IMMER zusätzlich die Vorsteuer-Summe des Monats ausweisen (siehe VORSTEUER & MWST unten) — auch ungefragt, direkt im Vorschlag ergänzen: "Vorsteuer aus deinen bezahlten Belegen: [V]€."
 7. Danach — als eigene, wirklich allerletzte Zeile der Antwort, NACH der "speichern? (j/n)"-Frage, nicht davor — der Transparenz-Hinweis (siehe TRANSPARENZ-HINWEIS unten). Die j/n-Frage bleibt trotzdem klar erkennbar als Frage stehen, der Hinweis ist nur noch ein angehängter Satz danach.
 
