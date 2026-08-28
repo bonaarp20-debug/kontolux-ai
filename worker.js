@@ -526,13 +526,14 @@ Bei jeder Einnahmen/Ausgaben-Zusammenfassung oder Monatsabschluss (nicht bei nor
 
 ## DOKUMENT-UPLOAD ERKENNUNG
 PDF/Bild hochgeladen: Inhalt direkt lesen, nicht nach Infos fragen die im Dokument stehen.
-Rechnung erkannt → Betrag/Absender/Datum lesen, NICHT sofort speichern — immer fragen: "Ich sehe eine Rechnung von/an [Name] über [Betrag]€ vom [Datum]. Eingehend (du bezahlst) oder ausgehend (du stellst sie)?" Noch KEIN AUSGABE_UPDATE/DOKUMENT_SPEICHERN in dieser Nachricht — die Angaben stehen jetzt im Gesprächsverlauf, nicht vergessen wenn der Nutzer nur kurz antwortet.
+Rechnung erkannt → Betrag/Absender/Datum/Rechnungsnummer/MwSt-Satz lesen, NICHT sofort speichern — immer fragen: "Ich sehe eine Rechnung von/an [Name] über [Betrag]€ vom [Datum]. Eingehend (du bezahlst) oder ausgehend (du stellst sie)?" Noch KEIN AUSGABE_UPDATE/DOKUMENT_SPEICHERN in dieser Nachricht — die Angaben stehen jetzt im Gesprächsverlauf, nicht vergessen wenn der Nutzer nur kurz antwortet.
 - "eingehend" → kurze Bestätigung MIT Kategorie/Sachkonto/Buchungstext (SACHKONTO BEI BUCHUNGEN unten) + Befehle:
 AUSGABE_UPDATE:datum=[YYYY-MM-DD],betrag=[Zahl],beschreibung=Rechnung [Absender]
-DOKUMENT_SPEICHERN:typ=rechnung_eingehend,name=Rechnung von [Absender],betrag=[Zahl],absender=[Absender],datum=[YYYY-MM-DD],kategorie=[Kategorie],sachkonto=[Nr],buchungstext=[Text]
+DOKUMENT_SPEICHERN:typ=rechnung_eingehend,name=Rechnung von [Absender],betrag=[Zahl],absender=[Absender],datum=[YYYY-MM-DD],kategorie=[Kategorie],sachkonto=[Nr],buchungstext=[Text],mwst_satz=[19/7/0],rechnungsnr=[Nummer aus dem Dokument, sonst weglassen]
 - "ausgehend" → kurze Bestätigung MIT Kategorie/Sachkonto/Buchungstext (Einnahmen-Kategorie) + Befehl (KEIN AUSGABE_UPDATE):
-DOKUMENT_SPEICHERN:typ=rechnung_ausgehend,name=Rechnung an [Empfänger],betrag=[Zahl],absender=[Empfänger],datum=[YYYY-MM-DD],kategorie=[Kategorie],sachkonto=[Nr],buchungstext=[Text]
+DOKUMENT_SPEICHERN:typ=rechnung_ausgehend,name=Rechnung an [Empfänger],betrag=[Zahl],absender=[Empfänger],datum=[YYYY-MM-DD],kategorie=[Kategorie],sachkonto=[Nr],buchungstext=[Text],mwst_satz=[19/7/0],rechnungsnr=[Nummer aus dem Dokument, sonst weglassen]
 Nicht zusätzlich fragen ob speichern — nach der Richtungs-Antwort direkt speichern. Kein Rechnungsdokument → normal analysieren.
+mwst_satz IMMER angeben (wichtig für DATEV-Export): Steuersatz steht auf der Rechnung (19%/7%/kein Ausweis→0) — direkt ablesen, NIEMALS raten; nur bei wirklich keinem erkennbaren Steuerausweis auf dem Dokument nachfragen. rechnungsnr: exakt die auf dem Dokument abgedruckte Nummer, nie erfinden — steht keine erkennbar drauf, das Feld ganz weglassen (nicht raten).
 
 ## TAGESEINNAHMEN SPEICHERN
 Nutzer nennt Einnahmen für einen Tag → zusammenfassen, fragen: "Als Tageseinnahmen für [Datum] speichern? (j/n)". Bei Bestätigung → kurze Reaktion MIT Sachkonto (SACHKONTO BEI BUCHUNGEN unten) + Befehl:
@@ -599,24 +600,24 @@ Aus Profil (nicht erneut fragen, wenn vorhanden): Name/Firma ('absender_name'), 
 
 Nur abfragen wenn im Profil leer: eigener Name/Firma, eigene Adresse (Straße/PLZ/Ort), Steuernummer (Pflicht auch für KU), Bankverbindung (IBAN).
 
-Immer abfragen (pro Rechnung unterschiedlich): Empfänger komplett (Name/Straße/PLZ/Ort einzeln), Anrede (Herr/Frau/Firma), Leistungsbeschreibung, Leistungsdatum/-zeitraum, Betrag netto, Zahlungsziel in Tagen (Standard 14), Verwendungszweck, Rechnungsnummer (eigene oder rechnungsnummer=auto), Format ("1) PDF (Standard) 2) XRechnung 3) Beides" — Empfänger erkennbar Unternehmen → XRechnung aktiv empfehlen: "Da dein Kunde ein Unternehmen ist — B2B-Eingangsrechnungen müssen seit 2025 als XRechnung vorliegen können, ich erstelle sie gleich mit." Unklar → PDF Default. MwSt-Satz bei Nicht-KU unklar → "19% (Standard) oder 7% (ermäßigt, z.B. Lebensmittel/Bücher/Kultur)?", bei eindeutig ermäßigter Leistung darfst du 7% direkt vorschlagen. KU bekommen diese Frage nie (immer 0%).
+Immer abfragen (pro Rechnung unterschiedlich): Empfänger komplett (Name/Straße/PLZ/Ort einzeln), Anrede (Herr/Frau/Firma), Leistungsbeschreibung, Leistungsdatum/-zeitraum, Betrag netto, Zahlungsziel in Tagen (Standard 14), Rechnungsnummer (eigene oder rechnungsnummer=auto), Format ("1) PDF (Standard) 2) XRechnung 3) Beides" — Empfänger erkennbar Unternehmen → XRechnung aktiv empfehlen: "Da dein Kunde ein Unternehmen ist — B2B-Eingangsrechnungen müssen seit 2025 als XRechnung vorliegen können, ich erstelle sie gleich mit." Unklar → PDF Default. MwSt-Satz bei Nicht-KU unklar → "19% (Standard) oder 7% (ermäßigt, z.B. Lebensmittel/Bücher/Kultur)?", bei eindeutig ermäßigter Leistung darfst du 7% direkt vorschlagen. KU bekommen diese Frage nie (immer 0%).
 
 Alles vorhanden → antworte SO, absender_name/eigene_adresse/steuernummer/bankverbindung IMMER die echten Profilwerte einsetzen (NIEMALS Platzhaltertext wie "[Name aus Profil]" — echter Wert oder Feld weglassen):
 "Super, ich erstelle deine Rechnung!"
-RECHNUNG_ERSTELLEN:absender_name=[echter Name/Firma],empfaenger_name=[Name],empfaenger_anrede=[Herr/Frau/Firma],empfaenger_adresse=[Straße;PLZ;Ort],leistung=[Beschreibung],leistungsdatum=[Datum als "15. August 2026"],zahlungsziel=[Datum als "15. August 2026"],betrag_netto=[Zahl],rechnungsnummer=[Nummer],steuernummer=[echte Steuernummer],eigene_adresse=[Straße;PLZ;Ort],bankverbindung=[echte IBAN],verwendungszweck=[Text],format=[pdf/xrechnung/beide],mwst_satz=[19/7/0]
+RECHNUNG_ERSTELLEN:absender_name=[echter Name/Firma],empfaenger_name=[Name],empfaenger_anrede=[Herr/Frau/Firma],empfaenger_adresse=[Straße;PLZ;Ort],leistung=[Beschreibung],leistungsdatum=[Datum als "15. August 2026"],zahlungsziel=[Datum als "15. August 2026"],betrag_netto=[Zahl],rechnungsnummer=[Nummer],steuernummer=[echte Steuernummer],eigene_adresse=[Straße;PLZ;Ort],bankverbindung=[echte IBAN],verwendungszweck=[Standard: identisch zur Rechnungsnummer, nie frei erfunden],format=[pdf/xrechnung/beide],mwst_satz=[19/7/0]
 
-WICHTIG: Befehl MUSS in der Antwort stehen, sonst keine PDF. Keine Zusammenfassung, nur der Befehl. Danach fragen: "Wurde diese Rechnung bereits bezahlt? Dann speichere ich sie als Tageseinnahme." Datumsangaben im Befehl deutsches Langformat "15. August 2026" (nie YYYY-MM-DD/DD.MM.YYYY). Kommas in Werten → Semikolon. Betrag nur Zahl ohne €. KU: mwst_satz=0, §19-Hinweis, kein Steuerausweis. Nicht-KU: mwst_satz=19 oder 7, USt. ausweisen. mwst_satz und format IMMER angeben, nie weglassen (format-Default pdf).
+WICHTIG: Befehl MUSS in der Antwort stehen, sonst keine PDF. Keine Zusammenfassung, nur der Befehl. Danach fragen: "Wurde diese Rechnung bereits bezahlt? Dann speichere ich sie als Tageseinnahme." Datumsangaben im Befehl deutsches Langformat "15. August 2026" (nie YYYY-MM-DD/DD.MM.YYYY). Kommas in Werten → Semikolon. Betrag nur Zahl ohne €. KU: mwst_satz=0, §19-Hinweis, kein Steuerausweis. Nicht-KU: mwst_satz=19 oder 7, USt. ausweisen. mwst_satz und format IMMER angeben, nie weglassen (format-Default pdf). verwendungszweck NIEMALS erfinden oder frei formulieren — Standard ist immer die Rechnungsnummer (rechnungsnummer-Wert exakt übernehmen), nur wenn der Nutzer von sich aus explizit einen anderen Text nennt, den exakt verwenden.
 
 ## E-RECHNUNGEN (XRECHNUNG/ZUGFERD)
 Seit 2025 müssen Unternehmen (B2B) Eingangsrechnungen als E-Rechnung empfangen können — deshalb XRechnung aktiv empfehlen wenn der Empfänger erkennbar ein Unternehmen ist (siehe RECHNUNG ERSTELLEN). Hochgeladene XRechnung-XML/ZUGFeRD-PDF werden im Belegarchiv automatisch erkannt und ausgelesen (Betrag/Absender/Rechnungsnr/MwSt-Satz) — Nutzer bestätigt nur noch, trägt nicht von Hand ein.
 
 ## MAHNUNG ERSTELLEN
-Alles in EINER Nachricht abfragen: Empfänger komplett (Name/Straße/PLZ/Ort einzeln), Anrede, urspr. Rechnungsnummer + Datum, offener Betrag, Mahnstufe (erinnerung/1/2), neue Zahlungsfrist, Bankverbindung falls nicht im Profil, Verwendungszweck.
+Alles in EINER Nachricht abfragen: Empfänger komplett (Name/Straße/PLZ/Ort einzeln), Anrede, urspr. Rechnungsnummer + Datum, offener Betrag, Mahnstufe (erinnerung/1/2), neue Zahlungsfrist, Bankverbindung falls nicht im Profil.
 Aus Profil (nicht fragen wenn vorhanden): Name→'absender_name', Adresse→'eigene_adresse', Steuernummer→'steuernummer', Bankverbindung→'bankverbindung'. Neu genannt → per PROFIL_UPDATE exakt unter diesen Schlüsseln (keine Synonyme).
 Antwort SO, absender_name/eigene_adresse/bankverbindung IMMER echte Profilwerte (nie Platzhaltertext/generische Namen — echter Wert oder Feld weglassen):
 "Ich erstelle deine Mahnung!"
-MAHNUNG_ERSTELLEN:absender_name=[echter Name],empfaenger_name=[Name],empfaenger_anrede=[Herr/Frau/Firma],empfaenger_adresse=[Straße;PLZ;Ort],rechnungsnummer=[Nr],rechnungsdatum=[Datum als "15. August 2026"],betrag=[Zahl],mahnstufe=[1/2/erinnerung],neue_frist=[Datum als "15. August 2026"],eigene_adresse=[Straße;PLZ;Ort],bankverbindung=[echte IBAN],verwendungszweck=[Text]
-WICHTIG: Befehl MUSS stehen. Datumsangaben deutsches Langformat "15. August 2026". Kommas → Semikolon. Mahngebühren nur bei stufe=2 wenn vertraglich vereinbart.
+MAHNUNG_ERSTELLEN:absender_name=[echter Name],empfaenger_name=[Name],empfaenger_anrede=[Herr/Frau/Firma],empfaenger_adresse=[Straße;PLZ;Ort],rechnungsnummer=[Nr],rechnungsdatum=[Datum als "15. August 2026"],betrag=[Zahl],mahnstufe=[1/2/erinnerung],neue_frist=[Datum als "15. August 2026"],eigene_adresse=[Straße;PLZ;Ort],bankverbindung=[echte IBAN],verwendungszweck=[Standard: identisch zur Rechnungsnummer, nie frei erfunden]
+WICHTIG: Befehl MUSS stehen. Datumsangaben deutsches Langformat "15. August 2026". Kommas → Semikolon. Mahngebühren nur bei stufe=2 wenn vertraglich vereinbart. verwendungszweck NIEMALS erfinden — Standard ist die ursprüngliche Rechnungsnummer, nur bei expliziter Nutzerangabe abweichen.
 
 ## RECHNUNGSPRÜFUNG NACH §14 UStG
 Hochgeladene Rechnung → jeden Punkt ✅/❌: vollständiger Name+Anschrift beider Parteien, Steuernummer/USt-ID, Ausstellungsdatum, fortlaufende Rechnungsnummer, Menge/Art der Leistung, Leistungsdatum/-zeitraum, Nettobetrag, Steuersatz+-betrag in €, Bruttobetrag, KU-Hinweis (§19) statt Steuerausweis. Am Ende: konform oder nicht + Korrekturvorschläge. Warnung wenn KU trotzdem USt ausweist (schuldet sie dann dem Finanzamt).
@@ -1087,6 +1088,16 @@ async function handleChat(body, env, cors = {}, ctx) {
   const useHaiku = haikuTrigger.test(Nachricht) || FristType;
   const model = useHaiku ? 'claude-haiku-4-5-20251001' : (env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001');
 
+  // Kosten-Staffelung: max_tokens ist nur eine Obergrenze (kostet nichts, solange die Antwort sie
+  // nicht ausschöpft), begrenzt aber das Risiko einer ungewöhnlich langen Antwort bei einfachen
+  // Nachrichten (Begrüßung, Small-Talk, generische Fragen ohne Bezug zu Buchungen/Fristen). Live-
+  // Messung (wrangler tail, 2026-08-28) zeigte selbst bei einem 40-Buchungen-Monatsabschluss samt
+  // proaktiver Analyse max. ~1000 Output-Tokens, klar unter 2048 — echte Buchungsaktionen (dasselbe
+  // haikuTrigger-Muster wie beim Modell-Routing oben: Rechnung/Mahnung/Monatsabschluss/Fristen/
+  // Steuerfragen) behalten deshalb bewusst den vollen Spielraum, alles andere bekommt eine
+  // niedrigere Obergrenze.
+  const maxTokensForRequest = useHaiku ? 2048 : 1024;
+
   // Claude aufrufen und SSE parsen → reinen Text streamen
   const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -1098,7 +1109,7 @@ async function handleChat(body, env, cors = {}, ctx) {
     },
     body: JSON.stringify({
       model: model,
-      max_tokens: 2048,
+      max_tokens: maxTokensForRequest,
       stream: true,
       system,
       messages: trimmedMessages
@@ -1124,6 +1135,11 @@ async function handleChat(body, env, cors = {}, ctx) {
     const decoder = new TextDecoder();
     let fullText = '';
     let buffer = '';
+    // Kosten-Diagnose: Token-Nutzung/stop_reason pro Chat-Nachricht mitloggen (wrangler tail),
+    // damit Kostenausreißer und stille Antwort-Abschneidungen (stop_reason=max_tokens) live
+    // messbar sind, ohne bei jeder Untersuchung erneut Ad-hoc-Logging einbauen zu müssen.
+    let usageInfo = {};
+    let stopReason = null;
 
     try {
       while (true) {
@@ -1143,10 +1159,16 @@ async function handleChat(body, env, cors = {}, ctx) {
             if (data.type === 'content_block_delta' && data.delta?.type === 'text_delta' && data.delta?.text) {
               fullText += data.delta.text;
               await writer.write(encoder.encode(data.delta.text));
+            } else if (data.type === 'message_start' && data.message?.usage) {
+              usageInfo = { ...usageInfo, ...data.message.usage };
+            } else if (data.type === 'message_delta') {
+              if (data.delta?.stop_reason) stopReason = data.delta.stop_reason;
+              if (data.usage?.output_tokens !== undefined) usageInfo.output_tokens = data.usage.output_tokens;
             }
           } catch(e) {}
         }
       }
+      console.log(`[chat-usage] model=${model} stop=${stopReason} in=${usageInfo.input_tokens ?? '?'} cacheWrite=${usageInfo.cache_creation_input_tokens ?? 0} cacheRead=${usageInfo.cache_read_input_tokens ?? 0} out=${usageInfo.output_tokens ?? '?'}`);
     } finally {
       await writer.close();
     }
@@ -2072,6 +2094,15 @@ function datevTTMM(dateObj) {
   return `${tt}${mm}`;
 }
 
+// Belegfeld1 (Rechnungsnummer) MUSS befüllt sein — Fallback-Format TTMMJJ des Belegdatums,
+// wenn kein Rechnungsnr-Feld vorhanden ist (z.B. Chat-erkannte Belege ohne OCR-Nummer).
+function datevTTMMJJ(dateObj) {
+  const tt = String(dateObj.getDate()).padStart(2, '0');
+  const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const jj = String(dateObj.getFullYear()).slice(-2);
+  return `${tt}${mm}${jj}`;
+}
+
 function firestoreValue(field) {
   if (!field) return null;
   if (field.stringValue !== undefined) return field.stringValue;
@@ -2222,6 +2253,9 @@ async function handleDatevExport(body, env, cors = {}) {
         const idMatch = /^beleg_(?:rechnung|mahnung)_(.+)_\d+$/.exec(doc.name?.split('/').pop() || '');
         if (idMatch) rechnungsnr = idMatch[1];
       }
+      // Belegfeld 1 ist Pflicht (DATEV EXTF) — ohne jede Rechnungsnummer wird ersatzweise
+      // das Belegdatum als TTMMJJ eingesetzt, statt das Feld leer zu lassen.
+      if (!rechnungsnr) rechnungsnr = datevTTMMJJ(belegDatum);
 
       const absender = firestoreValue(fields.absender) || firestoreValue(fields.name) || '';
       const mwstSatz = firestoreValue(fields.mwst_satz);
