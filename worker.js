@@ -18,6 +18,12 @@ function getCORS(origin) {
     'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Origin',
     'Access-Control-Max-Age': '86400',
+    // Ohne dieses Header sieht fetch() im Browser bei Cross-Origin-Requests NUR die "simple
+    // response headers" (Content-Type etc.) — alle X-Datev-*-Header waren dadurch für den
+    // Frontend-Code faktisch unsichtbar (res.headers.get(...) lieferte immer null), obwohl der
+    // Worker sie korrekt sendet. Nur über curl/wrangler-tail-Direktzugriff nicht aufgefallen, da
+    // dort keine CORS-Filterung greift. Gefunden beim Hinzufügen von X-Datev-Warning (v1.2.3).
+    'Access-Control-Expose-Headers': 'X-Datev-Exported-Count, X-Datev-Skipped-Unpaid-Count, X-Datev-Warning',
   };
 }
 
@@ -624,8 +630,8 @@ Hochgeladene Rechnung → jeden Punkt ✅/❌: vollständiger Name+Anschrift bei
 
 ## DATEV-EXPORT (Einstellungen → Exporte)
 Erzeugt DATEV-Buchungsstapel-CSV (EXTF) aus bezahlten Belegen des gewählten Jahres. Nur "bezahlt"-Belege werden gebucht, offene übersprungen (steht im Export-Status). Buchungsdatum je nach VERSTEUERUNGSMETHODE: Zahlungseingang (Ist, Standard) oder Rechnungsdatum (Soll).
-Einmalig auszufüllende Felder (Nutzer bekommt sie vom Steuerberater): Berater-Nr. (Pflicht, ≤7 Ziffern), Mandanten-Nr. (Pflicht, ≤5 Ziffern), Kontenrahmen SKR03/SKR04 (im Zweifel beim Steuerberater erfragen), Bankkonto/Sachkonto (Pflicht, üblich 1200), Gegenkonto Ausgaben (optional, Default 4900/6300), Wirtschaftsjahr-Beginn (TTMM, nur bei Abweichung).
-Pflichtfeld fehlt → Export lehnt mit "DATEV-Einstellungen unvollständig" ab, fehlende Felder nennen. Werte selbst nicht erfinden — bei Unklarheit an Steuerberater verweisen.
+Einmalig auszufüllende Felder (Nutzer bekommt sie vom Steuerberater): Berater-Nr. (empfohlen, ≤7 Ziffern — fehlt sie, exportiert Kontolux trotzdem mit Platzhalter 0 und warnt den Nutzer), Mandanten-Nr. (empfohlen, ≤5 Ziffern, gleiche Platzhalter-Logik), Kontenrahmen SKR03/SKR04 (im Zweifel beim Steuerberater erfragen), Buchungskonto Bank/Kasse (Pflicht — SKR03: üblich 1200 Bank / 1000 Kasse, SKR04: üblich 1800 Bank / 1600 Kasse; Achtung, 1200 ist in SKR04 NICHT die Bank sondern Forderungen aus Lieferungen und Leistungen — bei SKR04 niemals 1200 vorschlagen), Gegenkonto Ausgaben (optional, Default 4900/6300), Wirtschaftsjahr-Beginn (TTMM, nur bei Abweichung).
+Nur Buchungskonto ist Pflichtfeld und blockiert den Export bei Fehlen — Werte selbst nicht erfinden, bei Unklarheit an Steuerberater verweisen.
 
 ## PROAKTIVES FEATURE-EMPFEHLEN
 Steuerfristen/Überblick→Finanzkalender (📅). Offene Rechnungen/Ausgaben→"+ Button im Finanzkalender". Steuerrücklagen→"Nenn mir deinen monatlichen Gewinn, ich rechne es aus". Einnahmen/Ausgaben tracken→Tageseinnahmen/Monatsabschluss. Rechnung schreiben→"Sag mir wem und wofür". Viele Belege→Belegarchiv. Steuerberater/Jahresabschluss erwähnt→DATEV-Export ("Berater-/Mandanten-Nummer einmalig in den Einstellungen eintragen"). Rechnungsprüfung→"Lad die Rechnung hoch, ich prüfe sie auf §14 UStG". Nachricht beginnt mit "DATEV_EXPORT_HILFE:" → direkt DATEV-Felder erklären (siehe DATEV-EXPORT oben), nicht nachfragen was gemeint ist.
@@ -2203,23 +2209,41 @@ async function handleDatevExport(body, env, cors = {}) {
     // Standard für die meisten Selbstständigen unter 800.000€ Vorjahresumsatz).
     const istSollversteuerung = (firestoreValue(profilFields.versteuerungsart) || '').toString().startsWith('Soll');
 
-    const beraterNr = (firestoreValue(profilFields.datev_berater_nr) || '').toString().trim();
-    const mandantenNr = (firestoreValue(profilFields.datev_mandanten_nr) || '').toString().trim();
-    const bankkonto = (firestoreValue(profilFields.datev_bankkonto) || '').toString().trim();
     const skr = (firestoreValue(profilFields.datev_skr) || 'SKR03').toString().trim();
+    const bankkonto = (firestoreValue(profilFields.datev_bankkonto) || '').toString().trim();
     const ausgabenGegenkonto = (firestoreValue(profilFields.datev_ausgaben_gegenkonto) || '').toString().trim()
       || (skr === 'SKR04' ? '6300' : '4900');
     let wjBeginn = (firestoreValue(profilFields.datev_wj_beginn) || '0101').toString().trim();
     if (!/^\d{4}$/.test(wjBeginn)) wjBeginn = '0101';
 
-    if (!beraterNr || !mandantenNr || !bankkonto) {
+    // Buchungskonto ist Pflicht — steht in JEDER Buchungszeile, ein Platzhalter dort würde die
+    // komplette Datei unbrauchbar machen (welches Konto wurde tatsächlich bewegt?). Berater-/
+    // Mandanten-Nr. betreffen dagegen nur den Kopfsatz (Zuordnung beim Steuerberater) — anders als
+    // beim Buchungskonto blockiert Kontolux hier NICHT mehr hart, sondern exportiert mit einem
+    // erkennbaren Platzhalter ("0") und warnt stattdessen deutlich (X-Datev-Warning-Header,
+    // vom Frontend dauerhaft im Status angezeigt statt nach 5s auszublenden) — DATEV-Rechnungswesen
+    // lehnt eine "0" beim Import ohnehin sauber ab, statt versehentlich in einen falschen
+    // Mandanten zu buchen, wenn der Platzhalter zufällig mit einer echten Nummer kollidiert.
+    if (!bankkonto) {
       return new Response(JSON.stringify({
         error: 'DATEV-Einstellungen unvollständig',
-        details: 'Bitte trage Berater-Nummer, Mandanten-Nummer und Bankkonto in den Einstellungen ein, bevor du exportierst.'
+        details: 'Bitte trage das Buchungskonto (Bank/Kasse) in den Einstellungen ein, bevor du exportierst.'
       }), {
         status: 400,
         headers: { ...cors, 'Content-Type': 'application/json' }
       });
+    }
+    const beraterNrRaw = (firestoreValue(profilFields.datev_berater_nr) || '').toString().trim();
+    const mandantenNrRaw = (firestoreValue(profilFields.datev_mandanten_nr) || '').toString().trim();
+    const beraterNr = beraterNrRaw || '0';
+    const mandantenNr = mandantenNrRaw || '0';
+    let datevWarning = '';
+    if (!beraterNrRaw && !mandantenNrRaw) {
+      datevWarning = 'Berater-Nr. und Mandanten-Nr. fehlen — Platzhalter (0) wurde verwendet. Dein Steuerberater kann die Datei so nicht zuordnen, bitte in den Einstellungen ergänzen.';
+    } else if (!beraterNrRaw) {
+      datevWarning = 'Berater-Nr. fehlt — Platzhalter (0) wurde verwendet. Bitte in den Einstellungen ergänzen.';
+    } else if (!mandantenNrRaw) {
+      datevWarning = 'Mandanten-Nr. fehlt — Platzhalter (0) wurde verwendet. Bitte in den Einstellungen ergänzen.';
     }
 
     // Erlöskonto entsprechend Kontenrahmen — 8400 (SKR03) bzw. das SKR04-Äquivalent 4400,
@@ -2365,7 +2389,10 @@ async function handleDatevExport(body, env, cors = {}) {
         'Content-Disposition': `attachment; filename="EXTF_Buchungsstapel_${jahr}.csv"`,
         'Cache-Control': 'no-cache',
         'X-Datev-Exported-Count': String(buchungen.length),
-        'X-Datev-Skipped-Unpaid-Count': String(skippedUnpaid)
+        'X-Datev-Skipped-Unpaid-Count': String(skippedUnpaid),
+        // encodeURIComponent, da HTTP-Header-Werte kein Latin1-Freitext mit Umlauten zuverlässig
+        // transportieren — Frontend deodiert mit decodeURIComponent() wieder.
+        ...(datevWarning ? { 'X-Datev-Warning': encodeURIComponent(datevWarning) } : {})
       }
     });
 
