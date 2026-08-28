@@ -427,6 +427,9 @@ function buildSachkontoTabelleText() {
 // zwischen zwei Nachrichten desselben Nutzers (tippen, lesen, nachdenken) realistisch oft mehr
 // als 5 Minuten, wodurch der Cache mit der Default-TTL ständig abläuft bevor er gelesen wird.
 // Erfordert den Beta-Header 'extended-cache-ttl-2025-04-11' (siehe Fetch-Aufrufe an die API).
+// A/B-verifiziert 2026-08-28 (Kosten-Root-Cause-Suche): ohne diese beiden Breakpoints kostet
+// JEDE Nachricht ~1,5 Cent (voller ~14k-Token-Block als normaler Input bei jeder Nachricht), mit
+// Caching aktiv 0,2-0,7 Cent — Caching spart hier live gemessen 2-7x, nicht umgekehrt.
 function buildSystemBlocks(dynamicContext, steuerrechtText) {
   const blocks = [];
   if (steuerrechtText) {
@@ -1022,12 +1025,15 @@ async function handleSendEmailChangeVerification(currentEmail, body, env, cors =
   }
 }
 
-// Preise in $/MTok (Stand 2026-08-28). Cache-Write hier als 5-Minuten-TTL-Satz angenommen — der
-// Worker setzt aktuell nirgends ttl:"1h" auf einem Breakpoint, siehe buildSystemBlocks.
+// Preise in $/MTok (Stand 2026-08-28). Cache-Write als 1-STUNDEN-TTL-Satz (2x Input-Preis) —
+// KORRIGIERT 2026-08-28: buildSystemBlocks setzt auf beiden Breakpoints tatsächlich ttl:"1h"
+// (siehe dort), der ursprüngliche Kommentar hier behauptete fälschlich das Gegenteil und nutzte
+// den 5-Minuten-Satz (1.25x) — dadurch wurden alle costCents-Werte in diesem Log bisher zu
+// niedrig berechnet (der reale Cache-Write kostet 2x, nicht 1.25x, des Input-Preises).
 const MODEL_PRICING_PER_MTOK = {
-  haiku: { input: 1.00, output: 5.00, cacheWrite: 1.25, cacheRead: 0.10 },
-  sonnet: { input: 3.00, output: 15.00, cacheWrite: 3.75, cacheRead: 0.30 },
-  opus: { input: 5.00, output: 25.00, cacheWrite: 6.25, cacheRead: 0.50 }
+  haiku: { input: 1.00, output: 5.00, cacheWrite: 2.00, cacheRead: 0.10 },
+  sonnet: { input: 3.00, output: 15.00, cacheWrite: 6.00, cacheRead: 0.30 },
+  opus: { input: 5.00, output: 25.00, cacheWrite: 10.00, cacheRead: 0.50 }
 };
 function estimateCostCents(model, usage) {
   const key = /haiku/i.test(model) ? 'haiku' : /sonnet/i.test(model) ? 'sonnet' : /opus/i.test(model) ? 'opus' : 'haiku';
@@ -1212,7 +1218,12 @@ async function handleChat(body, env, cors = {}, ctx) {
 }
 
 // ── Stream Helper ────────────────────────────────────────
-async function streamTextResponse(claudeRes, userId, env, cors) {
+// label identifiziert den Aufrufer im [chat-usage]-Log (z.B. "image"/"document") — vorher hatte
+// dieser gemeinsam genutzte Helper (handleImage + normaler Dokument-Upload in handleDocument)
+// GAR KEIN Usage-Logging, obwohl Bild-/PDF-Analysen durch die eingebetteten Dokument-Tokens
+// potenziell die teuersten Aufrufe im ganzen Worker sind — Kosten-Untersuchung 2026-08-28 hätte
+// ohne dieses Logging diesen Pfad blind gelassen.
+async function streamTextResponse(claudeRes, userId, env, cors, model = 'claude-haiku-4-5-20251001', label = 'stream') {
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
   const encoder = new TextEncoder();
@@ -1222,6 +1233,8 @@ async function streamTextResponse(claudeRes, userId, env, cors) {
     const decoder = new TextDecoder();
     let fullText = '';
     let buffer = '';
+    let usageInfo = {};
+    let stopReason = null;
 
     try {
       while (true) {
@@ -1241,10 +1254,17 @@ async function streamTextResponse(claudeRes, userId, env, cors) {
             if (data.type === 'content_block_delta' && data.delta?.type === 'text_delta' && data.delta?.text) {
               fullText += data.delta.text;
               await writer.write(encoder.encode(data.delta.text));
+            } else if (data.type === 'message_start' && data.message?.usage) {
+              usageInfo = { ...usageInfo, ...data.message.usage };
+            } else if (data.type === 'message_delta') {
+              if (data.delta?.stop_reason) stopReason = data.delta.stop_reason;
+              if (data.usage?.output_tokens !== undefined) usageInfo.output_tokens = data.usage.output_tokens;
             }
           } catch(e) {}
         }
       }
+      const costCents = estimateCostCents(model, usageInfo);
+      console.log(`[chat-usage:${label}] model=${model} stop=${stopReason} in=${usageInfo.input_tokens ?? '?'} cacheWrite=${usageInfo.cache_creation_input_tokens ?? 0} cacheRead=${usageInfo.cache_read_input_tokens ?? 0} out=${usageInfo.output_tokens ?? '?'} costCents=${costCents}`);
     } finally {
       await writer.close();
     }
@@ -1286,6 +1306,7 @@ async function handleImage(body, env, cors = {}, ctx) {
     ]
   }];
 
+  const imageModel = env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001';
   const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -1295,14 +1316,14 @@ async function handleImage(body, env, cors = {}, ctx) {
       'content-type': 'application/json'
     },
     body: JSON.stringify({
-      model: env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001',
+      model: imageModel,
       max_tokens: 2048,
       stream: true,
       system,
       messages
     })
   });
-  return streamTextResponse(claudeRes, userId, env, cors);
+  return streamTextResponse(claudeRes, userId, env, cors, imageModel, 'image');
 }
 
 // Bucht einen bereits als bezahlt markierten Beleg (manueller Eintrag oder Datei-Upload im
@@ -1829,6 +1850,10 @@ async function handleDocument(body, env, cors = {}, ctx) {
       });
 
     const data = await claudeRes.json();
+    if (data.usage) {
+      const costCents = estimateCostCents('claude-haiku-4-5-20251001', data.usage);
+      console.log(`[chat-usage:monatsabschluss-pdf] model=claude-haiku-4-5-20251001 stop=${data.stop_reason} in=${data.usage.input_tokens ?? '?'} cacheWrite=${data.usage.cache_creation_input_tokens ?? 0} cacheRead=${data.usage.cache_read_input_tokens ?? 0} out=${data.usage.output_tokens ?? '?'} costCents=${costCents}`);
+    }
     if (!data.content || !data.content[0]) {
       return new Response('Fehler bei der PDF-Extraktion', { status: 500, headers: cors });
     }
@@ -1922,7 +1947,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
       messages
     })
   });
-  return streamTextResponse(claudeRes, userId, env, cors);
+  return streamTextResponse(claudeRes, userId, env, cors, 'claude-haiku-4-5-20251001', 'document');
 }
 
 // ── /frist Handler ────────────────────────────────────────
