@@ -1016,6 +1016,24 @@ async function handleSendEmailChangeVerification(currentEmail, body, env, cors =
   }
 }
 
+// Preise in $/MTok (Stand 2026-08-28). Cache-Write hier als 5-Minuten-TTL-Satz angenommen — der
+// Worker setzt aktuell nirgends ttl:"1h" auf einem Breakpoint, siehe buildSystemBlocks.
+const MODEL_PRICING_PER_MTOK = {
+  haiku: { input: 1.00, output: 5.00, cacheWrite: 1.25, cacheRead: 0.10 },
+  sonnet: { input: 3.00, output: 15.00, cacheWrite: 3.75, cacheRead: 0.30 },
+  opus: { input: 5.00, output: 25.00, cacheWrite: 6.25, cacheRead: 0.50 }
+};
+function estimateCostCents(model, usage) {
+  const key = /haiku/i.test(model) ? 'haiku' : /sonnet/i.test(model) ? 'sonnet' : /opus/i.test(model) ? 'opus' : 'haiku';
+  const p = MODEL_PRICING_PER_MTOK[key];
+  const input = usage.input_tokens || 0;
+  const cacheWrite = usage.cache_creation_input_tokens || 0;
+  const cacheRead = usage.cache_read_input_tokens || 0;
+  const output = usage.output_tokens || 0;
+  const dollars = (input * p.input + cacheWrite * p.cacheWrite + cacheRead * p.cacheRead + output * p.output) / 1_000_000;
+  return (dollars * 100).toFixed(3);
+}
+
 async function handleChat(body, env, cors = {}, ctx) {
   const { Nachricht, Verlauf, Nutzername, Profil, FristType, Datum, userId, ChatId, ErsteNachricht, Datei } = body;
 
@@ -1168,7 +1186,8 @@ async function handleChat(body, env, cors = {}, ctx) {
           } catch(e) {}
         }
       }
-      console.log(`[chat-usage] model=${model} stop=${stopReason} in=${usageInfo.input_tokens ?? '?'} cacheWrite=${usageInfo.cache_creation_input_tokens ?? 0} cacheRead=${usageInfo.cache_read_input_tokens ?? 0} out=${usageInfo.output_tokens ?? '?'}`);
+      const costCents = estimateCostCents(model, usageInfo);
+      console.log(`[chat-usage] model=${model} stop=${stopReason} in=${usageInfo.input_tokens ?? '?'} cacheWrite=${usageInfo.cache_creation_input_tokens ?? 0} cacheRead=${usageInfo.cache_read_input_tokens ?? 0} out=${usageInfo.output_tokens ?? '?'} costCents=${costCents}`);
     } finally {
       await writer.close();
     }
