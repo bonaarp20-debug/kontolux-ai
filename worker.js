@@ -653,12 +653,22 @@ ZEIT_ABRECHNEN:kunde=[Name],zeiteintraege_ids=[id1;id2;id3],rechnungsnummer=[aut
 Keine offenen Einträge für diesen Kunden im Kontext → sagen, dass keine offenen Stunden vorliegen, keine IDs erfinden.
 
 ## REISEKOSTEN
-Nutzer berichtet von einer Dienstreise (z.B. "Ich bin heute 45km zu Müller gefahren", "Ich war 2 Tage in Berlin für Schmidt GmbH") → Datum, Zweck, ggf. Kunde, km und/oder Abwesenheitsdauer erfassen. Pauschalen 2026 — ausschließlich diese verwenden, niemals eigene Werte annehmen oder das Steuerrecht-Dokument dafür neu interpretieren:
-- Kilometerpauschale: 0,32€/km für die ersten 20km, 0,40€/km ab dem 21. km (Gesamtstrecke, nicht nur einfache Fahrt)
+Nutzer berichtet von einer Dienstreise (z.B. "Ich bin heute 45km zu Müller gefahren", "Ich war 2 Tage in Berlin für Schmidt GmbH") → Datum, Zweck, ggf. Kunde, km und/oder Abwesenheitsdauer erfassen. Pauschalen 2026 — ausschließlich diese verwenden, niemals eigene Werte annehmen, niemals mit der Pendlerpauschale verwechseln:
+- Dienstreisen-Kilometerpauschale (das ist die für Selbstständige relevante!): 0,30€/km PAUSCHAL für die GESAMTE gefahrene Strecke (Hin- und Rückfahrt) — KEINE Staffelung nach Distanz, unabhängig ob 5km oder 500km.
+- NIEMALS die Pendlerpauschale/Entfernungspauschale (0,38€/km, nur einfache Strecke) hier verwenden — die gilt ausschließlich für den täglichen Arbeitsweg von Angestellten zur ersten Tätigkeitsstätte, nie für Dienstreisen/Kundentermine, auch nicht bei Selbstständigen.
 - Verpflegungspauschale: 14€ bei 8-24h Abwesenheit, 28€ ab 24h Abwesenheit, unter 8h kein Abzug möglich
 - Übernachtung: nur tatsächliche Kosten laut Beleg (Selbstständige haben keine Pauschale ohne Beleg) — ohne Beleg nachfragen oder weglassen, nie schätzen
-km_betrag/verpflegung_betrag selbst nach diesen Pauschalen ausrechnen und zur Anzeige im Befehl mitschicken — das System rechnet zur Kontrolle unabhängig nach und korrigiert falsche Werte. Wurde ein Kunde genannt → IMMER fragen: "Soll ich das als Betriebsausgabe buchen oder an [Kunde] weiterberechnen?" Kein Kunde genannt → automatisch Betriebsausgabe, ohne zu fragen. Befehl:
-REISE_ERFASSEN:datum=[YYYY-MM-DD],zweck=[Text],kunde=[Name, sonst weglassen],km=[Zahl, sonst weglassen],verpflegung_stunden=[8/24/0],uebernachtung_betrag=[Zahl, sonst weglassen],typ=[betriebsausgabe/weiterberechnung]
+km_betrag = km × 0,30€ (keine Staffelung!), verpflegung_betrag nach obigen Regeln — beides selbst ausrechnen und zur Anzeige in der Antwort nennen; das System rechnet zur Kontrolle unabhängig nach und korrigiert falsche Werte.
+
+KEIN Kunde genannt → sofort automatisch als Betriebsausgabe buchen, kurze Bestätigung MIT Betrag + Befehl in DERSELBEN Nachricht:
+REISE_ERFASSEN:datum=[YYYY-MM-DD],zweck=[Text],km=[Zahl, sonst weglassen],verpflegung_stunden=[8/24/0],uebernachtung_betrag=[Zahl, sonst weglassen],typ=betriebsausgabe
+
+KUNDE GENANNT → ZWEI SCHRITTE, NIE IN EINER NACHRICHT ZUSAMMENFASSEN:
+1. Berechnung zeigen, dann fragen: "Ich habe [km]km × 0,30€ = [X]€ Fahrtkosten[ + Verpflegungspauschale Y€] berechnet, macht [Z]€. Soll ich das als Betriebsausgabe buchen oder an [Kunde] weiterberechnen?" — in DIESER Nachricht noch KEIN REISE_ERFASSEN, die Angaben bleiben im Gesprächsverlauf (nicht vergessen, wenn der Nutzer nur kurz antwortet).
+2. Antwort erhalten ("Betriebsausgabe"/"als Ausgabe buchen" ODER "weiterberechnen"/"an [Kunde]") → kurze Bestätigung + Befehl MIT allen Daten aus Schritt 1 (Datum/Zweck/km/Verpflegung/Übernachtung erneut vollständig einsetzen, aus dem Gesprächsverlauf):
+REISE_ERFASSEN:datum=[YYYY-MM-DD],zweck=[Text],kunde=[Name],km=[Zahl, sonst weglassen],verpflegung_stunden=[8/24/0],uebernachtung_betrag=[Zahl, sonst weglassen],typ=[betriebsausgabe/weiterberechnung je nach Antwort]
+WICHTIG: Der Befehl MUSS in der bestätigenden Antwort (Schritt 2) stehen, sonst wird NICHTS gespeichert — niemals nur "Alles klar, gebucht!" ohne den Befehl antworten.
+
 "Berechne die Reisekosten an [Kunde] weiter" → die IDs aus "Offene, noch nicht weiterberechnete Reisekosten pro Kunde" im Profilkontext nehmen, MwSt-Satz erfragen falls unklar:
 REISE_ABRECHNEN:kunde=[Name],reise_ids=[id1;id2],rechnungsnummer=[auto oder eigene Nr.],mwst_satz=[19/7/0]
 
