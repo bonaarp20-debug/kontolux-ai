@@ -260,6 +260,33 @@ async function incrementUploadLimit(userId, env) {
 const DATEI_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
 const DATEI_ERLAUBTE_TYPEN = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png'];
 
+// ── Betrag-Validierung für RECHNUNG_ERSTELLEN/MAHNUNG_ERSTELLEN ───
+// Diese Commands stehen als eigene Zeile im gestreamten Claude-Fließtext und werden ausschließlich
+// clientseitig (index.html) per Regex herausgeparst und blind in PDF/Firestore umgesetzt — der
+// Client vertraut dem vom Modell gelieferten Betrag ohne Prüfung. Die Prüfung muss deshalb HIER
+// passieren, bevor die Befehlszeile den Client überhaupt erreicht (siehe emitStreamLine unten,
+// das den Stream zeilenweise puffert statt token-weise weiterzureichen — unsichtbar für den
+// Nutzer, da diese Befehlszeile ohnehin nie im Chat-Bubble angezeigt wird).
+function pruefeBetragZeile(line) {
+  const rechnungMatch = line.match(/RECHNUNG_ERSTELLEN:(.*)$/i);
+  if (rechnungMatch) {
+    const m = rechnungMatch[1].match(/betrag_netto=([^,]*)/i);
+    const betrag = m ? parseFloat(m[1]) : NaN;
+    if (!Number.isFinite(betrag) || betrag <= 0) {
+      return line.slice(0, rechnungMatch.index) + 'Ich kann diese Rechnung nicht erstellen — der Betrag muss größer als 0 sein. Bitte nenne mir einen gültigen Betrag.';
+    }
+  }
+  const mahnungMatch = line.match(/MAHNUNG_ERSTELLEN:(.*)$/i);
+  if (mahnungMatch) {
+    const m = mahnungMatch[1].match(/betrag=([^,]*)/i);
+    const betrag = m ? parseFloat(m[1]) : NaN;
+    if (!Number.isFinite(betrag) || betrag <= 0) {
+      return line.slice(0, mahnungMatch.index) + 'Ich kann diese Mahnung nicht erstellen — der Betrag muss größer als 0 sein. Bitte prüfe die zugrunde liegende Rechnung.';
+    }
+  }
+  return line;
+}
+
 function validateDatei(Datei, { allowedTypes = DATEI_ERLAUBTE_TYPEN } = {}) {
   if (!Datei || typeof Datei.base64 !== 'string' || !Datei.base64) {
     return { ok: false, error: 'Keine Datei übermittelt.' };
@@ -650,7 +677,7 @@ Alles vorhanden → antworte SO, absender_name/eigene_adresse/steuernummer/bankv
 "Super, ich erstelle deine Rechnung!"
 RECHNUNG_ERSTELLEN:absender_name=[echter Name/Firma],empfaenger_name=[Name],empfaenger_anrede=[Herr/Frau/Firma],empfaenger_adresse=[Straße;PLZ;Ort],leistung=[Beschreibung],leistungsdatum=[Datum als "15. August 2026"],zahlungsziel=[Datum als "15. August 2026"],betrag_netto=[Zahl],rechnungsnummer=[Nummer],steuernummer=[echte Steuernummer],eigene_adresse=[Straße;PLZ;Ort],bankverbindung=[echte IBAN],verwendungszweck=[Standard: identisch zur Rechnungsnummer, nie frei erfunden],format=[pdf/xrechnung/beide],mwst_satz=[19/7/0]
 
-WICHTIG: Befehl MUSS in der Antwort stehen, sonst keine PDF. Keine Zusammenfassung, nur der Befehl. Danach fragen: "Wurde diese Rechnung bereits bezahlt? Dann speichere ich sie als Tageseinnahme." Datumsangaben im Befehl deutsches Langformat "15. August 2026" (nie YYYY-MM-DD/DD.MM.YYYY). Kommas in Werten → Semikolon. Betrag nur Zahl ohne €. KU: mwst_satz=0, §19-Hinweis, kein Steuerausweis. Nicht-KU: mwst_satz=19 oder 7, USt. ausweisen. mwst_satz und format IMMER angeben, nie weglassen (format-Default pdf). verwendungszweck NIEMALS erfinden oder frei formulieren — Standard ist immer die Rechnungsnummer (rechnungsnummer-Wert exakt übernehmen), nur wenn der Nutzer von sich aus explizit einen anderen Text nennt, den exakt verwenden.
+WICHTIG: Befehl MUSS in der Antwort stehen, sonst keine PDF. Keine Zusammenfassung, nur der Befehl. Danach fragen: "Wurde diese Rechnung bereits bezahlt? Dann speichere ich sie als Tageseinnahme." Datumsangaben im Befehl deutsches Langformat "15. August 2026" (nie YYYY-MM-DD/DD.MM.YYYY). Kommas in Werten → Semikolon. Betrag nur Zahl ohne €. betrag_netto MUSS größer als 0 sein — ist der genannte/berechnete Betrag 0 oder negativ, KEINEN RECHNUNG_ERSTELLEN-Befehl ausgeben, sondern nachfragen, welcher Betrag korrekt ist. KU: mwst_satz=0, §19-Hinweis, kein Steuerausweis. Nicht-KU: mwst_satz=19 oder 7, USt. ausweisen. mwst_satz und format IMMER angeben, nie weglassen (format-Default pdf). verwendungszweck NIEMALS erfinden oder frei formulieren — Standard ist immer die Rechnungsnummer (rechnungsnummer-Wert exakt übernehmen), nur wenn der Nutzer von sich aus explizit einen anderen Text nennt, den exakt verwenden.
 
 ## E-RECHNUNGEN (XRECHNUNG/ZUGFERD)
 Seit 2025 müssen Unternehmen (B2B) Eingangsrechnungen als E-Rechnung empfangen können — deshalb XRechnung aktiv empfehlen wenn der Empfänger erkennbar ein Unternehmen ist (siehe RECHNUNG ERSTELLEN). Hochgeladene XRechnung-XML/ZUGFeRD-PDF werden im Belegarchiv automatisch erkannt und ausgelesen (Betrag/Absender/Rechnungsnr/MwSt-Satz) — Nutzer bestätigt nur noch, trägt nicht von Hand ein.
@@ -661,7 +688,7 @@ Aus Profil (nicht fragen wenn vorhanden): Name→'absender_name', Adresse→'eig
 Antwort SO, absender_name/eigene_adresse/bankverbindung IMMER echte Profilwerte (nie Platzhaltertext/generische Namen — echter Wert oder Feld weglassen):
 "Ich erstelle deine Mahnung!"
 MAHNUNG_ERSTELLEN:absender_name=[echter Name],empfaenger_name=[Name],empfaenger_anrede=[Herr/Frau/Firma],empfaenger_adresse=[Straße;PLZ;Ort],rechnungsnummer=[Nr],rechnungsdatum=[Datum als "15. August 2026"],betrag=[Zahl],mahnstufe=[1/2/erinnerung],neue_frist=[Datum als "15. August 2026"],eigene_adresse=[Straße;PLZ;Ort],bankverbindung=[echte IBAN],verwendungszweck=[Standard: identisch zur Rechnungsnummer, nie frei erfunden]
-WICHTIG: Befehl MUSS stehen. Datumsangaben deutsches Langformat "15. August 2026". Kommas → Semikolon. Mahngebühren nur bei stufe=2 wenn vertraglich vereinbart. verwendungszweck NIEMALS erfinden — Standard ist die ursprüngliche Rechnungsnummer, nur bei expliziter Nutzerangabe abweichen.
+WICHTIG: Befehl MUSS stehen. Datumsangaben deutsches Langformat "15. August 2026". Kommas → Semikolon. Mahngebühren nur bei stufe=2 wenn vertraglich vereinbart. betrag MUSS größer als 0 sein — ist der offene Betrag 0 oder negativ (z.B. Rechnung bereits vollständig bezahlt), KEINEN MAHNUNG_ERSTELLEN-Befehl ausgeben, sondern das dem Nutzer erklären. verwendungszweck NIEMALS erfinden — Standard ist die ursprüngliche Rechnungsnummer, nur bei expliziter Nutzerangabe abweichen.
 
 ## ANGEBOT ERSTELLEN
 Nutzer möchte ein Angebot (KEINE Rechnung — noch keine Leistung erbracht/fällig) → alle Infos in EINER Nachricht abfragen: Kunde (Name, Adresse optional), eine oder mehrere Positionen (je Position: Beschreibung, Menge z.B. Tage/Stunden/Stück, Einzelpreis netto), Gültigkeitsdauer (Nutzer sagt "gültig 30 Tage" → ab heutigem Datum ausrechnen; nichts genannt → 30 Tage Standard), MwSt-Satz wie bei RECHNUNG ERSTELLEN (Kleinunternehmer immer 0, sonst 19/7 erfragen falls unklar). absender_name/eigene_adresse/steuernummer kommen automatisch aus dem Profil — nicht erneut abfragen wenn dort vorhanden, neu genannt → wie bei RECHNUNG ERSTELLEN per PROFIL_UPDATE sichern.
@@ -1251,6 +1278,11 @@ async function handleChat(body, env, cors = {}, ctx) {
     const decoder = new TextDecoder();
     let fullText = '';
     let buffer = '';
+    // Zeilenpuffer für den ausgehenden Text — RECHNUNG_ERSTELLEN/MAHNUNG_ERSTELLEN müssen VOR dem
+    // Weiterreichen an den Client geprüft werden (siehe pruefeBetragZeile), was eine vollständige
+    // Zeile voraussetzt. Nur die eine Befehlszeile wird dadurch kurz zurückgehalten, aller andere
+    // Text streamt weiterhin unverändert live.
+    let textLineBuffer = '';
     // Kosten-Diagnose: Token-Nutzung/stop_reason pro Chat-Nachricht mitloggen (wrangler tail),
     // damit Kostenausreißer und stille Antwort-Abschneidungen (stop_reason=max_tokens) live
     // messbar sind, ohne bei jeder Untersuchung erneut Ad-hoc-Logging einbauen zu müssen.
@@ -1274,7 +1306,12 @@ async function handleChat(body, env, cors = {}, ctx) {
             const data = JSON.parse(dataStr);
             if (data.type === 'content_block_delta' && data.delta?.type === 'text_delta' && data.delta?.text) {
               fullText += data.delta.text;
-              await writer.write(encoder.encode(data.delta.text));
+              textLineBuffer += data.delta.text;
+              const textLines = textLineBuffer.split('\n');
+              textLineBuffer = textLines.pop();
+              for (const textLine of textLines) {
+                await writer.write(encoder.encode(pruefeBetragZeile(textLine) + '\n'));
+              }
             } else if (data.type === 'message_start' && data.message?.usage) {
               usageInfo = { ...usageInfo, ...data.message.usage };
             } else if (data.type === 'message_delta') {
@@ -1283,6 +1320,9 @@ async function handleChat(body, env, cors = {}, ctx) {
             }
           } catch(e) {}
         }
+      }
+      if (textLineBuffer) {
+        await writer.write(encoder.encode(pruefeBetragZeile(textLineBuffer)));
       }
       const costCents = estimateCostCents(model, usageInfo);
       console.log(`[chat-usage] model=${model} stop=${stopReason} in=${usageInfo.input_tokens ?? '?'} cacheWrite=${usageInfo.cache_creation_input_tokens ?? 0} cacheRead=${usageInfo.cache_read_input_tokens ?? 0} out=${usageInfo.output_tokens ?? '?'} costCents=${costCents}`);
@@ -1319,6 +1359,9 @@ async function streamTextResponse(claudeRes, userId, env, cors, model = 'claude-
     const decoder = new TextDecoder();
     let fullText = '';
     let buffer = '';
+    // Siehe handleChat weiter oben — gleiche Begründung: Zeilenpuffer, damit
+    // RECHNUNG_ERSTELLEN/MAHNUNG_ERSTELLEN vor dem Weiterreichen geprüft werden können.
+    let textLineBuffer = '';
     let usageInfo = {};
     let stopReason = null;
 
@@ -1339,7 +1382,12 @@ async function streamTextResponse(claudeRes, userId, env, cors, model = 'claude-
             const data = JSON.parse(dataStr);
             if (data.type === 'content_block_delta' && data.delta?.type === 'text_delta' && data.delta?.text) {
               fullText += data.delta.text;
-              await writer.write(encoder.encode(data.delta.text));
+              textLineBuffer += data.delta.text;
+              const textLines = textLineBuffer.split('\n');
+              textLineBuffer = textLines.pop();
+              for (const textLine of textLines) {
+                await writer.write(encoder.encode(pruefeBetragZeile(textLine) + '\n'));
+              }
             } else if (data.type === 'message_start' && data.message?.usage) {
               usageInfo = { ...usageInfo, ...data.message.usage };
             } else if (data.type === 'message_delta') {
@@ -1348,6 +1396,9 @@ async function streamTextResponse(claudeRes, userId, env, cors, model = 'claude-
             }
           } catch(e) {}
         }
+      }
+      if (textLineBuffer) {
+        await writer.write(encoder.encode(pruefeBetragZeile(textLineBuffer)));
       }
       const costCents = estimateCostCents(model, usageInfo);
       console.log(`[chat-usage:${label}] model=${model} stop=${stopReason} in=${usageInfo.input_tokens ?? '?'} cacheWrite=${usageInfo.cache_creation_input_tokens ?? 0} cacheRead=${usageInfo.cache_read_input_tokens ?? 0} out=${usageInfo.output_tokens ?? '?'} costCents=${costCents}`);
