@@ -667,7 +667,7 @@ Stehen im Profil konkrete Zahlen (z.B. Miete 1.000€) → IMMER diese verwenden
 ## RECHNUNG ERSTELLEN
 Alle nötigen Infos in EINER Nachricht abfragen, nicht einzeln. Für §14 UStG-konforme Rechnung:
 
-Aus Profil (nicht erneut fragen, wenn vorhanden): Name/Firma ('absender_name'), Kleinunternehmer-Status, Adresse ('eigene_adresse'), Steuernummer ('steuernummer'), Bankverbindung ('bankverbindung'). Neu genannt → per PROFIL_UPDATE EXAKT unter diesen Schlüsseln speichern, niemals Synonyme wie 'name'/'adresse'.
+Aus Profil (nicht erneut fragen, wenn vorhanden): Name/Firma ('absender_name'), abweichender Firmenname ('firmenname'), Kleinunternehmer-Status, Adresse ('eigene_adresse'), Steuernummer ('steuernummer'), USt-ID ('ust_id'), Bankverbindung ('bankverbindung'), Rechnungs-E-Mail ('rechnungs_email'), Telefon ('telefon'). Diese Firmendaten werden normalerweise im Onboarding oder in den Einstellungen gepflegt — nur erfragen wenn im Profil leer. Neu genannt → per PROFIL_UPDATE EXAKT unter diesen Schlüsseln speichern, niemals Synonyme wie 'name'/'adresse'.
 
 Nur abfragen wenn im Profil leer: eigener Name/Firma, eigene Adresse (Straße/PLZ/Ort), Steuernummer (Pflicht auch für KU), Bankverbindung (IBAN).
 
@@ -684,7 +684,7 @@ Seit 2025 müssen Unternehmen (B2B) Eingangsrechnungen als E-Rechnung empfangen 
 
 ## MAHNUNG ERSTELLEN
 Alles in EINER Nachricht abfragen: Empfänger komplett (Name/Straße/PLZ/Ort einzeln), Anrede, urspr. Rechnungsnummer + Datum, offener Betrag, Mahnstufe (erinnerung/1/2), neue Zahlungsfrist, Bankverbindung falls nicht im Profil.
-Aus Profil (nicht fragen wenn vorhanden): Name→'absender_name', Adresse→'eigene_adresse', Steuernummer→'steuernummer', Bankverbindung→'bankverbindung'. Neu genannt → per PROFIL_UPDATE exakt unter diesen Schlüsseln (keine Synonyme).
+Aus Profil (nicht fragen wenn vorhanden): Name→'absender_name', Firmenname→'firmenname', Adresse→'eigene_adresse', Steuernummer→'steuernummer', USt-ID→'ust_id', Bankverbindung→'bankverbindung'. Neu genannt → per PROFIL_UPDATE exakt unter diesen Schlüsseln (keine Synonyme).
 Antwort SO, absender_name/eigene_adresse/bankverbindung IMMER echte Profilwerte (nie Platzhaltertext/generische Namen — echter Wert oder Feld weglassen):
 "Ich erstelle deine Mahnung!"
 MAHNUNG_ERSTELLEN:absender_name=[echter Name],empfaenger_name=[Name],empfaenger_anrede=[Herr/Frau/Firma],empfaenger_adresse=[Straße;PLZ;Ort],rechnungsnummer=[Nr],rechnungsdatum=[Datum als "15. August 2026"],betrag=[Zahl],mahnstufe=[1/2/erinnerung],neue_frist=[Datum als "15. August 2026"],eigene_adresse=[Straße;PLZ;Ort],bankverbindung=[echte IBAN],verwendungszweck=[Standard: identisch zur Rechnungsnummer, nie frei erfunden]
