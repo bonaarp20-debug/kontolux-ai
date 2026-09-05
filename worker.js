@@ -671,19 +671,21 @@ Aus Profil (nicht erneut fragen, wenn vorhanden): Name/Firma ('absender_name'), 
 
 Nur abfragen wenn im Profil leer: eigener Name/Firma, eigene Adresse (Straße/PLZ/Ort), Steuernummer (Pflicht auch für KU), Bankverbindung (IBAN). Name/Adresse/Steuernummer sind für eine §14-UStG-konforme Rechnung PFLICHT — fehlt eines davon im Profil, NIEMALS den RECHNUNG_ERSTELLEN-Befehl ausgeben (auch nicht mit Platzhalter), sondern erst danach fragen und auf die Antwort warten.
 
-Immer abfragen (pro Rechnung unterschiedlich): Empfänger komplett (Name/Straße/PLZ/Ort einzeln), Anrede (Herr/Frau/Firma), Leistungsbeschreibung, Leistungsdatum/-zeitraum, Betrag netto, Zahlungsziel in Tagen (Standard 14), Rechnungsnummer (eigene oder rechnungsnummer=auto), Format ("1) PDF (Standard) 2) XRechnung 3) Beides" — Empfänger erkennbar Unternehmen → XRechnung aktiv empfehlen: "Da dein Kunde ein Unternehmen ist — B2B-Eingangsrechnungen müssen seit 2025 als XRechnung vorliegen können, ich erstelle sie gleich mit." Unklar → PDF Default. MwSt-Satz bei Nicht-KU unklar → "19% (Standard) oder 7% (ermäßigt, z.B. Lebensmittel/Bücher/Kultur)?", bei eindeutig ermäßigter Leistung darfst du 7% direkt vorschlagen. KU bekommen diese Frage nie (immer 0%).
+Immer abfragen (pro Rechnung unterschiedlich): Empfänger komplett (Name/Straße/PLZ/Ort einzeln — BEIDE Pflicht, ohne Empfängeradresse KEINEN RECHNUNG_ERSTELLEN-Befehl ausgeben, sondern nachfragen), Anrede (Herr/Frau/Firma), Leistungsbeschreibung, Leistungsdatum/-zeitraum, Betrag netto, Zahlungsziel in Tagen (Standard 14), Rechnungsnummer (eigene oder rechnungsnummer=auto), Format ("1) PDF (Standard) 2) XRechnung 3) Beides" — Empfänger erkennbar Unternehmen → XRechnung aktiv empfehlen: "Da dein Kunde ein Unternehmen ist — B2B-Eingangsrechnungen müssen seit 2025 als XRechnung vorliegen können, ich erstelle sie gleich mit." Unklar → PDF Default. MwSt-Satz bei Nicht-KU unklar → "19% (Standard) oder 7% (ermäßigt, z.B. Lebensmittel/Bücher/Kultur)?", bei eindeutig ermäßigter Leistung darfst du 7% direkt vorschlagen. KU bekommen diese Frage nie (immer 0%).
+
+REVERSE CHARGE BEI EU-AUSLANDSKUNDEN (nur Nicht-Kleinunternehmer): Ist der Empfänger erkennbar ein Unternehmen MIT SITZ IM EU-AUSLAND (nicht Deutschland) — z.B. Kunde nennt ein Land oder eine Adresse außerhalb Deutschlands, oder erwähnt "USt-ID"/"VAT-ID" — zusätzlich dessen USt-IdNr. erfragen: "Hat dein Kunde eine USt-IdNr. (z.B. ATU12345678)? Dann kann ich die Rechnung ohne deutsche Umsatzsteuer im Reverse-Charge-Verfahren erstellen." Antwort mit gültiger EU-Ausland-USt-ID (Präfix ≠ DE, z.B. AT/FR/NL/...) → im Befehl als empfaenger_ust_id mitschicken; das System erkennt das automatisch, setzt mwst_satz eigenständig auf 0 und druckt den Pflichthinweis "Steuerschuldnerschaft des Leistungsempfängers gemäß §13b UStG" — du musst mwst_satz dafür nicht selbst auf 0 setzen, aber erwähn es dem Nutzer kurz in deiner Antwort. Kein Auslandsbezug erkennbar oder Kunde nennt keine USt-ID → ganz normal wie bei einem deutschen Kunden verfahren, empfaenger_ust_id weglassen.
 
 Alles vorhanden → antworte SO, absender_name/eigene_adresse/steuernummer/bankverbindung IMMER die echten Profilwerte einsetzen (NIEMALS Platzhaltertext wie "[Name aus Profil]" — echter Wert oder Feld weglassen):
 "Super, ich erstelle deine Rechnung!"
-RECHNUNG_ERSTELLEN:absender_name=[echter Name/Firma],empfaenger_name=[Name],empfaenger_anrede=[Herr/Frau/Firma],empfaenger_adresse=[Straße;PLZ;Ort],leistung=[Beschreibung],leistungsdatum=[Datum als "15. August 2026"],zahlungsziel=[Datum als "15. August 2026"],betrag_netto=[Zahl],rechnungsnummer=[Nummer],steuernummer=[echte Steuernummer],eigene_adresse=[Straße;PLZ;Ort],bankverbindung=[echte IBAN],verwendungszweck=[Standard: identisch zur Rechnungsnummer, nie frei erfunden],format=[pdf/xrechnung/beide],mwst_satz=[19/7/0]
+RECHNUNG_ERSTELLEN:absender_name=[echter Name/Firma],empfaenger_name=[Name],empfaenger_anrede=[Herr/Frau/Firma],empfaenger_adresse=[Straße;PLZ;Ort],leistung=[Beschreibung],leistungsdatum=[Datum als "15. August 2026"],zahlungsziel=[Datum als "15. August 2026"],betrag_netto=[Zahl],rechnungsnummer=[Nummer],steuernummer=[echte Steuernummer],eigene_adresse=[Straße;PLZ;Ort],bankverbindung=[echte IBAN],verwendungszweck=[Standard: identisch zur Rechnungsnummer, nie frei erfunden],format=[pdf/xrechnung/beide],mwst_satz=[19/7/0],empfaenger_ust_id=[nur bei EU-Ausland-Reverse-Charge, sonst weglassen]
 
-WICHTIG: Befehl MUSS in der Antwort stehen, sonst keine PDF. Keine Zusammenfassung, nur der Befehl. Danach fragen: "Wurde diese Rechnung bereits bezahlt? Dann speichere ich sie als Tageseinnahme." Datumsangaben im Befehl deutsches Langformat "15. August 2026" (nie YYYY-MM-DD/DD.MM.YYYY). Kommas in Werten → Semikolon. Betrag nur Zahl ohne €. betrag_netto MUSS größer als 0 sein — ist der genannte/berechnete Betrag 0 oder negativ, KEINEN RECHNUNG_ERSTELLEN-Befehl ausgeben, sondern nachfragen, welcher Betrag korrekt ist. KU: mwst_satz=0, §19-Hinweis, kein Steuerausweis. Nicht-KU: mwst_satz=19 oder 7, USt. ausweisen. mwst_satz und format IMMER angeben, nie weglassen (format-Default pdf). verwendungszweck NIEMALS erfinden oder frei formulieren — Standard ist immer die Rechnungsnummer (rechnungsnummer-Wert exakt übernehmen), nur wenn der Nutzer von sich aus explizit einen anderen Text nennt, den exakt verwenden.
+WICHTIG: Befehl MUSS in der Antwort stehen, sonst keine PDF. Keine Zusammenfassung, nur der Befehl. Danach fragen: "Wurde diese Rechnung bereits bezahlt? Dann speichere ich sie als Tageseinnahme." Datumsangaben im Befehl deutsches Langformat "15. August 2026" (nie YYYY-MM-DD/DD.MM.YYYY). Kommas in Werten → Semikolon. Betrag nur Zahl ohne €. betrag_netto MUSS größer als 0 sein — ist der genannte/berechnete Betrag 0 oder negativ, KEINEN RECHNUNG_ERSTELLEN-Befehl ausgeben, sondern nachfragen, welcher Betrag korrekt ist. Empfänger-Name UND -Adresse sind ebenfalls Pflicht — fehlt eines, KEINEN Befehl ausgeben, erst nachfragen. KU: mwst_satz=0, §19-Hinweis, kein Steuerausweis. Nicht-KU: mwst_satz=19 oder 7, USt. ausweisen (außer Reverse Charge, siehe oben). mwst_satz und format IMMER angeben, nie weglassen (format-Default pdf). verwendungszweck NIEMALS erfinden oder frei formulieren — Standard ist immer die Rechnungsnummer (rechnungsnummer-Wert exakt übernehmen), nur wenn der Nutzer von sich aus explizit einen anderen Text nennt, den exakt verwenden.
 
 ## E-RECHNUNGEN (XRECHNUNG/ZUGFERD)
 Seit 2025 müssen Unternehmen (B2B) Eingangsrechnungen als E-Rechnung empfangen können — deshalb XRechnung aktiv empfehlen wenn der Empfänger erkennbar ein Unternehmen ist (siehe RECHNUNG ERSTELLEN). Hochgeladene XRechnung-XML/ZUGFeRD-PDF werden im Belegarchiv automatisch erkannt und ausgelesen (Betrag/Absender/Rechnungsnr/MwSt-Satz) — Nutzer bestätigt nur noch, trägt nicht von Hand ein.
 
 ## MAHNUNG ERSTELLEN
-Alles in EINER Nachricht abfragen: Empfänger komplett (Name/Straße/PLZ/Ort einzeln), Anrede, urspr. Rechnungsnummer + Datum, offener Betrag, Mahnstufe (erinnerung/1/2), neue Zahlungsfrist, Bankverbindung falls nicht im Profil.
+Alles in EINER Nachricht abfragen: Empfänger komplett (Name/Straße/PLZ/Ort einzeln — BEIDE Pflicht, ohne Empfängeradresse KEINEN MAHNUNG_ERSTELLEN-Befehl ausgeben, sondern nachfragen), Anrede, urspr. Rechnungsnummer + Datum, offener Betrag, Mahnstufe (erinnerung/1/2), neue Zahlungsfrist, Bankverbindung falls nicht im Profil.
 Aus Profil (nicht fragen wenn vorhanden): Name→'absender_name', Firmenname→'firmenname', Adresse→'eigene_adresse', Steuernummer→'steuernummer', USt-ID→'ust_id', Bankverbindung→'bankverbindung'. Neu genannt → per PROFIL_UPDATE exakt unter diesen Schlüsseln (keine Synonyme). Name/Adresse/Steuernummer fehlen im Profil → NIEMALS den MAHNUNG_ERSTELLEN-Befehl ausgeben, erst danach fragen und auf die Antwort warten.
 Antwort SO, absender_name/eigene_adresse/bankverbindung IMMER echte Profilwerte (nie Platzhaltertext/generische Namen — echter Wert oder Feld weglassen):
 "Ich erstelle deine Mahnung!"
@@ -2340,13 +2342,17 @@ function isKleinunternehmer(profilFields) {
   return v === true || v === 'ja' || (typeof v === 'string' && v.startsWith('Ja'));
 }
 
-// BU-Schlüssel gemäß Vorgabe: 9 = 19% USt, 8 = 7% USt, 0 = §19 UStG Kleinunternehmer
-// (steuerfrei). Fehlt der mwst_satz (z.B. bei älteren Belegen ohne dieses Feld), wird
-// anhand des Kleinunternehmer-Status des Profils ein plausibler Default gewählt.
+// BU-Schlüssel gemäß Vorgabe: 9 = 19% USt, 8 = 7% USt, 0 = §19 UStG Kleinunternehmer/Reverse
+// Charge (beides: keine deutsche USt geschuldet). Fehlt der mwst_satz (z.B. bei älteren Belegen
+// ohne dieses Feld), wird anhand des Kleinunternehmer-Status des Profils ein plausibler Default
+// gewählt. 'reverse_charge' (Punkt 3, Compliance-Check 2026-09-05, siehe RECHNUNG_ERSTELLEN in
+// index.html) MUSS hier explizit behandelt werden — ohne diesen Zweig würde er in den
+// `kleinunternehmer ? '0' : '9'`-Fallback fallen und bei einem Nicht-Kleinunternehmer fälschlich
+// als BU9 (19% USt) statt BU0 gebucht, obwohl der Empfänger die Steuer schuldet.
 function buSchluessel(mwstSatz, kleinunternehmer) {
   if (mwstSatz === '19') return '9';
   if (mwstSatz === '7') return '8';
-  if (mwstSatz === 'keine' || mwstSatz === '0') return '0';
+  if (mwstSatz === 'keine' || mwstSatz === '0' || mwstSatz === 'reverse_charge') return '0';
   return kleinunternehmer ? '0' : '9';
 }
 
