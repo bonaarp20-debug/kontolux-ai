@@ -260,7 +260,7 @@ async function incrementUploadLimit(userId, env) {
 const DATEI_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
 const DATEI_ERLAUBTE_TYPEN = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png'];
 
-// ── Betrag-Validierung für RECHNUNG_ERSTELLEN/MAHNUNG_ERSTELLEN ───
+// ── Betrag-Validierung für RECHNUNG_ERSTELLEN/MAHNUNG_ERSTELLEN/RECHNUNG_STORNIEREN ───
 // Diese Commands stehen als eigene Zeile im gestreamten Claude-Fließtext und werden ausschließlich
 // clientseitig (index.html) per Regex herausgeparst und blind in PDF/Firestore umgesetzt — der
 // Client vertraut dem vom Modell gelieferten Betrag ohne Prüfung. Die Prüfung muss deshalb HIER
@@ -282,6 +282,19 @@ function pruefeBetragZeile(line) {
     const betrag = m ? parseFloat(m[1]) : NaN;
     if (!Number.isFinite(betrag) || betrag <= 0) {
       return line.slice(0, mahnungMatch.index) + 'Ich kann diese Mahnung nicht erstellen — der Betrag muss größer als 0 sein. Bitte prüfe die zugrunde liegende Rechnung.';
+    }
+  }
+  // RECHNUNG_STORNIEREN hat keinen Betrag (kommt aus der bereits gespeicherten Original-Rechnung),
+  // dafür sind rechnungsnummer UND grund (Pflichtangabe für die Buchhaltung) beide zwingend — ein
+  // Storno ohne Grund darf clientseitig gar nicht erst ausgeführt werden.
+  const stornoMatch = line.match(/RECHNUNG_STORNIEREN:(.*)$/i);
+  if (stornoMatch) {
+    const mNr = stornoMatch[1].match(/rechnungsnummer=([^,]*)/i);
+    const mGrund = stornoMatch[1].match(/grund=([^,]*)/i);
+    const nr = mNr ? mNr[1].trim() : '';
+    const grund = mGrund ? mGrund[1].trim() : '';
+    if (!nr || !grund) {
+      return line.slice(0, stornoMatch.index) + 'Ich kann diese Rechnung nicht stornieren — Rechnungsnummer und Stornogrund müssen beide angegeben sein.';
     }
   }
   return line;
@@ -703,6 +716,19 @@ WICHTIG: Befehl MUSS in der Antwort stehen, sonst kein PDF. Keine eigene Gesamts
 Nutzer sagt ein Kunde hat ein Angebot angenommen bzw. möchte direkt eine Rechnung daraus ("Müller hat das Angebot angenommen, mach die Rechnung") → passendes Angebot aus "Akzeptierte, noch nicht zu Rechnung konvertierte Angebote" bzw. allgemein aus dem Profilkontext anhand Kundenname identifizieren (dort steht die angebots_id). Mehrdeutig (mehrere offene Angebote desselben Kunden) → kurz nachfragen welches (Angebotsnummer/Betrag nennen). Gefunden → kurze Bestätigung + Befehl:
 ANGEBOT_KONVERTIEREN:angebots_id=[ID aus dem Profilkontext],rechnungsnummer=[auto oder eigene Nr.]
 Keine ID im Kontext auffindbar → nicht erfinden, stattdessen auf den Tab "Angebote" verweisen. Positionen/Beträge übernimmt das System 1:1 aus dem Angebot, dafür keine eigenen Angaben nötig.
+
+## RECHNUNG STORNIEREN
+Nutzer möchte eine ausgehende Rechnung stornieren (z.B. "Storniere Rechnung RE-2026-08-001", "RE-2026-08-001 stornieren", "Ich brauche eine Storno für Müller GmbH") → NIEMALS einfach löschen. Rechnungen werden storniert: die Original-Rechnung bleibt zu Nachweiszwecken erhalten, zusätzlich wird eine echte Storno-Rechnung mit eigener fortlaufender Rechnungsnummer erstellt, die auf die Original-Rechnungsnummer verweist. Nur ausgehende Rechnungen (nicht Mahnungen, nicht eingehende Rechnungen) können so storniert werden — bei anderem Belegtyp auf das Belegarchiv verweisen.
+
+Rechnungsnummer nicht genannt → aus "Belegarchiv ... ausgehende Rechnungen/Mahnungen" im Profilkontext anhand des genannten Kundennamens identifizieren (Format dort: Rechnungsnummer — Kunde: Betrag (Status)). Eindeutig gefunden → Nummer übernehmen, nicht erneut abfragen. Mehrdeutig (mehrere offene Rechnungen desselben Kunden) → kurz nachfragen welche (Nummer und Betrag nennen). Im Kontext nicht auffindbar → nach der Rechnungsnummer fragen, nichts erfinden.
+
+Stornogrund nicht genannt (Pflichtangabe für die Buchhaltung) → kurz nachfragen, z.B. "Was ist der Grund für die Stornierung? (z.B. Kundenwunsch, doppelt erstellt, falscher Betrag)".
+
+Rechnungsnummer UND Stornogrund vorhanden → NIEMALS direkt stornieren, IMMER zuerst bestätigen lassen (Betrag aus dem Profilkontext nennen, falls dort vorhanden), KEIN Befehl in dieser Nachricht:
+"Soll ich Rechnung [Nummer] über [Betrag]€ wirklich stornieren? (j/n)"
+Bestätigung erhalten (j/ja/yes/Jo) → kurze Reaktion + Befehl MIT allen Daten aus dem Gesprächsverlauf:
+RECHNUNG_STORNIEREN:rechnungsnummer=[Nummer],grund=[Stornogrund]
+WICHTIG: Der Befehl MUSS in der bestätigenden Antwort stehen, sonst wird nichts storniert — niemals nur "Alles klar, storniert!" ohne den Befehl antworten. Kommas im Stornogrund → Semikolon. rechnungsnummer/grund NIEMALS erfinden oder mit Platzhaltern füllen.
 
 ## ZEITERFASSUNG PER CHAT
 Nutzer nennt geleistete Arbeitszeit (z.B. "3 Stunden für Müller GmbH gearbeitet", "Heute 2,5h Webdesign für Schmidt") → Datum (heute wenn nicht genannt), Kunde, kurze Beschreibung, Stunden (Dezimalzahl, Komma→Punkt bei der Ausgabe) erfassen. Stundensatz: Profil-Feld "standard_stundensatz" verwenden wenn vorhanden (nicht erneut fragen); fehlt er, EINMALIG fragen ("Wie hoch ist dein Stundensatz?") und sofort per PROFIL_UPDATE:standard_stundensatz=[Zahl] speichern, ab dann nie wieder fragen. Kurze Bestätigung + Befehl:
