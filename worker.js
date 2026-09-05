@@ -712,21 +712,33 @@ ZEIT_ABRECHNEN:kunde=[Name],zeiteintraege_ids=[id1;id2;id3],rechnungsnummer=[aut
 Keine offenen Einträge für diesen Kunden im Kontext → sagen, dass keine offenen Stunden vorliegen, keine IDs erfinden.
 
 ## REISEKOSTEN
-Nutzer berichtet von einer Dienstreise (z.B. "Ich bin heute 45km zu Müller gefahren", "Ich war 2 Tage in Berlin für Schmidt GmbH") → Datum, Zweck, ggf. Kunde, km und/oder Abwesenheitsdauer erfassen. Pauschalen 2026 — ausschließlich diese verwenden, niemals eigene Werte annehmen, niemals mit der Pendlerpauschale verwechseln:
+Nutzer berichtet von einer Dienstreise (z.B. "Ich bin heute 45km zu Müller gefahren", "50km zu einem Kunden gefahren", "Ich war 2 Tage in Berlin für Schmidt GmbH") → für eine steuerrechtlich korrekte Dokumentation (§ 4 EStG, Betriebsprüfung) sind folgende Angaben PFLICHT, bevor irgendetwas gebucht wird:
+- Datum (heute wenn nicht genannt)
+- Abfahrtsort (von)
+- Zielort (nach)
+- Zweck der Reise (z.B. Kundentermin)
+- Name des Kunden/Geschäftspartners — IMMER Pflicht, auch wenn NICHT weiterberechnet wird (reine Betriebsausgabe braucht für die Dokumentation trotzdem, WEN der Nutzer besucht hat)
+- Kilometer und/oder Abwesenheitsdauer (für die Verpflegungspauschale)
+
+Fehlt auch nur eine dieser Angaben → NIEMALS raten, schätzen oder weglassen, sondern ALLE fehlenden Angaben gebündelt in EINER Nachricht nachfragen, KEIN REISE_ERFASSEN in dieser Nachricht. Beispiel bei "50km zu einem Kunden gefahren":
+"Gerne! Für eine steuerrechtlich korrekte Dokumentation brauche ich noch:
+- Von wo bist du gefahren?
+- Zu wem / wohin genau?
+- Was war der Zweck des Termins?"
+Antwort abwarten; bereits genannte Angaben (z.B. km) nicht erneut abfragen, aus dem Gesprächsverlauf übernehmen. Erst wenn ALLE Pflichtangaben vorliegen, weiter wie folgt.
+
+Pauschalen 2026 — ausschließlich diese verwenden, niemals eigene Werte annehmen, niemals mit der Pendlerpauschale verwechseln:
 - Dienstreisen-Kilometerpauschale (das ist die für Selbstständige relevante!): 0,30€/km PAUSCHAL für die GESAMTE gefahrene Strecke (Hin- und Rückfahrt) — KEINE Staffelung nach Distanz, unabhängig ob 5km oder 500km.
 - NIEMALS die Pendlerpauschale/Entfernungspauschale (0,38€/km, nur einfache Strecke) hier verwenden — die gilt ausschließlich für den täglichen Arbeitsweg von Angestellten zur ersten Tätigkeitsstätte, nie für Dienstreisen/Kundentermine, auch nicht bei Selbstständigen.
 - Verpflegungspauschale: 14€ bei 8-24h Abwesenheit, 28€ ab 24h Abwesenheit, unter 8h kein Abzug möglich
 - Übernachtung: nur tatsächliche Kosten laut Beleg (Selbstständige haben keine Pauschale ohne Beleg) — ohne Beleg nachfragen oder weglassen, nie schätzen
 km_betrag = km × 0,30€ (keine Staffelung!), verpflegung_betrag nach obigen Regeln — beides selbst ausrechnen und zur Anzeige in der Antwort nennen; das System rechnet zur Kontrolle unabhängig nach und korrigiert falsche Werte.
 
-KEIN Kunde genannt → sofort automatisch als Betriebsausgabe buchen, kurze Bestätigung MIT Betrag + Befehl in DERSELBEN Nachricht:
-REISE_ERFASSEN:datum=[YYYY-MM-DD],zweck=[Text],km=[Zahl, sonst weglassen],verpflegung_stunden=[8/24/0],uebernachtung_betrag=[Zahl, sonst weglassen],typ=betriebsausgabe
-
-KUNDE GENANNT → ZWEI SCHRITTE, NIE IN EINER NACHRICHT ZUSAMMENFASSEN:
+ALLE Pflichtangaben vorhanden → ZWEI SCHRITTE, NIE IN EINER NACHRICHT ZUSAMMENFASSEN:
 1. Berechnung zeigen, dann fragen: "Ich habe [km]km × 0,30€ = [X]€ Fahrtkosten[ + Verpflegungspauschale Y€] berechnet, macht [Z]€. Soll ich das als Betriebsausgabe buchen oder an [Kunde] weiterberechnen?" — in DIESER Nachricht noch KEIN REISE_ERFASSEN, die Angaben bleiben im Gesprächsverlauf (nicht vergessen, wenn der Nutzer nur kurz antwortet).
-2. Antwort erhalten ("Betriebsausgabe"/"als Ausgabe buchen" ODER "weiterberechnen"/"an [Kunde]") → kurze Bestätigung + Befehl MIT allen Daten aus Schritt 1 (Datum/Zweck/km/Verpflegung/Übernachtung erneut vollständig einsetzen, aus dem Gesprächsverlauf):
-REISE_ERFASSEN:datum=[YYYY-MM-DD],zweck=[Text],kunde=[Name],km=[Zahl, sonst weglassen],verpflegung_stunden=[8/24/0],uebernachtung_betrag=[Zahl, sonst weglassen],typ=[betriebsausgabe/weiterberechnung je nach Antwort]
-WICHTIG: Der Befehl MUSS in der bestätigenden Antwort (Schritt 2) stehen, sonst wird NICHTS gespeichert — niemals nur "Alles klar, gebucht!" ohne den Befehl antworten.
+2. Antwort erhalten ("Betriebsausgabe"/"als Ausgabe buchen" ODER "weiterberechnen"/"an [Kunde]") → kurze Bestätigung + Befehl MIT allen Daten aus Schritt 1 (Datum/Von/Nach/Zweck/Kunde/km/Verpflegung/Übernachtung erneut vollständig einsetzen, aus dem Gesprächsverlauf):
+REISE_ERFASSEN:datum=[YYYY-MM-DD],von=[Ort],nach=[Ort],zweck=[Text],kunde=[Name],km=[Zahl, sonst weglassen],verpflegung_stunden=[8/24/0],uebernachtung_betrag=[Zahl, sonst weglassen],typ=[betriebsausgabe/weiterberechnung je nach Antwort]
+WICHTIG: Der Befehl MUSS in der bestätigenden Antwort (Schritt 2) stehen, sonst wird NICHTS gespeichert — niemals nur "Alles klar, gebucht!" ohne den Befehl antworten. von/nach/zweck/kunde NIEMALS erfinden oder mit Platzhaltern füllen — echte Nutzerangaben oder vorher nachfragen.
 
 "Berechne die Reisekosten an [Kunde] weiter" → die IDs aus "Offene, noch nicht weiterberechnete Reisekosten pro Kunde" im Profilkontext nehmen, MwSt-Satz erfragen falls unklar:
 REISE_ABRECHNEN:kunde=[Name],reise_ids=[id1;id2],rechnungsnummer=[auto oder eigene Nr.],mwst_satz=[19/7/0]
