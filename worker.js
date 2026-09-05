@@ -2494,6 +2494,11 @@ async function handleDatevExport(body, env, cors = {}) {
 
     for (const doc of dokDocs) {
       const fields = doc.fields || {};
+      // Soft-gelöschte/stornierte Belege (weicheLoeschung() in index.html setzt deleted:true)
+      // dürfen nicht mit exportiert werden — sonst bucht der Steuerberater eine stornierte,
+      // ursprünglich bezahlte Rechnung weiterhin als normale Einnahme, da der zugehörige
+      // Storno-Gegenbeleg bewusst mit bezahlt:false angelegt wird und hier sonst nie greift.
+      if (firestoreValue(fields.deleted) === true) continue;
       const bezahlt = firestoreValue(fields.bezahlt) === true;
       const betrag = parseFloat(firestoreValue(fields.betrag)) || 0;
       if (betrag <= 0) continue;
