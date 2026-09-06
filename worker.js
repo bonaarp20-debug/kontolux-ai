@@ -610,13 +610,18 @@ Bei jeder Einnahmen/Ausgaben-Zusammenfassung oder Monatsabschluss (nicht bei nor
 
 ## DOKUMENT-UPLOAD ERKENNUNG
 PDF/Bild hochgeladen: Inhalt direkt lesen, nicht nach Infos fragen die im Dokument stehen.
-Rechnung erkannt → Betrag/Absender/Datum/Rechnungsnummer/MwSt-Satz lesen, NICHT sofort speichern — immer fragen: "Ich sehe eine Rechnung von/an [Name] über [Betrag]€ vom [Datum]. Eingehend (du bezahlst) oder ausgehend (du stellst sie)?" Noch KEIN AUSGABE_UPDATE/DOKUMENT_SPEICHERN in dieser Nachricht — die Angaben stehen jetzt im Gesprächsverlauf, nicht vergessen wenn der Nutzer nur kurz antwortet.
-- "eingehend" → kurze Bestätigung MIT Kategorie/Sachkonto/Buchungstext (SACHKONTO BEI BUCHUNGEN unten) + Befehle:
+Rechnung erkannt → Betrag/Absender-Name/Empfänger-Name/Datum/Rechnungsnummer/MwSt-Satz lesen.
+
+RICHTUNG AUTOMATISCH ERKENNEN, BEVOR GEFRAGT WIRD: Vergleiche Absender-Name UND Empfänger-Name aus dem Dokument mit den Profilwerten 'absender_name' und 'firmenname' (oben im Profilkontext). Fuzzy: Groß-/Kleinschreibung ignorieren, Teilübereinstimmung reicht (z.B. Dokument "Müller GmbH" matcht Profilwert "Müller").
+- Dokument-ABSENDER ähnelt 'absender_name' ODER 'firmenname' (und der Empfänger tut es nicht) → eindeutig AUSGEHEND, sofort wie unten bei "ausgehend" behandeln, OHNE Rückfrage.
+- Dokument-EMPFÄNGER ähnelt 'absender_name' ODER 'firmenname' (und der Absender tut es nicht) → eindeutig EINGEHEND, sofort wie unten bei "eingehend" behandeln, OHNE Rückfrage.
+- Unklar (kein Match, beide matchen, 'absender_name' fehlt im Profil, oder Namen im Dokument nicht sicher lesbar) → NICHT raten, wie bisher fragen: "Ich sehe eine Rechnung von/an [Name] über [Betrag]€ vom [Datum]. Eingehend (du bezahlst) oder ausgehend (du stellst sie)?" Noch KEIN AUSGABE_UPDATE/DOKUMENT_SPEICHERN in dieser Nachricht — die Angaben stehen jetzt im Gesprächsverlauf, nicht vergessen wenn der Nutzer nur kurz antwortet.
+- Automatisch erkannt oder Nutzer antwortet "eingehend" → kurze Bestätigung MIT Kategorie/Sachkonto/Buchungstext (SACHKONTO BEI BUCHUNGEN unten); bei automatischer Erkennung zusätzlich kurz erwähnen woran die Richtung erkannt wurde (z.B. "eingehend, da Empfänger mit deinem Profilnamen übereinstimmt") + Befehle:
 AUSGABE_UPDATE:datum=[YYYY-MM-DD],betrag=[Zahl],beschreibung=Rechnung [Absender]
 DOKUMENT_SPEICHERN:typ=rechnung_eingehend,name=Rechnung von [Absender],betrag=[Zahl],absender=[Absender],datum=[YYYY-MM-DD],kategorie=[Kategorie],sachkonto=[Nr],buchungstext=[Text],mwst_satz=[19/7/0],rechnungsnr=[Nummer aus dem Dokument, sonst weglassen]
-- "ausgehend" → kurze Bestätigung MIT Kategorie/Sachkonto/Buchungstext (Einnahmen-Kategorie) + Befehl (KEIN AUSGABE_UPDATE):
+- Automatisch erkannt oder Nutzer antwortet "ausgehend" → kurze Bestätigung MIT Kategorie/Sachkonto/Buchungstext (Einnahmen-Kategorie), bei automatischer Erkennung ebenfalls kurz die Erkennung erwähnen + Befehl (KEIN AUSGABE_UPDATE):
 DOKUMENT_SPEICHERN:typ=rechnung_ausgehend,name=Rechnung an [Empfänger],betrag=[Zahl],absender=[Empfänger],datum=[YYYY-MM-DD],kategorie=[Kategorie],sachkonto=[Nr],buchungstext=[Text],mwst_satz=[19/7/0],rechnungsnr=[Nummer aus dem Dokument, sonst weglassen]
-Nicht zusätzlich fragen ob speichern — nach der Richtungs-Antwort direkt speichern. Kein Rechnungsdokument → normal analysieren.
+Nicht zusätzlich fragen ob speichern — bei automatischer Erkennung direkt in derselben Nachricht speichern, nach einer Richtungs-Rückfrage direkt nach der Antwort speichern. Kein Rechnungsdokument → normal analysieren.
 mwst_satz IMMER angeben (wichtig für DATEV-Export): Steuersatz steht auf der Rechnung (19%/7%/kein Ausweis→0) — direkt ablesen, NIEMALS raten; nur bei wirklich keinem erkennbaren Steuerausweis auf dem Dokument nachfragen. rechnungsnr: exakt die auf dem Dokument abgedruckte Nummer, nie erfinden — steht keine erkennbar drauf, das Feld ganz weglassen (nicht raten).
 
 ## TAGESEINNAHMEN SPEICHERN
