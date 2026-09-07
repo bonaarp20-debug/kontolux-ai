@@ -699,6 +699,14 @@ WERT-EXTRAKTION (gilt für JEDES PROFIL_UPDATE-Feld, nicht nur Firmendaten): 'we
 
 VOLLSTÄNDIGKEIT PRÜFEN, BEVOR DU WEITERMACHST: eine "vollständige Adresse" braucht ALLE DREI Teile — Straße+Hausnummer, PLZ, UND Ort. Nennt der Nutzer nur die Straße (z.B. "Musterstraße 1"), fehlen PLZ und Ort weiterhin — behandle 'eigene_adresse' dann NICHT als erledigt, auch wenn das Feld dadurch schon einen (unvollständigen) Wert im Profil hat. Nach JEDER Nutzerantwort mit Firmendaten gehst du die Pflichtfeld-Liste (Name, Straße+Hausnummer, PLZ+Ort, Steuernummer) einzeln durch, BEVOR du "alles gespeichert" o.ä. sagst oder mit einem anderen Thema (z.B. Kundendaten) weitermachst. Fehlt noch etwas, benenne es konkret ("Mir fehlen noch: PLZ+Ort und deine Steuernummer.") statt pauschal weiterzumachen.
 
+SPEICHERN UND VOLLSTÄNDIGKEIT SIND ZWEI GETRENNTE SACHEN — NIE AUF "ALLES VOLLSTÄNDIG" WARTEN, BEVOR DU SPEICHERST: Nutzer geben ihre Firmendaten oft über MEHRERE Nachrichten verteilt (erst Name+Straße, später erst PLZ+Ort, dann erst die Steuernummer). Nennt der Nutzer IRGENDEIN einzelnes Feld (absender_name, steuernummer, firmenname, ust_id, bankverbindung, telefon, rechnungs_email), gibst du in DERSELBEN Antwort sofort ein PROFIL_UPDATE dafür aus — unabhängig davon, ob andere Pflichtfelder noch fehlen. NIEMALS eine Angabe nur im Gesprächsverlauf "im Kopf behalten" und das Speichern auf später verschieben, bis "alles beisammen" ist — sonst geht sie verloren, sobald der Chat wechselt oder die Nachrichtenhistorie gekürzt wird, und eine spätere "Perfekt, alles da!"-Aussage wäre schlicht falsch, weil in Wahrheit nie etwas gespeichert wurde. Ausnahme 'eigene_adresse' (zusammengesetzt aus 3 Teilen in einem einzigen Feld): einen Teilwert (nur Straße, oder nur PLZ+Ort) NIEMALS isoliert per PROFIL_UPDATE speichern, das würde beim Zusammenführen den bereits gespeicherten anderen Teil überschreiben und löschen — schau stattdessen im bisherigen Gesprächsverlauf nach, was an Adressteilen schon genannt wurde, kombiniere ALLE bekannten Teile zu einem vollständigen Wert (Straße;PLZ Ort) und gib PROFIL_UPDATE:eigene_adresse=... erst aus, sobald du wirklich alle drei Teile kennst.
+
+KONKRETES BEISPIEL für dieses Muster (Nutzer nennt nur Name+Straße, PLZ/Ort/Steuernummer fehlen noch):
+"Danke! Mir fehlen noch PLZ+Ort und deine Steuernummer.
+
+PROFIL_UPDATE:absender_name=Jona Drews"
+So sieht eine korrekte Antwort aus — die Rückfrage nach dem Fehlenden UND die PROFIL_UPDATE-Zeile für das bereits Genannte stehen IMMER zusammen in derselben Antwort, nie nur die Rückfrage allein.
+
 Nur abfragen wenn im Profil leer bzw. unvollständig (siehe Vollständigkeits-Check oben): eigener Name/Firma, eigene Adresse (Straße/PLZ/Ort — alle drei Teile), Steuernummer (Pflicht auch für KU), Bankverbindung (IBAN). Name/Adresse/Steuernummer sind für eine §14-UStG-konforme Rechnung PFLICHT — fehlt eines davon (oder ein Teil der Adresse) im Profil, NIEMALS den RECHNUNG_ERSTELLEN-Befehl ausgeben (auch nicht mit Platzhalter), sondern erst danach fragen und auf die Antwort warten.
 
 Immer abfragen (pro Rechnung unterschiedlich): Empfänger komplett (Name/Straße/PLZ/Ort einzeln — BEIDE Pflicht, ohne Empfängeradresse KEINEN RECHNUNG_ERSTELLEN-Befehl ausgeben, sondern nachfragen), Anrede (Herr/Frau/Firma), Leistungsbeschreibung, Leistungsdatum/-zeitraum, Betrag netto, Zahlungsziel in Tagen (Standard 14), Rechnungsnummer (eigene oder rechnungsnummer=auto), Format ("1) PDF (Standard) 2) XRechnung 3) Beides" — Empfänger erkennbar Unternehmen → XRechnung aktiv empfehlen: "Da dein Kunde ein Unternehmen ist — B2B-Eingangsrechnungen müssen seit 2025 als XRechnung vorliegen können, ich erstelle sie gleich mit." Unklar → PDF Default. MwSt-Satz bei Nicht-KU unklar → "19% (Standard) oder 7% (ermäßigt, z.B. Lebensmittel/Bücher/Kultur)?", bei eindeutig ermäßigter Leistung darfst du 7% direkt vorschlagen. KU bekommen diese Frage nie (immer 0%).
@@ -824,7 +832,7 @@ TITEL:Kleinunternehmerregelung erklärt
 ANTWORT:...
 
 ## GEDÄCHTNIS-UPDATE
-Nutzer nennt relevante Finanzinfos → am Ende der Antwort PROFIL_UPDATE einfügen. Speichern: fixkosten=3000, steuerruecklage=30%, branche=Fotografie, einnahmequelle=Dienstleistungen, miete=1000 etc. — stabile Stammdaten, keine Monatssummen.
+PFLICHT-CHECK VOR JEDER ANTWORT: Hat der Nutzer in dieser Nachricht irgendeinen Namen, eine Adresse, eine Steuernummer, einen Betrag oder eine sonstige Stammdaten-Angabe genannt, die noch nicht im Profil-Kontext oben steht? Dann MUSS deine Antwort eine PROFIL_UPDATE-Zeile mit genau diesem Wert enthalten — UNABHÄNGIG davon, ob du im selben Antworttext noch weitere Angaben nachfragst oder ob insgesamt noch nicht alles vollständig ist. "Ich frage noch nach dem Rest" ist NIE ein Grund, das bereits Genannte nicht zu speichern — sonst geht es verloren und eine spätere Aussage wie "alles gespeichert" wäre schlicht falsch. Nutzer nennt relevante Finanzinfos → am Ende der Antwort PROFIL_UPDATE einfügen. Speichern: fixkosten=3000, steuerruecklage=30%, branche=Fotografie, einnahmequelle=Dienstleistungen, miete=1000 etc. — stabile Stammdaten, keine Monatssummen.
 
 NIEMALS Einnahmen-/Ausgaben-SUMMEN eines Monats hier speichern (z.B. einnahmen_juli_2026=3500) — verstößt gegen EINZIGE QUELLE DER WAHRHEIT: PROFIL_UPDATE-Felder werden roh in jeden künftigen Chat-Kontext übernommen und würden als zusätzliche, nicht abgeglichene Zahl auftauchen → Doppelzählung. Monatssumme gehört zu TAGES_UPDATE/AUSGABE_UPDATE (einzelne Tage) oder MONATSABSCHLUSS_SAVE — nie zu PROFIL_UPDATE.
 
@@ -1288,10 +1296,24 @@ async function handleChat(body, env, cors = {}, ctx) {
   // beiden stabilen Blöcke (Steuerrecht, STATIC_SYSTEM_INSTRUCTIONS) bleiben wie gehabt gecacht
   // — nur die für dieses Muster wirkungslose zusätzliche Ebene entfällt.
 
-  // Modell-Routing: Haiku für einfache Tasks, Sonnet für komplexe
-  const haikuTrigger = /rechnung|mahnung|tageseinnahmen|monatsabschluss|frist|steuer|ausgabe|einnahme|gewinn|prognose/i;
-  const useHaiku = haikuTrigger.test(Nachricht) || FristType;
-  const model = useHaiku ? 'claude-haiku-4-5-20251001' : (env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001');
+  // Modell-Routing: Haiku für einfache Tasks, Sonnet für komplexe.
+  // Rechnung/Mahnung/Angebot bekommen IMMER Sonnet (nicht Haiku) — Root-Cause-Analyse
+  // 2026-09-08: diese Flows verlangen dem Modell zwei Dinge GLEICHZEITIG ab (nach fehlenden
+  // Firmendaten fragen UND das bereits Genannte per PROFIL_UPDATE zwischenspeichern, Runde für
+  // Runde, bis alle Pflichtfelder da sind). Live gegen die echte API getestet: Haiku hat dabei in
+  // ca. 40-70% der Fälle das PROFIL_UPDATE für bereits genannte Angaben schlicht vergessen (z.B.
+  // Name in Runde 1 genannt, aber nie gespeichert) — der Bot behauptete am Ende trotzdem "alles
+  // da", obwohl in Firestore nichts stand, wodurch die eigentliche Rechnungserstellung immer
+  // wieder an denselben (nie gespeicherten) Pflichtfeldern scheiterte. Sonnet hat denselben
+  // Testfall 5 von 5 Mal korrekt gelöst. sonnetTrigger prüft zusätzlich den Verlauf, nicht nur
+  // die aktuelle Nachricht — sonst würde z.B. "12345 Berlin" als Folgeantwort in einem laufenden
+  // Rechnungs-Dialog wieder auf Haiku zurückfallen, weil das Wort "Rechnung" darin nicht mehr
+  // vorkommt, obwohl das Gespräch mitten in der Firmendaten-Erfassung steckt.
+  const sonnetTrigger = /rechnung|mahnung|angebot/i;
+  const useSonnet = sonnetTrigger.test(Nachricht) || sonnetTrigger.test(Verlauf || '');
+  const haikuTrigger = /tageseinnahmen|monatsabschluss|frist|steuer|ausgabe|einnahme|gewinn|prognose/i;
+  const useHaiku = !useSonnet && (haikuTrigger.test(Nachricht) || FristType);
+  const model = useSonnet ? 'claude-sonnet-4-5-20250929' : (useHaiku ? 'claude-haiku-4-5-20251001' : (env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001'));
 
   // Kosten-Staffelung: max_tokens ist nur eine Obergrenze (kostet nichts, solange die Antwort sie
   // nicht ausschöpft), begrenzt aber das Risiko einer ungewöhnlich langen Antwort bei einfachen
@@ -1300,8 +1322,10 @@ async function handleChat(body, env, cors = {}, ctx) {
   // proaktiver Analyse max. ~1000 Output-Tokens, klar unter 2048 — echte Buchungsaktionen (dasselbe
   // haikuTrigger-Muster wie beim Modell-Routing oben: Rechnung/Mahnung/Monatsabschluss/Fristen/
   // Steuerfragen) behalten deshalb bewusst den vollen Spielraum, alles andere bekommt eine
-  // niedrigere Obergrenze.
-  const maxTokensForRequest = useHaiku ? 2048 : 1024;
+  // niedrigere Obergrenze. useSonnet zählt hier mit (nicht nur useHaiku) — sonst würden Rechnung/
+  // Mahnung/Angebot durch das neue Sonnet-Routing oben von 2048 auf 1024 Tokens fallen, obwohl
+  // gerade deren Befehlszeilen (RECHNUNG_ERSTELLEN mit vielen Feldern) den Spielraum brauchen.
+  const maxTokensForRequest = (useSonnet || useHaiku) ? 2048 : 1024;
 
   // Claude aufrufen und SSE parsen → reinen Text streamen
   const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
