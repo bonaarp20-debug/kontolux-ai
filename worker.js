@@ -2299,9 +2299,10 @@ async function handleAbo(body, env, cors = {}) {
 
 // ── /delete-account-data Handler ───────────────────────────
 // Löscht bei Account-Löschung serverseitige Daten, die der Client nicht
-// direkt erreichen kann (Supabase-Zeile fürs Nachrichtenlimit, sowie
-// defensiv einen evtl. noch vorhandenen alten PROFIL_KV-Eintrag). userId
-// wurde vom Router bereits durch die tokenverifizierte UID überschrieben.
+// direkt erreichen kann (Supabase-Zeile fürs Nachrichtenlimit, defensiv ein
+// evtl. noch vorhandener alter PROFIL_KV-Eintrag, sowie die per Firestore-
+// Regel client-seitig unlöschbare 'feedback'-Collection — siehe unten).
+// userId wurde vom Router bereits durch die tokenverifizierte UID überschrieben.
 async function handleDeleteAccountData(body, env, cors = {}) {
   const userId = body.userId;
   if (!userId) {
@@ -2328,6 +2329,50 @@ async function handleDeleteAccountData(body, env, cors = {}) {
   try {
     if (env.PDF_RESULTS) await env.PDF_RESULTS.delete(userId);
   } catch(e) { console.error('Account-Löschung: PDF_RESULTS:', e.message); }
+
+  // Upload-Limit-Zähler (uploadLimitKey, siehe oben) läuft zwar nach 35 Tagen automatisch aus,
+  // DSGVO-Audit 2026-09-08 löscht ihn trotzdem sofort statt auf die TTL zu warten — aktueller
+  // und vorheriger Monat abdecken, da beide innerhalb der 35-Tage-TTL noch existieren können.
+  try {
+    if (env.PROFIL_KV) {
+      const jetzt = new Date();
+      const vormonat = new Date(jetzt.getFullYear(), jetzt.getMonth() - 1, 1);
+      await env.PROFIL_KV.delete(uploadLimitKey(userId, jetzt));
+      await env.PROFIL_KV.delete(uploadLimitKey(userId, vormonat));
+    }
+  } catch(e) { console.error('Account-Löschung: Upload-Limit-KV:', e.message); }
+
+  // Top-level 'feedback'-Collection (userId + Freitext, siehe submitFeedback in index.html) kann
+  // der Client NICHT selbst löschen — firestore.rules verbietet dort delete explizit, auch für
+  // den Eigentümer (Schutz gegen fremdes Überschreiben/Löschen anhand der UID im Dokumentnamen).
+  // DSGVO-Audit 2026-09-08 ergab: dadurch gab es für diese Collection bisher GAR KEINEN
+  // Löschpfad. Braucht deshalb den Admin-Service-Account-Token (wie loadSteuerrechtContext/
+  // handleSeedSteuerrecht oben) statt eines nutzerseitigen ID-Tokens — der umgeht die Firestore-
+  // Regeln, im Gegensatz zum Rest dieser Funktion aber absichtlich, weil hier keine Client-
+  // Löschmöglichkeit existiert, die stattdessen genutzt werden könnte.
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const queryRes = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        structuredQuery: {
+          from: [{ collectionId: 'feedback' }],
+          where: { fieldFilter: { field: { fieldPath: 'userId' }, op: 'EQUAL', value: { stringValue: userId } } }
+        }
+      })
+    });
+    if (queryRes.ok) {
+      const rows = await queryRes.json();
+      for (const row of rows) {
+        if (!row.document?.name) continue;
+        await fetch(`https://firestore.googleapis.com/v1/${row.document.name}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${adminToken}` }
+        });
+      }
+    }
+  } catch(e) { console.error('Account-Löschung: feedback:', e.message); }
 
   return new Response(JSON.stringify({ success: true }), {
     status: 200,
