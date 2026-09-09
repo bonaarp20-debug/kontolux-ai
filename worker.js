@@ -268,11 +268,12 @@ const DATEI_ERLAUBTE_TYPEN = ['application/pdf', 'image/jpeg', 'image/jpg', 'ima
 // das den Stream zeilenweise puffert statt token-weise weiterzureichen — unsichtbar für den
 // Nutzer, da diese Befehlszeile ohnehin nie im Chat-Bubble angezeigt wird).
 function pruefeBetragZeile(line) {
-  // Diagnose-Logging (2026-09-09, KUNDE_SPEICHERN-Fehlersuche): läuft für jede Zeile jeder
-  // Chat-Antwort, loggt aber nur bei einem Treffer — sichtbar per `wrangler tail`. Beantwortet
-  // direkt "sendet der Bot den Befehl überhaupt", ohne den kompletten Antworttext puffern zu
-  // müssen (Zeilen kommen hier ohnehin schon einzeln durch).
-  if (/(KUNDE_SPEICHERN|RECHNUNG_ERSTELLEN|MAHNUNG_ERSTELLEN|ANGEBOT_ERSTELLEN):/i.test(line)) {
+  // Diagnose-Logging: läuft für jede Zeile jeder Chat-Antwort, loggt aber nur bei einem Treffer —
+  // sichtbar per `wrangler tail`. KUNDE_SPEICHERN bewusst NICHT mehr enthalten (2026-09-09):
+  // Kunden-Anlegen ist inzwischen reine, deterministische Frontend-Logik (siehe
+  // pruefeUndLegeKundeAn in index.html) statt eines LLM-Befehls, den Haiku unzuverlässig
+  // ignoriert hat.
+  if (/(RECHNUNG_ERSTELLEN|MAHNUNG_ERSTELLEN|ANGEBOT_ERSTELLEN):/i.test(line)) {
     console.log('[Befehl erkannt]', line.trim().slice(0, 300));
   }
   const rechnungMatch = line.match(/RECHNUNG_ERSTELLEN:(.*)$/i);
@@ -708,10 +709,6 @@ FIRMENDATEN NIEMALS PER CHAT (2026-09-08, Kostenoptimierung — ersetzt frühere
 PFLICHTFELD-CHECK VOR JEDER RECHNUNG/MAHNUNG/ANGEBOT: Fehlt im Profil Name ('absender_name'), eine vollständige Adresse (Straße+Hausnummer, PLZ UND Ort — alle drei Teile) oder Steuernummer ('steuernummer') → NIEMALS den jeweiligen Befehl ausgeben (auch nicht mit Platzhalter). Stattdessen konkret benennen was fehlt und auf die Einstellungen verweisen, z.B.: "Um eine rechtskonforme Rechnung zu erstellen, fehlen noch: [Liste der fehlenden Felder]. Bitte ergänze sie unter ⚙️ Einstellungen → Firmendaten." Danach abwarten, nicht im Chat danach fragen oder anbieten die Werte dort entgegenzunehmen.
 
 KUNDENSTAMM (bei RECHNUNG/MAHNUNG/ANGEBOT IMMER zuerst prüfen): Kommt im Kontext ein Feld "Gespeicherte Kunden/Lieferanten" vor und nennt der Nutzer einen Namen, der darin eindeutig vorkommt (exakt oder klar erkennbar, z.B. "Rechnung an Müller GmbH" bei Eintrag "Müller GmbH [Kunde], Adresse: ..."), dann Adresse/Zahlungsziel/USt-ID DIREKT aus diesem Kontext-Eintrag übernehmen und NICHT erneut danach fragen — nur noch die restlichen, dort nicht enthaltenen Pflichtangaben erfragen (z.B. Leistungsbeschreibung/Betrag). Ist der Name im Kundenstamm nicht oder mehrdeutig (z.B. zwei ähnliche Einträge) vorhanden, ganz normal wie bisher nach Adresse fragen — nichts erraten oder erfinden.
-
-KUNDE AUTOMATISCH ANLEGEN — PFLICHT, nicht optional: Sobald du einen RECHNUNG_ERSTELLEN-, MAHNUNG_ERSTELLEN- oder ANGEBOT_ERSTELLEN-Befehl ausgibst UND der Empfängername NICHT eindeutig im Feld "Gespeicherte Kunden/Lieferanten" vorkommt (oder dieses Feld im Kontext gar nicht existiert, weil noch keine Kunden gespeichert sind) UND die vollständige Empfängeradresse (Straße+Hausnummer, PLZ, Ort) bekannt ist, MUSST du direkt VOR diesem Befehl zusätzlich eine eigene KUNDE_SPEICHERN-Zeile ausgeben — genau EINE Zeile, kommagetrennt wie die anderen Befehle, NICHT mehrzeilig, Kommas innerhalb eines Werts durch Semikolon ersetzen:
-KUNDE_SPEICHERN:name=Weber Design,adresse=Hauptstraße 10,plz_ort=10115 Berlin,typ=kunde
-Feld für Feld: name=[Name exakt wie genannt], adresse=[Straße plus Hausnummer als EIN Wert, z.B. "Hauptstraße 10" — kein Semikolon darin], plz_ort=[PLZ gefolgt von Ort als EIN Wert, z.B. "10115 Berlin"], email=[nur anhängen wenn genannt], ust_id=[nur anhängen wenn genannt], typ=[kunde oder lieferant, Standard kunde]. Direkt im Anschluss ganz normal mit dem eigentlichen RECHNUNG_ERSTELLEN/MAHNUNG_ERSTELLEN/ANGEBOT_ERSTELLEN-Befehl fortfahren — beide Zeilen gehören in dieselbe Antwort. In deiner sichtbaren Antwort kurz erwähnen, z.B. "Weber Design wurde als neuer Kunde gespeichert." Ausnahmen — KEINE KUNDE_SPEICHERN-Zeile ausgeben: (1) Adresse unvollständig — dann ohnehin erst nachfragen, kein Dokument-Befehl möglich; (2) der Name kommt im Kundenstamm-Kontext bereits eindeutig vor (kein Duplikat anlegen).
 
 Immer abfragen (pro Rechnung unterschiedlich): Empfänger komplett (Name/Straße/PLZ/Ort einzeln — BEIDE Pflicht, ohne Empfängeradresse KEINEN RECHNUNG_ERSTELLEN-Befehl ausgeben, sondern nachfragen), Anrede (Herr/Frau/Firma), Leistungsbeschreibung, Leistungsdatum/-zeitraum, Betrag netto, Zahlungsziel in Tagen (Standard 14), Rechnungsnummer (eigene oder rechnungsnummer=auto), Format ("1) PDF (Standard) 2) XRechnung 3) Beides" — Empfänger erkennbar Unternehmen → XRechnung aktiv empfehlen: "Da dein Kunde ein Unternehmen ist — B2B-Eingangsrechnungen müssen seit 2025 als XRechnung vorliegen können, ich erstelle sie gleich mit." Unklar → PDF Default. MwSt-Satz bei Nicht-KU unklar → "19% (Standard) oder 7% (ermäßigt, z.B. Lebensmittel/Bücher/Kultur)?", bei eindeutig ermäßigter Leistung darfst du 7% direkt vorschlagen. KU bekommen diese Frage nie (immer 0%).
 
