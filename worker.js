@@ -27,6 +27,19 @@ function getCORS(origin) {
   };
 }
 
+// Cloudflare Workers laufen intern in UTC (kein "lokales" Betriebssystem-Zeitzone-Konzept wie im
+// Browser) — new Date().toISOString().split('T')[0] liefert deshalb serverseitig IMMER den UTC-Tag.
+// Für einen Nutzer in Deutschland (UTC+1/+2) ist das rund um Mitternacht 1-2 Stunden lang der
+// FALSCHE Kalendertag (z.B. 01.10. 00:30 Uhr deutscher Zeit → UTC ist noch 30.09.) — bei
+// buchTagesBewegung landet eine Buchung dadurch im falschen Tag/Monat. Intl.DateTimeFormat mit
+// explizitem Europe/Berlin-Zeitzone statt eines festen Offsets, da der Offset durch die
+// Sommerzeitumstellung zweimal im Jahr wechselt (Fund im Code-Audit 2026-09-11, siehe
+// lokalesDatumAlsString im Frontend-Repo für das äquivalente clientseitige Muster).
+const BERLIN_DATUM_FORMATTER = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit' });
+function berlinDatumAlsString(d = new Date()) {
+  return BERLIN_DATUM_FORMATTER.format(d);
+}
+
 // ── In-Memory Rate Limiting ──────────────────
 const rateLimitMap = new Map();
 
@@ -338,7 +351,7 @@ function supabaseRestBase(env) {
 // geschrieben, und wir lesen+versuchen erneut statt den Request einfach durchzulassen.
 async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
   const key = userId || nutzername || 'anonym';
-  const heute = new Date().toISOString().split('T')[0];
+  const heute = berlinDatumAlsString();
   const LIMIT = 15;
   const MAX_CAS_VERSUCHE = 6;
 
@@ -1561,7 +1574,7 @@ async function handleImage(body, env, cors = {}, ctx) {
 // auch neu an (Firestore-Semantik: increment auf ein nicht existierendes Feld startet bei 0).
 async function buchTagesBewegung(userId, token, richtung, betragNum, beschreibung) {
   if (!userId || !token || !betragNum || isNaN(betragNum)) return;
-  const heute = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const heute = berlinDatumAlsString(); // YYYY-MM-DD, Europe/Berlin (siehe Kommentar oben)
   const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
   const commitUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:commit`;
 
@@ -1824,7 +1837,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
           bezahlt: { booleanValue: !!bezahlt },
           mwst_satz: { stringValue: mwst_satz || 'keine' },
           createdAt: { timestampValue: new Date().toISOString() },
-          ...(bezahlt ? { bezahlt_am: { stringValue: new Date().toISOString().split('T')[0] } } : {}),
+          ...(bezahlt ? { bezahlt_am: { stringValue: berlinDatumAlsString() } } : {}),
           ...(kategorie ? { kategorie: { stringValue: kategorie } } : {}),
           ...(sachkonto ? { sachkonto: { stringValue: sachkonto } } : {}),
           ...(buchungstext ? { buchungstext: { stringValue: buchungstext } } : {})
@@ -1971,7 +1984,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
       if (absender) metadata.fields.absender = { stringValue: absender };
       if (mwst_satz) metadata.fields.mwst_satz = { stringValue: mwst_satz };
       if (rechnungsnr) metadata.fields.rechnungsnr = { stringValue: rechnungsnr };
-      if (bezahlt) metadata.fields.bezahlt_am = { stringValue: new Date().toISOString().split('T')[0] };
+      if (bezahlt) metadata.fields.bezahlt_am = { stringValue: berlinDatumAlsString() };
       if (kategorie) metadata.fields.kategorie = { stringValue: kategorie };
       if (sachkonto) metadata.fields.sachkonto = { stringValue: sachkonto };
       if (buchungstext) metadata.fields.buchungstext = { stringValue: buchungstext };
@@ -2260,7 +2273,7 @@ async function handleUsage(body, env, cors) {
         headers: { 'apikey': env.SUPABASE_KEY, 'Authorization': `Bearer ${env.SUPABASE_KEY}` }
       });
       const rows = await res.json();
-      const heute = new Date().toISOString().split('T')[0];
+      const heute = berlinDatumAlsString();
       if (Array.isArray(rows) && rows.length > 0 && rows[0].letztes_datum === heute) {
         nachrichten = rows[0].nachrichten_heute || 0;
       }
