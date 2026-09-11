@@ -1578,6 +1578,14 @@ async function buchTagesBewegung(userId, token, richtung, betragNum, beschreibun
   const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
   const commitUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:commit`;
 
+  // Math.abs() (2026-09-12, Vorzeichen-Härtung): betragNum kommt aus geparsten Nutzer-/
+  // PDF-/XML-Beträgen. Die Aufrufer prüfen "betrag > 0" beim Anlegen, aber diese Funktion selbst
+  // verließ sich blind auf ein bereits positives Vorzeichen — die einzige Guard-Klausel oben
+  // (!betragNum) lässt negative Zahlen unbemerkt durch (negative Zahlen sind truthy in JS). Ein
+  // Aufruf mit negativem betragNum hätte hier eine Einnahme/Ausgabe verkleinert statt vergrößert.
+  // buchTagesBewegung bucht IMMER einen Zugang in die jeweilige Richtung — nie einen Abgang.
+  const betragAbs = Math.abs(betragNum);
+
   if (richtung === 'einnahme') {
     // beschreibung wurde von den Aufrufern bisher immer schon mitgeschickt, aber nie
     // gespeichert — dadurch tauchten Einnahmen aus dem Belegarchiv im Monatsabschluss als
@@ -1590,7 +1598,7 @@ async function buchTagesBewegung(userId, token, richtung, betragNum, beschreibun
         writes: [{
           update: { name: docName, fields: { datum: { stringValue: heute }, beschreibung: { stringValue: beschreibung || '' } } },
           updateMask: { fieldPaths: ['datum', 'beschreibung'] },
-          updateTransforms: [{ fieldPath: 'einnahmen', increment: { doubleValue: betragNum } }]
+          updateTransforms: [{ fieldPath: 'einnahmen', increment: { doubleValue: betragAbs } }]
         }]
       })
     });
@@ -1605,7 +1613,7 @@ async function buchTagesBewegung(userId, token, richtung, betragNum, beschreibun
         writes: [{
           update: { name: docName, fields: { [beschreibungKey]: { stringValue: beschreibung || '' } } },
           updateMask: { fieldPaths: [beschreibungKey] },
-          updateTransforms: [{ fieldPath: ausgabeKey, increment: { doubleValue: betragNum } }]
+          updateTransforms: [{ fieldPath: ausgabeKey, increment: { doubleValue: betragAbs } }]
         }]
       })
     });
