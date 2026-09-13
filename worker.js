@@ -472,24 +472,30 @@ async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
 // tatsächlichen Gegenkontos verwendet (resolveSachkonto). WICHTIG: dieselbe Tabelle ist in
 // index.html gespiegelt (dort für den Belegarchiv-Regel-Vorschlag ohne API-Call) — bei
 // Änderungen beide Stellen synchron halten.
+// euer_zeile: Zuordnung zur Anlage-EÜR-Zeile — Basis für die EÜR-Aggregation im Monats-/
+// Jahresabschluss (siehe Analyse). SKR03-Kollisionen aufgelöst 2026-09: "Bewirtung (70%)" lag
+// vorher auf demselben Konto wie "Werbekosten" (4650), "Sonstiges" auf demselben wie
+// "Bürobedarf" (4980) — beide EÜR-Zeilen wären dadurch nie unterscheidbar gewesen.
 const SACHKONTO_MAPPING = {
-  'Werbekosten':               { SKR03: '4650', SKR04: '6600' },
-  'Bürobedarf':                { SKR03: '4980', SKR04: '6800' },
-  'Telefon/Internet':          { SKR03: '4920', SKR04: '6805' },
-  'Reisekosten':                { SKR03: '4670', SKR04: '6830' },
-  'Fortbildung':                { SKR03: '4830', SKR04: '6811' },
-  'Kfz-Kosten':                 { SKR03: '4930', SKR04: '6820' },
-  'Miete/Raumkosten':           { SKR03: '4200', SKR04: '6310' },
-  'Wareneinkauf 19%':           { SKR03: '5400', SKR04: '3400' },
-  'Wareneinkauf 7%':            { SKR03: '5300', SKR04: '3300' },
-  'GWG bis 800€':               { SKR03: '0480', SKR04: '0670' },
-  'Versicherungen':             { SKR03: '4360', SKR04: '6400' },
-  'Steuerberater/Buchhaltung':  { SKR03: '4240', SKR04: '6825' },
-  'Bewirtung (70%)':            { SKR03: '4650', SKR04: '6650' },
-  'Sonstiges':                  { SKR03: '4980', SKR04: '6800' },
-  'Einnahmen 19%':              { SKR03: '8400', SKR04: '4400' },
-  'Einnahmen 7%':               { SKR03: '8300', SKR04: '4300' },
-  'Einnahmen steuerfrei':       { SKR03: '8200', SKR04: '4200' }
+  'Werbekosten':               { SKR03: '4650', SKR04: '6600', euer_zeile: 'Z.54' },
+  'Bürobedarf':                { SKR03: '4980', SKR04: '6800', euer_zeile: 'Z.51' },
+  'Telefon/Internet':          { SKR03: '4920', SKR04: '6805', euer_zeile: 'Z.43' },
+  'Reisekosten':                { SKR03: '4670', SKR04: '6830', euer_zeile: 'Z.44' },
+  'Fortbildung':                { SKR03: '4830', SKR04: '6811', euer_zeile: 'Z.45' },
+  'Kfz-Kosten':                 { SKR03: '4930', SKR04: '6820', euer_zeile: 'Z.71' },
+  'Miete/Raumkosten':           { SKR03: '4200', SKR04: '6310', euer_zeile: 'Z.39' },
+  'Wareneinkauf 19%':           { SKR03: '5400', SKR04: '3400', euer_zeile: 'Z.27' },
+  'Wareneinkauf 7%':            { SKR03: '5300', SKR04: '3300', euer_zeile: 'Z.27' },
+  'GWG bis 800€':               { SKR03: '0480', SKR04: '0670', euer_zeile: 'Z.51' },
+  'Versicherungen':             { SKR03: '4360', SKR04: '6400', euer_zeile: 'Z.49' },
+  'Steuerberater/Buchhaltung':  { SKR03: '4240', SKR04: '6825', euer_zeile: 'Z.46' },
+  'Bewirtung (70%)':            { SKR03: '4654', SKR04: '6650', euer_zeile: 'Z.63' },
+  'Sonstiges':                  { SKR03: '4999', SKR04: '6999', euer_zeile: 'Z.60' },
+  'Software/EDV/SaaS':          { SKR03: '4970', SKR04: '6815', euer_zeile: 'Z.50' },
+  'Fremdleistungen':            { SKR03: '3100', SKR04: '5900', euer_zeile: 'Z.29' },
+  'Einnahmen 19%':              { SKR03: '8400', SKR04: '4400', euer_zeile: 'Z.15' },
+  'Einnahmen 7%':               { SKR03: '8300', SKR04: '4300', euer_zeile: 'Z.15' },
+  'Einnahmen steuerfrei':       { SKR03: '8200', SKR04: '4200', euer_zeile: 'Z.12' }
 };
 
 function resolveSachkonto(kategorie, skr) {
@@ -661,7 +667,7 @@ Bei JEDER Buchung (Ausgabe/Einnahme/Rechnung) Kategorie + Sachkonto nennen — S
 Kategorie-Tabelle (SKR03, SKR04 in Klammern):
 ${buildSachkontoTabelleText()}
 
-Kategorie bestimmen: 1) "Bekannte Absender-Kategorie" im Profil-Kontext für genau diesen Absender → immer verwenden. 2) Sonst nach Absendername einschätzen (Google*→Werbekosten, Amazon*→Wareneinkauf/Bürobedarf, Telekom/Vodafone/O2→Telefon/Internet, ADAC/Tankstelle→Kfz-Kosten, Hotel/Bahn/Flug→Reisekosten). 3) Passt nichts eindeutig → kurz nachfragen, nicht raten.
+Kategorie bestimmen: 1) "Bekannte Absender-Kategorie" im Profil-Kontext für genau diesen Absender → immer verwenden. 2) Sonst nach Absendername einschätzen (Google*→Werbekosten, Amazon*→Wareneinkauf/Bürobedarf, Telekom/Vodafone/O2→Telefon/Internet, ADAC/Tankstelle→Kfz-Kosten, Hotel/Bahn/Flug→Reisekosten, Anthropic/OpenAI/Cloudflare/GitHub/AWS/Azure/Google Cloud/Microsoft/Adobe/Notion/Figma/Slack/Zoom/Dropbox/Spotify/Netflix→Software/EDV/SaaS, Subunternehmer/Freelancer/Honorar/Dienstleister→Fremdleistungen). 3) Passt nichts eindeutig → kurz nachfragen, nicht raten.
 
 Buchungstext IMMER automatisch generieren: "[Absender] [Monat] [Jahr]" (z.B. "Google Ads August 2026") — Nutzer liefert nie selbst einen.
 
