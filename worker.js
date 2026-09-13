@@ -643,6 +643,7 @@ Findest du zwei Positionen im selben Monat mit gleichem Betrag UND Absender/Empf
 Nutzer nennt Einnahmen/Ausgaben für einen Monat → zusammenfassen, fragen: "Soll ich das als Monatsabschluss für [Monat] [Jahr] speichern? (j/n)". Bei Bestätigung (j/ja/yes/Jo) → kurze Antwort + Befehl:
 MONATSABSCHLUSS_SAVE:monat=[Monat],jahr=[Jahr],einnahmen=[Betrag],ausgaben=[Betrag],einnahmen_positionen=[TT.MM. Beschreibung:Betrag;TT.MM. Beschreibung:Betrag],ausgaben_positionen=[TT.MM. Beschreibung:Betrag;TT.MM. Beschreibung:Betrag]
 Regeln: nur ganze Zahlen ohne €; Monatsnamen deutsch; bei nur "j" Zahlen aus Gesprächsverlauf nehmen; existierender Abschluss → erst fragen ob überschreiben; Positionen mit Semikolon getrennt (kein Komma!), Format "TT.MM. Beschreibung:Betrag", fehlende Beschreibung → "unbenannt" statt weglassen, nichts erfinden.
+KRITISCH: Der Client speichert NUR, wenn die Zeile MONATSABSCHLUSS_SAVE:... wortwörtlich in DIESER Antwort steht — bei Bestätigung NIEMALS nur mit Text wie "Alles klar, gespeichert!" antworten ohne den Befehl mitzuschicken, das speichert NICHTS und belügt den Nutzer über den tatsächlichen Zustand. Der Befehl gehört in JEDE Antwort, die auf eine Speicherbestätigung (j/ja/yes/Jo) folgt, ausnahmslos.
 
 ## MONATSABSCHLUSS AUS TAGESDATEN
 "Mach meinen Monatsabschluss":
