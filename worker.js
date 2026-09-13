@@ -489,9 +489,15 @@ const SACHKONTO_MAPPING = {
   'GWG bis 800€':               { SKR03: '0480', SKR04: '0670', euer_zeile: 'Z.51' },
   'Versicherungen':             { SKR03: '4360', SKR04: '6400', euer_zeile: 'Z.49' },
   'Steuerberater/Buchhaltung':  { SKR03: '4240', SKR04: '6825', euer_zeile: 'Z.46' },
-  'Bewirtung (70%)':            { SKR03: '4654', SKR04: '6650', euer_zeile: 'Z.63' },
+  // Bewirtung/Werbekosten teilen sich bewusst SKR03 4650 (Audit-Korrektur 2026-09) — 4654 ist
+  // tatsächlich "Nicht abzugsfähige Bewirtungskosten" (der 30%-Anteil), nicht die Gesamtkosten;
+  // 4650 ist laut DATEV-Praxis der abzugsfähige Bewirtungsanteil UND Werbekosten zugleich.
+  'Bewirtung (70%)':            { SKR03: '4650', SKR04: '6640', euer_zeile: 'Z.63' },
   'Sonstiges':                  { SKR03: '4999', SKR04: '6999', euer_zeile: 'Z.60' },
-  'Software/EDV/SaaS':          { SKR03: '4970', SKR04: '6815', euer_zeile: 'Z.50' },
+  // SKR03 4945 statt 4980 (Audit-Korrektur 2026-09): 4980 kollidiert mit "Bürobedarf" und würde
+  // im DATEV-Export beide Kategorien aufs selbe Gegenkonto buchen. 4970/6815 (vorherige Werte)
+  // waren schlicht falsch (Nebenkosten des Geldverkehrs bzw. Bürobedarf in echten SKR03/04).
+  'Software/EDV/SaaS':          { SKR03: '4945', SKR04: '6810', euer_zeile: 'Z.50' },
   'Fremdleistungen':            { SKR03: '3100', SKR04: '5900', euer_zeile: 'Z.29' },
   'Einnahmen 19%':              { SKR03: '8400', SKR04: '4400', euer_zeile: 'Z.15' },
   'Einnahmen 7%':               { SKR03: '8300', SKR04: '4300', euer_zeile: 'Z.15' },
@@ -667,7 +673,7 @@ Bei JEDER Buchung (Ausgabe/Einnahme/Rechnung) Kategorie + Sachkonto nennen — S
 Kategorie-Tabelle (SKR03, SKR04 in Klammern):
 ${buildSachkontoTabelleText()}
 
-Kategorie bestimmen: 1) "Bekannte Absender-Kategorie" im Profil-Kontext für genau diesen Absender → immer verwenden. 2) Sonst nach Absendername einschätzen (Google*→Werbekosten, Amazon*→Wareneinkauf/Bürobedarf, Telekom/Vodafone/O2→Telefon/Internet, ADAC/Tankstelle→Kfz-Kosten, Hotel/Bahn/Flug→Reisekosten, Anthropic/OpenAI/Cloudflare/GitHub/AWS/Azure/Google Cloud/Microsoft/Adobe/Notion/Figma/Slack/Zoom/Dropbox/Spotify/Netflix→Software/EDV/SaaS, Subunternehmer/Freelancer/Honorar/Dienstleister→Fremdleistungen). 3) Passt nichts eindeutig → kurz nachfragen, nicht raten.
+Kategorie bestimmen: 1) "Bekannte Absender-Kategorie" im Profil-Kontext für genau diesen Absender → immer verwenden. 2) Sonst nach Absendername einschätzen (Google*→Werbekosten, Amazon*→Wareneinkauf/Bürobedarf, Telekom/Vodafone/O2→Telefon/Internet, ADAC/Tankstelle→Kfz-Kosten, Hotel/Bahn/Flug→Reisekosten, Anthropic/OpenAI/ChatGPT/Cloudflare/GitHub/AWS/Azure/Google Cloud/Microsoft/Adobe/Notion/Figma/Slack/Zoom/Dropbox/Spotify/Netflix/Vercel/Netlify/Heroku/DigitalOcean/GitLab/Sentry/Canva/Mailchimp/Make.com/Zapier/Webflow→Software/EDV/SaaS, Subunternehmer/Freelancer/Honorar/Dienstleister→Fremdleistungen). 3) Passt nichts eindeutig → kurz nachfragen, nicht raten.
 
 Buchungstext IMMER automatisch generieren: "[Absender] [Monat] [Jahr]" (z.B. "Google Ads August 2026") — Nutzer liefert nie selbst einen.
 
