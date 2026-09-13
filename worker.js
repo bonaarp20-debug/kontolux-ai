@@ -1656,12 +1656,13 @@ async function buchTagesBewegung(userId, token, richtung, betragNum, beschreibun
   // buchTagesBewegung bucht IMMER einen Zugang in die jeweilige Richtung — nie einen Abgang.
   const betragAbs = Math.abs(betragNum);
 
+  let res;
   if (richtung === 'einnahme') {
     // beschreibung wurde von den Aufrufern bisher immer schon mitgeschickt, aber nie
     // gespeichert — dadurch tauchten Einnahmen aus dem Belegarchiv im Monatsabschluss als
     // "unbenannt" auf, obwohl der Absender bekannt war.
     const docName = `projects/kontolux-ai/databases/(default)/documents/users/${userId}/tagesdaten/${heute}`;
-    await fetch(commitUrl, {
+    res = await fetch(commitUrl, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -1676,7 +1677,7 @@ async function buchTagesBewegung(userId, token, richtung, betragNum, beschreibun
     const docName = `projects/kontolux-ai/databases/(default)/documents/users/${userId}/profil/settings`;
     const ausgabeKey = `ausgabe_${heute}`;
     const beschreibungKey = `ausgabe_beschreibung_${heute}`;
-    await fetch(commitUrl, {
+    res = await fetch(commitUrl, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -1687,6 +1688,19 @@ async function buchTagesBewegung(userId, token, richtung, betragNum, beschreibun
         }]
       })
     });
+  }
+
+  // Compliance-Fund 2026-09 (Anthropic-Beleg-Untersuchung): fetch() wirft bei einer HTTP-
+  // Fehlerantwort (4xx/5xx) NICHT — nur bei echten Netzwerkfehlern. Das try/catch der Aufrufer
+  // (BELEG_MANUELL/BELEG_SPEICHERN) griff deshalb NIE, wenn der Commit-Request selbst mit einem
+  // Fehlerstatus zurückkam (abgelaufenes Token, ungültige Feldwerte, Firestore-Rate-Limit etc.) —
+  // der Beleg stand danach dauerhaft auf "bezahlt", der Betrag landete aber nie in den
+  // Tagesdaten, ohne dass irgendwo eine Fehlermeldung sichtbar wurde. Jetzt wird der Status
+  // explizit geprüft und ein echter Error geworfen, den die Aufrufer abfangen und dem Nutzer
+  // sichtbar machen können (siehe warning-Feld in der Response von BELEG_MANUELL/BELEG_SPEICHERN).
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Firestore-Commit fehlgeschlagen (${res.status}): ${errText.slice(0, 200)}`);
   }
 }
 
@@ -1947,12 +1961,20 @@ async function handleDocument(body, env, cors = {}, ctx) {
       // Betrag ohne Umweg über den Chat im Monatsabschluss auftaucht. Mahnungen sind rein
       // informativ (Bezahlt/Offen nur für die Kundenübersicht) und lösen NIE eine Buchung aus —
       // die tatsächliche Zahlung wurde bereits über die zugrunde liegende Rechnung gebucht.
+      // tagesbewegungWarnung landet in der Response (statt nur im Server-Log), damit der Client
+      // den Nutzer sichtbar informieren kann, falls die Buchung fehlgeschlagen ist — der Beleg
+      // selbst ist zu diesem Zeitpunkt bereits erfolgreich gespeichert, das darf ein
+      // fehlgeschlagener Zweit-Write nicht rückgängig machen (siehe buchTagesBewegung-Kommentar).
+      let tagesbewegungWarnung = null;
       if (bezahlt && typ !== 'mahnung_ausgehend') {
         try {
           const richtung = typ === 'rechnung_ausgehend' ? 'einnahme' : 'ausgabe';
           const bewegungBeschreibung = richtung === 'einnahme' ? (absender || '') : `Beleg von ${absender}`;
           await buchTagesBewegung(userId, token, richtung, parseFloat(betrag), bewegungBeschreibung);
-        } catch(e) { console.warn('Tagesbewegung (BELEG_MANUELL):', e.message); }
+        } catch(e) {
+          console.warn('Tagesbewegung (BELEG_MANUELL):', e.message);
+          tagesbewegungWarnung = 'Der Beleg wurde gespeichert, aber die Buchung in deine Tagesdaten ist fehlgeschlagen. Bitte markiere ihn im Belegarchiv einmal als "offen" und danach wieder als "bezahlt" — das versucht die Buchung erneut.';
+        }
       }
 
       return new Response(JSON.stringify({
@@ -1960,7 +1982,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
         docId: docId,
         name: `Beleg von ${absender}`,
         typ: 'rechnung_eingehend',
-        message: 'Beleg erfolgreich gespeichert'
+        message: 'Beleg erfolgreich gespeichert',
+        ...(tagesbewegungWarnung ? { warning: tagesbewegungWarnung } : {})
       }), {
         status: 200,
         headers: { ...cors, 'Content-Type': 'application/json' }
@@ -2096,6 +2119,10 @@ async function handleDocument(body, env, cors = {}, ctx) {
       // Mahnungen sind rein informativ (Bezahlt/Offen nur für die Kundenübersicht) und lösen
       // NIE eine Buchung aus — die tatsächliche Zahlung wurde bereits über die zugrunde
       // liegende Rechnung gebucht.
+      // tagesbewegungWarnung landet in der Response (statt nur im Server-Log), damit der Client
+      // den Nutzer sichtbar informieren kann, falls die Buchung fehlgeschlagen ist (siehe
+      // buchTagesBewegung-Kommentar zum ungeprüften fetch()-Status).
+      let tagesbewegungWarnung = null;
       if (bezahlt && betrag && typ !== 'mahnung_ausgehend') {
         try {
           const richtung = typ === 'rechnung_ausgehend' ? 'einnahme' : 'ausgabe';
@@ -2103,7 +2130,10 @@ async function handleDocument(body, env, cors = {}, ctx) {
             ? (absender || name || '')
             : (absender ? `Beleg von ${absender}` : (name || 'Beleg'));
           await buchTagesBewegung(userId, token, richtung, parseFloat(betrag), bewegungBeschreibung);
-        } catch(e) { console.warn('Tagesbewegung (BELEG_SPEICHERN):', e.message); }
+        } catch(e) {
+          console.warn('Tagesbewegung (BELEG_SPEICHERN):', e.message);
+          tagesbewegungWarnung = 'Der Beleg wurde gespeichert, aber die Buchung in deine Tagesdaten ist fehlgeschlagen. Bitte markiere ihn im Belegarchiv einmal als "offen" und danach wieder als "bezahlt" — das versucht die Buchung erneut.';
+        }
       }
 
       return new Response(JSON.stringify({
@@ -2113,7 +2143,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
         size: sizeFormatted,
         storage_url: storageUrl,
         typ: typ || 'rechnung_eingehend',
-        message: 'Beleg erfolgreich gespeichert'
+        message: 'Beleg erfolgreich gespeichert',
+        ...(tagesbewegungWarnung ? { warning: tagesbewegungWarnung } : {})
       }), {
         status: 200,
         headers: { ...cors, 'Content-Type': 'application/json' }
