@@ -480,7 +480,12 @@ const SACHKONTO_MAPPING = {
   'Werbekosten':               { SKR03: '4650', SKR04: '6600', euer_zeile: 'Z.54' },
   'Bürobedarf':                { SKR03: '4980', SKR04: '6800', euer_zeile: 'Z.51' },
   'Telefon/Internet':          { SKR03: '4920', SKR04: '6805', euer_zeile: 'Z.43' },
-  'Reisekosten':                { SKR03: '4670', SKR04: '6830', euer_zeile: 'Z.44' },
+  // SKR04 6830 war falsch (Audit-Korrektur 2026-09) — das ist real "Buchführungskosten", nicht
+  // Reisekosten. Jetzt 4676/6680 "Übernachtungsaufwand und Reisenebenkosten" — genau die
+  // DATEV-Unterkonten-Bezeichnung, die wörtlich zu EÜR Z.44 passt. Kilometerpauschale und
+  // Verpflegungsmehraufwand werden seit dieser Korrektur separat ausgewiesen, siehe
+  // 'Fahrtkosten (Kilometerpauschale)'/'Verpflegungsmehraufwand' unten.
+  'Reisekosten':                { SKR03: '4676', SKR04: '6680', euer_zeile: 'Z.44' },
   'Fortbildung':                { SKR03: '4830', SKR04: '6811', euer_zeile: 'Z.45' },
   'Kfz-Kosten':                 { SKR03: '4930', SKR04: '6820', euer_zeile: 'Z.71' },
   'Miete/Raumkosten':           { SKR03: '4200', SKR04: '6310', euer_zeile: 'Z.39' },
@@ -497,8 +502,19 @@ const SACHKONTO_MAPPING = {
   // SKR03 4945 statt 4980 (Audit-Korrektur 2026-09): 4980 kollidiert mit "Bürobedarf" und würde
   // im DATEV-Export beide Kategorien aufs selbe Gegenkonto buchen. 4970/6815 (vorherige Werte)
   // waren schlicht falsch (Nebenkosten des Geldverkehrs bzw. Bürobedarf in echten SKR03/04).
-  'Software/EDV/SaaS':          { SKR03: '4945', SKR04: '6810', euer_zeile: 'Z.50' },
+  // SKR03 4945/SKR04 6810 waren erneut falsch (Audit-Korrektur 2026-09, zweite Runde): 4945 ist
+  // real "Sachbezüge 19% USt", 6810 ist "Internetkosten" — beides nicht EDV/Software. Korrekt
+  // laut DATEV-Kontenrahmen für Gewinnermittlung §4 Abs.3 EStG (EÜR): 4806/6495
+  // "Wartungskosten für Hard- und Software" — exakt die Beispiele aus dem amtlichen EÜR-Zeilentext
+  // Z.50 ("Laufende EDV-Kosten, z.B. Beratung, Wartung, Reparatur").
+  'Software/EDV/SaaS':          { SKR03: '4806', SKR04: '6495', euer_zeile: 'Z.50' },
   'Fremdleistungen':            { SKR03: '3100', SKR04: '5900', euer_zeile: 'Z.29' },
+  // Neu (Audit-Korrektur 2026-09): Aufsplittung der bisherigen Sammelkategorie "Reisekosten" —
+  // Kilometerpauschale und Verpflegungsmehraufwand haben je eine eigene EÜR-Zeile und ein eigenes
+  // DATEV-Unterkonto (siehe reichereMitBelegKategorieAn/splitReisekostenPosition in index.html),
+  // werden aber nie direkt aus einem Absendernamen erkannt (kein KATEGORIE_REGELN-Eintrag nötig).
+  'Fahrtkosten (Kilometerpauschale)': { SKR03: '4673', SKR04: '6673', euer_zeile: 'Z.71' },
+  'Verpflegungsmehraufwand':    { SKR03: '4674', SKR04: '6674', euer_zeile: 'Z.64' },
   'Einnahmen 19%':              { SKR03: '8400', SKR04: '4400', euer_zeile: 'Z.15' },
   'Einnahmen 7%':               { SKR03: '8300', SKR04: '4300', euer_zeile: 'Z.15' },
   'Einnahmen steuerfrei':       { SKR03: '8200', SKR04: '4200', euer_zeile: 'Z.12' }
@@ -651,11 +667,33 @@ RICHTUNG AUTOMATISCH ERKENNEN, BEVOR GEFRAGT WIRD: Vergleiche Absender-Name UND 
 - Unklar (kein Match, beide matchen, 'absender_name' fehlt im Profil, oder Namen im Dokument nicht sicher lesbar) → NICHT raten, wie bisher fragen: "Ich sehe eine Rechnung von/an [Name] über [Betrag]€ vom [Datum]. Eingehend (du bezahlst) oder ausgehend (du stellst sie)?" Noch KEIN AUSGABE_UPDATE/DOKUMENT_SPEICHERN in dieser Nachricht — die Angaben stehen jetzt im Gesprächsverlauf, nicht vergessen wenn der Nutzer nur kurz antwortet.
 - Automatisch erkannt oder Nutzer antwortet "eingehend" → kurze Bestätigung MIT Kategorie/Sachkonto/Buchungstext (SACHKONTO BEI BUCHUNGEN unten); bei automatischer Erkennung zusätzlich kurz erwähnen woran die Richtung erkannt wurde (z.B. "eingehend, da Empfänger mit deinem Profilnamen übereinstimmt") + Befehle:
 AUSGABE_UPDATE:datum=[YYYY-MM-DD],betrag=[Zahl],beschreibung=Rechnung [Absender]
-DOKUMENT_SPEICHERN:typ=rechnung_eingehend,name=Rechnung von [Absender],betrag=[Zahl],absender=[Absender],datum=[YYYY-MM-DD],kategorie=[Kategorie],sachkonto=[Nr],buchungstext=[Text],mwst_satz=[19/7/0],rechnungsnr=[Nummer aus dem Dokument, sonst weglassen]
+DOKUMENT_SPEICHERN:typ=rechnung_eingehend,name=Rechnung von [Absender],betrag=[Zahl],absender=[Absender],datum=[YYYY-MM-DD],kategorie=[Kategorie],sachkonto=[Nr],buchungstext=[Text],mwst_satz=[19/7/0/reverse_charge],rechnungsnr=[Nummer aus dem Dokument, sonst weglassen]
 - Automatisch erkannt oder Nutzer antwortet "ausgehend" → kurze Bestätigung MIT Kategorie/Sachkonto/Buchungstext (Einnahmen-Kategorie), bei automatischer Erkennung ebenfalls kurz die Erkennung erwähnen + Befehl (KEIN AUSGABE_UPDATE):
 DOKUMENT_SPEICHERN:typ=rechnung_ausgehend,name=Rechnung an [Empfänger],betrag=[Zahl],absender=[Empfänger],datum=[YYYY-MM-DD],kategorie=[Kategorie],sachkonto=[Nr],buchungstext=[Text],mwst_satz=[19/7/0],rechnungsnr=[Nummer aus dem Dokument, sonst weglassen]
 Nicht zusätzlich fragen ob speichern — bei automatischer Erkennung direkt in derselben Nachricht speichern, nach einer Richtungs-Rückfrage direkt nach der Antwort speichern. Kein Rechnungsdokument → normal analysieren.
 mwst_satz IMMER angeben (wichtig für DATEV-Export): Steuersatz steht auf der Rechnung (19%/7%/kein Ausweis→0) — direkt ablesen, NIEMALS raten; nur bei wirklich keinem erkennbaren Steuerausweis auf dem Dokument nachfragen. rechnungsnr: exakt die auf dem Dokument abgedruckte Nummer, nie erfinden — steht keine erkennbar drauf, das Feld ganz weglassen (nicht raten).
+
+REVERSE CHARGE BEI EINGEHENDEN RECHNUNGEN (§13b UStG) — Audit-Korrektur 2026-09: eine eingehende
+Rechnung eines ausländischen Anbieters (z.B. Anthropic, OpenAI, Cloudflare, AWS/Amazon Web
+Services, Google, Meta, Microsoft/Azure — Sitz USA/Irland/anderes Ausland) OHNE ausgewiesene
+deutsche Umsatzsteuer ist in aller Regel Reverse Charge, NICHT einfach "kein Ausweis→0". Setze in
+diesem Fall mwst_satz=reverse_charge statt mwst_satz=0 — beide bedeuten zwar "keine deutsche USt
+auf der Rechnung", aber nur reverse_charge löst im DATEV-Export den korrekten BU-Schlüssel aus
+(sonst würde ein Nicht-Kleinunternehmer fälschlich mit BU9/19%-Vorsteuerabzug statt BU0 gebucht,
+siehe buSchluessel() im Worker). Das gilt AUCH für Kleinunternehmer: sie schulden trotz §19 UStG
+die Steuer nach §13b UStG selbst und müssen dafür eine UStVA abgeben (siehe KLEINUNTERNEHMER +
+REVERSE CHARGE weiter oben) — kategorie bleibt bei diesen Belegen unabhängig vom mwst_satz
+'Software/EDV/SaaS' (oder die sonst zutreffende Kategorie), reverse_charge betrifft nur mwst_satz.
+
+KATEGORIE BEI SAAS-/CLOUD-BELEGEN — HARTE REGEL: Ein Beleg eines erkennbaren SaaS-, Cloud- oder
+API-Anbieters (laufendes Abonnement/laufende Nutzung statt physischer Ware, z.B. Anthropic,
+OpenAI, Cloudflare, AWS, Azure, Google Cloud, GitHub, Notion, Slack, DATEV) bekommt IMMER die
+Kategorie 'Software/EDV/SaaS' — NIEMALS 'Wareneinkauf 19%'/'Wareneinkauf 7%', auch wenn der
+Anbietername (z.B. "Amazon") sonst für Warenkäufe stehen würde. Wareneinkauf ist ausschließlich
+für physische Handelsware/Rohstoffe. Einmalig gekaufte Software (Kauflizenz statt Abo) ist KEINE
+laufende Betriebsausgabe, sondern Anlagevermögen — bis 800€ netto als 'GWG bis 800€' buchen,
+darüber auf AfA/Abschreibung hinweisen (Kontolux bildet Abschreibungen aktuell nicht ab, ehrlich
+sagen statt selbst zu verbuchen).
 
 ## TAGESEINNAHMEN SPEICHERN
 Nutzer nennt Einnahmen für einen Tag → zusammenfassen, fragen: "Als Tageseinnahmen für [Datum] speichern? (j/n)". Bei Bestätigung → kurze Reaktion MIT Sachkonto (SACHKONTO BEI BUCHUNGEN unten) + Befehl:
@@ -673,7 +711,7 @@ Bei JEDER Buchung (Ausgabe/Einnahme/Rechnung) Kategorie + Sachkonto nennen — S
 Kategorie-Tabelle (SKR03, SKR04 in Klammern):
 ${buildSachkontoTabelleText()}
 
-Kategorie bestimmen: 1) "Bekannte Absender-Kategorie" im Profil-Kontext für genau diesen Absender → immer verwenden. 2) Sonst nach Absendername einschätzen (Google*→Werbekosten, Amazon*→Wareneinkauf/Bürobedarf, Telekom/Vodafone/O2→Telefon/Internet, ADAC/Tankstelle→Kfz-Kosten, Hotel/Bahn/Flug→Reisekosten, Anthropic/OpenAI/ChatGPT/Cloudflare/GitHub/AWS/Azure/Google Cloud/Microsoft/Adobe/Notion/Figma/Slack/Zoom/Dropbox/Spotify/Netflix/Vercel/Netlify/Heroku/DigitalOcean/GitLab/Sentry/Canva/Mailchimp/Make.com/Zapier/Webflow→Software/EDV/SaaS, Subunternehmer/Freelancer/Honorar/Dienstleister→Fremdleistungen). 3) Passt nichts eindeutig → kurz nachfragen, nicht raten.
+Kategorie bestimmen: 1) "Bekannte Absender-Kategorie" im Profil-Kontext für genau diesen Absender → immer verwenden. 2) Sonst nach Absendername einschätzen — SaaS/Cloud-Erkennung IMMER zuerst prüfen (siehe KATEGORIE BEI SAAS-/CLOUD-BELEGEN oben), erst danach die übrigen Regeln: Anthropic/OpenAI/ChatGPT/Cloudflare/GitHub/AWS/Azure/Google Cloud/Microsoft/Adobe/Notion/Figma/Slack/Zoom/Dropbox/Spotify/Netflix/Vercel/Netlify/Heroku/DigitalOcean/GitLab/Sentry/Canva/Mailchimp/Make.com/Zapier/Webflow/DATEV→Software/EDV/SaaS (auch wenn der Name sonst nach Wareneinkauf aussieht, z.B. "Amazon Web Services"), sonst Google*→Werbekosten, Amazon*(ohne AWS)→Wareneinkauf/Bürobedarf, Telekom/Vodafone/O2/1&1→Telefon/Internet, ADAC/Tankstelle→Kfz-Kosten, Hotel/Bahn/Flug→Reisekosten, Subunternehmer/Freelancer/Honorar/Dienstleister→Fremdleistungen. 3) Passt nichts eindeutig → kurz nachfragen, nicht raten.
 
 Buchungstext IMMER automatisch generieren: "[Absender] [Monat] [Jahr]" (z.B. "Google Ads August 2026") — Nutzer liefert nie selbst einen.
 
