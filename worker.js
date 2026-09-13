@@ -318,6 +318,18 @@ function pruefeBetragZeile(line) {
       return line.slice(0, stornoMatch.index) + 'Ich kann diese Rechnung nicht stornieren — Rechnungsnummer und Stornogrund müssen beide angegeben sein.';
     }
   }
+  // AUSGABE_UPDATE ohne Kategorie (Compliance-Fund 2026-09): Chat-Ausgaben hatten bisher NIE ein
+  // persistiertes Kategorie-Feld — die Kategorie stand nur im Chat-Text, ging danach aber verloren.
+  // Serverseitiger Hard-Block hier, analog zum Betrag-Check oben, da der Client dem Bot-Befehl
+  // sonst blind vertraut (siehe emitStreamLine-Kommentar oben).
+  const ausgabeUpdateMatch = line.match(/AUSGABE_UPDATE:(.*)$/i);
+  if (ausgabeUpdateMatch) {
+    const mKat = ausgabeUpdateMatch[1].match(/kategorie=([^,]*)/i);
+    const kategorie = mKat ? mKat[1].trim() : '';
+    if (!kategorie) {
+      return line.slice(0, ausgabeUpdateMatch.index) + 'Ich kann diese Ausgabe noch nicht buchen — mir fehlt die Kategorie (z.B. Bürobedarf, Software/EDV/SaaS, Werbekosten, Reisekosten). Welche passt hier am besten?';
+    }
+  }
   return line;
 }
 
@@ -707,8 +719,8 @@ TAGES_UPDATE:datum=[YYYY-MM-DD],einnahmen=[Betrag],beschreibung=[Text]
 Datum: heute wenn nicht genannt, Format YYYY-MM-DD. Nur Zahl ohne €. Datum explizit genannt ("Gestern 200€") → kein "j" nötig, direkt speichern. beschreibung: kurz wer/was — fehlt sie, kurz nachfragen ("Von wem/wofür?"), da sie später im Monatsabschluss als Einzelposition erscheint.
 
 ## AUSGABEN SPEICHERN
-Nutzer nennt Ausgabe oder lädt eingehende Rechnung hoch → fragen: "[Beschreibung] über [Betrag]€ als Ausgabe für [Datum] speichern? (j/n)". Bei Bestätigung, kurze Reaktion MIT Sachkonto, z.B. "Ich buche die [Betrag]€ [Beschreibung] als Ausgabe. Sachkonto: [Nr] ([Bezeichnung], [SKR03/SKR04]) ✓" + Befehl:
-AUSGABE_UPDATE:datum=[YYYY-MM-DD],betrag=[Zahl],beschreibung=[Text]
+Nutzer nennt Ausgabe oder lädt eingehende Rechnung hoch → fragen: "[Beschreibung] über [Betrag]€ als Ausgabe für [Datum] speichern? (j/n)". Bei Bestätigung: Kategorie/Sachkonto IMMER bestimmen (siehe SACHKONTO BEI BUCHUNGEN unten, gleiche Regeln) — kategorie ist PFLICHTFELD im Befehl, niemals weglassen (der Server lehnt den Befehl sonst ab). Passt nichts eindeutig → kurz nachfragen statt zu raten oder ohne Kategorie zu buchen. Kurze Reaktion MIT Sachkonto, z.B. "Ich buche die [Betrag]€ [Beschreibung] als Ausgabe. Sachkonto: [Nr] ([Bezeichnung], [SKR03/SKR04]) ✓" + Befehl:
+AUSGABE_UPDATE:datum=[YYYY-MM-DD],betrag=[Zahl],beschreibung=[Text],kategorie=[Kategorie]
 Beim Abgleich: gleicher Betrag + gleicher Absender/Empfänger im selben Monat wie eine bekannte Ausgabe (ausgabe_YYYY-MM-DD-Felder) → Regel aus DUPLIKAT-ERKENNUNG oben anwenden.
 
 ## SACHKONTO BEI BUCHUNGEN
