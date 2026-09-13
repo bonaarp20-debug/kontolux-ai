@@ -478,7 +478,9 @@ async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
 // "Bürobedarf" (4980) — beide EÜR-Zeilen wären dadurch nie unterscheidbar gewesen.
 const SACHKONTO_MAPPING = {
   'Werbekosten':               { SKR03: '4650', SKR04: '6600', euer_zeile: 'Z.54' },
-  'Bürobedarf':                { SKR03: '4980', SKR04: '6800', euer_zeile: 'Z.51' },
+  // SKR04 6800 war falsch (Audit-Korrektur 2026-09) — das ist real "Porto", nicht Bürobedarf.
+  // Korrekt: 6815 (Sequenz 6800 Porto/6805 Telefon/6810 Internetkosten/6815 Bürobedarf).
+  'Bürobedarf':                { SKR03: '4980', SKR04: '6815', euer_zeile: 'Z.51' },
   'Telefon/Internet':          { SKR03: '4920', SKR04: '6805', euer_zeile: 'Z.43' },
   // SKR04 6830 war falsch (Audit-Korrektur 2026-09) — das ist real "Buchführungskosten", nicht
   // Reisekosten. Jetzt 4676/6680 "Übernachtungsaufwand und Reisenebenkosten" — genau die
@@ -489,8 +491,12 @@ const SACHKONTO_MAPPING = {
   'Fortbildung':                { SKR03: '4830', SKR04: '6811', euer_zeile: 'Z.45' },
   'Kfz-Kosten':                 { SKR03: '4930', SKR04: '6820', euer_zeile: 'Z.71' },
   'Miete/Raumkosten':           { SKR03: '4200', SKR04: '6310', euer_zeile: 'Z.39' },
-  'Wareneinkauf 19%':           { SKR03: '5400', SKR04: '3400', euer_zeile: 'Z.27' },
-  'Wareneinkauf 7%':            { SKR03: '5300', SKR04: '3300', euer_zeile: 'Z.27' },
+  // SKR04 3400/3300 waren falsch (Audit-Korrektur 2026-09) — Aktiv/Passiv-Verwechslung: das sind
+  // real "Verbindlichkeiten..." (Fremdkapitalkonten), da SKR04 dem Abschlussgliederungsprinzip
+  // folgt (Klasse 3 = kurzfristiges Fremdkapital), anders als SKR03 (Klasse 3 = Wareneingang).
+  // Korrekt: 5130/5110 "Einkauf Roh-, Hilfs- und Betriebsstoffe 19%/7% Vorsteuer".
+  'Wareneinkauf 19%':           { SKR03: '5400', SKR04: '5130', euer_zeile: 'Z.27' },
+  'Wareneinkauf 7%':            { SKR03: '5300', SKR04: '5110', euer_zeile: 'Z.27' },
   'GWG bis 800€':               { SKR03: '0480', SKR04: '0670', euer_zeile: 'Z.51' },
   'Versicherungen':             { SKR03: '4360', SKR04: '6400', euer_zeile: 'Z.49' },
   'Steuerberater/Buchhaltung':  { SKR03: '4240', SKR04: '6825', euer_zeile: 'Z.46' },
@@ -748,7 +754,9 @@ Wird nur berechnet wenn Profilfeld "beruf" = "Gewerbetreibender" ist (Freiberufl
 
 ## VORSTEUER & MWST
 Kleinunternehmer (§19 UStG) haben keine Vorsteuer — Status zuerst prüfen, dann ist dieser ganze Abschnitt irrelevant.
+Mögliche mwst_satz-Werte: 19, 7, 0, "keine", "unbekannt", "reverse_charge".
 Für Regelbesteuerte: Belege mit mwst_satz vorhanden → Vorsteuer AUTOMATISCH berechnen, Satz steht bei jeder Belegarchiv-Position ("... MwSt: X%"): 19%→Betrag/1,19×0,19; 7%→Betrag/1,07×0,07; 0%/"keine"→keine Vorsteuer; "unbekannt"→NICHT automatisch 19% annehmen, diesen Beleg explizit als "ohne bekannten Satz" ausweisen und nur dafür nachfragen. Mehrere Sätze → einzeln rechnen, summieren. Nur BEZAHLTE eingehende Belege zählen (Ist-Versteuerung/EÜR).
+Bei "reverse_charge" (§13b UStG, siehe REVERSE CHARGE BEI EINGEHENDEN RECHNUNGEN oben): Regelbesteuert → NICHT in die normale Vorsteuer-Summe einrechnen (weder als 19% noch als "unbekannt" behandeln) — dieser Beleg wird separat über den DATEV-BU-Schlüssel abgebildet, nicht über die Chat-Vorsteuer-Berechnung. Kleinunternehmer → keine Vorsteuer (wie immer), aber die USt-Schuld nach §13b UStG besteht trotzdem und gehört in die selbst abzugebende UStVA — das ist unabhängig von diesem Vorsteuer-Abschnitt (siehe KLEINUNTERNEHMER + REVERSE CHARGE oben), hier nur zur Klarstellung: "reverse_charge" niemals mit "unbekannt" verwechseln oder wie einen fehlenden Satz nachfragen.
 "Wie hoch ist meine Vorsteuer?" → direkt aus bezahlten Belegen des Zeitraums (Standard: laufender Monat) rechnen, keine Rückfrage. Beim Monatsabschluss IMMER zusätzlich ausweisen, auch ungefragt. Umsatzsteuerzahllast = USt aus eigenen Rechnungen − Vorsteuer aus eingehenden; negativ = Vorsteuerüberhang (Erstattung).
 Antwortmuster: "Deine Vorsteuer aus [Zeitraum]: [Summe]€ (aus [N] bezahlten Belegen mit bekanntem MwSt-Satz)." Fehlende Sätze: "Für [M] Beleg(e) ist kein MwSt-Satz hinterlegt — nicht mitgerechnet. Nachtragen?"
 
