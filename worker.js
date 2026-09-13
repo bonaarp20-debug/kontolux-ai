@@ -1703,6 +1703,26 @@ async function buchTagesBewegung(userId, token, richtung, betragNum, beschreibun
     const errText = await res.text().catch(() => '');
     throw new Error(`Firestore-Commit fehlgeschlagen (${res.status}): ${errText.slice(0, 200)}`);
   }
+  return heute;
+}
+
+// Markiert auf dem Beleg-Dokument, an welchem Tag GERADE eine bestätigte Buchung liegt (nur nach
+// erfolgreichem buchTagesBewegung aufrufen, siehe dort). Compliance-Fund 2026-09 (Anthropic-Beleg,
+// vierter und struktureller Fund): eine spätere Rückbuchung (siehe wendeBezahltStatusAn in
+// index.html) hat bisher blind auf bezahlt_am/createdAt geraten, AN WELCHEM Tag zu dekrementieren
+// ist — ohne zu wissen, ob dort überhaupt jemals erfolgreich gebucht wurde. Ist die ursprüngliche
+// Buchung (z.B. wegen eines abgelaufenen Tokens) fehlgeschlagen, zieht die "Rückbuchung" den
+// Betrag trotzdem ab und macht das Tagesfeld dauerhaft NEGATIV — ein bestätigter, reproduzierter
+// Fall. gebuchter_tag ist die einzige Quelle, die wirklich weiß, ob (und wo) etwas zu reversieren
+// ist; fehlt das Feld (ältere Belege vor diesem Fix), fällt die Rückbuchung weiterhin auf die
+// bisherige Schätzung zurück, statt Alt-Belege komplett von der Rückbuchung auszuschließen.
+async function setzeGebuchterTag(userId, token, docId, tag) {
+  const url = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}?updateMask.fieldPaths=gebuchter_tag`;
+  await fetch(url, {
+    method: 'PATCH',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields: { gebuchter_tag: { stringValue: tag } } })
+  }).catch(e => console.warn('setzeGebuchterTag fehlgeschlagen (nicht kritisch, siehe Kommentar):', e.message));
 }
 
 // ── E-Rechnung (XRechnung/ZUGFeRD) Erkennung ──────────────────────────────
@@ -1971,7 +1991,10 @@ async function handleDocument(body, env, cors = {}, ctx) {
         try {
           const richtung = typ === 'rechnung_ausgehend' ? 'einnahme' : 'ausgabe';
           const bewegungBeschreibung = richtung === 'einnahme' ? (absender || '') : `Beleg von ${absender}`;
-          await buchTagesBewegung(userId, token, richtung, parseFloat(betrag), bewegungBeschreibung);
+          const gebuchterTag = await buchTagesBewegung(userId, token, richtung, parseFloat(betrag), bewegungBeschreibung);
+          // Nur bei bestätigtem Erfolg gesetzt (siehe setzeGebuchterTag) — macht eine spätere
+          // Rückbuchung über das Belegarchiv präzise statt geraten.
+          await setzeGebuchterTag(userId, token, docId, gebuchterTag);
         } catch(e) {
           console.warn('Tagesbewegung (BELEG_MANUELL):', e.message);
           tagesbewegungWarnung = 'Der Beleg wurde gespeichert, aber die Buchung in deine Tagesdaten ist fehlgeschlagen. Bitte markiere ihn im Belegarchiv einmal als "offen" und danach wieder als "bezahlt" — das versucht die Buchung erneut.';
@@ -2130,7 +2153,10 @@ async function handleDocument(body, env, cors = {}, ctx) {
           const bewegungBeschreibung = richtung === 'einnahme'
             ? (absender || name || '')
             : (absender ? `Beleg von ${absender}` : (name || 'Beleg'));
-          await buchTagesBewegung(userId, token, richtung, parseFloat(betrag), bewegungBeschreibung);
+          const gebuchterTag = await buchTagesBewegung(userId, token, richtung, parseFloat(betrag), bewegungBeschreibung);
+          // Nur bei bestätigtem Erfolg gesetzt (siehe setzeGebuchterTag) — macht eine spätere
+          // Rückbuchung über das Belegarchiv präzise statt geraten.
+          await setzeGebuchterTag(userId, token, docId, gebuchterTag);
         } catch(e) {
           console.warn('Tagesbewegung (BELEG_SPEICHERN):', e.message);
           tagesbewegungWarnung = 'Der Beleg wurde gespeichert, aber die Buchung in deine Tagesdaten ist fehlgeschlagen. Bitte markiere ihn im Belegarchiv einmal als "offen" und danach wieder als "bezahlt" — das versucht die Buchung erneut.';
