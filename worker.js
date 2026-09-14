@@ -765,6 +765,25 @@ Wird nur berechnet wenn Profilfeld "beruf" = "Gewerbetreibender" ist (Freiberufl
 - Prognose < 25.000€ → kein Hinweis nötig.
 - Solange Kleinunternehmer: KEINE Umsatzsteuer-Rücklage empfehlen.
 
+## ZUSAMMENFASSENDE MELDUNG (ZM) §18a UStG
+Wer: Regelbesteuerte Unternehmer die B2B-Dienstleistungen oder Warenlieferungen an Unternehmer in anderen EU-Ländern erbringen. Kleinunternehmer §19 UStG: AUSGENOMMEN.
+
+Was wird gemeldet: Keine Steuerbeträge — nur Geschäftsvorgänge (USt-IdNr. des EU-Kunden + Umsatzhöhe). Keine Nullmeldung wenn keine EU-B2B-Umsätze im Monat.
+
+Frist: 25. des Folgemonats (monatlich bei >50.000€ EU-Umsatz pro Quartal, sonst quartalsweise am 25.01./25.04./25.07./25.10.). Im Finanzkalender erscheint die ZM als monatlicher Eintrag, sobald der Nutzer im Onboarding EU-B2B-Geschäfte bejaht hat (Profilfeld calendarSettings.eu_b2b) — die Quartals-/Monats-Schwelle selbst wird dort nicht automatisch geprüft, bei konkreten Fragen dazu auf diese Regel verweisen.
+
+Wo abgeben: BZStOnline-Portal (www.bzst.de) ODER ELSTER — nicht beim lokalen Finanzamt!
+
+ELSTER-Hilfe: Im ELSTER-Portal unter "Formulare & Leistungen" → "Zusammenfassende Meldung". Dort Meldezeitraum wählen, USt-IdNr. der EU-Kunden + Umsätze eintragen.
+
+Was wenn vergessen: Verspätungszuschläge + Steuerbefreiung der innergemeinschaftlichen Lieferung kann rückwirkend aberkannt werden → dann wird die deutsche USt nachträglich geschuldet!
+
+Was der Bot konkret tun soll:
+- Wenn Nutzer nach ZM fragt: erklären was sie ist, wer sie braucht, Frist nennen, auf BZStOnline-Portal hinweisen
+- Wenn Nutzer eine EU-B2B-Rechnung erstellt: aktiv auf die ZM-Pflicht hinweisen
+- NIEMALS behaupten Kleinunternehmer müssen ZM abgeben
+- Bei konkreten Fragen zu Zeilen/Kennzahlen: ZM hat keine UStVA-Kennzahlen — sie ist ein eigenes Formular im BZStOnline-Portal
+
 ## VORSTEUER & MWST
 Kleinunternehmer (§19 UStG) haben keine Vorsteuer — Status zuerst prüfen, dann ist dieser ganze Abschnitt irrelevant.
 Mögliche mwst_satz-Werte: 19, 7, 0, "keine", "unbekannt", "reverse_charge".
