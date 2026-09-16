@@ -12,6 +12,22 @@ const ALLOWED_ORIGINS = [
   'http://localhost:5000', // lokale Entwicklung
 ];
 
+// Security-Audit-Fund 2026-09-16: handleKontakt/handleFeedback bauten die Admin-
+// Benachrichtigungs-E-Mail bisher aus rohem, ungefiltertem Nutzer-Input zusammen
+// (Kontaktformular/Feedback-Formular sind beide öffentlich bzw. ohne Content-
+// Validierung erreichbar). Wer dort z.B. `<a href="...">` oder `<img>` einschleust,
+// hätte damit Links/Layout der E-Mail manipulieren können, die im HTML-fähigen
+// Mail-Client des Betreibers landet — klassische HTML-Injection. Analog zum
+// clientseitigen escapeHtml() in index.html, nur ohne DOM (Worker-Umgebung).
+function escapeHtml(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function getCORS(origin) {
   return {
     'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : 'https://app.kontolux-ai.de',
@@ -69,6 +85,19 @@ export default {
       return new Response(null, { headers: cors });
     }
 
+    // Rate Limiting — max 20 Requests pro 10 Sekunden pro IP. MUSS vor den drei
+    // Token-geschützten GET-Endpoints unten laufen (Security-Audit-Fund 2026-09-16):
+    // die standen bisher NACH diesen Blöcken und liefen dadurch komplett ohne Limit
+    // — jede IP konnte /usage, /check-upload-limit und /pdf-result beliebig oft
+    // aufrufen. Jeder Aufruf löst bei vorhandenem Bearer-Token einen echten Netzwerk-
+    // Request an Googles accounts:lookup aus (Kosten/Latenz), bei fehlendem/falschem
+    // Format wird zwar sofort lokal abgelehnt, aber auch das ist ohne Limit ein
+    // günstiger Vektor, um den Worker mit Requests zu fluten.
+    const clientIP = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || 'unknown';
+    if (!checkRateLimit(clientIP)) {
+      return new Response('Too Many Requests', { status: 429, headers: cors });
+    }
+
     // ✅ /usage als GET — vor JSON Parse! Token-Pflicht: sonst könnte jeder mit
     // einer beliebigen userId die Nachrichten-/Upload-Zahlen fremder Nutzer abfragen.
     if (request.method === 'GET' && url.pathname === '/usage') {
@@ -119,12 +148,6 @@ export default {
       if (!result) return new Response('pending', { status: 202, headers: corsH });
       await env.PDF_RESULTS.delete(userId);
       return new Response(result, { status: 200, headers: corsH });
-    }
-
-    // Rate Limiting — max 20 Requests pro 10 Sekunden pro IP
-    const clientIP = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || 'unknown';
-    if (!checkRateLimit(clientIP)) {
-      return new Response('Too Many Requests', { status: 429, headers: cors });
     }
 
     // Origin-Check — nur erlaubte Domains
@@ -2393,16 +2416,19 @@ async function handleKontakt(body, env, cors) {
   if (!name || !email || !nachricht) {
     return new Response('Fehlende Felder', { status: 400, headers: cors });
   }
+  const nameSafe = escapeHtml(name);
+  const emailSafe = escapeHtml(email);
+  const nachrichtSafe = escapeHtml(nachricht).replace(/\n/g, '<br>');
 
-  const html = emailShell(`Neue Kontaktanfrage von ${name}`, `
+  const html = emailShell(`Neue Kontaktanfrage von ${nameSafe}`, `
     <h1 style="font-size:19px;color:#0f1f2e;margin:0 0 16px">Neue Kontaktanfrage</h1>
-    <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 6px"><strong>Name:</strong> ${name}</p>
-    <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 16px"><strong>E-Mail:</strong> <a href="mailto:${email}" style="color:#1d5d96">${email}</a></p>
+    <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 6px"><strong>Name:</strong> ${nameSafe}</p>
+    <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 16px"><strong>E-Mail:</strong> <a href="mailto:${emailSafe}" style="color:#1d5d96">${emailSafe}</a></p>
     <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 6px"><strong>Nachricht:</strong></p>
-    <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0">${nachricht.replace(/\n/g, '<br>')}</p>
+    <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0">${nachrichtSafe}</p>
   `);
 
-  await sendEmail('jona@kontolux-ai.de', `Kontaktanfrage von ${name}`, html, env);
+  await sendEmail('jona@kontolux-ai.de', `Kontaktanfrage von ${name}`.slice(0, 200), html, env);
   return new Response('OK', { headers: cors });
 }
 
@@ -2444,17 +2470,23 @@ async function handleUsage(body, env, cors) {
 // ── /feedback Handler ─────────────────────────────────────
 async function handleFeedback(body, env, cors = {}) {
   const { feedback, nutzername, gut, schlecht, wunsch, datum } = body;
+  const nutzernameSafe = escapeHtml(nutzername) || 'Unbekannt';
+  const gutSafe = escapeHtml(gut);
+  const schlechtSafe = escapeHtml(schlecht);
+  const wunschSafe = escapeHtml(wunsch);
+  const feedbackSafe = escapeHtml(feedback);
+  const datumSafe = escapeHtml(datum) || new Date().toLocaleDateString('de-DE');
 
-  const html = emailShell(`Neues Feedback von ${nutzername || 'Unbekannt'}`, `
-    <h1 style="font-size:19px;color:#0f1f2e;margin:0 0 16px">Neues Feedback von ${nutzername || 'Unbekannt'}</h1>
-    <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 16px"><strong>Datum:</strong> ${datum || new Date().toLocaleDateString('de-DE')}</p>
-    ${gut ? `<p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 12px"><strong>Was gefällt:</strong> ${gut}</p>` : ''}
-    ${schlecht ? `<p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 12px"><strong>Was stört:</strong> ${schlecht}</p>` : ''}
-    ${wunsch ? `<p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 12px"><strong>Wunsch:</strong> ${wunsch}</p>` : ''}
-    ${feedback ? `<p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0"><strong>Feedback:</strong> ${feedback}</p>` : ''}
+  const html = emailShell(`Neues Feedback von ${nutzernameSafe}`, `
+    <h1 style="font-size:19px;color:#0f1f2e;margin:0 0 16px">Neues Feedback von ${nutzernameSafe}</h1>
+    <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 16px"><strong>Datum:</strong> ${datumSafe}</p>
+    ${gutSafe ? `<p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 12px"><strong>Was gefällt:</strong> ${gutSafe}</p>` : ''}
+    ${schlechtSafe ? `<p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 12px"><strong>Was stört:</strong> ${schlechtSafe}</p>` : ''}
+    ${wunschSafe ? `<p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 12px"><strong>Wunsch:</strong> ${wunschSafe}</p>` : ''}
+    ${feedbackSafe ? `<p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0"><strong>Feedback:</strong> ${feedbackSafe}</p>` : ''}
   `);
 
-  await sendEmail('jona@kontolux-ai.de', `Feedback von ${nutzername || 'Nutzer'}`, html, env);
+  await sendEmail('jona@kontolux-ai.de', `Feedback von ${nutzername || 'Nutzer'}`.slice(0, 200), html, env);
   return new Response('OK', { headers: cors });
 }
 
@@ -2581,8 +2613,18 @@ function toLatin1Bytes(str) {
 // DATEV-Textfelder werden immer gequotet (auch wenn sie kein Semikolon enthalten) —
 // das entspricht dem offiziellen Format und ist robust gegen Sonderzeichen in frei
 // eingegebenen Absender-/Beschreibungstexten.
+//
+// Security-Audit-Fund 2026-09-16 (CSV/Formula-Injection): "absender"/"buchungstext"
+// stammen u.a. aus per OCR/Claude ausgelesenen EINGEHENDEN Belegen — der Text kommt
+// also nicht nur vom Kontoinhaber selbst, sondern potenziell von einem Dritten
+// (Absender einer Eingangsrechnung). Beginnt ein Feld mit =, +, -, @ oder Tab,
+// interpretiert Excel es beim Öffnen der Export-CSV als Formel — auch INNERHALB
+// von Anführungszeichen (Anführungszeichen sind für DATEV/CSV-Quoting da, nicht als
+// Excel-"das ist Text"-Marker). Ein führendes Apostroph neutralisiert das zuverlässig
+// (Excel zeigt den Rest als Klartext), ohne das DATEV-Format zu brechen.
 function datevText(val, maxLen) {
   let s = String(val ?? '').replace(/[\r\n]+/g, ' ');
+  if (/^[=+\-@\t]/.test(s)) s = `'${s}`;
   if (maxLen) s = s.slice(0, maxLen);
   return `"${s.replace(/"/g, '""')}"`;
 }
