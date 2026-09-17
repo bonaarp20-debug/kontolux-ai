@@ -2621,14 +2621,23 @@ async function handlePrueferDaten(body, env, cors = {}) {
   try {
     const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
 
-    // collectionGroup-Query (allDescendants:true) — die UID des Nutzers ist aus der Prüfer-URL
-    // NICHT bekannt, deshalb über alle users/*/profil/prueferZugang-Dokumente hinweg suchen.
+    // Bug-Fund 2026-09-18: "prueferZugang" ist in der Datenstruktur (siehe generierePrueferToken
+    // in index.html) KEINE Collection, sondern nur die Dokument-ID INNERHALB der "profil"-
+    // Collection — derselben Collection wie "settings"/"kalender"/"rechnungsCounter". Eine
+    // collectionGroup-Query mit collectionId:'prueferZugang' sucht nach einer Collection, die
+    // nirgends existiert, und findet deshalb NIE etwas — unabhängig davon wie gültig
+    // Token/aktiv/ablauf tatsächlich sind (reproduziert: frisch erstelltes, aktives, 90 Tage
+    // gültiges Test-Dokument wurde trotzdem als "invalid" abgelehnt). Der Fix fragt stattdessen
+    // die echte Collection-Gruppe "profil" ab; der token-Filter grenzt zuverlässig auf die
+    // prueferZugang-förmigen Dokumente ein, weil settings/kalender nie ein "token"-Feld haben.
+    // Die UID des Nutzers ist aus der Prüfer-URL NICHT bekannt, deshalb über alle
+    // users/*/profil-Dokumente hinweg suchen statt einen bekannten Pfad direkt zu lesen.
     const queryRes = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         structuredQuery: {
-          from: [{ collectionId: 'prueferZugang', allDescendants: true }],
+          from: [{ collectionId: 'profil', allDescendants: true }],
           where: { fieldFilter: { field: { fieldPath: 'token' }, op: 'EQUAL', value: { stringValue: token } } },
           limit: 1
         }
