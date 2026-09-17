@@ -234,6 +234,9 @@ export default {
       if (url.pathname === '/send-password-reset') return handleSendPasswordReset(body, env, cors);
       if (url.pathname === '/send-email-change-verification') return handleSendEmailChangeVerification(verifiedEmail, body, env, cors);
       if (url.pathname === '/admin/seed-steuerrecht') return handleSeedSteuerrecht(request, body, env, cors);
+      // Bewusst NICHT in protectedPaths: ein Betriebsprüfer hat keinen Firebase-Login, der
+      // Zugriffsnachweis ist der Besitz des Tokens selbst (siehe handlePrueferDaten unten).
+      if (url.pathname === '/pruefer-daten') return handlePrueferDaten(body, env, cors);
 
       return new Response('Not found', { status: 404, headers: cors });
     } catch (e) {
@@ -2590,6 +2593,99 @@ async function handleDeleteAccountData(body, env, cors = {}) {
   });
 }
 
+// ── /pruefer-daten Handler — Betriebsprüfer-Lesezugriff ───────────────────
+// Öffentlich erreichbar (kein Firebase-Login) — der Zugriffsnachweis ist der Besitz des
+// kryptographisch zufälligen 32-Zeichen-Tokens (users/{uid}/profil/prueferZugang, siehe
+// generierePrueferZugang in index.html), nicht eine Firebase-Session.
+//
+// Sicherheits-Fund 2026-09-18: Der ursprüngliche Plan sah eine Firestore Security Rule vor,
+// die "request.query.token" gegen das gespeicherte Token vergleicht. Das existiert nicht —
+// request.query in Firestore Rules bezieht sich auf Query-Constraints wie limit/offset, NIE
+// auf URL-Parameter der Web-App. Selbst ein where('token','==',X)-Filter würde nicht helfen:
+// Rules sehen nur, ob ein KANDIDAT-Dokument die Bedingung erfüllt, nicht ob der Client den
+// Filter überhaupt gesetzt oder einfach weggelassen hat — jeder könnte sonst per
+// collectionGroup-Query ohne Token-Filter alle aktiven Zugänge aller Nutzer auflisten.
+// Die Prüfung läuft deshalb komplett hier, mit dem Admin-Service-Account (bypasst Firestore
+// Rules bewusst, wie schon bei handleDeleteAccountData/loadSteuerrechtContext oben) — niemals
+// mit einer Client-Anmeldung, die es für einen anonymen Prüfer gar nicht gibt.
+async function handlePrueferDaten(body, env, cors = {}) {
+  const token = (body.token || '').trim();
+  // 32-Zeichen-Base64Url (siehe generierePrueferToken im Frontend) — Format-Check VOR der
+  // Firestore-Query, um offensichtlich falsche/leere Werte günstig abzuweisen.
+  if (!token || token.length < 16 || token.length > 64) {
+    return new Response(JSON.stringify({ error: 'invalid' }), {
+      status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+
+    // collectionGroup-Query (allDescendants:true) — die UID des Nutzers ist aus der Prüfer-URL
+    // NICHT bekannt, deshalb über alle users/*/profil/prueferZugang-Dokumente hinweg suchen.
+    const queryRes = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        structuredQuery: {
+          from: [{ collectionId: 'prueferZugang', allDescendants: true }],
+          where: { fieldFilter: { field: { fieldPath: 'token' }, op: 'EQUAL', value: { stringValue: token } } },
+          limit: 1
+        }
+      })
+    });
+    if (!queryRes.ok) {
+      const errText = await queryRes.text().catch(() => '');
+      throw new Error(`Query fehlgeschlagen: ${queryRes.status} ${errText.slice(0, 300)}`);
+    }
+    const rows = await queryRes.json();
+    const match = Array.isArray(rows) ? rows.find(r => r.document?.name) : null;
+
+    // Absichtlich dieselbe generische Fehlermeldung für "kein Token-Treffer" UND "Treffer, aber
+    // inaktiv/abgelaufen" — sonst könnte ein Angreifer aus der Antwort ablesen, ob ein geratener
+    // Token je existiert hat.
+    const generischerFehler = () => new Response(JSON.stringify({ error: 'invalid' }), {
+      status: 404, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+
+    if (!match) return generischerFehler();
+
+    const zugangFields = match.document.fields || {};
+    const aktiv = firestoreValue(zugangFields.aktiv);
+    const ablaufIso = firestoreValue(zugangFields.ablauf);
+    const ablaufMs = ablaufIso ? new Date(ablaufIso).getTime() : NaN;
+    if (aktiv !== true || !Number.isFinite(ablaufMs) || ablaufMs <= Date.now()) return generischerFehler();
+
+    // UID aus dem vollen Dokumentpfad extrahieren: .../documents/users/{uid}/profil/prueferZugang
+    const pfadMatch = /\/documents\/users\/([^/]+)\/profil\/prueferZugang$/.exec(match.document.name || '');
+    if (!pfadMatch) return generischerFehler();
+    const uid = pfadMatch[1];
+
+    const base = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${uid}`;
+    const [dokDocs, maDocs] = await Promise.all([
+      firestoreListAll(`${base}/dokumente`, adminToken),
+      firestoreListAll(`${base}/monatsabschluesse`, adminToken)
+    ]);
+
+    // Absichtlich UNGEFILTERT, auch soft-gelöschte/stornierte Belege (deleted:true) — genau das
+    // ist der GoBD-Zweck der Soft-Delete-Architektur (siehe firestore.rules-Kommentar zu
+    // "Unveränderbare Archivierung"): ein Betriebsprüfer muss Stornos nachvollziehen können,
+    // nicht nur den bereinigten Endstand sehen.
+    const dokIdAusPfad = (name) => name.split('/').pop();
+    const dokumente = dokDocs.map(d => ({ id: dokIdAusPfad(d.name), ...firestoreFieldsToObject(d.fields) }));
+    const monatsabschluesse = maDocs.map(d => ({ id: dokIdAusPfad(d.name), ...firestoreFieldsToObject(d.fields) }));
+
+    return new Response(JSON.stringify({ dokumente, monatsabschluesse }), {
+      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  } catch (e) {
+    console.error('Prüfer-Zugriff Fehler:', e.message);
+    return new Response(JSON.stringify({ error: 'server_error' }), {
+      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+}
+
 // ── DATEV Buchungsstapel Helpers ──────────────────────────────
 // ISO-8859-1 (ANSI) ist ein direktes 1:1-Mapping von Codepoint 0-255 auf ein Byte —
 // DATEV erwartet diese Kodierung statt UTF-8. Zeichen außerhalb dieses Bereichs (z.B.
@@ -2654,6 +2750,29 @@ function firestoreValue(field) {
   if (field.booleanValue !== undefined) return field.booleanValue;
   if (field.timestampValue !== undefined) return field.timestampValue;
   return null;
+}
+
+// Wandelt eine komplette Firestore-REST fields-Map rekursiv in ein normales JS-Objekt um —
+// anders als firestoreValue oben (das gezielt EIN benanntes Feld entpackt) reicht diese hier
+// beliebige, nicht vorab bekannte Beleg-/Abschlussfelder unverändert durch. Gebraucht für
+// handlePrueferDaten, wo (anders als beim DATEV-Export) keine feste, kuratierte Feldliste
+// ausreicht, sondern die kompletten Dokumente wie im Belegarchiv selbst gebraucht werden.
+function firestoreValueGeneric(value) {
+  if (!value) return null;
+  if (value.stringValue !== undefined) return value.stringValue;
+  if (value.doubleValue !== undefined) return value.doubleValue;
+  if (value.integerValue !== undefined) return parseFloat(value.integerValue);
+  if (value.booleanValue !== undefined) return value.booleanValue;
+  if (value.timestampValue !== undefined) return value.timestampValue;
+  if (value.nullValue !== undefined) return null;
+  if (value.mapValue !== undefined) return firestoreFieldsToObject(value.mapValue.fields || {});
+  if (value.arrayValue !== undefined) return (value.arrayValue.values || []).map(firestoreValueGeneric);
+  return null;
+}
+function firestoreFieldsToObject(fields) {
+  const out = {};
+  for (const key in (fields || {})) out[key] = firestoreValueGeneric(fields[key]);
+  return out;
 }
 
 function isKleinunternehmer(profilFields) {
