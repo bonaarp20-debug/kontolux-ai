@@ -55,6 +55,14 @@ const BERLIN_DATUM_FORMATTER = new Intl.DateTimeFormat('en-CA', { timeZone: 'Eur
 function berlinDatumAlsString(d = new Date()) {
   return BERLIN_DATUM_FORMATTER.format(d);
 }
+// "September 2026"-Format für Beleg-Namen (z.B. Stripe-Webhook-Belege) — dieselbe Europe/
+// Berlin-Zeitzonen-Begründung wie bei BERLIN_DATUM_FORMATTER oben, sonst könnte eine Zahlung
+// kurz nach Mitternacht deutscher Zeit fälschlich noch im Vormonat angezeigt werden.
+const BERLIN_MONAT_JAHR_FORMATTER = new Intl.DateTimeFormat('de-DE', { timeZone: 'Europe/Berlin', month: 'long', year: 'numeric' });
+function unixToMonatJahr(unixSeconds) {
+  const d = unixSeconds ? new Date(unixSeconds * 1000) : new Date();
+  return BERLIN_MONAT_JAHR_FORMATTER.format(d);
+}
 
 // ── In-Memory Rate Limiting ──────────────────
 const rateLimitMap = new Map();
@@ -150,6 +158,17 @@ export default {
       return new Response(result, { status: 200, headers: corsH });
     }
 
+    // ── /webhook/{plattform}/... Routen (externe Plattformen, z.B. Stripe) ──────
+    // Muss VOR dem generischen body = await request.json() unten behandelt werden: externe
+    // Server haben kein Firebase-Token (kein protectedPaths-Eintrag), und Webhook-Signatur-
+    // prüfung (HMAC) braucht den UNVERÄNDERTEN rohen Body — ein hier bereits geparstes und
+    // neu serialisiertes JSON könnte durch andere Key-Reihenfolge/Whitespace einen
+    // abweichenden Hash ergeben. Details/Abwägungen: docs/webhook_implementierungsplan.md
+    // (Kontolux-Frontend-Repo).
+    if (request.method === 'POST' && url.pathname.startsWith('/webhook/stripe/')) {
+      return handleStripeWebhook(request, url, env, cors);
+    }
+
     // Origin-Check — nur erlaubte Domains
     if (origin && !ALLOWED_ORIGINS.includes(origin)) {
       return new Response('Forbidden', { status: 403, headers: cors });
@@ -177,7 +196,7 @@ export default {
       // ✅ /send-verification-email geschützt — E-Mail kommt aus dem verifizierten
       // Token, nie vom Client, sonst könnte jeder Verifizierungsmails an beliebige
       // Adressen auslösen (Spam-Vektor).
-      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/usage', '/abo', '/delete-account-data', '/send-verification-email', '/send-email-change-verification'];
+      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/usage', '/abo', '/delete-account-data', '/send-verification-email', '/send-email-change-verification', '/webhook-settings'];
 
       if (protectedPaths.includes(url.pathname)) {
         try {
@@ -228,6 +247,7 @@ export default {
       if (url.pathname === '/abo')      return handleAbo(body, env, cors);
       if (url.pathname === '/usage')    return handleUsage(body, env, cors);
       if (url.pathname === '/datev-export') return handleDatevExport(body, env, cors);
+      if (url.pathname === '/webhook-settings') return handleWebhookSettings(body, env, cors, verifiedUid, url.origin);
       if (url.pathname === '/kontakt')   return handleKontakt(body, env, cors);
       if (url.pathname === '/delete-account-data') return handleDeleteAccountData(body, env, cors);
       if (url.pathname === '/send-verification-email') return handleSendVerificationEmail(verifiedEmail, env, cors);
@@ -1118,6 +1138,11 @@ async function getGoogleAccessToken(env, scope = 'https://www.googleapis.com/aut
 }
 
 const FIRESTORE_SCOPE = 'https://www.googleapis.com/auth/datastore';
+// Für den REST-Upload von Stripe-Rechnungs-PDFs nach Firebase Storage (siehe archiveInvoicePdf
+// weiter unten) — Firebase-Storage-Buckets sind normale Google-Cloud-Storage-Buckets, dieselbe
+// Service-Account-Token-Infrastruktur (getGoogleAccessToken) funktioniert dafür genauso wie für
+// Firestore, nur mit diesem eigenen Scope (eigener Cache-Eintrag, siehe googleAccessTokenCache).
+const STORAGE_SCOPE = 'https://www.googleapis.com/auth/devstorage.read_write';
 
 // In-Memory-Fallback (pro Worker-Isolate, überlebt mehrere Requests) für das Steuerrecht-
 // Dokument — siehe Begründung in loadSteuerrechtContext unten.
@@ -3103,5 +3128,638 @@ async function sendMonthlyReminders(env) {
       <p style="font-size:12.5px;color:#5d6e7f;line-height:1.6;margin:24px 0 0">Du erhältst diese Mail, weil du Erinnerungen aktiviert hast. <a href="https://app.kontolux-ai.de" style="color:#1d5d96">Abmelden</a></p>
     `);
     await sendEmail(email, `Dein Monatsabschluss für ${monat} wartet`, html, env, 'Kontolux AI <jona@kontolux-ai.de>');
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// ── WEBHOOK-INFRASTRUKTUR (Phase 0) ────────────────────────────────────────
+// Gemeinsame Bausteine für externe Zahlungs-/Verkaufsplattformen (Stripe zuerst,
+// weitere Plattformen sollen demselben Muster folgen: eigener Abschnitt
+// "PLATTFORM-INTEGRATION" mit stripeEventToBeleg-/handleStripeWebhook-Äquivalenten,
+// Wiederverwendung von writeBelegAsAdmin/isAlreadyProcessed/markAsProcessed).
+// Details/Abwägungen: docs/webhook_implementierungsplan.md (Kontolux-Frontend-Repo).
+// ════════════════════════════════════════════════════════════════════════
+
+// Liest ein einzelnes Firestore-Dokument per Admin-Token. Gibt bei 404 `null` zurück (kein
+// Fehler — "existiert nicht" ist für Webhook-Secret-Lookup/Dedup-Check ein normaler,
+// erwarteter Fall), wirft bei jedem anderen Nicht-2xx-Status.
+async function firestoreGetDoc(docPath, token) {
+  const res = await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/${docPath}`, {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Firestore GET fehlgeschlagen (${res.status}): ${errText.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+/**
+ * Erzeugt einen kryptografisch sicheren, URL-tauglichen Zufalls-Token (192 Bit) für den
+ * geheimen Teil einer Webhook-URL (`/webhook/{plattform}/{userId}/{token}`). Der Token ist
+ * eine Verteidigungsebene ZUSÄTZLICH zur eigentlichen kryptografischen Signaturprüfung
+ * (siehe verifyStripeSignature) — er verhindert billiges Durchprobieren fremder userIds,
+ * ist selbst aber NICHT die Sicherheitsgrenze. Nutzt die bereits vorhandene
+ * base64UrlFromBytes()-Hilfsfunktion (siehe Google-Admin-Zugriff oben).
+ * @returns {string}
+ */
+function generateWebhookSecret() {
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  return base64UrlFromBytes(bytes);
+}
+
+/**
+ * Legt einen Beleg OHNE aktive Nutzersession an (Aufrufer: Webhook-Handler). Nutzt einen
+ * bereits geholten Admin-Token (getGoogleAccessToken(env, FIRESTORE_SCOPE)) statt eines
+ * Nutzer-Firebase-Tokens — Firestore REST unterscheidet beim Bearer-Header nicht zwischen
+ * beiden Token-Arten; der Admin-Token umgeht zusätzlich die Security Rules, was hier
+ * gewünscht ist (kein Nutzer ist eingeloggt, der sie erfüllen könnte).
+ *
+ * Feldstruktur bewusst identisch zu BELEG_MANUELL (siehe handleDocument/BELEG_MANUELL) —
+ * damit webhook-erzeugte Belege im Belegarchiv/DATEV-Export/Monatsabschluss ununterscheidbar
+ * von manuell erfassten Belegen funktionieren. Das zusätzliche Feld `quelle` markiert nur
+ * die Herkunft zur Nachvollziehbarkeit, ändert aber kein bestehendes Auswertungsverhalten.
+ *
+ * @param {string} userId
+ * @param {object} belegData - { typ, betrag, absender, rechnungsnr?, bezahlt, bezahlt_am?,
+ *   mwst_satz, kategorie?, sachkonto?, buchungstext?, quelle, name?, storage_url? }
+ * @param {object} env
+ * @param {string} adminToken - von getGoogleAccessToken(env, FIRESTORE_SCOPE)
+ * @returns {Promise<{success: true, docId: string, tagesbewegungWarnung?: string}>}
+ */
+async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
+  const docId = `beleg_webhook_${Date.now()}`;
+  const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}`;
+
+  const name = belegData.name || (belegData.absender ? `Beleg von ${belegData.absender}` : 'Beleg');
+  const metadata = {
+    fields: {
+      name: { stringValue: name },
+      typ: { stringValue: belegData.typ },
+      betrag: { doubleValue: belegData.betrag },
+      absender: { stringValue: belegData.absender || '' },
+      rechnungsnr: { stringValue: belegData.rechnungsnr || '' },
+      manuell: { booleanValue: false },
+      bezahlt: { booleanValue: !!belegData.bezahlt },
+      mwst_satz: { stringValue: belegData.mwst_satz || 'keine' },
+      createdAt: { timestampValue: new Date().toISOString() },
+      quelle: { stringValue: belegData.quelle || 'webhook' },
+      ...(belegData.bezahlt ? { bezahlt_am: { stringValue: belegData.bezahlt_am || berlinDatumAlsString() } } : {}),
+      ...(belegData.kategorie ? { kategorie: { stringValue: belegData.kategorie } } : {}),
+      ...(belegData.sachkonto ? { sachkonto: { stringValue: belegData.sachkonto } } : {}),
+      ...(belegData.buchungstext ? { buchungstext: { stringValue: belegData.buchungstext } } : {}),
+      ...(belegData.storage_url ? { storage_url: { stringValue: belegData.storage_url } } : {})
+    }
+  };
+
+  const firestoreRes = await fetch(firestoreUrl, {
+    method: 'PATCH',
+    headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(metadata)
+  });
+  if (!firestoreRes.ok) {
+    const errText = await firestoreRes.text();
+    throw new Error(`writeBelegAsAdmin: Firestore-Write fehlgeschlagen (${firestoreRes.status}): ${errText.slice(0, 200)}`);
+  }
+
+  // Nur bei bezahlten Belegen — und in einem eigenen try/catch, damit ein Fehler hier NICHT
+  // den bereits erfolgreich gespeicherten Beleg rückwirkend als Fehler meldet. Exakt dasselbe
+  // Muster wie in BELEG_MANUELL/BELEG_SPEICHERN (dort sichtbar für den Nutzer als
+  // tagesbewegungWarnung im Response-Feld; hier ohne interaktive Session nur geloggt).
+  let tagesbewegungWarnung;
+  if (belegData.bezahlt) {
+    try {
+      const richtung = belegData.typ === 'rechnung_ausgehend' ? 'einnahme' : 'ausgabe';
+      const beschreibung = richtung === 'einnahme' ? (belegData.absender || '') : name;
+      const gebuchterTag = await buchTagesBewegung(userId, adminToken, richtung, belegData.betrag, beschreibung);
+      await setzeGebuchterTag(userId, adminToken, docId, gebuchterTag);
+    } catch (e) {
+      console.error('writeBelegAsAdmin: Tagesbewegung fehlgeschlagen für', docId, e.message);
+      tagesbewegungWarnung = 'Beleg gespeichert, aber Tagesbewegung fehlgeschlagen — bitte im Belegarchiv einmal "offen" und danach wieder "bezahlt" setzen.';
+    }
+  }
+
+  return { success: true, docId, ...(tagesbewegungWarnung ? { tagesbewegungWarnung } : {}) };
+}
+
+/**
+ * Prüft, ob ein externes Webhook-Event (per Plattform-eigener Event-ID) bereits verarbeitet
+ * wurde — externe Plattformen liefern Events dokumentiert "at-least-once", Duplikate durch
+ * Retries sind normal (siehe docs/integrationen_machbarkeit.md).
+ * @returns {Promise<boolean>}
+ */
+async function isAlreadyProcessed(userId, externalEventId, adminToken) {
+  const doc = await firestoreGetDoc(`users/${userId}/webhook_processed/${encodeURIComponent(externalEventId)}`, adminToken);
+  return doc !== null;
+}
+
+/** Markiert ein externes Webhook-Event als verarbeitet (siehe isAlreadyProcessed). */
+async function markAsProcessed(userId, externalEventId, adminToken) {
+  const url = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/webhook_processed/${encodeURIComponent(externalEventId)}`;
+  await fetch(url, {
+    method: 'PATCH',
+    headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields: { processed_at: { timestampValue: new Date().toISOString() } } })
+  });
+}
+
+/**
+ * Rein informativer Zähler für webhook-erzeugte Belege — läuft bewusst NICHT über
+ * PROFIL_KV/UPLOAD_LIMIT (siehe peekUploadLimit/incrementUploadLimit oben): dieser Zähler
+ * blockiert NIE. Ein Nutzer mit vielen Bestellungen/Monat darf nicht plötzlich keine
+ * automatischen Belege mehr bekommen, nur weil sein manuelles Upload-Kontingent (OCR/Foto-
+ * Belege) ausgeschöpft ist. Fehler werden bewusst verschluckt (best effort, nie kritischer Pfad).
+ */
+async function incrementWebhookBelegCount(userId, env) {
+  if (!userId) return;
+  const jetzt = new Date();
+  const key = `webhook_belege:${userId}:${jetzt.getFullYear()}-${String(jetzt.getMonth() + 1).padStart(2, '0')}`;
+  try {
+    const val = await env.PROFIL_KV.get(key);
+    const anzahl = val ? parseInt(val) : 0;
+    await env.PROFIL_KV.put(key, String(anzahl + 1), { expirationTtl: 35 * 86400 });
+  } catch (e) { /* rein informativ — darf nichts blockieren */ }
+}
+
+/**
+ * GET/SAVE der Webhook-Konfiguration eines Nutzers. `plattform` wählt das Dokument unter
+ * users/{userId}/webhook_secrets/{plattform} — Struktur so gewählt, dass weitere Plattformen
+ * (Mollie, Digistore24, ...) ohne Änderung an dieser Funktion hinzukommen können.
+ * @param {object} body - { action: 'get'|'save', plattform, signingSecret? }
+ * @param {string} verifiedUid - aus dem verifizierten Firebase-Token (nie aus dem Body —
+ *   sonst könnte ein Nutzer die Webhook-Config eines anderen lesen/überschreiben)
+ * @param {string} requestOrigin - `new URL(request.url).origin`, für die angezeigte
+ *   Webhook-URL — bewusst zur Laufzeit ermittelt statt hart codiert.
+ */
+async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin) {
+  const { action, plattform, signingSecret, mwstSetting } = body;
+  if (!verifiedUid) {
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: { ...cors, 'Content-Type': 'application/json' } });
+  }
+  const erlaubtePlattformen = ['stripe'];
+  if (!erlaubtePlattformen.includes(plattform)) {
+    return new Response(JSON.stringify({ error: 'Unbekannte Plattform' }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+  }
+
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const docPath = `users/${verifiedUid}/webhook_secrets/${plattform}`;
+
+    if (action === 'get') {
+      const doc = await firestoreGetDoc(docPath, adminToken);
+      const fields = doc?.fields || {};
+      const secret = firestoreValue(fields.stripe_signing_secret);
+      const urlSecret = firestoreValue(fields.url_secret);
+      const enabled = firestoreValue(fields.enabled) === true;
+      return new Response(JSON.stringify({
+        enabled,
+        hasSecret: !!secret,
+        // Das volle Secret wird nach dem Speichern NIE wieder ausgeliefert (Security-Praxis
+        // wie bei API-Key-Verwaltungen üblich) — nur die letzten 4 Zeichen zur Wiedererkennung.
+        secretPreview: secret ? `••••${secret.slice(-4)}` : null,
+        webhookUrl: urlSecret ? `${requestOrigin}/webhook/${plattform}/${verifiedUid}/${urlSecret}` : null,
+        // Default '19' (nicht null) — deckt sich mit resolveMwstKategorie()s eigenem Default,
+        // damit die UI schon beim ersten Laden denselben Wert vorausgewählt zeigt, den der
+        // Worker auch tatsächlich verwenden würde, falls nie explizit gespeichert wurde.
+        mwstSetting: firestoreValue(fields.mwst_setting) || '19'
+      }), { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
+    }
+
+    if (action === 'save') {
+      if (!signingSecret || typeof signingSecret !== 'string' || signingSecret.trim().length < 8) {
+        return new Response(JSON.stringify({ error: 'Bitte ein gültiges Webhook-Secret eintragen.' }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+      }
+      const existing = await firestoreGetDoc(docPath, adminToken);
+      // url_secret nur EINMALIG erzeugen — ein Nutzer, der sein Stripe-Secret aktualisiert,
+      // soll nicht plötzlich eine neue Webhook-URL bekommen und sie in Stripe neu hinterlegen
+      // müssen. PATCH ohne updateMask ERSETZT das komplette Dokument (siehe handleSeedSteuerrecht-
+      // Kommentar zum Gegenteil) — bestehende Werte müssen deshalb explizit mitgeschickt werden,
+      // sonst gingen sie bei jedem Speichern verloren.
+      const urlSecret = firestoreValue(existing?.fields?.url_secret) || generateWebhookSecret();
+      const now = new Date().toISOString();
+      const createdAt = firestoreValue(existing?.fields?.created_at) || now;
+      // Gültige Werte wie im Frontend-Select — bei ungültigem/fehlendem Wert den bisher
+      // gespeicherten behalten (PATCH ersetzt das komplette Dokument, siehe Kommentar oben),
+      // sonst Default '19' für einen erstmals gespeicherten Datensatz.
+      const erlaubteMwstSettings = ['19', '7', 'keine'];
+      const bisherigesMwstSetting = firestoreValue(existing?.fields?.mwst_setting);
+      const neuesMwstSetting = erlaubteMwstSettings.includes(mwstSetting)
+        ? mwstSetting
+        : (bisherigesMwstSetting || '19');
+
+      const writeRes = await fetch(
+        `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/${docPath}`,
+        {
+          method: 'PATCH',
+          headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fields: {
+              stripe_signing_secret: { stringValue: signingSecret.trim() },
+              url_secret: { stringValue: urlSecret },
+              enabled: { booleanValue: true },
+              mwst_setting: { stringValue: neuesMwstSetting },
+              created_at: { timestampValue: createdAt },
+              updated_at: { timestampValue: now }
+            }
+          })
+        }
+      );
+      if (!writeRes.ok) {
+        const errText = await writeRes.text();
+        throw new Error(`Firestore-Write fehlgeschlagen (${writeRes.status}): ${errText.slice(0, 200)}`);
+      }
+
+      return new Response(JSON.stringify({
+        success: true,
+        webhookUrl: `${requestOrigin}/webhook/${plattform}/${verifiedUid}/${urlSecret}`,
+        mwstSetting: neuesMwstSetting
+      }), { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
+    }
+
+    return new Response(JSON.stringify({ error: 'Unbekannte Aktion' }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+  } catch (e) {
+    console.error('handleWebhookSettings Error:', e.message);
+    return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { ...cors, 'Content-Type': 'application/json' } });
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// ── STRIPE-INTEGRATION ──────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════
+
+/**
+ * Verifiziert eine Stripe-Webhook-Signatur (HMAC-SHA256) rein mit Web Crypto — kein Node.js
+ * `crypto` nötig/verfügbar (kein nodejs_compat-Flag in wrangler.toml). Format des
+ * "Stripe-Signature"-Headers: "t=<unix-timestamp>,v1=<hex-hmac>[,v0=...]". Signierte
+ * Nachricht ist "{timestamp}.{rawBody}" — der ROHE, unveränderte Body, kein reparstes JSON.
+ * Replay-Schutz: Timestamp darf nicht älter als 300s sein (Stripes eigene Standard-Toleranz).
+ * @see https://docs.stripe.com/webhooks/signature
+ * @returns {Promise<{valid: boolean, reason?: string}>}
+ */
+async function verifyStripeSignature(rawBody, signatureHeader, secret) {
+  if (!signatureHeader) return { valid: false, reason: 'missing_header' };
+  const parts = Object.fromEntries(
+    signatureHeader.split(',').map(p => p.split('='))
+  );
+  const timestamp = parts['t'];
+  const signature = parts['v1'];
+  if (!timestamp || !signature) return { valid: false, reason: 'malformed_header' };
+
+  if (Math.abs(Date.now() / 1000 - parseInt(timestamp, 10)) > 300) {
+    return { valid: false, reason: 'replay' };
+  }
+
+  let expectedSig;
+  try {
+    expectedSig = hexToBytes(signature);
+  } catch (e) {
+    return { valid: false, reason: 'malformed_signature' };
+  }
+
+  const signedPayload = `${timestamp}.${rawBody}`;
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['verify']
+  );
+  const valid = await crypto.subtle.verify('HMAC', key, expectedSig, new TextEncoder().encode(signedPayload));
+  return { valid, ...(valid ? {} : { reason: 'signature_mismatch' }) };
+}
+
+/** Hex-String → Bytes. Wirft bei ungerader Länge statt eine falsche letzte Byte-Berechnung zu riskieren. */
+function hexToBytes(hex) {
+  if (hex.length % 2 !== 0) throw new Error('hexToBytes: ungerade Länge');
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+  }
+  return bytes;
+}
+
+/** Unix-Timestamp (Sekunden) → "YYYY-MM-DD" in Europe/Berlin (siehe berlinDatumAlsString). */
+function unixToDatumString(unixSeconds) {
+  if (!unixSeconds) return berlinDatumAlsString();
+  return berlinDatumAlsString(new Date(unixSeconds * 1000));
+}
+
+/**
+ * Wandelt die vom Nutzer in den Integrationen-Settings gewählte MwSt-Einstellung
+ * ('19'|'7'|'keine') in das Feldpaar { mwst_satz, kategorie } um, das ein Beleg-Dokument
+ * braucht. `kategorie` ist der Schlüssel in SACHKONTO_MAPPING (worker.js oben,
+ * resolveSachkonto()) — dieselbe Tabelle wie im DATEV-Export, KEIN eigenes Mapping. Default
+ * '19' (Regelsteuersatz) für Bestandsnutzer, die die Integration vor diesem Feature
+ * konfiguriert haben und deshalb noch kein mwst_setting gespeichert haben.
+ * @param {string|undefined|null} mwstSetting
+ * @returns {{mwst_satz: string, kategorie: string}}
+ */
+function resolveMwstKategorie(mwstSetting) {
+  if (mwstSetting === '7') return { mwst_satz: '7', kategorie: 'Einnahmen 7%' };
+  if (mwstSetting === 'keine') return { mwst_satz: 'keine', kategorie: 'Einnahmen steuerfrei' };
+  return { mwst_satz: '19', kategorie: 'Einnahmen 19%' };
+}
+
+/**
+ * Lädt eine Stripe-Rechnungs-PDF-URL herunter und archiviert sie in Firebase Storage unter
+ * users/{userId}/belege/{fileNameSuffix}.pdf — per REST-API (Firebase-Storage-Buckets sind
+ * Google-Cloud-Storage-Buckets, siehe STORAGE_SCOPE oben), kein Storage-SDK im Worker
+ * verfügbar/nötig. Setzt zusätzlich ein `firebaseStorageDownloadTokens`-Metadatenfeld
+ * (Zufalls-UUID) und hängt es als `&token=` an die zurückgegebene Download-URL — OHNE das
+ * würde die URL an storage.rules (`request.auth.uid == userId`) scheitern, sobald sie ohne
+ * eingeloggte Session aufgerufen wird (z.B. Klick auf "Beleg öffnen ↗" im Belegarchiv). Das
+ * ist exakt der Mechanismus, den `uploadBytes()`/`getDownloadURL()` (Firebase-SDK, überall
+ * sonst in index.html genutzt) automatisch im Hintergrund macht.
+ * @param {string} userId
+ * @param {string} fileNameSuffix - z.B. die Stripe-Event-ID, wird Teil des Dateinamens
+ * @param {string} pdfUrl - `invoice_pdf` aus dem Stripe-Event
+ * @param {object} env
+ * @returns {Promise<string>} - öffentlich abrufbare Download-URL
+ * @throws bei jedem Fehlschlag (Download ODER Upload) — Aufrufer MUSS das abfangen, ein
+ *   fehlgeschlagenes PDF-Archiv darf den Beleg selbst nie blockieren (siehe handleStripeWebhook).
+ */
+async function archiveInvoicePdf(userId, fileNameSuffix, pdfUrl, env) {
+  // redirect: 'follow' ist der fetch()-Default, aber hier bewusst explizit — Fund beim
+  // Debuggen: eine per Redirect erreichte URL kann mit `200 OK` und einer normalen HTML-Seite
+  // enden (z.B. eine "Rechnung nicht gefunden"-Weboberfläche statt eines echten PDFs).
+  // `pdfRes.ok` allein hätte das als Erfolg durchgehen lassen und die HTML-Bytes fälschlich
+  // als "PDF" hochgeladen — deshalb zusätzlich die Magic-Bytes unten prüfen.
+  // Expliziter User-Agent: manche Hosts blocken generische/fehlende UAs (Fund beim Debuggen —
+  // ein öffentlich erreichbares Test-PDF antwortete curl mit 200, demselben Cloudflare-Worker-
+  // Fetch aber mit 403). Echte Stripe-invoice_pdf-URLs (pay.stripe.com/files.stripe.com) sind
+  // davon nicht betroffen, aber die explizite UA schadet nicht und macht das robuster.
+  const pdfRes = await fetch(pdfUrl, {
+    redirect: 'follow',
+    headers: { 'User-Agent': 'Kontolux-AI-Webhook/1.0 (+https://kontolux-ai.de)' }
+  });
+  if (!pdfRes.ok) {
+    throw new Error(`Invoice-PDF-Download fehlgeschlagen (${pdfRes.status}): ${pdfUrl}`);
+  }
+  const pdfBuffer = await pdfRes.arrayBuffer();
+
+  // PDF-Dateien beginnen laut Spezifikation (ISO 32000) immer mit den Bytes "%PDF-" — billige,
+  // zuverlässige Prüfung gegen genau das oben beschriebene Redirect-auf-HTML-Szenario, ohne
+  // einen vollen PDF-Parser zu brauchen.
+  const magicBytes = new Uint8Array(pdfBuffer.slice(0, 5));
+  const magicString = new TextDecoder().decode(magicBytes);
+  if (magicString !== '%PDF-') {
+    throw new Error(`Antwort von ${pdfUrl} ist kein PDF (erste Bytes: "${magicString}") — wird nicht hochgeladen`);
+  }
+
+  const objectPath = `users/${userId}/belege/stripe_${fileNameSuffix}.pdf`;
+  const downloadToken = crypto.randomUUID();
+
+  // multipart/related-Body von Hand gebaut (kein Node-Multipart-Helper in Workers verfügbar,
+  // aber auch nicht nötig — Format ist eine simple Boundary-Konkatenation aus Google-Cloud-
+  // Storage-JSON-API-Doku): Metadata-Teil (JSON) MUSS zuerst kommen, dann der Datenteil. Als
+  // Uint8Array statt String zusammengesetzt, weil der Datenteil binäre PDF-Bytes enthält.
+  const boundary = `kontolux_${crypto.randomUUID()}`;
+  const metadata = {
+    name: objectPath,
+    contentType: 'application/pdf',
+    metadata: { firebaseStorageDownloadTokens: downloadToken }
+  };
+  const enc = new TextEncoder();
+  const head = enc.encode(
+    `--${boundary}\r\n` +
+    `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+    `${JSON.stringify(metadata)}\r\n` +
+    `--${boundary}\r\n` +
+    `Content-Type: application/pdf\r\n\r\n`
+  );
+  const tail = enc.encode(`\r\n--${boundary}--`);
+  const body = new Uint8Array(head.length + pdfBuffer.byteLength + tail.length);
+  body.set(head, 0);
+  body.set(new Uint8Array(pdfBuffer), head.length);
+  body.set(tail, head.length + pdfBuffer.byteLength);
+
+  const storageToken = await getGoogleAccessToken(env, STORAGE_SCOPE);
+  const uploadRes = await fetch(
+    'https://storage.googleapis.com/upload/storage/v1/b/kontolux-ai.firebasestorage.app/o?uploadType=multipart',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${storageToken}`,
+        'Content-Type': `multipart/related; boundary=${boundary}`
+      },
+      body
+    }
+  );
+  if (!uploadRes.ok) {
+    const errText = await uploadRes.text();
+    throw new Error(`Storage-Upload fehlgeschlagen (${uploadRes.status}): ${errText.slice(0, 200)}`);
+  }
+
+  // Lesepfad braucht ANDERE Kodierung als der Upload-Pfad oben: dort echte "/" im JSON-name-
+  // Feld, hier muss der GESAMTE Pfad als ein einziges opakes Segment kodiert werden ("/" wird
+  // zu "%2F") — so parst Firebase Storage die v0/b/.../o/{...}-Lese-URL.
+  const encodedPath = encodeURIComponent(objectPath);
+
+  // Live verifiziert (2026-09-22, echtes Test-PDF hochgeladen und die zurückgegebene URL per
+  // curl direkt abgerufen — 200, korrekter application/pdf-Content-Type, korrekte Byte-Größe):
+  // das firebaseStorageDownloadTokens-Metadata-Feld aus dem Multipart-Upload oben wird von
+  // Firebase Storages Serving-Schicht zuverlässig übernommen, ein zusätzlicher PATCH-Call ist
+  // NICHT nötig. (Ein testweise ergänzter separater PATCH auf den GCS-objects.patch-Endpoint
+  // scheiterte durchgehend an "Provided scope(s) are not authorized" — der Service-Account hat
+  // für reine Metadata-PATCH-Operationen keine ausreichenden IAM-Rechte, obwohl derselbe Token
+  // für den Multipart-Upload selbst funktioniert. Deshalb absichtlich NICHT hier eingebaut.)
+  return `https://firebasestorage.googleapis.com/v0/b/kontolux-ai.firebasestorage.app/o/${encodedPath}?alt=media&token=${downloadToken}`;
+}
+
+/**
+ * Wandelt ein Stripe-Event in ein Beleg-Objekt für writeBelegAsAdmin() — reine Funktion,
+ * einzeln testbar (kein Netzwerk-/Firestore-Zugriff). Feldnamen gegen die offizielle Stripe-
+ * API-Referenz geprüft (Payment-Intent/Invoice/Charge-Objekt-Doku, siehe
+ * docs/webhook_implementierungsplan.md Abschnitt 1).
+ * mwst_satz ist hier nur ein Platzhalter ('keine'), kategorie wird hier gar nicht gesetzt —
+ * handleStripeWebhook ergänzt/überschreibt beide direkt nach diesem Aufruf mit
+ * resolveMwstKategorie() anhand der vom Nutzer in den Integrationen-Settings gewählten
+ * Einstellung, aber NUR für Einnahmen (typ === 'rechnung_ausgehend') — ein charge.refunded-
+ * Beleg (typ 'rechnung_eingehend') bleibt bewusst ohne Einnahmen-Kategorie (siehe
+ * docs/stripe_phase2_plan.md Abschnitt 2). Bewusst getrennt: diese Funktion bleibt dadurch
+ * weiterhin ohne Firestore-Lookup isoliert testbar.
+ * @param {object} event - komplettes Stripe-Event-Objekt (bereits geparst)
+ * @returns {object|null} - null für nicht unterstützte Event-Typen
+ */
+function stripeEventToBeleg(event) {
+  const obj = event.data?.object || {};
+  const quelle = 'stripe_webhook';
+
+  if (event.type === 'payment_intent.succeeded') {
+    // absender bleibt e-mail-basiert (Feld wird u.a. für Kundenstamm-Matching genutzt) —
+    // NUR der Anzeigename `name` folgt jetzt dem Muster manuell erfasster Belege
+    // ("Beratung September 2026" statt einer E-Mail-Adresse oder Stripe-ID).
+    const absender = obj.receipt_email || obj.description || 'Stripe-Kunde';
+    const monatJahr = unixToMonatJahr(obj.created);
+    return {
+      typ: 'rechnung_ausgehend',
+      betrag: (obj.amount || 0) / 100,
+      absender,
+      bezahlt: true,
+      bezahlt_am: unixToDatumString(obj.created),
+      mwst_satz: 'keine',
+      quelle,
+      name: obj.description ? `Stripe: ${obj.description} ${monatJahr}` : `Stripe-Zahlung ${monatJahr}`,
+      buchungstext: obj.id || ''
+    };
+  }
+
+  if (event.type === 'invoice.payment_succeeded') {
+    const absender = obj.customer_email || obj.customer_name || 'Stripe-Kunde';
+    // description am Invoice-Objekt selbst (Stripe-Dashboard nennt es "Memo") hat Vorrang vor
+    // der Beschreibung der ersten Rechnungsposition — beides nullable laut Stripe-API-Referenz.
+    const beschreibung = obj.description || obj.lines?.data?.[0]?.description || null;
+    const monatJahr = unixToMonatJahr(obj.status_transitions?.paid_at || obj.created);
+    return {
+      typ: 'rechnung_ausgehend',
+      betrag: (obj.amount_paid || 0) / 100,
+      absender,
+      rechnungsnr: obj.number || '',
+      bezahlt: true,
+      bezahlt_am: unixToDatumString(obj.status_transitions?.paid_at || obj.created),
+      mwst_satz: 'keine',
+      quelle,
+      name: beschreibung ? `Stripe: ${beschreibung} ${monatJahr}` : `Stripe-Zahlung ${monatJahr}`,
+      buchungstext: obj.id || ''
+    };
+  }
+
+  if (event.type === 'charge.refunded') {
+    const absender = obj.billing_details?.email || obj.receipt_email || 'Stripe-Kunde';
+    return {
+      // rechnung_eingehend (nicht rechnung_ausgehend) — im Cash-Basis-Modell dieser App ist
+      // eine Rückerstattung ein Geldabfluss. Kein echtes Storno mit eigener fortlaufender
+      // Rechnungsnummer/Verweis auf den Original-Beleg (siehe Implementierungsplan Abschnitt 5
+      // "Bekannte Grenzen") — dafür bräuchte es einen Lookup des ursprünglichen Belegs über
+      // die Payment-Intent-/Charge-ID, das ist hier bewusst noch nicht gebaut.
+      typ: 'rechnung_eingehend',
+      betrag: (obj.amount_refunded || 0) / 100,
+      absender,
+      bezahlt: true,
+      bezahlt_am: unixToDatumString(obj.created),
+      mwst_satz: 'keine',
+      quelle,
+      name: `Stripe-Rückerstattung an ${absender}`,
+      buchungstext: obj.id || ''
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Haupt-Handler für POST /webhook/stripe/{userId}/{urlSecret}. Kein Firebase-Token (externer
+ * Server) — Auth läuft zweistufig: der URL-Secret lehnt geratene/falsche Pfade billig ab
+ * (generische 404, verrät nicht welcher Teil falsch war), die eigentliche Sicherheitsgrenze
+ * ist die kryptografische Stripe-Signaturprüfung danach.
+ */
+async function handleStripeWebhook(request, url, env, cors) {
+  const segments = url.pathname.split('/').filter(Boolean); // ['webhook','stripe',userId,urlSecret]
+  const userId = segments[2];
+  const urlSecret = segments[3];
+  if (!userId || !urlSecret) {
+    return new Response('Not found', { status: 404, headers: cors });
+  }
+
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/stripe`, adminToken);
+    const fields = configDoc?.fields || {};
+    const storedUrlSecret = firestoreValue(fields.url_secret);
+    const signingSecret = firestoreValue(fields.stripe_signing_secret);
+    const enabled = firestoreValue(fields.enabled) === true;
+
+    if (!enabled || !storedUrlSecret || storedUrlSecret !== urlSecret || !signingSecret) {
+      return new Response('Not found', { status: 404, headers: cors });
+    }
+
+    // Roher Body als Text — NICHT request.json(), die Signatur ist über die exakten Bytes
+    // berechnet (siehe verifyStripeSignature).
+    const rawBody = await request.text();
+    const sigCheck = await verifyStripeSignature(rawBody, request.headers.get('Stripe-Signature'), signingSecret);
+    if (!sigCheck.valid) {
+      console.warn('Stripe-Webhook Signaturprüfung fehlgeschlagen:', sigCheck.reason, 'userId=', userId);
+      return new Response(JSON.stringify({ error: 'Invalid signature' }), {
+        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Erst NACH erfolgreicher Signaturprüfung parsen — ungeprüfte Bytes werden nie interpretiert.
+    const event = JSON.parse(rawBody);
+
+    if (await isAlreadyProcessed(userId, event.id, adminToken)) {
+      return new Response(JSON.stringify({ received: true, dedup: true }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const belegData = stripeEventToBeleg(event);
+    if (!belegData) {
+      // Event-Typ, den wir nicht auswerten (Nutzer kann im Stripe-Dashboard weitere Typen
+      // abonniert haben) — trotzdem 200, sonst retryt Stripe bis zu 3 Tage lang ein Event,
+      // das wir nie verarbeiten werden.
+      return new Response(JSON.stringify({ received: true, ignored: event.type }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // ── MwSt-Setting + Sachkonto (Phase 2, Aufgabe 1) — nur für Einnahmen ───────────────
+    // Ein charge.refunded-Beleg (typ 'rechnung_eingehend') ist keine Einnahme und bekommt
+    // bewusst KEINE Einnahmen-Kategorie — die Nutzer-Einstellung "Meine Stripe-EINNAHMEN
+    // unterliegen..." bezieht sich nur auf Zahlungseingänge.
+    if (belegData.typ === 'rechnung_ausgehend') {
+      const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(fields.mwst_setting));
+      belegData.mwst_satz = mwst_satz;
+      belegData.kategorie = kategorie;
+      // sachkonto ist optional und wird von DATEV-Export/Monatsabschluss ohnehin live aus
+      // `kategorie` per resolveSachkonto() aufgelöst (siehe worker.js oben) — hier zusätzlich
+      // gesetzt nur für die Beleg-Detailanzeige, analog zu BELEG_MANUELL. Scheitert der
+      // profil/settings-Read, bleibt sachkonto einfach leer statt den Beleg zu blockieren.
+      try {
+        const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
+        const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
+        belegData.sachkonto = resolveSachkonto(kategorie, skr) || '';
+      } catch (e) {
+        console.warn('Stripe-Webhook: datev_skr-Lookup fehlgeschlagen, sachkonto bleibt leer:', e.message);
+      }
+    }
+
+    // ── Invoice-PDF archivieren (Phase 2, Aufgabe 2) — nur invoice.payment_succeeded ────
+    // Eigener try/catch NUR um diesen Block: ein fehlgeschlagener PDF-Download/-Upload darf
+    // den Beleg selbst nie blockieren (Netzwerkfehler bei Stripe, abgelaufene invoice_pdf-URL,
+    // fehlende Storage-Berechtigung des Service-Accounts — alles nicht der Fehler des Nutzers).
+    if (event.type === 'invoice.payment_succeeded' && event.data?.object?.invoice_pdf) {
+      try {
+        belegData.storage_url = await archiveInvoicePdf(userId, event.id, event.data.object.invoice_pdf, env);
+      } catch (e) {
+        console.error('Stripe-Webhook: Invoice-PDF-Archivierung fehlgeschlagen, Beleg wird trotzdem angelegt:', e.message, 'userId=', userId, 'eventId=', event.id);
+      }
+    }
+
+    const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
+    // Als verarbeitet markieren SOBALD der Beleg sicher gespeichert ist — auch wenn die
+    // Tagesbewegung selbst noch fehlschlagen sollte (result.tagesbewegungWarnung). Ein Crash
+    // zwischen Beleg-Schreiben und Markieren führt im schlimmsten Fall zu einem doppelten
+    // Beleg (sichtbar/korrigierbar im Belegarchiv) — das ist das kleinere Risiko gegenüber
+    // einem fälschlich VORHER gesetzten Marker, der einen echten Beleg dauerhaft verschluckt.
+    await markAsProcessed(userId, event.id, adminToken);
+    // Bewusst awaited statt "fire and forget": ein Cloudflare Worker kann nicht-awaitete
+    // Promises nach dem Senden der Response abbrechen (ctx.waitUntil wäre die Alternative,
+    // aber der Extra-Call ist trivial günstig genug, um ihn einfach synchron abzuwarten).
+    await incrementWebhookBelegCount(userId, env);
+
+    if (result.tagesbewegungWarnung) {
+      console.error('Stripe-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
+    }
+
+    return new Response(JSON.stringify({ received: true, docId: result.docId }), {
+      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  } catch (e) {
+    console.error('handleStripeWebhook Error:', e.message, e.stack);
+    return new Response(JSON.stringify({ error: 'Server error' }), {
+      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
   }
 }
