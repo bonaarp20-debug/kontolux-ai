@@ -2696,23 +2696,33 @@ async function handlePrueferDaten(body, env, cors = {}) {
 }
 
 // ── DATEV Buchungsstapel Helpers ──────────────────────────────
-// ISO-8859-1 (ANSI) ist ein direktes 1:1-Mapping von Codepoint 0-255 auf ein Byte —
-// DATEV erwartet diese Kodierung statt UTF-8. Zeichen außerhalb dieses Bereichs (z.B.
-// Emojis) werden zu '?', typografische Anführungszeichen/Gedankenstriche vorher auf
-// ihr ASCII-Äquivalent normalisiert, damit gängige Absender-/Beschreibungstexte nicht
-// unnötig verstümmelt werden.
-function toLatin1Bytes(str) {
+// UTF-8 mit BOM statt ISO-8859-1 — ohne BOM erkennen Excel & Co. die Datei sonst
+// fälschlich als ANSI/Windows-1252 und zeigen Umlaute (ä/ö/ü/ß) als Mojibake bzw.
+// Fragezeichen an. Die BOM (EF BB BF) gibt Windows-Programmen den nötigen Hinweis,
+// dass die restlichen Bytes UTF-8 sind. Typografische Anführungszeichen/Gedankenstriche
+// werden weiterhin auf ihr ASCII-Äquivalent normalisiert (rein kosmetisch, nicht mehr
+// encoding-bedingt nötig).
+function toUtf8BytesWithBom(str) {
   const normalized = String(str ?? '')
     .replace(/[–—]/g, '-')
     .replace(/[‘’]/g, "'")
     .replace(/[“”]/g, '"')
     .replace(/…/g, '...');
-  const bytes = new Uint8Array(normalized.length);
-  for (let i = 0; i < normalized.length; i++) {
-    const code = normalized.charCodeAt(i);
-    bytes[i] = code <= 0xFF ? code : 0x3F;
-  }
+  const body = new TextEncoder().encode(normalized);
+  const bytes = new Uint8Array(body.length + 3);
+  bytes[0] = 0xEF; bytes[1] = 0xBB; bytes[2] = 0xBF;
+  bytes.set(body, 3);
   return bytes;
+}
+
+// Nutzer geben im Buchungskonto-/Gegenkonto-Feld gelegentlich das Placeholder-Format
+// ("1200 (Bank) / 1000 (Kasse)") wörtlich ein, statt nur die Kontonummer — DATEV erwartet
+// im Konto-Feld aber eine reine Zahl, sonst schlägt der Import fehl. Es gibt aktuell kein
+// Beleg-Feld, das eine Barzahlung markiert (kein Kassenbuch-Feature), daher wird hier immer
+// die erste im Feld gefundene Zahl verwendet (= praktisch immer das Bankkonto).
+function extractKontoNummer(raw) {
+  const match = String(raw ?? '').match(/\d+/);
+  return match ? match[0] : '';
 }
 
 // DATEV-Textfelder werden immer gequotet (auch wenn sie kein Semikolon enthalten) —
@@ -2821,7 +2831,7 @@ async function firestoreListAll(baseUrl, authHeader) {
 }
 
 // ── /datev-export Handler ─────────────────────────────────────────
-// Erzeugt einen DATEV-Buchungsstapel (EXTF-Format, Semikolon-getrennt, ANSI/ISO-8859-1)
+// Erzeugt einen DATEV-Buchungsstapel (EXTF-Format, Semikolon-getrennt, UTF-8 mit BOM)
 // direkt aus dem Belegarchiv (dokumente-Collection) — ein Buchungssatz pro tatsächlich
 // bezahltem Beleg (Ist-Versteuerung/EÜR: unbezahlte Rechnungen sind noch kein Zufluss/
 // Abfluss und werden bewusst NICHT gebucht, sonst würden offene, ggf. nie eingehende
@@ -2847,11 +2857,23 @@ async function handleDatevExport(body, env, cors = {}) {
   try {
     const base = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}`;
 
-    // Profil (DATEV-Einstellungen + Kleinunternehmer-Status) + Belegarchiv parallel laden
-    const [profilRes, dokDocs] = await Promise.all([
+    // Profil (DATEV-Einstellungen + Kleinunternehmer-Status) + Belegarchiv + Kundenstamm
+    // (für die Debitorennummer im Feld "Diverse Adressnummer") parallel laden.
+    const [profilRes, dokDocs, kundenDocs] = await Promise.all([
       fetch(`${base}/profil/settings`, { headers: { 'Authorization': `Bearer ${authHeader}` } }),
-      firestoreListAll(`${base}/dokumente`, authHeader)
+      firestoreListAll(`${base}/dokumente`, authHeader),
+      firestoreListAll(`${base}/kunden`, authHeader)
     ]);
+
+    // kunde_id (Beleg) -> Kundennummer (Kundenstamm), nur wenn eine Kundennummer gepflegt ist —
+    // DATEV erwartet in "Diverse Adressnummer" eine reine Zahl, daher wie beim Bankkonto robust
+    // die erste Zahl aus dem Feld extrahieren statt den Rohwert zu übernehmen.
+    const kundenNummerById = {};
+    for (const kDoc of kundenDocs) {
+      const kId = kDoc.name?.split('/').pop();
+      const kNummer = extractKontoNummer(firestoreValue((kDoc.fields || {}).kundennummer));
+      if (kId && kNummer) kundenNummerById[kId] = kNummer;
+    }
 
     const profilFields = profilRes.ok ? ((await profilRes.json()).fields || {}) : {};
     const kleinunternehmer = isKleinunternehmer(profilFields);
@@ -2860,8 +2882,8 @@ async function handleDatevExport(body, env, cors = {}) {
     const istSollversteuerung = (firestoreValue(profilFields.versteuerungsart) || '').toString().startsWith('Soll');
 
     const skr = (firestoreValue(profilFields.datev_skr) || 'SKR03').toString().trim();
-    const bankkonto = (firestoreValue(profilFields.datev_bankkonto) || '').toString().trim();
-    const ausgabenGegenkonto = (firestoreValue(profilFields.datev_ausgaben_gegenkonto) || '').toString().trim()
+    const bankkonto = extractKontoNummer(firestoreValue(profilFields.datev_bankkonto));
+    const ausgabenGegenkonto = extractKontoNummer(firestoreValue(profilFields.datev_ausgaben_gegenkonto))
       || (skr === 'SKR04' ? '6300' : '4900');
     let wjBeginn = (firestoreValue(profilFields.datev_wj_beginn) || '0101').toString().trim();
     if (!/^\d{4}$/.test(wjBeginn)) wjBeginn = '0101';
@@ -2969,6 +2991,10 @@ async function handleDatevExport(body, env, cors = {}) {
         ? `Rechnung ${absender}`.trim()
         : `Beleg ${absender}`.trim();
       const belegfeld2 = firestoreValue(fields.buchungstext) || '';
+      // Debitorennummer nur bei Einnahmen (Rechnung an Kunde = Debitor) relevant — bei Ausgaben
+      // wäre das Gegenstück eine Kreditorennummer des Lieferanten, die hier nicht geführt wird.
+      const kundeId = firestoreValue(fields.kunde_id) || '';
+      const diverseAdressnummer = istEinnahme ? (kundenNummerById[kundeId] || '') : '';
 
       buchungen.push({
         betrag,
@@ -2979,7 +3005,8 @@ async function handleDatevExport(body, env, cors = {}) {
         belegDatum,
         belegfeld1: rechnungsnr,
         belegfeld2,
-        buchungstext
+        buchungstext,
+        diverseAdressnummer
       });
     }
 
@@ -3031,16 +3058,16 @@ async function handleDatevExport(body, env, cors = {}) {
       datevText(b.belegfeld2, 30),
       '',
       datevText(b.buchungstext, 60),
-      '', '', '', '', '', ''
+      '', b.diverseAdressnummer, '', '', '', ''
     ].join(';'));
 
     const csvContent = [headerRow, columnRow, ...rows].join('\r\n') + '\r\n';
 
-    return new Response(toLatin1Bytes(csvContent), {
+    return new Response(toUtf8BytesWithBom(csvContent), {
       status: 200,
       headers: {
         ...cors,
-        'Content-Type': 'text/csv; charset=ISO-8859-1',
+        'Content-Type': 'text/csv; charset=UTF-8',
         'Content-Disposition': `attachment; filename="EXTF_Buchungsstapel_${jahr}.csv"`,
         'Cache-Control': 'no-cache',
         'X-Datev-Exported-Count': String(buchungen.length),
