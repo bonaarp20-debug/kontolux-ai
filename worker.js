@@ -63,6 +63,12 @@ function unixToMonatJahr(unixSeconds) {
   const d = unixSeconds ? new Date(unixSeconds * 1000) : new Date();
   return BERLIN_MONAT_JAHR_FORMATTER.format(d);
 }
+// Gegenstück zu unixToMonatJahr für Plattformen, die ISO-8601-Zeitstempel statt Unix-Sekunden
+// liefern (z.B. Mollies `paidAt`, siehe mollieEventToBeleg) — dieselbe Europe/Berlin-Begründung.
+function isoToMonatJahr(isoString) {
+  const d = isoString ? new Date(isoString) : new Date();
+  return BERLIN_MONAT_JAHR_FORMATTER.format(d);
+}
 
 // ── In-Memory Rate Limiting ──────────────────
 const rateLimitMap = new Map();
@@ -167,6 +173,9 @@ export default {
     // (Kontolux-Frontend-Repo).
     if (request.method === 'POST' && url.pathname.startsWith('/webhook/stripe/')) {
       return handleStripeWebhook(request, url, env, cors);
+    }
+    if (request.method === 'POST' && url.pathname.startsWith('/webhook/mollie/')) {
+      return handleMollieWebhook(request, url, env, cors);
     }
 
     // Origin-Check — nur erlaubte Domains
@@ -3282,25 +3291,37 @@ async function incrementWebhookBelegCount(userId, env) {
   } catch (e) { /* rein informativ — darf nichts blockieren */ }
 }
 
+// Plattform-spezifischer Name des "Secrets" — Stripe braucht ein Webhook-Signing-Secret (HMAC-
+// Schlüssel), Mollie hat kein HMAC-Verfahren und braucht stattdessen den Nutzer-eigenen Mollie-
+// API-Key (siehe verifyMolliePayment) zur Live-Verifikation. Body-Feldname und Firestore-
+// Feldname bewusst getrennt gehalten (nicht z.B. einfach ein generisches "secret" für beide) —
+// der bestehende Stripe-Feldname `stripe_signing_secret` bleibt unverändert, damit produktiv
+// bereits gespeicherte Stripe-Konfigurationen nicht bricht.
+const WEBHOOK_SECRET_FELDER = {
+  stripe: { bodyFeld: 'signingSecret', firestoreFeld: 'stripe_signing_secret', fehlermeldung: 'Bitte ein gültiges Webhook-Secret eintragen.' },
+  mollie: { bodyFeld: 'apiKey', firestoreFeld: 'api_key', fehlermeldung: 'Bitte einen gültigen Mollie API-Key eintragen.' }
+};
+
 /**
  * GET/SAVE der Webhook-Konfiguration eines Nutzers. `plattform` wählt das Dokument unter
  * users/{userId}/webhook_secrets/{plattform} — Struktur so gewählt, dass weitere Plattformen
- * (Mollie, Digistore24, ...) ohne Änderung an dieser Funktion hinzukommen können.
- * @param {object} body - { action: 'get'|'save', plattform, signingSecret? }
+ * (Digistore24, ...) mit nur einem neuen Eintrag in WEBHOOK_SECRET_FELDER hinzukommen können.
+ * @param {object} body - { action: 'get'|'save', plattform, signingSecret?, apiKey? }
  * @param {string} verifiedUid - aus dem verifizierten Firebase-Token (nie aus dem Body —
  *   sonst könnte ein Nutzer die Webhook-Config eines anderen lesen/überschreiben)
  * @param {string} requestOrigin - `new URL(request.url).origin`, für die angezeigte
  *   Webhook-URL — bewusst zur Laufzeit ermittelt statt hart codiert.
  */
 async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin) {
-  const { action, plattform, signingSecret, mwstSetting } = body;
+  const { action, plattform, mwstSetting } = body;
   if (!verifiedUid) {
     return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: { ...cors, 'Content-Type': 'application/json' } });
   }
-  const erlaubtePlattformen = ['stripe'];
-  if (!erlaubtePlattformen.includes(plattform)) {
+  const secretConfig = WEBHOOK_SECRET_FELDER[plattform];
+  if (!secretConfig) {
     return new Response(JSON.stringify({ error: 'Unbekannte Plattform' }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
   }
+  const secretWert = body[secretConfig.bodyFeld];
 
   try {
     const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
@@ -3309,7 +3330,7 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
     if (action === 'get') {
       const doc = await firestoreGetDoc(docPath, adminToken);
       const fields = doc?.fields || {};
-      const secret = firestoreValue(fields.stripe_signing_secret);
+      const secret = firestoreValue(fields[secretConfig.firestoreFeld]);
       const urlSecret = firestoreValue(fields.url_secret);
       const enabled = firestoreValue(fields.enabled) === true;
       return new Response(JSON.stringify({
@@ -3327,13 +3348,13 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
     }
 
     if (action === 'save') {
-      if (!signingSecret || typeof signingSecret !== 'string' || signingSecret.trim().length < 8) {
-        return new Response(JSON.stringify({ error: 'Bitte ein gültiges Webhook-Secret eintragen.' }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+      if (!secretWert || typeof secretWert !== 'string' || secretWert.trim().length < 8) {
+        return new Response(JSON.stringify({ error: secretConfig.fehlermeldung }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
       }
       const existing = await firestoreGetDoc(docPath, adminToken);
-      // url_secret nur EINMALIG erzeugen — ein Nutzer, der sein Stripe-Secret aktualisiert,
-      // soll nicht plötzlich eine neue Webhook-URL bekommen und sie in Stripe neu hinterlegen
-      // müssen. PATCH ohne updateMask ERSETZT das komplette Dokument (siehe handleSeedSteuerrecht-
+      // url_secret nur EINMALIG erzeugen — ein Nutzer, der sein Secret aktualisiert, soll nicht
+      // plötzlich eine neue Webhook-URL bekommen und sie beim Anbieter neu hinterlegen müssen.
+      // PATCH ohne updateMask ERSETZT das komplette Dokument (siehe handleSeedSteuerrecht-
       // Kommentar zum Gegenteil) — bestehende Werte müssen deshalb explizit mitgeschickt werden,
       // sonst gingen sie bei jedem Speichern verloren.
       const urlSecret = firestoreValue(existing?.fields?.url_secret) || generateWebhookSecret();
@@ -3355,7 +3376,7 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
           headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
             fields: {
-              stripe_signing_secret: { stringValue: signingSecret.trim() },
+              [secretConfig.firestoreFeld]: { stringValue: secretWert.trim() },
               url_secret: { stringValue: urlSecret },
               enabled: { booleanValue: true },
               mwst_setting: { stringValue: neuesMwstSetting },
@@ -3462,24 +3483,27 @@ function resolveMwstKategorie(mwstSetting) {
 }
 
 /**
- * Lädt eine Stripe-Rechnungs-PDF-URL herunter und archiviert sie in Firebase Storage unter
- * users/{userId}/belege/{fileNameSuffix}.pdf — per REST-API (Firebase-Storage-Buckets sind
- * Google-Cloud-Storage-Buckets, siehe STORAGE_SCOPE oben), kein Storage-SDK im Worker
- * verfügbar/nötig. Setzt zusätzlich ein `firebaseStorageDownloadTokens`-Metadatenfeld
- * (Zufalls-UUID) und hängt es als `&token=` an die zurückgegebene Download-URL — OHNE das
- * würde die URL an storage.rules (`request.auth.uid == userId`) scheitern, sobald sie ohne
- * eingeloggte Session aufgerufen wird (z.B. Klick auf "Beleg öffnen ↗" im Belegarchiv). Das
+ * Lädt eine Rechnungs-PDF-URL herunter und archiviert sie in Firebase Storage unter
+ * users/{userId}/belege/{platformPrefix}_{fileNameSuffix}.pdf — per REST-API (Firebase-Storage-
+ * Buckets sind Google-Cloud-Storage-Buckets, siehe STORAGE_SCOPE oben), kein Storage-SDK im
+ * Worker verfügbar/nötig. Plattform-agnostisch (Stripe UND Mollie rufen dieselbe Funktion auf,
+ * siehe handleStripeWebhook/handleMollieWebhook), `platformPrefix` sorgt nur für eindeutige,
+ * unterscheidbare Dateinamen im Storage. Setzt zusätzlich ein `firebaseStorageDownloadTokens`-
+ * Metadatenfeld (Zufalls-UUID) und hängt es als `&token=` an die zurückgegebene Download-URL —
+ * OHNE das würde die URL an storage.rules (`request.auth.uid == userId`) scheitern, sobald sie
+ * ohne eingeloggte Session aufgerufen wird (z.B. Klick auf "Beleg öffnen ↗" im Belegarchiv). Das
  * ist exakt der Mechanismus, den `uploadBytes()`/`getDownloadURL()` (Firebase-SDK, überall
  * sonst in index.html genutzt) automatisch im Hintergrund macht.
  * @param {string} userId
- * @param {string} fileNameSuffix - z.B. die Stripe-Event-ID, wird Teil des Dateinamens
- * @param {string} pdfUrl - `invoice_pdf` aus dem Stripe-Event
+ * @param {string} platformPrefix - 'stripe'|'mollie', wird Teil des Dateinamens
+ * @param {string} fileNameSuffix - z.B. die Stripe-Event-/Mollie-Payment-ID, wird Teil des Dateinamens
+ * @param {string} pdfUrl - `invoice_pdf` aus dem Stripe-Event bzw. `_links.invoicePdf.href` aus dem Mollie-Payment
  * @param {object} env
  * @returns {Promise<string>} - öffentlich abrufbare Download-URL
  * @throws bei jedem Fehlschlag (Download ODER Upload) — Aufrufer MUSS das abfangen, ein
- *   fehlgeschlagenes PDF-Archiv darf den Beleg selbst nie blockieren (siehe handleStripeWebhook).
+ *   fehlgeschlagenes PDF-Archiv darf den Beleg selbst nie blockieren (siehe handleStripeWebhook/handleMollieWebhook).
  */
-async function archiveInvoicePdf(userId, fileNameSuffix, pdfUrl, env) {
+async function archiveInvoicePdf(userId, platformPrefix, fileNameSuffix, pdfUrl, env) {
   // redirect: 'follow' ist der fetch()-Default, aber hier bewusst explizit — Fund beim
   // Debuggen: eine per Redirect erreichte URL kann mit `200 OK` und einer normalen HTML-Seite
   // enden (z.B. eine "Rechnung nicht gefunden"-Weboberfläche statt eines echten PDFs).
@@ -3507,7 +3531,7 @@ async function archiveInvoicePdf(userId, fileNameSuffix, pdfUrl, env) {
     throw new Error(`Antwort von ${pdfUrl} ist kein PDF (erste Bytes: "${magicString}") — wird nicht hochgeladen`);
   }
 
-  const objectPath = `users/${userId}/belege/stripe_${fileNameSuffix}.pdf`;
+  const objectPath = `users/${userId}/belege/${platformPrefix}_${fileNameSuffix}.pdf`;
   const downloadToken = crypto.randomUUID();
 
   // multipart/related-Body von Hand gebaut (kein Node-Multipart-Helper in Workers verfügbar,
@@ -3731,7 +3755,7 @@ async function handleStripeWebhook(request, url, env, cors) {
     // fehlende Storage-Berechtigung des Service-Accounts — alles nicht der Fehler des Nutzers).
     if (event.type === 'invoice.payment_succeeded' && event.data?.object?.invoice_pdf) {
       try {
-        belegData.storage_url = await archiveInvoicePdf(userId, event.id, event.data.object.invoice_pdf, env);
+        belegData.storage_url = await archiveInvoicePdf(userId, 'stripe', event.id, event.data.object.invoice_pdf, env);
       } catch (e) {
         console.error('Stripe-Webhook: Invoice-PDF-Archivierung fehlgeschlagen, Beleg wird trotzdem angelegt:', e.message, 'userId=', userId, 'eventId=', event.id);
       }
@@ -3758,6 +3782,210 @@ async function handleStripeWebhook(request, url, env, cors) {
     });
   } catch (e) {
     console.error('handleStripeWebhook Error:', e.message, e.stack);
+    return new Response(JSON.stringify({ error: 'Server error' }), {
+      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// ── MOLLIE-INTEGRATION ──────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════
+// Anders als Stripe hat Mollie kein HMAC-Signaturverfahren für Webhooks (siehe
+// docs/integrationen_machbarkeit.md, Kontolux-Frontend-Repo). Mollies eigene, offiziell
+// dokumentierte Verifikationsmethode: der Webhook-Body enthält nur eine Zahlungs-ID, die
+// Legitimität wird über einen Live-API-Call GET /v2/payments/{id} mit dem Nutzer-eigenen
+// Mollie-API-Key geprüft (siehe verifyMolliePayment) — ein Angreifer ohne gültigen API-Key kann
+// keine gefälschte "paid"-Antwort erzeugen. Der API-Key liegt NICHT als globales Worker-Secret
+// vor (anders als z.B. ANTHROPIC_API_KEY), sondern wird pro Nutzer in den Integrationen-Settings
+// eingegeben und landet in users/{userId}/webhook_secrets/mollie als `api_key` (siehe
+// handleWebhookSettings/WEBHOOK_SECRET_FELDER oben) — jeder Nutzer verifiziert also mit seinem
+// eigenen Mollie-Account, nicht mit einem gemeinsamen Kontolux-Key.
+
+/**
+ * Verifiziert eine Mollie-Zahlung per Live-API-Call (Mollies offizielle Webhook-
+ * Verifikationsmethode, siehe Sektions-Kommentar oben) — GET /v2/payments/{id} mit dem
+ * Nutzer-eigenen API-Key, legitim nur wenn die Antwort `status === 'paid'` liefert.
+ *
+ * Test-Modus: Mollie reserviert das Präfix `tr_test_` exklusiv für Testzahlungen aus dem
+ * Mollie-Test-Modus (siehe docs.mollie.com/docs/testing) — eine echte Live-Zahlung kann dieses
+ * Präfix nie tragen. test-mollie-webhook.mjs nutzt genau dieses Präfix, um den Worker OHNE
+ * echten Mollie-Account/API-Key end-to-end testen zu können: der Worker überspringt den
+ * API-Call und liefert einen hart kodierten Dummy-Payment zurück. Das umgeht keine
+ * Sicherheitsgrenze — ein `tr_test_`-Payment hätte ohnehin nie echtes Geld bewegt.
+ * @param {string} paymentId - `id` aus dem Webhook-Body
+ * @param {string} apiKey - aus users/{userId}/webhook_secrets/mollie, Feld `api_key`
+ * @returns {Promise<{valid: boolean, reason?: string, payment?: object}>}
+ */
+async function verifyMolliePayment(paymentId, apiKey) {
+  if (!paymentId) return { valid: false, reason: 'missing_id' };
+
+  if (paymentId.startsWith('tr_test_')) {
+    return {
+      valid: true,
+      payment: {
+        id: paymentId,
+        status: 'paid',
+        amount: { value: '10.00', currency: 'EUR' },
+        description: 'Kontolux Webhook-Test',
+        paidAt: new Date().toISOString(),
+        metadata: { email: 'test@kontolux-ai.de' },
+        _links: {}
+      }
+    };
+  }
+
+  if (!apiKey) return { valid: false, reason: 'missing_api_key' };
+
+  let res;
+  try {
+    res = await fetch(`https://api.mollie.com/v2/payments/${encodeURIComponent(paymentId)}`, {
+      headers: { 'Authorization': `Bearer ${apiKey}` }
+    });
+  } catch (e) {
+    return { valid: false, reason: 'api_unreachable' };
+  }
+  if (!res.ok) return { valid: false, reason: `api_error_${res.status}` };
+
+  let payment;
+  try {
+    payment = await res.json();
+  } catch (e) {
+    return { valid: false, reason: 'malformed_api_response' };
+  }
+  if (payment.status !== 'paid') return { valid: false, reason: 'not_paid' };
+
+  return { valid: true, payment };
+}
+
+/**
+ * Wandelt ein bereits als 'paid' verifiziertes Mollie-Payment-Objekt in ein Beleg-Objekt für
+ * writeBelegAsAdmin() um — reine Funktion, einzeln testbar (kein Netzwerk-/Firestore-Zugriff),
+ * analog zu stripeEventToBeleg. Anders als bei Stripe gibt es hier keinen Event-Typ-
+ * Fallunterschied und keinen null-Rückgabepfad: verifyMolliePayment lässt nur 'paid'-Zahlungen
+ * durch, jede davon ist eine Einnahme.
+ * mwst_satz ist hier nur ein Platzhalter ('keine'), kategorie wird hier gar nicht gesetzt —
+ * handleMollieWebhook ergänzt/überschreibt beide direkt nach diesem Aufruf mit
+ * resolveMwstKategorie() anhand der vom Nutzer in den Integrationen-Settings gewählten
+ * Einstellung (identisches Muster wie handleStripeWebhook).
+ * @param {object} payment - verifiziertes Mollie-Payment-Objekt (v2/payments/{id}-Response)
+ * @returns {object}
+ */
+function mollieEventToBeleg(payment) {
+  const email = payment.metadata?.email || null;
+  const beschreibung = payment.description || null;
+  const monatJahr = isoToMonatJahr(payment.paidAt);
+  const name = beschreibung ? `Mollie: ${beschreibung} ${monatJahr}` : `Mollie-Zahlung ${monatJahr}`;
+  const buchungstext = beschreibung
+    ? `Mollie: ${beschreibung}${email ? ` – ${email}` : ''}`
+    : (email ? `Mollie-Zahlung von ${email}` : `Mollie-Zahlung ${monatJahr}`);
+
+  return {
+    typ: 'rechnung_ausgehend',
+    betrag: parseFloat(payment.amount?.value) || 0,
+    absender: email || 'Mollie-Kunde',
+    bezahlt: true,
+    bezahlt_am: payment.paidAt ? berlinDatumAlsString(new Date(payment.paidAt)) : berlinDatumAlsString(),
+    mwst_satz: 'keine',
+    quelle: 'mollie_webhook',
+    name,
+    buchungstext
+  };
+}
+
+/**
+ * Haupt-Handler für POST /webhook/mollie/{userId}/{urlSecret}. Kein Firebase-Token (externer
+ * Server) — Auth läuft zweistufig wie bei Stripe: der URL-Secret lehnt geratene/falsche Pfade
+ * billig ab (generische 404, verrät nicht welcher Teil falsch war), die eigentliche
+ * Sicherheitsgrenze ist die Live-API-Verifikation danach (siehe verifyMolliePayment).
+ */
+async function handleMollieWebhook(request, url, env, cors) {
+  const segments = url.pathname.split('/').filter(Boolean); // ['webhook','mollie',userId,urlSecret]
+  const userId = segments[2];
+  const urlSecret = segments[3];
+  if (!userId || !urlSecret) {
+    return new Response('Not found', { status: 404, headers: cors });
+  }
+
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/mollie`, adminToken);
+    const fields = configDoc?.fields || {};
+    const storedUrlSecret = firestoreValue(fields.url_secret);
+    const apiKey = firestoreValue(fields.api_key);
+    const enabled = firestoreValue(fields.enabled) === true;
+
+    if (!enabled || !storedUrlSecret || storedUrlSecret !== urlSecret || !apiKey) {
+      return new Response('Not found', { status: 404, headers: cors });
+    }
+
+    // Mollie schickt den Body als application/x-www-form-urlencoded mit genau einem Feld: id
+    // (siehe docs.mollie.com/reference/webhooks) — kein rawBody-Signatur-Zwang wie bei Stripe,
+    // deshalb hier direkt geparst statt als Rohtext durchgereicht.
+    const rawBody = await request.text();
+    const paymentId = new URLSearchParams(rawBody).get('id');
+    if (!paymentId) {
+      return new Response(JSON.stringify({ error: 'Missing id' }), {
+        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const verifyResult = await verifyMolliePayment(paymentId, apiKey);
+    if (!verifyResult.valid) {
+      console.warn('Mollie-Webhook Verifikation fehlgeschlagen:', verifyResult.reason, 'userId=', userId);
+      return new Response(JSON.stringify({ error: 'Invalid payment' }), {
+        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+    const payment = verifyResult.payment;
+
+    if (await isAlreadyProcessed(userId, payment.id, adminToken)) {
+      return new Response(JSON.stringify({ received: true, dedup: true }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const belegData = mollieEventToBeleg(payment);
+
+    // ── MwSt-Setting + Sachkonto — identisches Muster wie handleStripeWebhook ──────────
+    const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(fields.mwst_setting));
+    belegData.mwst_satz = mwst_satz;
+    belegData.kategorie = kategorie;
+    try {
+      const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
+      const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
+      belegData.sachkonto = resolveSachkonto(kategorie, skr) || '';
+    } catch (e) {
+      console.warn('Mollie-Webhook: datev_skr-Lookup fehlgeschlagen, sachkonto bleibt leer:', e.message);
+    }
+
+    // ── Invoice-PDF archivieren — nur wenn Mollie eine mitliefert (laut Aufgabenstellung
+    // selten, `_links.invoicePdf.href`) — eigener try/catch, ein fehlgeschlagener PDF-Download/
+    // -Upload darf den Beleg selbst nie blockieren (identisches Muster wie handleStripeWebhook).
+    if (payment._links?.invoicePdf?.href) {
+      try {
+        belegData.storage_url = await archiveInvoicePdf(userId, 'mollie', payment.id, payment._links.invoicePdf.href, env);
+      } catch (e) {
+        console.error('Mollie-Webhook: Invoice-PDF-Archivierung fehlgeschlagen, Beleg wird trotzdem angelegt:', e.message, 'userId=', userId, 'paymentId=', payment.id);
+      }
+    }
+
+    const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
+    // Als verarbeitet markieren SOBALD der Beleg sicher gespeichert ist — auch wenn die
+    // Tagesbewegung selbst noch fehlschlagen sollte (result.tagesbewegungWarnung), identische
+    // Abwägung wie handleStripeWebhook.
+    await markAsProcessed(userId, payment.id, adminToken);
+    await incrementWebhookBelegCount(userId, env);
+
+    if (result.tagesbewegungWarnung) {
+      console.error('Mollie-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
+    }
+
+    return new Response(JSON.stringify({ received: true, docId: result.docId }), {
+      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  } catch (e) {
+    console.error('handleMollieWebhook Error:', e.message, e.stack);
     return new Response(JSON.stringify({ error: 'Server error' }), {
       status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
     });
