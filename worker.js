@@ -177,6 +177,18 @@ export default {
     if (request.method === 'POST' && url.pathname.startsWith('/webhook/mollie/')) {
       return handleMollieWebhook(request, url, env, cors);
     }
+    if (request.method === 'POST' && url.pathname.startsWith('/webhook/digistore24/')) {
+      return handleDigistore24Webhook(request, url, env, cors);
+    }
+    if (request.method === 'POST' && url.pathname.startsWith('/webhook/copecart/')) {
+      return handleCopecartWebhook(request, url, env, cors);
+    }
+    if (request.method === 'POST' && url.pathname.startsWith('/webhook/paypal/')) {
+      return handlePaypalWebhook(request, url, env, cors);
+    }
+    if (request.method === 'POST' && url.pathname.startsWith('/webhook/sumup/')) {
+      return handleSumupWebhook(request, url, env, cors);
+    }
 
     // Origin-Check — nur erlaubte Domains
     if (origin && !ALLOWED_ORIGINS.includes(origin)) {
@@ -3291,22 +3303,33 @@ async function incrementWebhookBelegCount(userId, env) {
   } catch (e) { /* rein informativ — darf nichts blockieren */ }
 }
 
-// Plattform-spezifischer Name des "Secrets" — Stripe braucht ein Webhook-Signing-Secret (HMAC-
-// Schlüssel), Mollie hat kein HMAC-Verfahren und braucht stattdessen den Nutzer-eigenen Mollie-
-// API-Key (siehe verifyMolliePayment) zur Live-Verifikation. Body-Feldname und Firestore-
-// Feldname bewusst getrennt gehalten (nicht z.B. einfach ein generisches "secret" für beide) —
-// der bestehende Stripe-Feldname `stripe_signing_secret` bleibt unverändert, damit produktiv
-// bereits gespeicherte Stripe-Konfigurationen nicht bricht.
+// Plattform-spezifische Credential-Felder — jeweils eine LISTE (nicht ein einzelnes Feld), da
+// PayPal drei getrennte Werte braucht (Client ID/Secret/Webhook ID), alle anderen Plattformen
+// genau einen. Body-Feldname und Firestore-Feldname bewusst pro Eintrag getrennt gehalten (nicht
+// z.B. ein generisches "secret") — die bestehenden Feldnamen (z.B. `stripe_signing_secret`)
+// bleiben unverändert, damit produktiv bereits gespeicherte Konfigurationen nicht brechen.
 const WEBHOOK_SECRET_FELDER = {
-  stripe: { bodyFeld: 'signingSecret', firestoreFeld: 'stripe_signing_secret', fehlermeldung: 'Bitte ein gültiges Webhook-Secret eintragen.' },
-  mollie: { bodyFeld: 'apiKey', firestoreFeld: 'api_key', fehlermeldung: 'Bitte einen gültigen Mollie API-Key eintragen.' }
+  stripe: { felder: [{ bodyFeld: 'signingSecret', firestoreFeld: 'stripe_signing_secret', fehlermeldung: 'Bitte ein gültiges Webhook-Secret eintragen.' }] },
+  mollie: { felder: [{ bodyFeld: 'apiKey', firestoreFeld: 'api_key', fehlermeldung: 'Bitte einen gültigen Mollie API-Key eintragen.' }] },
+  digistore24: { felder: [{ bodyFeld: 'passphrase', firestoreFeld: 'passphrase', fehlermeldung: 'Bitte eine gültige Digistore24 API-Passphrase eintragen.' }] },
+  copecart: { felder: [{ bodyFeld: 'webhookSecret', firestoreFeld: 'webhook_secret', fehlermeldung: 'Bitte ein gültiges Webhook-Secret eintragen.' }] },
+  paypal: { felder: [
+    { bodyFeld: 'clientId', firestoreFeld: 'client_id', fehlermeldung: 'Bitte deine PayPal Client ID eintragen.' },
+    { bodyFeld: 'clientSecret', firestoreFeld: 'client_secret', fehlermeldung: 'Bitte dein PayPal Client Secret eintragen.' },
+    { bodyFeld: 'webhookId', firestoreFeld: 'webhook_id', fehlermeldung: 'Bitte deine PayPal Webhook ID eintragen.' }
+  ] },
+  sumup: { felder: [{ bodyFeld: 'webhookSecret', firestoreFeld: 'webhook_secret', fehlermeldung: 'Bitte ein gültiges Webhook-Secret eintragen.' }] }
 };
 
 /**
  * GET/SAVE der Webhook-Konfiguration eines Nutzers. `plattform` wählt das Dokument unter
- * users/{userId}/webhook_secrets/{plattform} — Struktur so gewählt, dass weitere Plattformen
- * (Digistore24, ...) mit nur einem neuen Eintrag in WEBHOOK_SECRET_FELDER hinzukommen können.
- * @param {object} body - { action: 'get'|'save', plattform, signingSecret?, apiKey? }
+ * users/{userId}/webhook_secrets/{plattform} — Struktur so gewählt, dass weitere Plattformen mit
+ * nur einem neuen Eintrag in WEBHOOK_SECRET_FELDER hinzukommen können (`felder` ist eine Liste,
+ * damit auch Mehr-Feld-Plattformen wie PayPal ohne Sonderfall-Code auskommen — siehe dortigen
+ * Kommentar). Für Plattformen mit nur einem Feld (Stripe/Mollie/Digistore24/CopeCart) bleibt das
+ * Response-Format (`hasSecret`/`secretPreview` als einzelne Werte) unverändert, damit deren
+ * bestehender Frontend-Code ohne Anpassung weiterläuft.
+ * @param {object} body - { action: 'get'|'save', plattform, ...plattformspezifische Felder }
  * @param {string} verifiedUid - aus dem verifizierten Firebase-Token (nie aus dem Body —
  *   sonst könnte ein Nutzer die Webhook-Config eines anderen lesen/überschreiben)
  * @param {string} requestOrigin - `new URL(request.url).origin`, für die angezeigte
@@ -3317,11 +3340,11 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
   if (!verifiedUid) {
     return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: { ...cors, 'Content-Type': 'application/json' } });
   }
-  const secretConfig = WEBHOOK_SECRET_FELDER[plattform];
-  if (!secretConfig) {
+  const plattformConfig = WEBHOOK_SECRET_FELDER[plattform];
+  if (!plattformConfig) {
     return new Response(JSON.stringify({ error: 'Unbekannte Plattform' }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
   }
-  const secretWert = body[secretConfig.bodyFeld];
+  const felder = plattformConfig.felder;
 
   try {
     const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
@@ -3330,15 +3353,27 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
     if (action === 'get') {
       const doc = await firestoreGetDoc(docPath, adminToken);
       const fields = doc?.fields || {};
-      const secret = firestoreValue(fields[secretConfig.firestoreFeld]);
       const urlSecret = firestoreValue(fields.url_secret);
       const enabled = firestoreValue(fields.enabled) === true;
+
+      // Pro Feld eine eigene Preview (nötig für PayPals drei getrennte Werte) — das volle Secret
+      // wird nach dem Speichern NIE wieder ausgeliefert (Security-Praxis wie bei API-Key-
+      // Verwaltungen üblich), nur die letzten 4 Zeichen zur Wiedererkennung.
+      const secretPreviews = {};
+      let alleVorhanden = true;
+      for (const f of felder) {
+        const wert = firestoreValue(fields[f.firestoreFeld]);
+        secretPreviews[f.firestoreFeld] = wert ? `••••${wert.slice(-4)}` : null;
+        if (!wert) alleVorhanden = false;
+      }
+
       return new Response(JSON.stringify({
         enabled,
-        hasSecret: !!secret,
-        // Das volle Secret wird nach dem Speichern NIE wieder ausgeliefert (Security-Praxis
-        // wie bei API-Key-Verwaltungen üblich) — nur die letzten 4 Zeichen zur Wiedererkennung.
-        secretPreview: secret ? `••••${secret.slice(-4)}` : null,
+        hasSecret: alleVorhanden,
+        // Rückwärtskompatibel für die Single-Feld-Plattformen (Stripe/Mollie/Digistore24/
+        // CopeCart), deren Frontend nur dieses eine Top-Level-Feld liest.
+        secretPreview: secretPreviews[felder[0].firestoreFeld],
+        secretPreviews,
         webhookUrl: urlSecret ? `${requestOrigin}/webhook/${plattform}/${verifiedUid}/${urlSecret}` : null,
         // Default '19' (nicht null) — deckt sich mit resolveMwstKategorie()s eigenem Default,
         // damit die UI schon beim ersten Laden denselben Wert vorausgewählt zeigt, den der
@@ -3348,12 +3383,19 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
     }
 
     if (action === 'save') {
-      if (!secretWert || typeof secretWert !== 'string' || secretWert.trim().length < 8) {
-        return new Response(JSON.stringify({ error: secretConfig.fehlermeldung }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+      // Wie bei den Single-Feld-Plattformen bereits üblich: ALLE Felder müssen bei JEDEM
+      // Speichern erneut ausgefüllt sein (kein "leer lassen = alten Wert behalten") — konsistent
+      // mit dem bestehenden Stripe/Mollie/Digistore24/CopeCart-Verhalten, einfacher als ein
+      // Teil-Update-Mechanismus für ein Feature, das (noch) niemand braucht.
+      for (const f of felder) {
+        const wert = body[f.bodyFeld];
+        if (!wert || typeof wert !== 'string' || wert.trim().length < 8) {
+          return new Response(JSON.stringify({ error: f.fehlermeldung }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+        }
       }
       const existing = await firestoreGetDoc(docPath, adminToken);
-      // url_secret nur EINMALIG erzeugen — ein Nutzer, der sein Secret aktualisiert, soll nicht
-      // plötzlich eine neue Webhook-URL bekommen und sie beim Anbieter neu hinterlegen müssen.
+      // url_secret nur EINMALIG erzeugen — ein Nutzer, der seine Zugangsdaten aktualisiert, soll
+      // nicht plötzlich eine neue Webhook-URL bekommen und sie beim Anbieter neu hinterlegen müssen.
       // PATCH ohne updateMask ERSETZT das komplette Dokument (siehe handleSeedSteuerrecht-
       // Kommentar zum Gegenteil) — bestehende Werte müssen deshalb explizit mitgeschickt werden,
       // sonst gingen sie bei jedem Speichern verloren.
@@ -3369,6 +3411,9 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
         ? mwstSetting
         : (bisherigesMwstSetting || '19');
 
+      const feldWerte = {};
+      for (const f of felder) feldWerte[f.firestoreFeld] = { stringValue: body[f.bodyFeld].trim() };
+
       const writeRes = await fetch(
         `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/${docPath}`,
         {
@@ -3376,7 +3421,7 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
           headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
             fields: {
-              [secretConfig.firestoreFeld]: { stringValue: secretWert.trim() },
+              ...feldWerte,
               url_secret: { stringValue: urlSecret },
               enabled: { booleanValue: true },
               mwst_setting: { stringValue: neuesMwstSetting },
@@ -3986,6 +4031,889 @@ async function handleMollieWebhook(request, url, env, cors) {
     });
   } catch (e) {
     console.error('handleMollieWebhook Error:', e.message, e.stack);
+    return new Response(JSON.stringify({ error: 'Server error' }), {
+      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// ── DIGISTORE24-INTEGRATION ─────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════
+// Digistore24 schickt IPN ("Instant Payment Notification") als application/x-www-form-urlencoded
+// mit einem `sha_sign`-Feld zur Signaturprüfung — anders als Stripe (echtes HMAC über den rohen
+// Body) berechnet Digistore24 die Signatur über die EINZELNEN Formularfelder (siehe
+// verifyDigistore24Signature unten), nicht über den rohen Byte-String. Kein rawBody-Zwang wie bei
+// Stripe deshalb, aber der Body wird trotzdem zuerst als Text gelesen und dann selbst geparst
+// (nicht request.formData()), damit exakt dieselben decodierten Werte in Verifikation UND
+// Beleg-Mapping verwendet werden.
+//
+// Korrektur gegenüber der Aufgabenstellung (verifiziert per WebFetch gegen Digistore24s offizielles
+// PHP-Beispiel `sha_sign.php` sowie die quelloffene Bibliothek GoSuccessHQ/digistore24-ipn, nicht
+// geraten): Das im Auftrag skizzierte Pseudo-Format "param1=value1&param2=value2&...PASSPHRASE"
+// (Werte mit & verkettet, Passphrase EINMAL am Ende) entspricht NICHT dem echten Algorithmus.
+// Digistore24 hängt die Passphrase nach JEDEM einzelnen "KEY=value"-Paar an (kein &-Trenner
+// zwischen den Paaren), Groß-/Kleinschreibung der Keys bleibt unverändert (Default
+// `$convert_keys_to_uppercase = false` im offiziellen Beispiel), und Parameter mit leerem Wert
+// ODER dem String "0" werden übersprungen (PHP-`empty()`-Semantik, die Digistore24s eigenes
+// Beispiel nutzt). Siehe verifyDigistore24Signature/berechneDigistore24SignaturBasis für die
+// exakte Umsetzung. Eine falsche Verkettung hätte JEDE echte Digistore24-Signatur zurückgewiesen —
+// die Webhook-Route wäre real nie nutzbar gewesen, obwohl sie mit selbstgebauten Testdaten (die
+// denselben, aber falschen Algorithmus verwenden) fälschlich "funktionierend" ausgesehen hätte.
+//
+// Ebenfalls verifiziert: das tatsächliche Feld heißt `event` (nicht `event_type` wie im Auftrag
+// skizziert) mit Werten wie `on_payment`/`on_refund`/`on_chargeback` (nicht `SALE`/`REFUND`/
+// `CHARGEBACK`) — eine Rebilling-Zahlung löst denselben `on_payment`-Event wie eine Erstzahlung
+// aus, es gibt keinen separaten "REBILL"-Event. Feldnamen für Betrag/E-Mail/Datum sind in
+// unterschiedlichen Digistore24-Dokumentationsquellen uneinheitlich benannt (transaction_amount
+// vs. amount_brutto, email vs. buyer_email, transaction_date vs. order_date) — statt mich auf
+// eine einzelne, möglicherweise veraltete Quelle zu verlassen, liest digistore24FieldValue()
+// unten alle beobachteten Namensvarianten mit Priorität durch (erster Treffer gewinnt), inklusive
+// der im Auftrag genannten Namen (customer_email, amount, payment_date, event_type, SALE/REBILL)
+// als zusätzliche Fallbacks — schadet nicht, falls Digistore24 diese in bestimmten Kontokonfigu-
+// rationen doch verwendet, und macht den Handler robuster als eine einzelne hart kodierte Quelle.
+
+/** Erster nicht-leerer Wert aus `fields` über mehrere mögliche Feldnamen (Prioritätsreihenfolge). */
+function digistore24FieldValue(fields, ...keys) {
+  for (const k of keys) {
+    if (fields[k]) return fields[k];
+  }
+  return null;
+}
+
+/**
+ * "YYYY-MM-DDTHH:mm:ss"/ISO-String ODER Unix-Sekunden (als Ziffernstring) → Date. Digistore24s
+ * Datumsfeld ist je nach Quelle unterschiedlich dokumentiert (siehe Sektions-Kommentar oben) —
+ * eine reine Ziffernfolge wird als Unix-Sekunden interpretiert (wie bei Stripe), alles andere als
+ * ISO/parsebares Datum. Fällt auf "jetzt" zurück, wenn beides fehlschlägt (Beleg soll nie an einem
+ * unparsbaren Datum scheitern).
+ */
+function parseDigistore24Date(raw) {
+  if (!raw) return new Date();
+  if (/^\d+$/.test(raw)) {
+    return new Date(parseInt(raw, 10) * 1000);
+  }
+  const d = new Date(raw);
+  return isNaN(d.getTime()) ? new Date() : d;
+}
+
+/** Konstante-Zeit-Vergleich zweier gleich langer Hex-Strings (Groß-/Kleinschreibung wird vorher vereinheitlicht). */
+function timingSafeEqualHex(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+/**
+ * Baut den Klartext-String, den Digistore24 vor dem SHA-512-Hash bildet — siehe Sektions-Kommentar
+ * oben für die per WebFetch verifizierten Details. Alle Felder außer `sha_sign`/`SHASIGN`,
+ * alphabetisch nach Key sortiert (Standard-JS-String-Sort reicht, da Digistore24-Feldnamen reines
+ * ASCII sind — keine Locale-Sonderfälle wie bei berlinDatumAlsString), Werte mit leerem String oder
+ * "0" werden übersprungen (PHP-`empty()`-Semantik). Für jedes verbleibende Paar wird
+ * `KEY=value` + Passphrase angehängt — OHNE Trenner zwischen den Paaren.
+ * @param {Record<string,string>} fields - geparste POST-Felder (inkl. sha_sign)
+ * @param {string} passphrase
+ * @returns {string}
+ */
+function digistore24SignaturBasis(fields, passphrase) {
+  const keys = Object.keys(fields)
+    .filter(k => k !== 'sha_sign' && k !== 'SHASIGN')
+    .filter(k => fields[k] !== '' && fields[k] !== '0' && fields[k] != null)
+    .sort();
+  let basis = '';
+  for (const k of keys) {
+    basis += `${k}=${fields[k]}${passphrase}`;
+  }
+  return basis;
+}
+
+/**
+ * Verifiziert eine Digistore24-IPN-Signatur (SHA-512, siehe digistore24SignaturBasis) rein mit Web
+ * Crypto. Anders als Stripes HMAC ist das kein Secret-Key-Verfahren, sondern ein einfacher Hash
+ * über Feldwerte+Passphrase — die Passphrase selbst ist damit die alleinige Sicherheitsgrenze
+ * (zusätzlich zum URL-Secret, siehe handleDigistore24Webhook).
+ * @param {Record<string,string>} fields
+ * @param {string} passphrase - aus users/{userId}/webhook_secrets/digistore24, Feld `passphrase`
+ * @returns {Promise<{valid: boolean, reason?: string}>}
+ */
+async function verifyDigistore24Signature(fields, passphrase) {
+  const receivedSig = fields.sha_sign || fields.SHASIGN;
+  if (!receivedSig) return { valid: false, reason: 'missing_signature' };
+
+  const basis = digistore24SignaturBasis(fields, passphrase);
+  const hashBuffer = await crypto.subtle.digest('SHA-512', new TextEncoder().encode(basis));
+  const expectedSig = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+
+  const valid = timingSafeEqualHex(expectedSig, receivedSig.toUpperCase());
+  return { valid, ...(valid ? {} : { reason: 'signature_mismatch' }) };
+}
+
+// Nur diese (normalisiert kleingeschriebenen) Event-Werte lösen eine Buchung aus — `on_payment`
+// ist der tatsächliche Digistore24-Event-Name für sowohl Erst- als auch Rebilling-Zahlungen (siehe
+// Sektions-Kommentar oben), `sale`/`rebill` sind Fallbacks für den im Auftrag skizzierten
+// `event_type`-Namen, falls dieser in einer bestimmten Kontokonfiguration doch verwendet wird.
+// Alles andere (on_refund/REFUND, on_chargeback/CHARGEBACK, on_payment_missed,
+// on_rebill_cancelled, last_paid_day, ...) wird ignoriert — 200 zurück, kein Beleg (siehe
+// handleDigistore24Webhook), exakt wie im Auftrag gefordert.
+const DIGISTORE24_BUCHEN_EVENTS = new Set(['on_payment', 'sale', 'rebill']);
+
+/**
+ * Wandelt geparste Digistore24-IPN-Felder eines bereits verifizierten `on_payment`/SALE/REBILL-
+ * Events in ein Beleg-Objekt für writeBelegAsAdmin() um — reine Funktion, einzeln testbar,
+ * analog zu stripeEventToBeleg/mollieEventToBeleg.
+ * mwst_satz ist hier nur ein Platzhalter ('keine'), kategorie wird hier gar nicht gesetzt —
+ * handleDigistore24Webhook ergänzt/überschreibt beide direkt nach diesem Aufruf mit
+ * resolveMwstKategorie() (identisches Muster wie handleStripeWebhook/handleMollieWebhook).
+ * @param {Record<string,string>} fields
+ * @returns {object}
+ */
+function digistore24EventToBeleg(fields) {
+  const productName = digistore24FieldValue(fields, 'product_name') || 'Digistore24-Produkt';
+  const email = digistore24FieldValue(fields, 'email', 'buyer_email', 'customer_email');
+  const orderId = digistore24FieldValue(fields, 'order_id') || '';
+  const amountRaw = digistore24FieldValue(fields, 'transaction_amount', 'amount_brutto', 'amount');
+  const zahlungsDatum = parseDigistore24Date(digistore24FieldValue(fields, 'transaction_date', 'order_date', 'payment_date'));
+  const monatJahr = BERLIN_MONAT_JAHR_FORMATTER.format(zahlungsDatum);
+
+  return {
+    typ: 'rechnung_ausgehend',
+    betrag: parseFloat(amountRaw) || 0,
+    absender: email || 'Digistore24-Kunde',
+    rechnungsnr: orderId,
+    bezahlt: true,
+    bezahlt_am: berlinDatumAlsString(zahlungsDatum),
+    mwst_satz: 'keine',
+    quelle: 'digistore24_webhook',
+    name: `Digistore24: ${productName} ${monatJahr}`,
+    buchungstext: `Digistore24: ${productName}${email ? ` – ${email}` : ''}`
+  };
+}
+
+/**
+ * Haupt-Handler für POST /webhook/digistore24/{userId}/{urlSecret}. Kein Firebase-Token (externer
+ * Server) — Auth läuft zweistufig wie bei Stripe/Mollie: der URL-Secret lehnt geratene/falsche
+ * Pfade billig ab (generische 404, verrät nicht welcher Teil falsch war), die eigentliche
+ * Sicherheitsgrenze ist die Signaturprüfung danach (siehe verifyDigistore24Signature).
+ */
+async function handleDigistore24Webhook(request, url, env, cors) {
+  const segments = url.pathname.split('/').filter(Boolean); // ['webhook','digistore24',userId,urlSecret]
+  const userId = segments[2];
+  const urlSecret = segments[3];
+  if (!userId || !urlSecret) {
+    return new Response('Not found', { status: 404, headers: cors });
+  }
+
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/digistore24`, adminToken);
+    const configFields = configDoc?.fields || {};
+    const storedUrlSecret = firestoreValue(configFields.url_secret);
+    const passphrase = firestoreValue(configFields.passphrase);
+    const enabled = firestoreValue(configFields.enabled) === true;
+
+    if (!enabled || !storedUrlSecret || storedUrlSecret !== urlSecret || !passphrase) {
+      return new Response('Not found', { status: 404, headers: cors });
+    }
+
+    // Roher Body als Text, dann selbst geparst (nicht request.formData()) — dieselben decodierten
+    // Werte müssen in Signaturprüfung UND Beleg-Mapping verwendet werden (siehe Sektions-Kommentar).
+    const rawBody = await request.text();
+    const fields = Object.fromEntries(new URLSearchParams(rawBody));
+
+    const sigCheck = await verifyDigistore24Signature(fields, passphrase);
+    if (!sigCheck.valid) {
+      console.warn('Digistore24-Webhook Signaturprüfung fehlgeschlagen:', sigCheck.reason, 'userId=', userId);
+      return new Response(JSON.stringify({ error: 'Invalid signature' }), {
+        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const transactionId = fields.transaction_id;
+    if (!transactionId) {
+      return new Response(JSON.stringify({ error: 'Missing transaction_id' }), {
+        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    if (await isAlreadyProcessed(userId, transactionId, adminToken)) {
+      return new Response(JSON.stringify({ received: true, dedup: true }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const eventRaw = (fields.event || fields.event_type || '').toLowerCase();
+    if (!DIGISTORE24_BUCHEN_EVENTS.has(eventRaw)) {
+      // z.B. on_refund/REFUND, on_chargeback/CHARGEBACK, on_payment_missed, ... — trotzdem 200,
+      // sonst retryt Digistore24 sinnlos ein Event, das wir nie verarbeiten werden (analoges
+      // Muster zu handleStripeWebhook).
+      return new Response(JSON.stringify({ received: true, ignored: fields.event || fields.event_type || 'unknown' }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const belegData = digistore24EventToBeleg(fields);
+
+    // ── MwSt-Setting + Sachkonto — identisches Muster wie handleStripeWebhook/handleMollieWebhook
+    const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(configFields.mwst_setting));
+    belegData.mwst_satz = mwst_satz;
+    belegData.kategorie = kategorie;
+    try {
+      const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
+      const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
+      belegData.sachkonto = resolveSachkonto(kategorie, skr) || '';
+    } catch (e) {
+      console.warn('Digistore24-Webhook: datev_skr-Lookup fehlgeschlagen, sachkonto bleibt leer:', e.message);
+    }
+
+    const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
+    // Als verarbeitet markieren SOBALD der Beleg sicher gespeichert ist — identische Abwägung wie
+    // handleStripeWebhook/handleMollieWebhook (siehe dort für die ausführliche Begründung).
+    await markAsProcessed(userId, transactionId, adminToken);
+    await incrementWebhookBelegCount(userId, env);
+
+    if (result.tagesbewegungWarnung) {
+      console.error('Digistore24-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
+    }
+
+    return new Response(JSON.stringify({ received: true, docId: result.docId }), {
+      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  } catch (e) {
+    console.error('handleDigistore24Webhook Error:', e.message, e.stack);
+    return new Response(JSON.stringify({ error: 'Server error' }), {
+      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// ── COPECART-INTEGRATION ────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════
+// CopeCart schickt application/json mit einem `X-Copecart-Signature`-Header — HMAC-SHA256 über
+// den rohen Body (kein Feld-für-Feld-Hash wie bei Digistore24), identisches Muster zu Stripes
+// verifyStripeSignature: rawBody muss vor dem JSON.parse gelesen werden, sonst würde ein
+// neu serialisiertes Objekt (andere Key-Reihenfolge/Whitespace) einen abweichenden Hash ergeben.
+// Anders als Stripe hat der Header hier KEINEN eingebetteten Timestamp/Replay-Schutz (kein
+// "t=...,v1=..."-Format, nur der reine Hex-Hash) — es gibt deshalb keine Replay-Toleranzprüfung
+// wie bei Stripe, das URL-Secret + die Dedup-Prüfung über `id` sind hier die einzigen zusätzlichen
+// Verteidigungsebenen.
+
+/**
+ * Verifiziert eine CopeCart-Webhook-Signatur (HMAC-SHA256, Hex) rein mit Web Crypto — identisches
+ * Muster zu verifyStripeSignature, nur ohne Timestamp-Präfix im Header (siehe Sektions-Kommentar).
+ * @param {string} rawBody - unverändertes Body-Text (NICHT re-serialisiertes JSON)
+ * @param {string} signatureHeader - Wert des "X-Copecart-Signature"-Headers (Hex)
+ * @param {string} secret - Webhook-Secret aus den Integrationen-Settings
+ * @returns {Promise<{valid: boolean, reason?: string}>}
+ */
+async function verifyCopecartSignature(rawBody, signatureHeader, secret) {
+  if (!signatureHeader) return { valid: false, reason: 'missing_header' };
+
+  let expectedSig;
+  try {
+    expectedSig = hexToBytes(signatureHeader.trim());
+  } catch (e) {
+    return { valid: false, reason: 'malformed_signature' };
+  }
+
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['verify']
+  );
+  const valid = await crypto.subtle.verify('HMAC', key, expectedSig, new TextEncoder().encode(rawBody));
+  return { valid, ...(valid ? {} : { reason: 'signature_mismatch' }) };
+}
+
+/**
+ * Wandelt ein bereits signatur-verifiziertes CopeCart "order.completed"-Event in ein Beleg-Objekt
+ * für writeBelegAsAdmin() um — reine Funktion, einzeln testbar, analog zu stripeEventToBeleg/
+ * mollieEventToBeleg/digistore24EventToBeleg.
+ * mwst_satz ist hier nur ein Platzhalter ('keine'), kategorie wird hier gar nicht gesetzt —
+ * handleCopecartWebhook ergänzt/überschreibt beide direkt nach diesem Aufruf mit
+ * resolveMwstKategorie() (identisches Muster wie bei den anderen Plattformen).
+ * @param {object} event - komplettes CopeCart-Event-Objekt (bereits geparst)
+ * @returns {object}
+ */
+function copecartEventToBeleg(event) {
+  const productName = event.product?.name || 'CopeCart-Produkt';
+  const email = event.customer?.email || null;
+  const zahlungsDatum = event.created_at ? new Date(event.created_at) : new Date();
+  const gueltigesDatum = isNaN(zahlungsDatum.getTime()) ? new Date() : zahlungsDatum;
+  const monatJahr = BERLIN_MONAT_JAHR_FORMATTER.format(gueltigesDatum);
+
+  return {
+    typ: 'rechnung_ausgehend',
+    betrag: (event.payment?.amount || 0) / 100,
+    absender: email || 'CopeCart-Kunde',
+    bezahlt: true,
+    bezahlt_am: berlinDatumAlsString(gueltigesDatum),
+    mwst_satz: 'keine',
+    quelle: 'copecart_webhook',
+    name: `CopeCart: ${productName} ${monatJahr}`,
+    buchungstext: `CopeCart: ${productName}${email ? ` – ${email}` : ''}`
+  };
+}
+
+/**
+ * Haupt-Handler für POST /webhook/copecart/{userId}/{urlSecret}. Kein Firebase-Token (externer
+ * Server) — Auth läuft zweistufig wie bei Stripe/Mollie/Digistore24: der URL-Secret lehnt
+ * geratene/falsche Pfade billig ab (generische 404), die eigentliche Sicherheitsgrenze ist die
+ * HMAC-Signaturprüfung danach (siehe verifyCopecartSignature).
+ */
+async function handleCopecartWebhook(request, url, env, cors) {
+  const segments = url.pathname.split('/').filter(Boolean); // ['webhook','copecart',userId,urlSecret]
+  const userId = segments[2];
+  const urlSecret = segments[3];
+  if (!userId || !urlSecret) {
+    return new Response('Not found', { status: 404, headers: cors });
+  }
+
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/copecart`, adminToken);
+    const configFields = configDoc?.fields || {};
+    const storedUrlSecret = firestoreValue(configFields.url_secret);
+    const webhookSecret = firestoreValue(configFields.webhook_secret);
+    const enabled = firestoreValue(configFields.enabled) === true;
+
+    if (!enabled || !storedUrlSecret || storedUrlSecret !== urlSecret || !webhookSecret) {
+      return new Response('Not found', { status: 404, headers: cors });
+    }
+
+    // Roher Body als Text — NICHT request.json(), die Signatur ist über die exakten Bytes
+    // berechnet (siehe verifyCopecartSignature).
+    const rawBody = await request.text();
+    const sigCheck = await verifyCopecartSignature(rawBody, request.headers.get('X-Copecart-Signature'), webhookSecret);
+    if (!sigCheck.valid) {
+      console.warn('CopeCart-Webhook Signaturprüfung fehlgeschlagen:', sigCheck.reason, 'userId=', userId);
+      return new Response(JSON.stringify({ error: 'Invalid signature' }), {
+        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Erst NACH erfolgreicher Signaturprüfung parsen — ungeprüfte Bytes werden nie interpretiert.
+    let event;
+    try {
+      event = JSON.parse(rawBody);
+    } catch (e) {
+      return new Response(JSON.stringify({ error: 'Invalid JSON' }), {
+        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    if (!event.id) {
+      return new Response(JSON.stringify({ error: 'Missing id' }), {
+        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    if (await isAlreadyProcessed(userId, event.id, adminToken)) {
+      return new Response(JSON.stringify({ received: true, dedup: true }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    if (event.event !== 'order.completed') {
+      // z.B. order.refunded, order.chargeback, ... — trotzdem 200, sonst retryt CopeCart
+      // sinnlos ein Event, das wir nie verarbeiten werden (analoges Muster zu handleStripeWebhook).
+      return new Response(JSON.stringify({ received: true, ignored: event.event || 'unknown' }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const belegData = copecartEventToBeleg(event);
+
+    // ── MwSt-Setting + Sachkonto — identisches Muster wie bei den anderen Plattformen ────────
+    const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(configFields.mwst_setting));
+    belegData.mwst_satz = mwst_satz;
+    belegData.kategorie = kategorie;
+    try {
+      const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
+      const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
+      belegData.sachkonto = resolveSachkonto(kategorie, skr) || '';
+    } catch (e) {
+      console.warn('CopeCart-Webhook: datev_skr-Lookup fehlgeschlagen, sachkonto bleibt leer:', e.message);
+    }
+
+    const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
+    // Als verarbeitet markieren SOBALD der Beleg sicher gespeichert ist — identische Abwägung wie
+    // bei den anderen Plattformen (siehe handleStripeWebhook für die ausführliche Begründung).
+    await markAsProcessed(userId, event.id, adminToken);
+    await incrementWebhookBelegCount(userId, env);
+
+    if (result.tagesbewegungWarnung) {
+      console.error('CopeCart-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
+    }
+
+    return new Response(JSON.stringify({ received: true, docId: result.docId }), {
+      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  } catch (e) {
+    console.error('handleCopecartWebhook Error:', e.message, e.stack);
+    return new Response(JSON.stringify({ error: 'Server error' }), {
+      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// ── PAYPAL-INTEGRATION ──────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════
+// PayPal hat kein selbst berechenbares HMAC/Hash-Verfahren wie Stripe/CopeCart/Digistore24 —
+// die Verifikation läuft über einen Live-API-Call (POST /v1/notifications/verify-webhook-
+// signature) mit den fünf PAYPAL-*-Headern des Requests, dem gespeicherten `webhook_id` und dem
+// geparsten Event-Body. Der API-Call selbst braucht einen OAuth2-Access-Token (Client-Credentials-
+// Flow mit Client ID/Secret aus den Integrationen-Settings) — deshalb drei Firestore-Felder statt
+// eines einzelnen Secrets (siehe WEBHOOK_SECRET_FELDER.paypal oben).
+//
+// Sonderfall (explizit in der Aufgabenstellung gefordert): Antwortet PayPals eigene Verifikations-
+// API mit einem Fehler (5xx, Timeout, nicht erreichbar) — im Unterschied zu einer ECHTEN
+// Ablehnung (`verification_status !== 'SUCCESS'`, was PayPal immer mit HTTP 200 beantwortet) —,
+// wird das NICHT als ungültige Signatur wie bei Stripe/CopeCart behandelt (400 hätte einen
+// endlosen Retry-Sturm von PayPal zur Folge). Stattdessen gibt handlePaypalWebhook trotzdem 200
+// zurück, legt aber keinen Beleg an (siehe dortiger `verification_unavailable`-Zweig) — der
+// Vorfall wird nur geloggt, ein Entwickler kann das im Worker-Log nachvollziehen.
+
+/**
+ * Holt einen OAuth2-Access-Token per Client-Credentials-Flow (PayPals eigener, von
+ * getGoogleAccessToken() unabhängiger OAuth-Flow — andere Plattform, anderes Protokoll).
+ * @param {string} clientId
+ * @param {string} clientSecret
+ * @returns {Promise<string>}
+ * @throws bei jedem Fehlschlag — Aufrufer (verifyPaypalWebhookSignature) fängt das ab und
+ *   behandelt es als 'verification_unavailable' (siehe Sektions-Kommentar).
+ */
+async function getPaypalAccessToken(clientId, clientSecret) {
+  const res = await fetch('https://api-m.paypal.com/v1/oauth2/token', {
+    method: 'POST',
+    headers: {
+      // Standard-Base64 (nicht URL-safe) — HTTP Basic Auth verlangt das klassische Alphabet,
+      // anders als base64UrlFromString() oben (die ist für JWT-Signing gedacht).
+      'Authorization': `Basic ${btoa(`${clientId}:${clientSecret}`)}`,
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body: 'grant_type=client_credentials'
+  });
+  if (!res.ok) {
+    throw new Error(`PayPal OAuth-Token fehlgeschlagen (${res.status})`);
+  }
+  const data = await res.json();
+  if (!data.access_token) {
+    throw new Error('PayPal OAuth-Antwort ohne access_token');
+  }
+  return data.access_token;
+}
+
+/**
+ * Verifiziert eine PayPal-Webhook-Signatur per Live-API-Call (siehe Sektions-Kommentar oben für
+ * die drei möglichen Ausgänge).
+ *
+ * Test-Modus: `client_id` mit Präfix `test_` überspringt die echte API-Verifikation komplett
+ * (analog zu Mollies `tr_test_`-Präfix) — macht test-paypal-webhook.mjs ohne echten PayPal-
+ * Account/App möglich, exakt wie in der Aufgabenstellung gefordert.
+ * @param {Request} request - für die PAYPAL-*-Header
+ * @param {object} event - bereits geparster Body (== `webhook_event` im API-Call)
+ * @param {{clientId: string, clientSecret: string, webhookId: string}} config
+ * @returns {Promise<{status: 'valid'|'invalid'|'verification_unavailable'}>}
+ */
+async function verifyPaypalWebhookSignature(request, event, config) {
+  if (config.clientId.startsWith('test_')) {
+    return { status: 'valid' };
+  }
+
+  const authAlgo = request.headers.get('PAYPAL-AUTH-ALGO');
+  const certUrl = request.headers.get('PAYPAL-CERT-URL');
+  const transmissionId = request.headers.get('PAYPAL-TRANSMISSION-ID');
+  const transmissionSig = request.headers.get('PAYPAL-TRANSMISSION-SIG');
+  const transmissionTime = request.headers.get('PAYPAL-TRANSMISSION-TIME');
+  if (!authAlgo || !certUrl || !transmissionId || !transmissionSig || !transmissionTime) {
+    return { status: 'invalid' };
+  }
+
+  // Token-Abruf UND der Verifikations-Call selbst landen beide im 'verification_unavailable'-
+  // Zweig bei Fehlschlag — ein Access-Token-Fehler (z.B. falsche Client-Zugangsdaten) ist zwar
+  // eher ein Konfigurationsproblem als eine PayPal-Störung, aber die Aufgabenstellung verlangt
+  // explizit "nicht mit 400 antworten" für Verifikations-API-Fehler; die Unterscheidung zwischen
+  // "PayPal down" und "falsche Zugangsdaten" wäre hier ohnehin nur an groben HTTP-Codes zu raten.
+  let accessToken;
+  try {
+    accessToken = await getPaypalAccessToken(config.clientId, config.clientSecret);
+  } catch (e) {
+    console.error('PayPal-Webhook: Access-Token-Abruf fehlgeschlagen:', e.message);
+    return { status: 'verification_unavailable' };
+  }
+
+  let res;
+  try {
+    res = await fetch('https://api-m.paypal.com/v1/notifications/verify-webhook-signature', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        auth_algo: authAlgo,
+        cert_url: certUrl,
+        transmission_id: transmissionId,
+        transmission_sig: transmissionSig,
+        transmission_time: transmissionTime,
+        webhook_id: config.webhookId,
+        webhook_event: event
+      })
+    });
+  } catch (e) {
+    console.error('PayPal-Webhook: Verifikations-API nicht erreichbar:', e.message);
+    return { status: 'verification_unavailable' };
+  }
+
+  if (!res.ok) {
+    // PayPal beantwortet eine ECHTE Ablehnung (verification_status: FAILURE) immer mit HTTP 200
+    // — ein Nicht-200 hier ist also ein Fehler der API selbst (5xx) oder unserer Anfrage (4xx),
+    // keine legitime Signaturprüfung. Siehe Sektions-Kommentar: bewusst NICHT als 'invalid'.
+    console.error(`PayPal-Webhook: Verifikations-API-Fehler (${res.status})`);
+    return { status: 'verification_unavailable' };
+  }
+
+  let data;
+  try {
+    data = await res.json();
+  } catch (e) {
+    return { status: 'verification_unavailable' };
+  }
+
+  return { status: data.verification_status === 'SUCCESS' ? 'valid' : 'invalid' };
+}
+
+/**
+ * Wandelt ein bereits verifiziertes PayPal "PAYMENT.CAPTURE.COMPLETED"-Event in ein Beleg-Objekt
+ * für writeBelegAsAdmin() um — reine Funktion, einzeln testbar, analog zu stripeEventToBeleg/
+ * mollieEventToBeleg/digistore24EventToBeleg/copecartEventToBeleg.
+ * mwst_satz ist hier nur ein Platzhalter ('keine'), kategorie wird hier gar nicht gesetzt —
+ * handlePaypalWebhook ergänzt/überschreibt beide direkt nach diesem Aufruf mit
+ * resolveMwstKategorie() (identisches Muster wie bei den anderen Plattformen).
+ * Bekannter Fallstrick (laut Aufgabenstellung, gegen die offizielle PayPal-API-Referenz
+ * verifizierbar): `resource.amount.value` ist ein STRING, kein number — parseFloat() ist Pflicht.
+ * @param {object} event - komplettes PayPal-Event-Objekt (bereits geparst)
+ * @returns {object}
+ */
+function paypalEventToBeleg(event) {
+  const resource = event.resource || {};
+  const description = resource.custom_id || resource.description || null;
+  const email = resource.payer?.email_address || '';
+  const zahlungsDatum = event.create_time ? new Date(event.create_time) : new Date();
+  const gueltigesDatum = isNaN(zahlungsDatum.getTime()) ? new Date() : zahlungsDatum;
+  const monatJahr = BERLIN_MONAT_JAHR_FORMATTER.format(gueltigesDatum);
+  const betrag = parseFloat(resource.amount?.value) || 0;
+
+  return {
+    typ: 'rechnung_ausgehend',
+    betrag,
+    absender: email || 'PayPal-Kunde',
+    bezahlt: true,
+    bezahlt_am: berlinDatumAlsString(gueltigesDatum),
+    mwst_satz: 'keine',
+    quelle: 'paypal_webhook',
+    name: description ? `PayPal: ${description} ${monatJahr}` : `PayPal-Zahlung ${monatJahr}`,
+    buchungstext: description
+      ? `PayPal: ${description}${email ? ` – ${email}` : ''}`
+      : (email ? `PayPal-Zahlung von ${email}` : `PayPal-Zahlung ${monatJahr}`)
+  };
+}
+
+/**
+ * Haupt-Handler für POST /webhook/paypal/{userId}/{urlSecret}. Kein Firebase-Token (externer
+ * Server) — Auth läuft zweistufig wie bei den anderen Plattformen: der URL-Secret lehnt geratene/
+ * falsche Pfade billig ab (generische 404), die eigentliche Sicherheitsgrenze ist die
+ * API-Verifikation danach (siehe verifyPaypalWebhookSignature).
+ *
+ * Reihenfolge bewusst anders als bei Stripe/CopeCart: Dedup-Check (billiger Firestore-Read) läuft
+ * VOR der Signaturprüfung (teurer PayPal-API-Roundtrip mit eigenem OAuth-Token-Abruf) — bei
+ * wiederholten Zustellungen desselben Events (laut Aufgabenstellung explizit erwartet) spart das
+ * unnötige externe API-Calls. Das ist unkritisch: der Dedup-Read selbst verrät nichts
+ * Sicherheitsrelevantes, er bestätigt nur, ob eine Event-ID bereits verarbeitet wurde.
+ */
+async function handlePaypalWebhook(request, url, env, cors) {
+  const segments = url.pathname.split('/').filter(Boolean); // ['webhook','paypal',userId,urlSecret]
+  const userId = segments[2];
+  const urlSecret = segments[3];
+  if (!userId || !urlSecret) {
+    return new Response('Not found', { status: 404, headers: cors });
+  }
+
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/paypal`, adminToken);
+    const configFields = configDoc?.fields || {};
+    const storedUrlSecret = firestoreValue(configFields.url_secret);
+    const clientId = firestoreValue(configFields.client_id);
+    const clientSecret = firestoreValue(configFields.client_secret);
+    const webhookId = firestoreValue(configFields.webhook_id);
+    const enabled = firestoreValue(configFields.enabled) === true;
+
+    if (!enabled || !storedUrlSecret || storedUrlSecret !== urlSecret || !clientId || !clientSecret || !webhookId) {
+      return new Response('Not found', { status: 404, headers: cors });
+    }
+
+    let event;
+    try {
+      event = JSON.parse(await request.text());
+    } catch (e) {
+      return new Response(JSON.stringify({ error: 'Invalid JSON' }), {
+        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    if (!event.id) {
+      return new Response(JSON.stringify({ error: 'Missing id' }), {
+        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    if (await isAlreadyProcessed(userId, event.id, adminToken)) {
+      return new Response(JSON.stringify({ received: true, dedup: true }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const verifyResult = await verifyPaypalWebhookSignature(request, event, { clientId, clientSecret, webhookId });
+    if (verifyResult.status === 'invalid') {
+      console.warn('PayPal-Webhook Signaturprüfung fehlgeschlagen: userId=', userId, 'eventId=', event.id);
+      return new Response(JSON.stringify({ error: 'Invalid signature' }), {
+        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+    if (verifyResult.status === 'verification_unavailable') {
+      // Siehe Sektions-Kommentar: bewusst 200 OHNE Beleg, sonst retryt PayPal endlos gegen eine
+      // gerade nicht erreichbare Verifikations-API.
+      console.error('PayPal-Webhook: Verifikation nicht verfügbar — kein Beleg angelegt. userId=', userId, 'eventId=', event.id);
+      return new Response(JSON.stringify({ received: true, verificationUnavailable: true }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Case-sensitive geprüft (laut Aufgabenstellung: Event-Typ ist GROSSBUCHSTABEN) — nur
+    // PAYMENT.CAPTURE.COMPLETED bucht, alles andere (PAYMENT.CAPTURE.DENIED, ...REFUNDED, ...)
+    // trotzdem 200, sonst retryt PayPal sinnlos ein Event, das wir nie verarbeiten werden.
+    if (event.event_type !== 'PAYMENT.CAPTURE.COMPLETED') {
+      return new Response(JSON.stringify({ received: true, ignored: event.event_type || 'unknown' }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const belegData = paypalEventToBeleg(event);
+
+    // ── MwSt-Setting + Sachkonto — identisches Muster wie bei den anderen Plattformen ────────
+    const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(configFields.mwst_setting));
+    belegData.mwst_satz = mwst_satz;
+    belegData.kategorie = kategorie;
+    try {
+      const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
+      const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
+      belegData.sachkonto = resolveSachkonto(kategorie, skr) || '';
+    } catch (e) {
+      console.warn('PayPal-Webhook: datev_skr-Lookup fehlgeschlagen, sachkonto bleibt leer:', e.message);
+    }
+
+    const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
+    // Als verarbeitet markieren SOBALD der Beleg sicher gespeichert ist — identische Abwägung wie
+    // bei den anderen Plattformen (siehe handleStripeWebhook für die ausführliche Begründung).
+    await markAsProcessed(userId, event.id, adminToken);
+    await incrementWebhookBelegCount(userId, env);
+
+    if (result.tagesbewegungWarnung) {
+      console.error('PayPal-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
+    }
+
+    return new Response(JSON.stringify({ received: true, docId: result.docId }), {
+      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  } catch (e) {
+    console.error('handlePaypalWebhook Error:', e.message, e.stack);
+    return new Response(JSON.stringify({ error: 'Server error' }), {
+      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// ── SUMUP-INTEGRATION ───────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════
+// SumUp schickt application/json mit einem `X-SumUp-Signature`-Header im Format "sha256=<hex>" —
+// HMAC-SHA256 über den rohen Body, identisches Muster zu CopeCarts verifyCopecartSignature, nur
+// mit einem "sha256="-Präfix vor dem eigentlichen Hex-Digest (den man vor hexToBytes() abstreifen
+// muss). rawBody muss wie bei Stripe/CopeCart vor dem JSON.parse gelesen werden.
+
+/**
+ * Verifiziert eine SumUp-Webhook-Signatur (HMAC-SHA256, Hex mit "sha256="-Präfix) rein mit Web
+ * Crypto — identisches Muster zu verifyCopecartSignature, nur mit dem zusätzlichen Präfix-Abstreifen.
+ * @param {string} rawBody - unverändertes Body-Text (NICHT re-serialisiertes JSON)
+ * @param {string} signatureHeader - Wert des "X-SumUp-Signature"-Headers, z.B. "sha256=abcd..."
+ * @param {string} secret - Webhook-Secret aus den Integrationen-Settings
+ * @returns {Promise<{valid: boolean, reason?: string}>}
+ */
+async function verifySumupSignature(rawBody, signatureHeader, secret) {
+  if (!signatureHeader) return { valid: false, reason: 'missing_header' };
+  const PREFIX = 'sha256=';
+  if (!signatureHeader.startsWith(PREFIX)) return { valid: false, reason: 'malformed_header' };
+  const hexSig = signatureHeader.slice(PREFIX.length).trim();
+
+  let expectedSig;
+  try {
+    expectedSig = hexToBytes(hexSig);
+  } catch (e) {
+    return { valid: false, reason: 'malformed_signature' };
+  }
+
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['verify']
+  );
+  const valid = await crypto.subtle.verify('HMAC', key, expectedSig, new TextEncoder().encode(rawBody));
+  return { valid, ...(valid ? {} : { reason: 'signature_mismatch' }) };
+}
+
+/**
+ * Wandelt ein bereits signatur-verifiziertes SumUp "PAYMENT"/"SUCCESSFUL"-Event in ein Beleg-
+ * Objekt für writeBelegAsAdmin() um — reine Funktion, einzeln testbar, analog zu
+ * copecartEventToBeleg/paypalEventToBeleg.
+ * mwst_satz ist hier nur ein Platzhalter ('keine'), kategorie wird hier gar nicht gesetzt —
+ * handleSumupWebhook ergänzt/überschreibt beide direkt nach diesem Aufruf mit
+ * resolveMwstKategorie() (identisches Muster wie bei den anderen Plattformen).
+ * @param {object} event - komplettes SumUp-Event-Objekt (bereits geparst)
+ * @returns {object}
+ */
+function sumupEventToBeleg(event) {
+  const payload = event.payload || {};
+  const description = payload.description || null;
+  const email = payload.customer?.email || null;
+  const last4 = payload.card?.last_4_digits || null;
+  const zahlungsDatum = payload.timestamp ? new Date(payload.timestamp) : new Date();
+  const gueltigesDatum = isNaN(zahlungsDatum.getTime()) ? new Date() : zahlungsDatum;
+  const monatJahr = BERLIN_MONAT_JAHR_FORMATTER.format(gueltigesDatum);
+  const betrag = parseFloat(payload.amount) || 0;
+
+  // Reihenfolge laut Aufgabenstellung: E-Mail-basierter Buchungstext hat Vorrang vor dem
+  // Karten-Buchungstext — beide sind optional (Kartenzahlung am Terminal hat oft keine
+  // Kunden-E-Mail), deshalb ein zusätzlicher dritter Fallback (analog zum Namensfeld), falls
+  // SumUp keins von beidem mitliefert.
+  let buchungstext;
+  if (email) buchungstext = `SumUp-Zahlung von ${email}`;
+  else if (last4) buchungstext = `SumUp-Kartenzahlung ****${last4}`;
+  else buchungstext = `SumUp-Zahlung ${monatJahr}`;
+
+  return {
+    typ: 'rechnung_ausgehend',
+    betrag,
+    absender: email || 'SumUp-Kunde',
+    bezahlt: true,
+    bezahlt_am: berlinDatumAlsString(gueltigesDatum),
+    mwst_satz: 'keine',
+    quelle: 'sumup_webhook',
+    name: description ? `SumUp: ${description} ${monatJahr}` : `SumUp-Zahlung ${monatJahr}`,
+    buchungstext
+  };
+}
+
+/**
+ * Haupt-Handler für POST /webhook/sumup/{userId}/{urlSecret}. Kein Firebase-Token (externer
+ * Server) — Auth läuft zweistufig wie bei den anderen Plattformen: der URL-Secret lehnt geratene/
+ * falsche Pfade billig ab (generische 404), die eigentliche Sicherheitsgrenze ist die HMAC-
+ * Signaturprüfung danach (siehe verifySumupSignature).
+ */
+async function handleSumupWebhook(request, url, env, cors) {
+  const segments = url.pathname.split('/').filter(Boolean); // ['webhook','sumup',userId,urlSecret]
+  const userId = segments[2];
+  const urlSecret = segments[3];
+  if (!userId || !urlSecret) {
+    return new Response('Not found', { status: 404, headers: cors });
+  }
+
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/sumup`, adminToken);
+    const configFields = configDoc?.fields || {};
+    const storedUrlSecret = firestoreValue(configFields.url_secret);
+    const webhookSecret = firestoreValue(configFields.webhook_secret);
+    const enabled = firestoreValue(configFields.enabled) === true;
+
+    if (!enabled || !storedUrlSecret || storedUrlSecret !== urlSecret || !webhookSecret) {
+      return new Response('Not found', { status: 404, headers: cors });
+    }
+
+    // Roher Body als Text — NICHT request.json(), die Signatur ist über die exakten Bytes
+    // berechnet (siehe verifySumupSignature).
+    const rawBody = await request.text();
+    const sigCheck = await verifySumupSignature(rawBody, request.headers.get('X-SumUp-Signature'), webhookSecret);
+    if (!sigCheck.valid) {
+      console.warn('SumUp-Webhook Signaturprüfung fehlgeschlagen:', sigCheck.reason, 'userId=', userId);
+      return new Response(JSON.stringify({ error: 'Invalid signature' }), {
+        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Erst NACH erfolgreicher Signaturprüfung parsen — ungeprüfte Bytes werden nie interpretiert.
+    let event;
+    try {
+      event = JSON.parse(rawBody);
+    } catch (e) {
+      return new Response(JSON.stringify({ error: 'Invalid JSON' }), {
+        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    if (!event.id) {
+      return new Response(JSON.stringify({ error: 'Missing id' }), {
+        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    if (await isAlreadyProcessed(userId, event.id, adminToken)) {
+      return new Response(JSON.stringify({ received: true, dedup: true }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    if (event.event_type !== 'PAYMENT' || event.payload?.status !== 'SUCCESSFUL') {
+      // z.B. PAYMENT/FAILED, REFUND, ... — trotzdem 200, sonst retryt SumUp sinnlos ein Event,
+      // das wir nie verarbeiten werden (analoges Muster zu handleStripeWebhook).
+      return new Response(JSON.stringify({ received: true, ignored: `${event.event_type || 'unknown'}/${event.payload?.status || 'unknown'}` }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const belegData = sumupEventToBeleg(event);
+
+    // ── MwSt-Setting + Sachkonto — identisches Muster wie bei den anderen Plattformen ────────
+    const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(configFields.mwst_setting));
+    belegData.mwst_satz = mwst_satz;
+    belegData.kategorie = kategorie;
+    try {
+      const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
+      const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
+      belegData.sachkonto = resolveSachkonto(kategorie, skr) || '';
+    } catch (e) {
+      console.warn('SumUp-Webhook: datev_skr-Lookup fehlgeschlagen, sachkonto bleibt leer:', e.message);
+    }
+
+    const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
+    // Als verarbeitet markieren SOBALD der Beleg sicher gespeichert ist — identische Abwägung wie
+    // bei den anderen Plattformen (siehe handleStripeWebhook für die ausführliche Begründung).
+    await markAsProcessed(userId, event.id, adminToken);
+    await incrementWebhookBelegCount(userId, env);
+
+    if (result.tagesbewegungWarnung) {
+      console.error('SumUp-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
+    }
+
+    return new Response(JSON.stringify({ received: true, docId: result.docId }), {
+      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  } catch (e) {
+    console.error('handleSumupWebhook Error:', e.message, e.stack);
     return new Response(JSON.stringify({ error: 'Server error' }), {
       status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
     });
