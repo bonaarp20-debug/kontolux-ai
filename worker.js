@@ -189,6 +189,9 @@ export default {
     if (request.method === 'POST' && url.pathname.startsWith('/webhook/sumup/')) {
       return handleSumupWebhook(request, url, env, cors);
     }
+    if (request.method === 'POST' && url.pathname.startsWith('/webhook/ablefy/')) {
+      return handleAblefyWebhook(request, url, env, cors);
+    }
 
     // Origin-Check — nur erlaubte Domains
     if (origin && !ALLOWED_ORIGINS.includes(origin)) {
@@ -3322,7 +3325,12 @@ const WEBHOOK_SECRET_FELDER = {
     { bodyFeld: 'clientSecret', firestoreFeld: 'client_secret', fehlermeldung: 'Bitte dein PayPal Client Secret eintragen.' },
     { bodyFeld: 'webhookId', firestoreFeld: 'webhook_id', fehlermeldung: 'Bitte deine PayPal Webhook ID eintragen.' }
   ] },
-  sumup: { felder: [{ bodyFeld: 'webhookSecret', firestoreFeld: 'webhook_secret', fehlermeldung: 'Bitte ein gültiges Webhook-Secret eintragen.' }] }
+  sumup: { felder: [{ bodyFeld: 'webhookSecret', firestoreFeld: 'webhook_secret', fehlermeldung: 'Bitte ein gültiges Webhook-Secret eintragen.' }] },
+  // Ablefy bietet keine Signatur-/API-Verifikation an — `felder: []` (leer) heißt: keine
+  // Zugangsdaten nötig, "Speichern" aktiviert die Route nur (generiert url_secret, setzt
+  // enabled=true) und speichert die MwSt-Einstellung. Sicherheitsgrenze ist allein der
+  // url_secret-Teil der Webhook-URL (siehe Sektions-Kommentar bei handleAblefyWebhook).
+  ablefy: { felder: [] }
 };
 
 /**
@@ -3375,8 +3383,10 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
         enabled,
         hasSecret: alleVorhanden,
         // Rückwärtskompatibel für die Single-Feld-Plattformen (Stripe/Mollie/Digistore24/
-        // CopeCart), deren Frontend nur dieses eine Top-Level-Feld liest.
-        secretPreview: secretPreviews[felder[0].firestoreFeld],
+        // CopeCart), deren Frontend nur dieses eine Top-Level-Feld liest. `null` für
+        // Null-Feld-Plattformen wie Ablefy (kein Secret nötig, nur die URL — siehe
+        // WEBHOOK_SECRET_FELDER.ablefy), deren Frontend dieses Feld ohnehin nicht anzeigt.
+        secretPreview: felder[0] ? secretPreviews[felder[0].firestoreFeld] : null,
         secretPreviews,
         webhookUrl: urlSecret ? `${requestOrigin}/webhook/${plattform}/${verifiedUid}/${urlSecret}` : null,
         // Default '19' (nicht null) — deckt sich mit resolveMwstKategorie()s eigenem Default,
@@ -4918,6 +4928,213 @@ async function handleSumupWebhook(request, url, env, cors) {
     });
   } catch (e) {
     console.error('handleSumupWebhook Error:', e.message, e.stack);
+    return new Response(JSON.stringify({ error: 'Server error' }), {
+      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// ── ABLEFY-INTEGRATION ──────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════
+// Ablefy bietet KEINE Signaturprüfung an (kein HMAC wie Stripe/CopeCart/SumUp, keine Live-API-
+// Verifikation wie Mollie) — die einzige Sicherheitsgrenze ist der url_secret-Teil der Webhook-
+// URL (billige Hürde gegen Durchprobieren, siehe generateWebhookSecret). Das ist schwächer als
+// jede andere Plattform hier: ein Angreifer, der die vollständige Webhook-URL kennt (z.B. durch
+// einen kompromittierten Ablefy-Account oder einen geleakten Log-Eintrag), könnte beliebige
+// Fake-Belege anlegen. Bewusst dokumentiert statt verschwiegen — das ist eine Ablefy-Plattform-
+// Einschränkung, keine Nachlässigkeit dieser Implementierung. `WEBHOOK_SECRET_FELDER.ablefy`
+// hat deshalb `felder: []`: keine Zugangsdaten zu speichern, nur MwSt-Einstellung + url_secret.
+//
+// Dedup-Key bewusst NICHT nur `order_id` (obwohl in der Aufgabenstellung so benannt): Ablefy
+// feuert `order.installment.paid` MEHRFACH für dieselbe order_id (einmal pro Rate) — ein reiner
+// order_id-Dedup würde jede Rate ab der zweiten fälschlich als Duplikat verwerfen. Ebenso teilen
+// sich ein `...paid`- und ein späteres `...refunded`-Event dieselbe order_id. Der Key ist deshalb
+// `order_id + Event-Typ + created_at` (siehe ablefyEventKey) — bei einer echten Zustellungs-
+// Wiederholung (identisches Event) bleiben alle drei Teile gleich, bei einer neuen Rate oder
+// einem späteren Refund ändert sich mindestens `created_at`.
+
+const ABLEFY_BUCHEN_EVENTS = new Set([
+  'order.one_time.paid', 'order.installment.paid', 'order.limited_subscription.paid', 'payment.successful'
+]);
+const ABLEFY_REFUND_EVENTS = new Set([
+  'order.one_time.refunded', 'order.installment.refunded', 'order.subscription.refunded',
+  'order.limited_subscription.refunded', 'refund.successful'
+]);
+
+/**
+ * Baut einen stabilen, dateiname-/Firestore-ID-tauglichen Schlüssel aus order_id + Event-Typ +
+ * created_at (siehe Sektions-Kommentar für die Begründung) — wird sowohl als Dedup-Key als auch
+ * als PDF-Dateiname-Suffix verwendet (siehe handleAblefyWebhook), damit eine Rechnung pro echtem
+ * Zahlungsereignis archiviert wird, nicht pro order_id.
+ * @param {string} orderId
+ * @param {string} eventType
+ * @param {string|undefined} createdAt
+ * @returns {string}
+ */
+function ablefyEventKey(orderId, eventType, createdAt) {
+  return `${orderId}_${eventType}_${createdAt || ''}`.replace(/[^a-zA-Z0-9_.-]/g, '_');
+}
+
+/**
+ * Wandelt ein Ablefy-Payload (bereits als Einnahme oder Rückerstattung klassifiziert) in ein
+ * Beleg-Objekt für writeBelegAsAdmin() um — reine Funktion, einzeln testbar, analog zu
+ * sumupEventToBeleg/copecartEventToBeleg.
+ * mwst_satz ist hier nur ein Platzhalter ('keine'), kategorie wird hier gar nicht gesetzt —
+ * handleAblefyWebhook ergänzt/überschreibt beide direkt nach diesem Aufruf mit
+ * resolveMwstKategorie() (identisches Muster wie bei den anderen Plattformen — `vat_rate` aus dem
+ * Payload wird bewusst NICHT dynamisch übernommen, siehe Aufgabenstellung: "MwSt-Mapping via
+ * resolveMwstKategorie() wie bei allen anderen", also die vom Nutzer in den Settings gewählte
+ * pauschale Einstellung, kein Parsing des Anbieter-eigenen Satzes pro Event).
+ * @param {object} payload
+ * @param {boolean} istRueckerstattung
+ * @returns {object}
+ */
+function ablefyEventToBeleg(payload, istRueckerstattung) {
+  const productName = payload.product?.name || null;
+  const email = payload.email || null;
+  const zahlungsDatum = payload.created_at ? new Date(payload.created_at) : new Date();
+  const gueltigesDatum = isNaN(zahlungsDatum.getTime()) ? new Date() : zahlungsDatum;
+  const monatJahr = BERLIN_MONAT_JAHR_FORMATTER.format(gueltigesDatum);
+  const betrag = parseFloat(payload.amount) || 0;
+  const quelle = 'ablefy_webhook';
+
+  if (istRueckerstattung) {
+    // Kein Storno mit eigener fortlaufender Rechnungsnummer, analog zu Stripes charge.refunded
+    // (siehe dortiger Kommentar) — im Cash-Basis-Modell dieser App ist eine Rückerstattung ein
+    // Geldabfluss, deshalb typ 'rechnung_eingehend'.
+    return {
+      typ: 'rechnung_eingehend',
+      betrag,
+      absender: email || 'Ablefy-Kunde',
+      bezahlt: true,
+      bezahlt_am: berlinDatumAlsString(gueltigesDatum),
+      mwst_satz: 'keine',
+      quelle,
+      name: productName ? `Ablefy-Rückerstattung: ${productName} ${monatJahr}` : `Ablefy-Rückerstattung ${monatJahr}`,
+      buchungstext: productName
+        ? `Ablefy-Rückerstattung: ${productName}${email ? ` – ${email}` : ''}`
+        : (email ? `Ablefy-Rückerstattung an ${email}` : `Ablefy-Rückerstattung ${monatJahr}`)
+    };
+  }
+
+  return {
+    typ: 'rechnung_ausgehend',
+    betrag,
+    absender: email || 'Ablefy-Kunde',
+    bezahlt: true,
+    bezahlt_am: berlinDatumAlsString(gueltigesDatum),
+    mwst_satz: 'keine',
+    quelle,
+    name: productName ? `Ablefy: ${productName} ${monatJahr}` : `Ablefy-Zahlung ${monatJahr}`,
+    buchungstext: productName
+      ? `Ablefy: ${productName}${email ? ` – ${email}` : ''}`
+      : (email ? `Ablefy-Zahlung von ${email}` : `Ablefy-Zahlung ${monatJahr}`)
+  };
+}
+
+/**
+ * Haupt-Handler für POST /webhook/ablefy/{userId}/{urlSecret}. Kein Firebase-Token (externer
+ * Server) — Auth läuft NUR über den URL-Secret (siehe Sektions-Kommentar oben: Ablefy hat keine
+ * eigene Signaturprüfung, anders als jede andere hier integrierte Plattform).
+ */
+async function handleAblefyWebhook(request, url, env, cors) {
+  const segments = url.pathname.split('/').filter(Boolean); // ['webhook','ablefy',userId,urlSecret]
+  const userId = segments[2];
+  const urlSecret = segments[3];
+  if (!userId || !urlSecret) {
+    return new Response('Not found', { status: 404, headers: cors });
+  }
+
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/ablefy`, adminToken);
+    const configFields = configDoc?.fields || {};
+    const storedUrlSecret = firestoreValue(configFields.url_secret);
+    const enabled = firestoreValue(configFields.enabled) === true;
+
+    if (!enabled || !storedUrlSecret || storedUrlSecret !== urlSecret) {
+      return new Response('Not found', { status: 404, headers: cors });
+    }
+
+    let payload;
+    try {
+      payload = JSON.parse(await request.text());
+    } catch (e) {
+      return new Response(JSON.stringify({ error: 'Invalid JSON' }), {
+        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const orderId = payload.order_id;
+    if (!orderId) {
+      return new Response(JSON.stringify({ error: 'Missing order_id' }), {
+        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const eventType = payload.event || payload.action || '';
+    const eventKey = ablefyEventKey(orderId, eventType, payload.created_at);
+
+    if (await isAlreadyProcessed(userId, eventKey, adminToken)) {
+      return new Response(JSON.stringify({ received: true, dedup: true }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const istRueckerstattung = ABLEFY_REFUND_EVENTS.has(eventType);
+    const istEinnahme = ABLEFY_BUCHEN_EVENTS.has(eventType);
+    if (!istEinnahme && !istRueckerstattung) {
+      // z.B. order.created, order.cancelled, ... — trotzdem 200, sonst retryt Ablefy sinnlos ein
+      // Event, das wir nie verarbeiten werden (analoges Muster zu handleStripeWebhook).
+      return new Response(JSON.stringify({ received: true, ignored: eventType || 'unknown' }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const belegData = ablefyEventToBeleg(payload, istRueckerstattung);
+
+    // ── MwSt-Setting + Sachkonto — nur für die Einnahme, nicht für die Rückerstattung, analog
+    // zu handleStripeWebhook (charge.refunded bekommt dort ebenfalls keine Einnahmen-Kategorie).
+    if (!istRueckerstattung) {
+      const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(configFields.mwst_setting));
+      belegData.mwst_satz = mwst_satz;
+      belegData.kategorie = kategorie;
+      try {
+        const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
+        const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
+        belegData.sachkonto = resolveSachkonto(kategorie, skr) || '';
+      } catch (e) {
+        console.warn('Ablefy-Webhook: datev_skr-Lookup fehlgeschlagen, sachkonto bleibt leer:', e.message);
+      }
+    }
+
+    // ── Invoice-PDF archivieren — nur wenn Ablefy eine mitliefert, eigener try/catch (ein
+    // fehlgeschlagener PDF-Download/-Upload darf den Beleg selbst nie blockieren, identisches
+    // Muster wie handleStripeWebhook/handleMollieWebhook).
+    if (payload.invoice_link) {
+      try {
+        belegData.storage_url = await archiveInvoicePdf(userId, 'ablefy', eventKey, payload.invoice_link, env);
+      } catch (e) {
+        console.error('Ablefy-Webhook: Invoice-PDF-Archivierung fehlgeschlagen, Beleg wird trotzdem angelegt:', e.message, 'userId=', userId, 'orderId=', orderId);
+      }
+    }
+
+    const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
+    // Als verarbeitet markieren SOBALD der Beleg sicher gespeichert ist — identische Abwägung wie
+    // bei den anderen Plattformen (siehe handleStripeWebhook für die ausführliche Begründung).
+    await markAsProcessed(userId, eventKey, adminToken);
+    await incrementWebhookBelegCount(userId, env);
+
+    if (result.tagesbewegungWarnung) {
+      console.error('Ablefy-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
+    }
+
+    return new Response(JSON.stringify({ received: true, docId: result.docId }), {
+      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  } catch (e) {
+    console.error('handleAblefyWebhook Error:', e.message, e.stack);
     return new Response(JSON.stringify({ error: 'Server error' }), {
       status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
     });
