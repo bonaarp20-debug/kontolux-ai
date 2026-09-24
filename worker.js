@@ -2717,9 +2717,10 @@ async function handlePrueferDaten(body, env, cors = {}) {
     const uid = pfadMatch[1];
 
     const base = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${uid}`;
-    const [dokDocs, maDocs] = await Promise.all([
+    const [dokDocs, maDocs, sammelbelegDocs] = await Promise.all([
       firestoreListAll(`${base}/dokumente`, adminToken),
-      firestoreListAll(`${base}/monatsabschluesse`, adminToken)
+      firestoreListAll(`${base}/monatsabschluesse`, adminToken),
+      firestoreListAll(`${base}/sammelbelege`, adminToken)
     ]);
 
     // Absichtlich UNGEFILTERT, auch soft-gelöschte/stornierte Belege (deleted:true) — genau das
@@ -2729,8 +2730,11 @@ async function handlePrueferDaten(body, env, cors = {}) {
     const dokIdAusPfad = (name) => name.split('/').pop();
     const dokumente = dokDocs.map(d => ({ id: dokIdAusPfad(d.name), ...firestoreFieldsToObject(d.fields) }));
     const monatsabschluesse = maDocs.map(d => ({ id: dokIdAusPfad(d.name), ...firestoreFieldsToObject(d.fields) }));
+    // Sammelbelege (Mollie/Digistore24/CopeCart/SumUp) — reiner Nachweis, nie gebucht
+    // (nur_nachweis:true), siehe Sammelbelege-Block in index.html.
+    const sammelbelege = sammelbelegDocs.map(d => ({ id: dokIdAusPfad(d.name), ...firestoreFieldsToObject(d.fields) }));
 
-    return new Response(JSON.stringify({ dokumente, monatsabschluesse }), {
+    return new Response(JSON.stringify({ dokumente, monatsabschluesse, sammelbelege }), {
       status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
     });
   } catch (e) {
