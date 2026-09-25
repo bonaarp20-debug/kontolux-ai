@@ -2559,6 +2559,28 @@ async function handleAbo(body, env, cors = {}) {
   return new Response('OK', { headers: cors });
 }
 
+/** Löscht alle Dokumente von users/{userId}/{collectionId} mit dem Admin-Token (seitenweise). */
+async function loescheUnterCollectionAlsAdmin(userId, collectionId, env) {
+  const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+  const basis = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/${collectionId}`;
+  // Obergrenze gegen Endlosschleifen bei einem API-Fehler, der immer dieselbe Seite liefert
+  for (let seite = 0; seite < 100; seite++) {
+    const res = await fetch(`${basis}?pageSize=300&mask.fieldPaths=__name__`, {
+      headers: { 'Authorization': `Bearer ${adminToken}` }
+    });
+    if (!res.ok) throw new Error(`Liste fehlgeschlagen (${res.status})`);
+    const data = await res.json();
+    const dokumente = data.documents || [];
+    if (!dokumente.length) return;
+    for (const d of dokumente) {
+      await fetch(`https://firestore.googleapis.com/v1/${d.name}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${adminToken}` }
+      });
+    }
+  }
+}
+
 // ── /delete-account-data Handler ───────────────────────────
 // Löscht bei Account-Löschung serverseitige Daten, die der Client nicht
 // direkt erreichen kann (Supabase-Zeile fürs Nachrichtenlimit, defensiv ein
@@ -2635,6 +2657,17 @@ async function handleDeleteAccountData(body, env, cors = {}) {
       }
     }
   } catch(e) { console.error('Account-Löschung: feedback:', e.message); }
+
+  // Nur serverseitig erreichbare Unter-Collections der Webhook-Integrationen: webhook_secrets
+  // (enthält API-Keys/Signing-Secrets!) und webhook_processed haben in firestore.rules keine
+  // match-Regel — der Client kann sie weder lesen noch löschen. stripe_links/stripe_rechnungen
+  // (Doppelbuchungs-Fix 2026-09) ebenso. sammelbelege wäre client-seitig löschbar, fehlte aber in
+  // der Löschroutine der App. Deshalb hier mit dem Admin-Token, seitenweise.
+  for (const collectionId of ['webhook_secrets', 'webhook_processed', 'stripe_links', 'stripe_rechnungen', 'sammelbelege']) {
+    try {
+      await loescheUnterCollectionAlsAdmin(userId, collectionId, env);
+    } catch(e) { console.error(`Account-Löschung: ${collectionId}:`, e.message); }
+  }
 
   return new Response(JSON.stringify({ success: true }), {
     status: 200,
@@ -3341,7 +3374,7 @@ const WEBHOOK_SECRET_FELDER = {
  * Kommentar). Für Plattformen mit nur einem Feld (Stripe/Mollie/Digistore24/CopeCart) bleibt das
  * Response-Format (`hasSecret`/`secretPreview` als einzelne Werte) unverändert, damit deren
  * bestehender Frontend-Code ohne Anpassung weiterläuft.
- * @param {object} body - { action: 'get'|'save', plattform, ...plattformspezifische Felder }
+ * @param {object} body - { action: 'get'|'prepare'|'save', plattform, ...plattformspezifische Felder }
  * @param {string} verifiedUid - aus dem verifizierten Firebase-Token (nie aus dem Body —
  *   sonst könnte ein Nutzer die Webhook-Config eines anderen lesen/überschreiben)
  * @param {string} requestOrigin - `new URL(request.url).origin`, für die angezeigte
@@ -3393,6 +3426,43 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
         // damit die UI schon beim ersten Laden denselben Wert vorausgewählt zeigt, den der
         // Worker auch tatsächlich verwenden würde, falls nie explizit gespeichert wurde.
         mwstSetting: firestoreValue(fields.mwst_setting) || '19'
+      }), { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
+    }
+
+    // 'prepare': erzeugt (oder liefert) nur die Webhook-URL, OHNE Zugangsdaten zu verlangen und
+    // OHNE die Route zu aktivieren. Nötig für Stripe und PayPal: deren Signing-Secret bzw.
+    // Webhook-ID entsteht erst, nachdem die URL beim Anbieter eingetragen wurde — vorher gab es
+    // keine Möglichkeit, an die URL zu kommen (Henne-Ei-Problem). `enabled` bleibt unverändert
+    // (bei neuen Configs also false), die Webhook-Handler lehnen Events bis zum ersten
+    // vollständigen 'save' weiterhin mit 404 ab. Das spätere 'save' übernimmt den url_secret.
+    if (action === 'prepare') {
+      const existing = await firestoreGetDoc(docPath, adminToken);
+      let urlSecret = firestoreValue(existing?.fields?.url_secret);
+      if (!urlSecret) {
+        urlSecret = generateWebhookSecret();
+        const now = new Date().toISOString();
+        const mask = ['url_secret', 'created_at', 'updated_at'].map(k => `updateMask.fieldPaths=${k}`).join('&');
+        const writeRes = await fetch(
+          `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/${docPath}?${mask}`,
+          {
+            method: 'PATCH',
+            headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fields: {
+              url_secret: { stringValue: urlSecret },
+              created_at: { timestampValue: now },
+              updated_at: { timestampValue: now }
+            } })
+          }
+        );
+        if (!writeRes.ok) {
+          const errText = await writeRes.text();
+          throw new Error(`Firestore-Write fehlgeschlagen (${writeRes.status}): ${errText.slice(0, 200)}`);
+        }
+      }
+      return new Response(JSON.stringify({
+        success: true,
+        webhookUrl: `${requestOrigin}/webhook/${plattform}/${verifiedUid}/${urlSecret}`,
+        enabled: firestoreValue(existing?.fields?.enabled) === true
       }), { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
     }
 
@@ -3677,7 +3747,8 @@ function stripeEventToBeleg(event) {
     const monatJahr = unixToMonatJahr(obj.created);
     return {
       typ: 'rechnung_ausgehend',
-      betrag: (obj.amount || 0) / 100,
+      // amount_received = tatsächlich eingezogener Betrag (bei Teil-Captures < amount)
+      betrag: (obj.amount_received || obj.amount || 0) / 100,
       absender,
       bezahlt: true,
       bezahlt_am: unixToDatumString(obj.created),
@@ -3688,25 +3759,10 @@ function stripeEventToBeleg(event) {
     };
   }
 
-  if (event.type === 'invoice.payment_succeeded') {
-    const absender = obj.customer_email || obj.customer_name || 'Stripe-Kunde';
-    // description am Invoice-Objekt selbst (Stripe-Dashboard nennt es "Memo") hat Vorrang vor
-    // der Beschreibung der ersten Rechnungsposition — beides nullable laut Stripe-API-Referenz.
-    const beschreibung = obj.description || obj.lines?.data?.[0]?.description || null;
-    const monatJahr = unixToMonatJahr(obj.status_transitions?.paid_at || obj.created);
-    return {
-      typ: 'rechnung_ausgehend',
-      betrag: (obj.amount_paid || 0) / 100,
-      absender,
-      rechnungsnr: obj.number || '',
-      bezahlt: true,
-      bezahlt_am: unixToDatumString(obj.status_transitions?.paid_at || obj.created),
-      mwst_satz: 'keine',
-      quelle,
-      name: beschreibung ? `Stripe: ${beschreibung} ${monatJahr}` : `Stripe-Zahlung ${monatJahr}`,
-      buchungstext: obj.id || ''
-    };
-  }
+  // invoice.payment_succeeded/invoice.paid buchen bewusst KEINE Einnahme mehr (Doppelbuchungs-
+  // Fix 2026-09): Jede über Stripe bezahlte Rechnung erzeugt zusätzlich einen PaymentIntent, der
+  // oben als payment_intent.succeeded gebucht wird. Rechnungs-Events liefern nur noch
+  // Rechnungsnummer + PDF nach (siehe handleStripeInvoiceEvent/verknuepfeStripeRechnung).
 
   if (event.type === 'charge.refunded') {
     const absender = obj.billing_details?.email || obj.receipt_email || 'Stripe-Kunde';
@@ -3729,6 +3785,168 @@ function stripeEventToBeleg(event) {
   }
 
   return null;
+}
+
+// ── Stripe: Rechnung ↔ Zahlung verknüpfen (Doppelbuchungs-Fix 2026-09) ─────────────────────
+// Bei Abo-/Rechnungszahlungen sendet Stripe payment_intent.succeeded UND
+// invoice.payment_succeeded für dieselbe Zahlung (unterschiedliche Event-IDs) — früher wurden
+// deshalb beide als Einnahme gebucht. Jetzt gilt: Der PaymentIntent ist die EINZIGE Einnahme-
+// Buchung (jede über Stripe eingezogene Zahlung hat genau einen), Rechnungs-Events ergänzen den
+// PI-Beleg nur um Rechnungsnummer, Namen und archiviertes PDF.
+//
+// Die Verknüpfung Rechnung → PaymentIntent steht ab API-Version 2025-03-31.basil NICHT mehr im
+// Invoice-/PaymentIntent-Payload (Felder invoice.payment_intent / payment_intent.invoice
+// entfernt) und der Worker hat keinen Stripe-API-Key für einen Lookup. Quellen deshalb:
+//   - ältere API-Versionen: invoice.payment_intent direkt im invoice.payment_succeeded-Payload
+//   - basil und neuer: das Event invoice_payment.paid (InvoicePayment-Objekt mit `invoice` und
+//     `payment.payment_intent`) — muss im Stripe-Dashboard zusätzlich abonniert werden
+// Reihenfolge der Events ist nicht garantiert. Deshalb schreiben beide Seiten zuerst ihren Teil
+// in users/{uid}/stripe_links/{piId} und lesen danach den Teil der anderen Seite — so sieht
+// mindestens eine Seite beide Hälften. Eine doppelt ausgeführte Anreicherung ist harmlos
+// (setzt dieselben Werte).
+
+/** Setzt einzelne Felder eines Firestore-Dokuments (Merge per updateMask, legt es ggf. an). */
+async function firestorePatchFields(docPath, felder, token) {
+  const mask = Object.keys(felder).map(k => `updateMask.fieldPaths=${encodeURIComponent(k)}`).join('&');
+  const res = await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/${docPath}?${mask}`, {
+    method: 'PATCH',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields: felder })
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Firestore PATCH fehlgeschlagen (${res.status}): ${errText.slice(0, 200)}`);
+  }
+}
+
+/**
+ * Ermittelt die PaymentIntent-ID einer Rechnung, soweit sie im Payload steht (ältere API-
+ * Versionen: `payment_intent` als String oder expandiertes Objekt; basil+: nur wenn
+ * `payments` im Payload enthalten ist, was bei Webhooks standardmäßig nicht der Fall ist).
+ */
+function stripeRechnungPaymentIntentId(invoice) {
+  const pi = invoice.payment_intent;
+  if (typeof pi === 'string' && pi) return pi;
+  if (pi && typeof pi === 'object' && pi.id) return pi.id;
+  const zahlungen = invoice.payments?.data || [];
+  for (const z of zahlungen) {
+    const zpi = z?.payment?.payment_intent;
+    if (typeof zpi === 'string' && zpi) return zpi;
+    if (zpi && typeof zpi === 'object' && zpi.id) return zpi.id;
+  }
+  return null;
+}
+
+/** Rechnungsdaten aus einem Invoice-Objekt für die spätere Beleg-Anreicherung. */
+function stripeRechnungDaten(invoice) {
+  const beschreibung = invoice.description || invoice.lines?.data?.[0]?.description || null;
+  const monatJahr = unixToMonatJahr(invoice.status_transitions?.paid_at || invoice.created);
+  return {
+    rechnungsnr: invoice.number || '',
+    name: beschreibung ? `Stripe: ${beschreibung} ${monatJahr}` : `Stripe-Rechnung ${invoice.number || ''} ${monatJahr}`.replace(/\s+/g, ' ').trim()
+  };
+}
+
+/**
+ * Überträgt Rechnungsnummer, Namen und ggf. PDF auf den bereits gebuchten PI-Beleg.
+ * Fasst Betrag, Datum, Kategorie und MwSt NICHT an — die stammen aus der Zahlung selbst.
+ */
+async function reichereStripeBelegAn(userId, belegId, rechnung, token) {
+  const felder = {};
+  if (rechnung.rechnungsnr) felder.rechnungsnr = { stringValue: rechnung.rechnungsnr };
+  if (rechnung.name) felder.name = { stringValue: rechnung.name };
+  if (rechnung.storage_url) felder.storage_url = { stringValue: rechnung.storage_url };
+  if (rechnung.invoice_id) felder.stripe_invoice_id = { stringValue: rechnung.invoice_id };
+  if (!Object.keys(felder).length) return;
+  await firestorePatchFields(`users/${userId}/dokumente/${belegId}`, felder, token);
+}
+
+/** Liest die gespeicherten Rechnungsdaten (users/{uid}/stripe_rechnungen/{invoiceId}). */
+async function ladeStripeRechnung(userId, invoiceId, token) {
+  const doc = await firestoreGetDoc(`users/${userId}/stripe_rechnungen/${encodeURIComponent(invoiceId)}`, token);
+  if (!doc) return null;
+  const f = doc.fields || {};
+  return {
+    invoice_id: invoiceId,
+    rechnungsnr: firestoreValue(f.rechnungsnr) || '',
+    name: firestoreValue(f.name) || '',
+    storage_url: firestoreValue(f.storage_url) || ''
+  };
+}
+
+/**
+ * Verknüpft Rechnung und PaymentIntent (Rechnungs-Seite). Schreibt zuerst die Rechnungs-ID in
+ * den Link, liest danach die Beleg-ID der Zahlungs-Seite (siehe Sektions-Kommentar oben).
+ */
+async function verknuepfeStripeRechnung(userId, piId, invoiceId, token) {
+  const linkPfad = `users/${userId}/stripe_links/${encodeURIComponent(piId)}`;
+  await firestorePatchFields(linkPfad, { invoice_id: { stringValue: invoiceId } }, token);
+  const link = await firestoreGetDoc(linkPfad, token);
+  const belegId = firestoreValue(link?.fields?.beleg_id);
+  if (!belegId) return { angereichert: false };
+  const rechnung = await ladeStripeRechnung(userId, invoiceId, token);
+  if (!rechnung) return { angereichert: false };
+  await reichereStripeBelegAn(userId, belegId, rechnung, token);
+  return { angereichert: true, belegId };
+}
+
+/**
+ * Verknüpft Rechnung und PaymentIntent (Zahlungs-Seite, direkt nach dem Buchen des PI-Belegs).
+ * Schreibt zuerst die Beleg-ID, liest danach eine ggf. schon bekannte Rechnungs-ID.
+ */
+async function verknuepfeStripeZahlung(userId, piId, belegId, token) {
+  const linkPfad = `users/${userId}/stripe_links/${encodeURIComponent(piId)}`;
+  await firestorePatchFields(linkPfad, { beleg_id: { stringValue: belegId } }, token);
+  const link = await firestoreGetDoc(linkPfad, token);
+  const invoiceId = firestoreValue(link?.fields?.invoice_id);
+  if (!invoiceId) return { angereichert: false };
+  const rechnung = await ladeStripeRechnung(userId, invoiceId, token);
+  if (!rechnung) return { angereichert: false };
+  await reichereStripeBelegAn(userId, belegId, rechnung, token);
+  return { angereichert: true };
+}
+
+/**
+ * invoice.payment_succeeded / invoice.paid: speichert Rechnungsnummer, Namen und archiviertes
+ * PDF unter users/{uid}/stripe_rechnungen/{invoiceId} und verknüpft — falls die PI-ID im
+ * Payload steht (ältere API-Versionen) — sofort mit dem Zahlungs-Beleg. Bucht KEINE Einnahme.
+ */
+async function handleStripeInvoiceEvent(userId, event, env, token) {
+  const invoice = event.data?.object || {};
+  if (!invoice.id) return { ignoriert: 'invoice_ohne_id' };
+  const daten = stripeRechnungDaten(invoice);
+  let storageUrl = '';
+  if (invoice.invoice_pdf) {
+    try {
+      // Dateiname nach Rechnungs-ID statt Event-ID: invoice.paid und invoice.payment_succeeded
+      // für dieselbe Rechnung überschreiben so dieselbe Datei statt zwei Kopien anzulegen.
+      storageUrl = await archiveInvoicePdf(userId, 'stripe', invoice.id, invoice.invoice_pdf, env);
+    } catch (e) {
+      console.error('Stripe-Webhook: Invoice-PDF-Archivierung fehlgeschlagen:', e.message, 'userId=', userId, 'invoiceId=', invoice.id);
+    }
+  }
+  await firestorePatchFields(`users/${userId}/stripe_rechnungen/${encodeURIComponent(invoice.id)}`, {
+    rechnungsnr: { stringValue: daten.rechnungsnr },
+    name: { stringValue: daten.name },
+    ...(storageUrl ? { storage_url: { stringValue: storageUrl } } : {}),
+    aktualisiert_am: { timestampValue: new Date().toISOString() }
+  }, token);
+
+  const piId = stripeRechnungPaymentIntentId(invoice);
+  if (!piId) return { rechnungGespeichert: true, verknuepft: false };
+  const r = await verknuepfeStripeRechnung(userId, piId, invoice.id, token);
+  return { rechnungGespeichert: true, verknuepft: true, angereichert: r.angereichert };
+}
+
+/** invoice_payment.paid (API basil+): liefert die Verknüpfung Rechnung ↔ PaymentIntent. */
+async function handleStripeInvoicePaymentEvent(userId, event, token) {
+  const ip = event.data?.object || {};
+  const invoiceId = typeof ip.invoice === 'string' ? ip.invoice : ip.invoice?.id;
+  const zpi = ip.payment?.payment_intent;
+  const piId = typeof zpi === 'string' ? zpi : zpi?.id;
+  if (!invoiceId || !piId) return { ignoriert: 'keine_payment_intent_zahlung' };
+  const r = await verknuepfeStripeRechnung(userId, piId, invoiceId, token);
+  return { verknuepft: true, angereichert: r.angereichert };
 }
 
 /**
@@ -3777,6 +3995,18 @@ async function handleStripeWebhook(request, url, env, cors) {
       });
     }
 
+    // Rechnungs-Events buchen nichts, sie liefern nur Rechnungsdaten bzw. die Verknüpfung
+    // Rechnung ↔ Zahlung nach (siehe Abschnitt "Rechnung ↔ Zahlung verknüpfen" oben).
+    if (event.type === 'invoice.payment_succeeded' || event.type === 'invoice.paid' || event.type === 'invoice_payment.paid') {
+      const ergebnis = event.type === 'invoice_payment.paid'
+        ? await handleStripeInvoicePaymentEvent(userId, event, adminToken)
+        : await handleStripeInvoiceEvent(userId, event, env, adminToken);
+      await markAsProcessed(userId, event.id, adminToken);
+      return new Response(JSON.stringify({ received: true, ...ergebnis }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
+
     const belegData = stripeEventToBeleg(event);
     if (!belegData) {
       // Event-Typ, den wir nicht auswerten (Nutzer kann im Stripe-Dashboard weitere Typen
@@ -3808,18 +4038,6 @@ async function handleStripeWebhook(request, url, env, cors) {
       }
     }
 
-    // ── Invoice-PDF archivieren (Phase 2, Aufgabe 2) — nur invoice.payment_succeeded ────
-    // Eigener try/catch NUR um diesen Block: ein fehlgeschlagener PDF-Download/-Upload darf
-    // den Beleg selbst nie blockieren (Netzwerkfehler bei Stripe, abgelaufene invoice_pdf-URL,
-    // fehlende Storage-Berechtigung des Service-Accounts — alles nicht der Fehler des Nutzers).
-    if (event.type === 'invoice.payment_succeeded' && event.data?.object?.invoice_pdf) {
-      try {
-        belegData.storage_url = await archiveInvoicePdf(userId, 'stripe', event.id, event.data.object.invoice_pdf, env);
-      } catch (e) {
-        console.error('Stripe-Webhook: Invoice-PDF-Archivierung fehlgeschlagen, Beleg wird trotzdem angelegt:', e.message, 'userId=', userId, 'eventId=', event.id);
-      }
-    }
-
     const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
     // Als verarbeitet markieren SOBALD der Beleg sicher gespeichert ist — auch wenn die
     // Tagesbewegung selbst noch fehlschlagen sollte (result.tagesbewegungWarnung). Ein Crash
@@ -3827,6 +4045,15 @@ async function handleStripeWebhook(request, url, env, cors) {
     // Beleg (sichtbar/korrigierbar im Belegarchiv) — das ist das kleinere Risiko gegenüber
     // einem fälschlich VORHER gesetzten Marker, der einen echten Beleg dauerhaft verschluckt.
     await markAsProcessed(userId, event.id, adminToken);
+    // PI-Beleg für eine spätere (oder bereits eingetroffene) Rechnung auffindbar machen. Eigener
+    // try/catch: fehlt die Verknüpfung, fehlen nur Rechnungsnummer/PDF — der Betrag stimmt.
+    if (event.type === 'payment_intent.succeeded' && event.data?.object?.id) {
+      try {
+        await verknuepfeStripeZahlung(userId, event.data.object.id, result.docId, adminToken);
+      } catch (e) {
+        console.error('Stripe-Webhook: Verknüpfung Zahlung ↔ Rechnung fehlgeschlagen:', e.message, 'userId=', userId, 'piId=', event.data.object.id);
+      }
+    }
     // Bewusst awaited statt "fire and forget": ein Cloudflare Worker kann nicht-awaitete
     // Promises nach dem Senden der Response abbrechen (ctx.waitUntil wäre die Alternative,
     // aber der Extra-Call ist trivial günstig genug, um ihn einfach synchron abzuwarten).

@@ -230,11 +230,15 @@ function auswerten(label, res, pruefung) {
 }
 
 const ok1 = auswerten('Test 1 (payment_intent)', ergebnisse.test1.res, j => j.received === true && !!j.docId);
-const ok2 = auswerten('Test 2 (invoice, PDF-Fehler)', ergebnisse.test2.res, j => j.received === true && !!j.docId);
-const ok3 = auswerten('Test 3 (invoice, PDF-Erfolg)', ergebnisse.test3.res, j => j.received === true && !!j.docId);
+// Seit dem Doppelbuchungs-Fix 2026-09 buchen Rechnungs-Events keine Einnahme mehr (kein docId),
+// sie speichern nur Rechnungsdaten (rechnungGespeichert) — siehe test-stripe-dedup-lokal.mjs.
+const ok2 = auswerten('Test 2 (invoice, PDF-Fehler)', ergebnisse.test2.res, j => j.received === true && j.rechnungGespeichert === true && !j.docId);
+const ok3 = auswerten('Test 3 (invoice, PDF-Erfolg)', ergebnisse.test3.res, j => j.received === true && j.rechnungGespeichert === true && !j.docId);
 const ok4 = auswerten('Test 4 (Dedup)', ergebnisse.test4.res, j => j.received === true && j.dedup === true);
 
-console.log('\nHinweis: Ob Test 2 wirklich OHNE storage_url gespeichert wurde und Test 3 wirklich MIT');
+console.log('\nHinweis: Test 2/3 legen seit dem Doppelbuchungs-Fix keinen Beleg mehr an, sondern nur');
+console.log('users/{uid}/stripe_rechnungen/{invoiceId} (Test 3 mit storage_url). Details: test-stripe-dedup-lokal.mjs.');
+console.log('Ob Test 2 wirklich OHNE storage_url gespeichert wurde und Test 3 wirklich MIT');
 console.log('storage_url (und ob der Link tatsächlich funktioniert) zeigt nur ein Blick ins');
 console.log('Belegarchiv bzw. direkt in Firestore — dieses Script sieht nur die HTTP-Antwort, die');
 console.log('bei beiden aus Absicht gleich aussieht (nur docId, kein Feld-Inhalt).');
