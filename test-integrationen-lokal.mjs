@@ -278,18 +278,33 @@ abschnitt('SumUp (API-Abruf)');
 // ═══ Ablefy ═══════════════════════════════════════════════════════════════════════════════
 abschnitt('Ablefy');
 {
-  config('ablefy', {});
-  let r = await post('ablefy', JSON.stringify({ event: 'payment.successful', order_id: 'A-1001', created_at: '25.06.2026 14:54', amount: '97.00', currency: 'EUR', product: { name: 'Kurs' }, payer: { email: 'p@example.com' } }), { 'Content-Type': 'application/json' });
-  const b = belege('ablefy_webhook')[0];
-  pruefe('JSON-Zahlung wird gebucht (97 €)', r.status === 200 && w(b, 'betrag') === 97, r.text);
+  // Zahlen aus dem Ablefy-Hilfeartikel "Steuerberechnung & Auszahlung im Reseller-Modell":
+  // 119 € brutto − 19 € USt − 9,43 € Gebühren = 90,57 € Nettoeinnahme (+19 % bei USt-Pflicht)
+  const zahlung = (extra = {}) => ({ event: 'payment.successful', order_id: 'A-1001', created_at: '25.06.2026 14:54', revenue: '119.00', vat_amount: '19.00', vat_rate: '19', fee: '9.43', amount: '90.57', currency: 'EUR', product: { name: 'Kurs' }, payer: { email: 'p@example.com' }, ...extra });
+  const J = { 'Content-Type': 'application/json' };
+  config('ablefy', { verkaufsmodell: S('reseller') });
+  let r = await post('ablefy', JSON.stringify(zahlung()), J);
+  let b = belege('ablefy_webhook')[0];
+  pruefe('Reseller-Modell: Gutschrift-Anteil 90,57 € × 1,19 = 107,78 €', r.status === 200 && w(b, 'betrag') === 107.78, `${r.text} ${w(b, 'betrag')}`);
+  pruefe('Reseller-Modell: Vertragspartner namotto statt Endkunde', String(w(b, 'absender')).includes('namotto'));
   pruefe('Deutsches Datum "25.06.2026" wird erkannt', w(b, 'bezahlt_am') === '2026-06-25', w(b, 'bezahlt_am'));
-  r = await post('ablefy', new URLSearchParams({ event: 'payment.successful', order_id: 'A-1002', created_at: '26.06.2026 09:10', amount: '49.00', 'product[name]': 'Workshop', 'payer[email]': 'q@example.com' }).toString(), { 'Content-Type': 'application/x-www-form-urlencoded' });
-  pruefe('Formular-Format (product[name]) wird gelesen', r.status === 200 && belege('ablefy_webhook').some(x => w(x, 'betrag') === 49 && String(w(x, 'name')).includes('Workshop')), r.text);
-  r = await post('ablefy', JSON.stringify({ event: 'payment.successful', order_id: 'A-1001', created_at: '25.06.2026 14:54', amount: '97.00' }), { 'Content-Type': 'application/json' });
-  pruefe('Duplikat wird erkannt', belege('ablefy_webhook').length === 2);
-  r = await post('ablefy', JSON.stringify({ event: 'refund.successful', order_id: 'A-1001', created_at: '27.06.2026 10:00', amount: '97.00' }), { 'Content-Type': 'application/json' });
-  pruefe('Erstattung als Abfluss gebucht', belege('ablefy_webhook').some(x => w(x, 'typ') === 'rechnung_eingehend'));
-  r = await post('ablefy', JSON.stringify({ event: 'payment.successful', order_id: 'X' }), { 'Content-Type': 'application/json' }, 'falsch');
+  r = await post('ablefy', JSON.stringify(zahlung({ order_id: 'A-1002', amount: '109.57' })), J);
+  pruefe('Reseller: amount inkl. USt wird erkannt und bereinigt (ebenfalls 107,78 €)', belege('ablefy_webhook').filter(x => w(x, 'betrag') === 107.78).length === 2);
+  r = await post('ablefy', JSON.stringify(zahlung({ order_id: 'A-1003', amount: '' })), J);
+  pruefe('Reseller ohne amount: aus revenue − USt − Gebühren berechnet', belege('ablefy_webhook').filter(x => w(x, 'betrag') === 107.78).length === 3);
+  config('ablefy', { verkaufsmodell: S('reseller') }, 'keine');
+  r = await post('ablefy', JSON.stringify(zahlung({ order_id: 'A-1004' })), J);
+  pruefe('Reseller als Kleinunternehmer: netto 90,57 €', belege('ablefy_webhook').some(x => w(x, 'betrag') === 90.57));
+  config('ablefy', { verkaufsmodell: S('eigener_name') });
+  r = await post('ablefy', new URLSearchParams({ event: 'payment.successful', order_id: 'A-2001', created_at: '26.06.2026 09:10', revenue: '119,00', amount: '109,57', fee: '9,43', invoice_number: 'RE-2026-77', 'product[name]': 'Workshop', 'payer[email]': 'q@example.com' }).toString(), { 'Content-Type': 'application/x-www-form-urlencoded' });
+  b = belege('ablefy_webhook').find(x => w(x, 'rechnungsnr') === 'RE-2026-77');
+  pruefe('Eigener Name (Formular-Format): voller Kaufpreis 119 € mit Rechnungsnummer', r.status === 200 && w(b, 'betrag') === 119 && String(w(b, 'name')).includes('Workshop'), `${r.text} ${w(b, 'betrag')}`);
+  r = await post('ablefy', JSON.stringify(zahlung({ order_id: 'A-1001' })), J);
+  pruefe('Duplikat wird erkannt', belege('ablefy_webhook').length === 5);
+  config('ablefy', { verkaufsmodell: S('reseller') });
+  r = await post('ablefy', JSON.stringify(zahlung({ event: 'refund.successful', created_at: '27.06.2026 10:00' })), J);
+  pruefe('Erstattung als Abfluss gebucht (107,78 €)', belege('ablefy_webhook').some(x => w(x, 'typ') === 'rechnung_eingehend' && w(x, 'betrag') === 107.78));
+  r = await post('ablefy', JSON.stringify(zahlung({ order_id: 'X' })), J, 'falsch');
   pruefe('Falsche Webhook-URL → 404 (einzige Sicherung bei Ablefy)', r.status === 404);
 }
 

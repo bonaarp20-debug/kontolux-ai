@@ -573,11 +573,17 @@ async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
 // Jahresabschluss (siehe Analyse). SKR03-Kollisionen aufgelöst 2026-09: "Bewirtung (70%)" lag
 // vorher auf demselben Konto wie "Werbekosten" (4650), "Sonstiges" auf demselben wie
 // "Bürobedarf" (4980) — beide EÜR-Zeilen wären dadurch nie unterscheidbar gewesen.
+// Konten-Korrektur 2026-09-26 (geprüft gegen den offiziellen SKR03-/SKR04-Kontenplan des
+// Klausurenverbunds der Steuerberaterkammern, Haufe und epago): SKR03 4650 ist Bewirtung (nicht
+// Werbekosten → 4610), 4930 ist Bürobedarf (nicht Kfz → Fahrzeugkosten 4500/6500), 4830 sind
+// Abschreibungen (Fortbildung → 4945/6821), 4240 ist Gas/Strom/Wasser (Steuerberater → 4950),
+// Wareneingang liegt auf den Automatikkonten 3400/3300 bzw. 5400/5300, sonstige betriebliche
+// Aufwendungen auf 4900/6300. Betrifft DATEV-Export und DATEV-Import gleichermaßen.
 const SACHKONTO_MAPPING = {
-  'Werbekosten':               { SKR03: '4650', SKR04: '6600', euer_zeile: 'Z.54' },
+  'Werbekosten':               { SKR03: '4610', SKR04: '6600', euer_zeile: 'Z.54' },
   // SKR04 6800 war falsch (Audit-Korrektur 2026-09) — das ist real "Porto", nicht Bürobedarf.
   // Korrekt: 6815 (Sequenz 6800 Porto/6805 Telefon/6810 Internetkosten/6815 Bürobedarf).
-  'Bürobedarf':                { SKR03: '4980', SKR04: '6815', euer_zeile: 'Z.51' },
+  'Bürobedarf':                { SKR03: '4930', SKR04: '6815', euer_zeile: 'Z.51' },
   'Telefon/Internet':          { SKR03: '4920', SKR04: '6805', euer_zeile: 'Z.43' },
   // SKR04 6830 war falsch (Audit-Korrektur 2026-09) — das ist real "Buchführungskosten", nicht
   // Reisekosten. Jetzt 4676/6680 "Übernachtungsaufwand und Reisenebenkosten" — genau die
@@ -585,42 +591,34 @@ const SACHKONTO_MAPPING = {
   // Verpflegungsmehraufwand werden seit dieser Korrektur separat ausgewiesen, siehe
   // 'Fahrtkosten (Kilometerpauschale)'/'Verpflegungsmehraufwand' unten.
   'Reisekosten':                { SKR03: '4676', SKR04: '6680', euer_zeile: 'Z.44' },
-  'Fortbildung':                { SKR03: '4830', SKR04: '6811', euer_zeile: 'Z.45' },
-  'Kfz-Kosten':                 { SKR03: '4930', SKR04: '6820', euer_zeile: 'Z.71' },
+  'Fortbildung':                { SKR03: '4945', SKR04: '6821', euer_zeile: 'Z.45' },
+  'Kfz-Kosten':                 { SKR03: '4500', SKR04: '6500', euer_zeile: 'Z.70' },
   'Miete/Raumkosten':           { SKR03: '4200', SKR04: '6310', euer_zeile: 'Z.39' },
   // SKR04 3400/3300 waren falsch (Audit-Korrektur 2026-09) — Aktiv/Passiv-Verwechslung: das sind
   // real "Verbindlichkeiten..." (Fremdkapitalkonten), da SKR04 dem Abschlussgliederungsprinzip
   // folgt (Klasse 3 = kurzfristiges Fremdkapital), anders als SKR03 (Klasse 3 = Wareneingang).
   // Korrekt: 5130/5110 "Einkauf Roh-, Hilfs- und Betriebsstoffe 19%/7% Vorsteuer".
-  'Wareneinkauf 19%':           { SKR03: '5400', SKR04: '5130', euer_zeile: 'Z.27' },
-  'Wareneinkauf 7%':            { SKR03: '5300', SKR04: '5110', euer_zeile: 'Z.27' },
-  'GWG bis 800€':               { SKR03: '0480', SKR04: '0670', euer_zeile: 'Z.51' },
+  'Wareneinkauf 19%':           { SKR03: '3400', SKR04: '5400', euer_zeile: 'Z.27' },
+  'Wareneinkauf 7%':            { SKR03: '3300', SKR04: '5300', euer_zeile: 'Z.27' },
+  'GWG bis 800€':               { SKR03: '0480', SKR04: '0670', euer_zeile: 'Z.36' },
   'Versicherungen':             { SKR03: '4360', SKR04: '6400', euer_zeile: 'Z.49' },
-  'Steuerberater/Buchhaltung':  { SKR03: '4240', SKR04: '6825', euer_zeile: 'Z.46' },
-  // Bewirtung/Werbekosten teilen sich bewusst SKR03 4650 (Audit-Korrektur 2026-09) — 4654 ist
-  // tatsächlich "Nicht abzugsfähige Bewirtungskosten" (der 30%-Anteil), nicht die Gesamtkosten;
-  // 4650 ist laut DATEV-Praxis der abzugsfähige Bewirtungsanteil UND Werbekosten zugleich.
+  'Steuerberater/Buchhaltung':  { SKR03: '4950', SKR04: '6825', euer_zeile: 'Z.46' },
+  // Bewirtung 4650/6640 (abzugsfähiger Teil), Werbekosten seit 2026-09-26 auf 4610 — siehe Korrektur oben.
   'Bewirtung (70%)':            { SKR03: '4650', SKR04: '6640', euer_zeile: 'Z.63' },
-  'Sonstiges':                  { SKR03: '4999', SKR04: '6999', euer_zeile: 'Z.60' },
-  // SKR03 4945 statt 4980 (Audit-Korrektur 2026-09): 4980 kollidiert mit "Bürobedarf" und würde
-  // im DATEV-Export beide Kategorien aufs selbe Gegenkonto buchen. 4970/6815 (vorherige Werte)
-  // waren schlicht falsch (Nebenkosten des Geldverkehrs bzw. Bürobedarf in echten SKR03/04).
-  // SKR03 4945/SKR04 6810 waren erneut falsch (Audit-Korrektur 2026-09, zweite Runde): 4945 ist
-  // real "Sachbezüge 19% USt", 6810 ist "Internetkosten" — beides nicht EDV/Software. Korrekt
-  // laut DATEV-Kontenrahmen für Gewinnermittlung §4 Abs.3 EStG (EÜR): 4806/6495
-  // "Wartungskosten für Hard- und Software" — exakt die Beispiele aus dem amtlichen EÜR-Zeilentext
-  // Z.50 ("Laufende EDV-Kosten, z.B. Beratung, Wartung, Reparatur").
+  'Sonstiges':                  { SKR03: '4900', SKR04: '6300', euer_zeile: 'Z.60' },
+  // Software/EDV/SaaS: 4806/6495 \"Wartungskosten für Hard- und Software\" (EÜR Z.50). Laufende
+  // SaaS-Abos sind sofort abzugsfähig; einmalige Software-Käufe >800€ gehören aufs Anlagevermögen.
   'Software/EDV/SaaS':          { SKR03: '4806', SKR04: '6495', euer_zeile: 'Z.50' },
   'Fremdleistungen':            { SKR03: '3100', SKR04: '5900', euer_zeile: 'Z.29' },
   // Neu (Audit-Korrektur 2026-09): Aufsplittung der bisherigen Sammelkategorie "Reisekosten" —
   // Kilometerpauschale und Verpflegungsmehraufwand haben je eine eigene EÜR-Zeile und ein eigenes
   // DATEV-Unterkonto (siehe reichereMitBelegKategorieAn/splitReisekostenPosition in index.html),
   // werden aber nie direkt aus einem Absendernamen erkannt (kein KATEGORIE_REGELN-Eintrag nötig).
-  'Fahrtkosten (Kilometerpauschale)': { SKR03: '4673', SKR04: '6673', euer_zeile: 'Z.71' },
+  'Fahrtkosten (Kilometerpauschale)': { SKR03: '4673', SKR04: '6673', euer_zeile: 'Z.70' },
   'Verpflegungsmehraufwand':    { SKR03: '4674', SKR04: '6674', euer_zeile: 'Z.64' },
   'Einnahmen 19%':              { SKR03: '8400', SKR04: '4400', euer_zeile: 'Z.15' },
   'Einnahmen 7%':               { SKR03: '8300', SKR04: '4300', euer_zeile: 'Z.15' },
-  'Einnahmen steuerfrei':       { SKR03: '8200', SKR04: '4200', euer_zeile: 'Z.12' }
+  'Einnahmen steuerfrei':       { SKR03: '8200', SKR04: '4200', euer_zeile: 'Z.11' }
 };
 
 function resolveSachkonto(kategorie, skr) {
@@ -783,8 +781,8 @@ Services, Google, Meta, Microsoft/Azure — Sitz USA/Irland/anderes Ausland) OHN
 deutsche Umsatzsteuer ist in aller Regel Reverse Charge, NICHT einfach "kein Ausweis→0". Setze in
 diesem Fall mwst_satz=reverse_charge statt mwst_satz=0 — beide bedeuten zwar "keine deutsche USt
 auf der Rechnung", aber nur reverse_charge löst im DATEV-Export den korrekten BU-Schlüssel aus
-(sonst würde ein Nicht-Kleinunternehmer fälschlich mit BU9/19%-Vorsteuerabzug statt BU0 gebucht,
-siehe buSchluessel() im Worker). Das gilt AUCH für Kleinunternehmer: sie schulden trotz §19 UStG
+(sonst würde ein Nicht-Kleinunternehmer fälschlich mit BU9/19%-Vorsteuerabzug statt ohne Steuerschlüssel gebucht,
+siehe buSchluesselExport() im Worker). Das gilt AUCH für Kleinunternehmer: sie schulden trotz §19 UStG
 die Steuer nach §13b UStG selbst und müssen dafür eine UStVA abgeben (siehe KLEINUNTERNEHMER +
 REVERSE CHARGE weiter oben) — kategorie bleibt bei diesen Belegen unabhängig vom mwst_satz
 'Software/EDV/SaaS' (oder die sonst zutreffende Kategorie), reverse_charge betrifft nur mwst_satz.
@@ -2900,19 +2898,24 @@ function isKleinunternehmer(profilFields) {
   return v === true || v === 'ja' || (typeof v === 'string' && v.startsWith('Ja'));
 }
 
-// BU-Schlüssel gemäß Vorgabe: 9 = 19% USt, 8 = 7% USt, 0 = §19 UStG Kleinunternehmer/Reverse
-// Charge (beides: keine deutsche USt geschuldet). Fehlt der mwst_satz (z.B. bei älteren Belegen
-// ohne dieses Feld), wird anhand des Kleinunternehmer-Status des Profils ein plausibler Default
-// gewählt. 'reverse_charge' (Punkt 3, Compliance-Check 2026-09-05, siehe RECHNUNG_ERSTELLEN in
-// index.html) MUSS hier explizit behandelt werden — ohne diesen Zweig würde er in den
-// `kleinunternehmer ? '0' : '9'`-Fallback fallen und bei einem Nicht-Kleinunternehmer fälschlich
-// als BU9 (19% USt) statt BU0 gebucht, obwohl der Empfänger die Steuer schuldet.
-function buSchluessel(mwstSatz, kleinunternehmer) {
-  if (mwstSatz === '19') return '9';
-  if (mwstSatz === '7') return '8';
-  if (mwstSatz === 'keine' || mwstSatz === '0' || mwstSatz === 'reverse_charge') return '0';
-  return kleinunternehmer ? '0' : '9';
+// Steuerschlüssel für den DATEV-Export (Korrektur 2026-09-26): DATEV-Automatikkonten rechnen die
+// Steuer selbst — auf ihnen darf kein Steuerschlüssel stehen (DATEV-Kontenbeschriftung "AV/AM").
+// Vorher bekam z.B. jede Einnahme auf 8400 den Schlüssel 9 (= VORsteuer 19 %). Jetzt:
+// Automatikkonto → leer; sonst Einnahmen 3/2 (Umsatzsteuer 19/7 %), Ausgaben 9/8 (Vorsteuer
+// 19/7 %); steuerfrei, §19 UStG und §13b (Reverse Charge) → leer. Fehlt mwst_satz (ältere
+// Belege), gilt wie bisher der Kleinunternehmer-Status des Profils als Default.
+const DATEV_AUTOMATIKKONTEN_EXPORT = {
+  SKR03: new Set(['8400', '8300', '3400', '3300']),
+  SKR04: new Set(['4400', '4300', '5400', '5300'])
+};
+function buSchluesselExport(mwstSatz, kleinunternehmer, istEinnahme, gegenkonto, skr) {
+  if (DATEV_AUTOMATIKKONTEN_EXPORT[skr]?.has(String(gegenkonto))) return '';
+  const satz = mwstSatz || (kleinunternehmer ? 'keine' : '19');
+  if (satz === '19') return istEinnahme ? '3' : '9';
+  if (satz === '7') return istEinnahme ? '2' : '8';
+  return '';
 }
+
 
 async function firestoreListAll(baseUrl, authHeader) {
   const allDocs = [];
@@ -3080,14 +3083,23 @@ async function handleDatevExport(body, env, cors = {}) {
 
       const absender = firestoreValue(fields.absender) || firestoreValue(fields.name) || '';
       const mwstSatz = firestoreValue(fields.mwst_satz);
-      const bu = buSchluessel(mwstSatz, kleinunternehmer);
+
       // Sachkonto wird IMMER frisch aus der gespeicherten Kategorie + der AKTUELLEN SKR03/04-
       // Einstellung aufgelöst statt den zum Speicherzeitpunkt fixierten Rohwert zu übernehmen —
       // sonst würde ein späterer SKR-Wechsel alte Belege mit dem falschen Kontenrahmen
       // exportieren. Nur Belege ohne Kategorie (vor diesem Feature gespeichert) fallen auf das
       // generische Gegenkonto zurück.
       const kategorie = firestoreValue(fields.kategorie) || '';
-      const gegenkonto = resolveSachkonto(kategorie, skr) || (istEinnahme ? einnahmenGegenkonto : ausgabenGegenkonto);
+      // DATEV-Importe: das Original-Konto der Quelldatei behalten, solange der Nutzer die Kategorie
+      // nicht geändert hat und der Kontenrahmen gleich ist — sonst ginge z.B. ein spezielles
+      // Aufwandskonto beim Rück-Export in "Sonstiges" auf.
+      const datevKontoImport = firestoreValue(fields.datev_konto) || '';
+      const importKontoGilt = datevKontoImport
+        && (firestoreValue(fields.datev_skr) || '') === skr
+        && (firestoreValue(fields.datev_kategorie_import) || '') === kategorie;
+      const gegenkonto = (importKontoGilt ? datevKontoImport : '')
+        || resolveSachkonto(kategorie, skr) || (istEinnahme ? einnahmenGegenkonto : ausgabenGegenkonto);
+      const bu = buSchluesselExport(mwstSatz, kleinunternehmer, istEinnahme, gegenkonto, skr);
       const buchungstext = istEinnahme
         ? `Rechnung ${absender}`.trim()
         : `Beleg ${absender}`.trim();
@@ -3475,7 +3487,8 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
         // Default '19' (nicht null) — deckt sich mit resolveMwstKategorie()s eigenem Default,
         // damit die UI schon beim ersten Laden denselben Wert vorausgewählt zeigt, den der
         // Worker auch tatsächlich verwenden würde, falls nie explizit gespeichert wurde.
-        mwstSetting: firestoreValue(fields.mwst_setting) || '19'
+        mwstSetting: firestoreValue(fields.mwst_setting) || '19',
+        ...(plattform === 'ablefy' ? { verkaufsmodell: firestoreValue(fields.verkaufsmodell) || null } : {})
       }), { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
     }
 
@@ -3555,6 +3568,13 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
 
       const feldWerte = {};
       for (const f of felder) feldWerte[f.firestoreFeld] = { stringValue: body[f.bodyFeld].trim() };
+      if (plattform === 'ablefy') {
+        const modell = body.verkaufsmodell === 'eigener_name' ? 'eigener_name' : (body.verkaufsmodell === 'reseller' ? 'reseller' : null);
+        if (!modell) {
+          return new Response(JSON.stringify({ error: 'Bitte wähle dein Ablefy-Verkaufsmodell (Reseller-Modell oder Verkauf im eigenen Namen).' }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+        }
+        feldWerte.verkaufsmodell = { stringValue: modell };
+      }
       if (sumupMerchant) {
         // Der PATCH unten ersetzt das ganze Dokument — Abruf-Stand deshalb explizit mitschreiben.
         feldWerte.merchant_code = { stringValue: sumupMerchant };
@@ -5345,13 +5365,65 @@ function parseAblefyDatum(raw) {
   return isNaN(d.getTime()) ? new Date() : d;
 }
 
-function ablefyEventToBeleg(payload, istRueckerstattung) {
+/** Deutsche oder englische Zahl ("97,00" / "97.00") → Zahl, sonst NaN. */
+function ablefyZahl(v) {
+  if (v == null || v === '') return NaN;
+  const s = String(v).trim();
+  return parseFloat(s.includes(',') && !s.includes('.') ? s.replace(',', '.') : s.replace(/,/g, ''));
+}
+
+/**
+ * Betrag, den Kontolux für ein Ablefy-Ereignis bucht — abhängig vom Verkaufsmodell des Nutzers
+ * (Integrations-Audit 2026-09-26, belegt durch die Ablefy-Hilfe "Steuerberechnung & Auszahlung im
+ * Reseller-Modell" und "Webhooks-URL hinterlegen"):
+ *
+ * - 'eigener_name' (Seller-Modell): Der Nutzer stellt die Kundenrechnung selbst und führt die USt
+ *   selbst ab — Betriebseinnahme ist der volle Kaufpreis. Ablefy sendet ihn als `revenue`
+ *   ("Gesamtumsatz"); Gebühren (`fee`) sind eine Ausgabe (Ablefy-Abrechnung als Sammelbeleg).
+ * - 'reseller': Vertragspartner des Kunden ist namotto (Ablefy-Tochter), der Nutzer erhält je
+ *   Auszahlung eine Gutschrift über Kaufpreis − USt − Gebühren − Provisionen, bei USt-Pflicht
+ *   zzgl. 19 %. Ablefy nennt den Anteil `amount` ("Einnahme"), dokumentiert aber nicht, ob darin die
+ *   Kunden-USt steckt. Deshalb Plausibilitätsprüfung: liegt `amount` über `revenue − vat_amount`
+ *   (also über dem Netto-Kaufpreis, was ein Netto-Anteil nie kann), enthält er die USt noch und sie
+ *   wird abgezogen. Fehlt `amount`, wird der Anteil aus revenue − vat_amount − fee berechnet
+ *   (Provisionen sind dann nicht bekannt — Gutschrift als Sammelbeleg ist maßgeblich).
+ * Danach wie bei Digistore24/CopeCart: plattformAnteilBrutto() mit der MwSt-Einstellung.
+ */
+function ablefyBuchungsbetrag(payload, modell, mwstSetting) {
+  const revenue = ablefyZahl(payload.revenue);
+  const amount = ablefyZahl(payload.amount);
+  const vat = ablefyZahl(payload.vat_amount);
+  const fee = ablefyZahl(payload.fee);
+  if (modell === 'eigener_name') {
+    const brutto = !isNaN(revenue) && revenue !== 0 ? revenue : amount;
+    return Math.round(Math.abs(brutto || 0) * 100) / 100;
+  }
+  let netto;
+  if (!isNaN(amount) && amount !== 0) {
+    netto = Math.abs(amount);
+    if (!isNaN(revenue) && !isNaN(vat) && vat > 0 && netto > Math.abs(revenue) - Math.abs(vat) + 0.01) {
+      netto -= Math.abs(vat);
+    }
+  } else if (!isNaN(revenue)) {
+    netto = Math.abs(revenue) - (isNaN(vat) ? 0 : Math.abs(vat)) - (isNaN(fee) ? 0 : Math.abs(fee));
+  } else {
+    netto = 0;
+  }
+  return netto > 0 ? plattformAnteilBrutto(netto, mwstSetting) : 0;
+}
+
+function ablefyEventToBeleg(payload, istRueckerstattung, modell = 'reseller', mwstSetting = '19') {
   const productName = payload.product?.name || null;
   const email = payload.payer?.email || payload.email || null;
   const gueltigesDatum = parseAblefyDatum(payload.success_date || payload.created_at);
   const monatJahr = BERLIN_MONAT_JAHR_FORMATTER.format(gueltigesDatum);
-  const betrag = parseFloat(payload.amount) || 0;
+  const betrag = ablefyBuchungsbetrag(payload, modell, mwstSetting);
   const quelle = 'ablefy_webhook';
+  const reseller = modell !== 'eigener_name';
+  // Im Reseller-Modell ist namotto (Ablefy-Tochter) Vertragspartner, nicht der Endkunde.
+  const absender = reseller ? 'Ablefy / namotto (Wiederverkäufer)' : (email || 'Ablefy-Kunde');
+  const rechnungsnr = !reseller ? String(payload.invoice_number || payload.bill_number || '') : '';
+  const zusatz = reseller ? ' (Verkäuferanteil)' : '';
 
   if (istRueckerstattung) {
     // Kein Storno mit eigener fortlaufender Rechnungsnummer, analog zu Stripes charge.refunded
@@ -5360,30 +5432,28 @@ function ablefyEventToBeleg(payload, istRueckerstattung) {
     return {
       typ: 'rechnung_eingehend',
       betrag,
-      absender: email || 'Ablefy-Kunde',
+      absender,
+      rechnungsnr,
       bezahlt: true,
       bezahlt_am: berlinDatumAlsString(gueltigesDatum),
       mwst_satz: 'keine',
       quelle,
       name: productName ? `Ablefy-Rückerstattung: ${productName} ${monatJahr}` : `Ablefy-Rückerstattung ${monatJahr}`,
-      buchungstext: productName
-        ? `Ablefy-Rückerstattung: ${productName}${email ? ` – ${email}` : ''}`
-        : (email ? `Ablefy-Rückerstattung an ${email}` : `Ablefy-Rückerstattung ${monatJahr}`)
+      buchungstext: `Ablefy-Rückerstattung${zusatz}${productName ? `: ${productName}` : ''}${email ? ` – ${email}` : ''}`
     };
   }
 
   return {
     typ: 'rechnung_ausgehend',
     betrag,
-    absender: email || 'Ablefy-Kunde',
+    absender,
+    rechnungsnr,
     bezahlt: true,
     bezahlt_am: berlinDatumAlsString(gueltigesDatum),
     mwst_satz: 'keine',
     quelle,
     name: productName ? `Ablefy: ${productName} ${monatJahr}` : `Ablefy-Zahlung ${monatJahr}`,
-    buchungstext: productName
-      ? `Ablefy: ${productName}${email ? ` – ${email}` : ''}`
-      : (email ? `Ablefy-Zahlung von ${email}` : `Ablefy-Zahlung ${monatJahr}`)
+    buchungstext: `Ablefy${reseller ? '-Gutschrift' : ''}${zusatz}${productName ? `: ${productName}` : ''}${email ? ` – ${email}` : ''}`
   };
 }
 
@@ -5444,7 +5514,13 @@ async function handleAblefyWebhook(request, url, env, cors) {
       });
     }
 
-    const belegData = ablefyEventToBeleg(payload, istRueckerstattung);
+    const ablefyModell = firestoreValue(configFields.verkaufsmodell) === 'eigener_name' ? 'eigener_name' : 'reseller';
+    const belegData = ablefyEventToBeleg(payload, istRueckerstattung, ablefyModell, firestoreValue(configFields.mwst_setting) || '19');
+    if (!(belegData.betrag > 0)) {
+      return new Response(JSON.stringify({ received: true, ignored: 'kein_betrag' }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
 
     // ── MwSt-Setting + Sachkonto — nur für die Einnahme, nicht für die Rückerstattung, analog
     // zu handleStripeWebhook (charge.refunded bekommt dort ebenfalls keine Einnahmen-Kategorie).
@@ -5464,7 +5540,9 @@ async function handleAblefyWebhook(request, url, env, cors) {
     // ── Invoice-PDF archivieren — nur wenn Ablefy eine mitliefert, eigener try/catch (ein
     // fehlgeschlagener PDF-Download/-Upload darf den Beleg selbst nie blockieren, identisches
     // Muster wie handleStripeWebhook/handleMollieWebhook).
-    if (payload.invoice_link) {
+    // Nur im Seller-Modell ist die Kundenrechnung der eigene Beleg — im Reseller-Modell stellt
+    // namotto sie aus, maßgeblich ist dort die Ablefy-Gutschrift (Sammelbeleg).
+    if (payload.invoice_link && ablefyModell === 'eigener_name') {
       try {
         belegData.storage_url = await archiveInvoicePdf(userId, 'ablefy', eventKey, payload.invoice_link, env);
       } catch (e) {
