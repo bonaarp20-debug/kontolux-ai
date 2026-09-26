@@ -1,0 +1,581 @@
+{
+  "version": "2026-08",
+  "beschreibung": "Deutsches Steuerrecht für Selbstständige und Kleinunternehmer — Kontolux AI",
+  "inhalt": {
+    "grundlagen": {
+      "kleinunternehmerregelung": {
+        "paragraph": "§19 UStG",
+        "umsatzgrenze_vorjahr": 25000,
+        "umsatzgrenze_laufendes_jahr": 100000,
+        "gilt_seit": "01.01.2025 — neue EU-weite Regelung",
+        "hinweis": "Kleinunternehmer stellen KEINE Umsatzsteuer in Rechnung und haben keinen Vorsteuerabzug. Pflichthinweis auf jeder Rechnung: 'Gemäß §19 UStG wird keine Umsatzsteuer berechnet.'",
+        "verzicht_moeglich": true,
+        "verzicht_bindung_jahre": 5,
+        "eu_grenzueberschreitend": "Seit 2025 können Kleinunternehmer aus anderen EU-Ländern auch in Deutschland die Kleinunternehmerregelung nutzen und umgekehrt — bis zu einem EU-weiten Jahresumsatz von 100.000€",
+        "neu_2025": "Umsatzgrenze wurde von 22.000€ auf 25.000€ erhöht",
+        "grenze_100000_sofort": {
+          "warnung": "KRITISCH — Statuswechsel sofort bei Überschreitung!",
+          "regel": "Wenn Umsatz im laufenden Jahr 100.000€ übersteigt, endet Kleinunternehmerregelung SOFORT — nicht erst zum Jahresende!",
+          "beispiel": "Umsatz überschreitet am 15. August 100.000€ → ab dieser Rechnung USt-Pflicht!",
+          "konsequenz": "Bereits ausgestellte Rechnungen ohne USt müssen ggf. korrigiert werden",
+          "empfehlung": "Umsatz laufend im Blick behalten — bei 90.000€ Warnung ausgeben"
+        },
+        "verzicht_details": {
+          "moeglich": true,
+          "sinnvoll_wenn": [
+            "Viele B2B-Kunden die Vorsteuer abziehen können",
+            "Größere Investitionen geplant",
+            "Umsatz nähert sich 25.000€ Grenze",
+            "Professionelleres Auftreten gewünscht"
+          ],
+          "nicht_sinnvoll_wenn": [
+            "Hauptsächlich Privatkunden",
+            "Wenig eigene Ausgaben mit USt",
+            "Geringer Umsatz unter 15.000€"
+          ],
+          "bindung_jahre": 5,
+          "antrag": "Beim Finanzamt schriftlich — am besten mit Steuerberater"
+        }
+      },
+      "einkommensteuer_grundfreibetrag": {
+        "2024": 11604,
+        "2025": 12096,
+        "2026": 12348,
+        "hinweis": "Unter dem Grundfreibetrag keine Einkommensteuer. Zu versteuerndes Einkommen = Gewinn minus Sonderausgaben minus außergewöhnliche Belastungen"
+      },
+      "gewerbesteuer": {
+        "freibetrag_einzelunternehmer": 24500,
+        "freibetrag_kapitalgesellschaft": 0,
+        "hinweis": "Einzelunternehmer und Personengesellschaften: Freibetrag 24.500€. GmbH/UG: kein Freibetrag. Hebesatz variiert je Gemeinde (300-500% typisch). Gewerbesteuer mindert Einkommensteuer teilweise.",
+        "anrechnung": "Gewerbesteuer wird auf die Einkommensteuer angerechnet — bis zu 3,8-faches des Gewerbesteuermessbetrags",
+        "vorauszahlungen": {
+          "faelligkeiten_2026": {
+            "q1": "17. Februar 2026",
+            "q2": "15. Mai 2026",
+            "q3": "17. August 2026",
+            "q4": "17. November 2026"
+          },
+          "an_wen": "An die Gemeinde — NICHT ans Finanzamt!",
+          "nur_fuer": "Nur Gewerbetreibende — Freiberufler zahlen KEINE Gewerbesteuer!"
+        }
+      },
+      "solidaritaetszuschlag": {
+        "abgeschafft_fuer": "Seit 2021 zahlen ca. 90% der Steuerzahler keinen Soli mehr",
+        "freigrenze_2026": 18130,
+        "hinweis": "Nur bei hohem Einkommen noch relevant"
+      }
+    },
+    "umsatzsteuer": {
+      "steuersaetze": {
+        "regulaer": 19,
+        "ermaessigt": 7,
+        "befreit": 0,
+        "ermaessigt_7_beispiele": [
+          "Lebensmittel (außer Getränke im Restaurant, Alkohol)",
+          "Bücher, Zeitungen, Zeitschriften (auch E-Books seit 2020)",
+          "Kulturveranstaltungen (Theater, Konzerte, Museen, Zoos)",
+          "Personennahverkehr (Bus, Bahn bis 50km Entfernung)",
+          "Bestimmte medizinische Leistungen (Krankenhaus, Arzt)",
+          "Gemeinnützige Leistungen",
+          "Übernachtungen (Hotelzimmer — aber nicht Frühstück!)",
+          "Kunstgegenstände und Sammlerstücke",
+          "Holz aus Forstwirtschaft"
+        ],
+        "befreit_0_beispiele": [
+          "Ärztliche Heilbehandlungen §4 Nr. 14 UStG",
+          "Schul- und Hochschulunterricht §4 Nr. 21 UStG",
+          "Versicherungsleistungen §4 Nr. 10 UStG",
+          "Grundstücksverkäufe §4 Nr. 9 UStG",
+          "Innergemeinschaftliche Lieferungen §4 Nr. 1b UStG"
+        ]
+      },
+      "voranmeldung": {
+        "monatlich_wenn": "Vorjahres-USt über 7.500€",
+        "quartalsweise_wenn": "Vorjahres-USt zwischen 1.000€ und 7.500€",
+        "jaehrlich_wenn": "Vorjahres-USt unter 1.000€",
+        "abgabefrist": "10. des Folgemonats (bzw. Folgevierteljahrs)",
+        "elektronisch": "Pflicht — über ELSTER oder Steuerberatersoftware",
+        "dauerfristverlaengerung": {
+          "beschreibung": "Antrag beim Finanzamt verlängert Abgabefrist dauerhaft um einen Monat",
+          "antrag": "Einmalig stellen — gilt dann dauerhaft bis Widerruf",
+          "sondervorauszahlung": {
+            "betrag": "1/11 der Vorjahres-Umsatzsteuerzahllast",
+            "faelligkeit": "10. Februar (monatliche Zahler) bzw. 10. Februar (Quartalszahler)",
+            "verrechnung": "Wird mit der Dezember-UStVA des laufenden Jahres verrechnet",
+            "beispiel": "Vorjahres-USt 11.000€ → Sondervorauszahlung 1.000€ im Februar"
+          },
+          "wichtig": "Bei Dauerfristverlängerung verschiebt sich JEDE UStVA-Frist um einen Monat. Januar-UStVA nicht am 10. Februar sondern am 10. März."
+        }
+      },
+      "vorsteuer": {
+        "beschreibung": "Umsatzsteuer die du selbst bezahlt hast (auf Eingangsrechnungen) und vom Finanzamt zurückbekommst",
+        "voraussetzungen": [
+          "Du bist umsatzsteuerpflichtig (kein Kleinunternehmer)",
+          "Du hast eine ordnungsgemäße Rechnung nach §14 UStG",
+          "Die Leistung wurde für dein Unternehmen erbracht",
+          "Die Rechnung weist Steuerbetrag und Steuersatz aus"
+        ],
+        "nicht_abzugsfaehig": [
+          "Bewirtungskosten über 70% hinaus",
+          "Private Nutzungsanteile",
+          "Reisekosten ohne ordnungsgemäßen Beleg"
+        ]
+      },
+      "reverse_charge": {
+        "paragraph": "§13b UStG",
+        "beschreibung": "Steuerschuldnerschaft geht auf den Leistungsempfänger über — der Käufer schuldet die USt ans Finanzamt, nicht der Verkäufer",
+        "wann_anwendbar": [
+          "Leistungen ausländischer Unternehmer an deutsche Unternehmer (z.B. Google Ads, Anthropic API, AWS, Zoom)",
+          "Bestimmte Bauleistungen zwischen Bauunternehmern",
+          "Lieferung von Mobilfunkgeräten ab 5.000€ Nettowert",
+          "Lieferung von Tablet-Computern ab 5.000€",
+          "Lieferung von Spielekonsolen ab 5.000€",
+          "Schrottlieferungen und Altmetall",
+          "Gebäudereinigungsleistungen zwischen Unternehmern"
+        ],
+        "buchung_beim_empfaenger": {
+          "erklaerung": "Der Empfänger bucht SOWOHL Umsatzsteuer ALS AUCH Vorsteuer — beide Beträge sind identisch und heben sich auf (bei vollem Vorsteuerabzugsrecht)",
+          "ustva_zeilen": {
+            "umsatzsteuer": "Zeile 52: Steuer nach §13b UStG (du schuldest die USt)",
+            "vorsteuer": "Zeile 67: Vorsteuer nach §13b UStG (du ziehst sie gleichzeitig ab)",
+            "wichtig": "BEIDE Zeilen müssen ausgefüllt werden — nicht nur eine!"
+          },
+          "beispiel": "Du kaufst Google Ads für 1.000€ netto. Auf der Rechnung steht 0% USt. Du buchst: 1.000€ Betriebsausgabe + 190€ USt (Zeile 52) + 190€ VSt (Zeile 67). Netto-Effekt: 0€ Steuerlast."
+        },
+        "auf_eingangsrechnung": "Ausländischer Lieferant schreibt 'Reverse Charge' oder 'Steuerschuldnerschaft des Leistungsempfängers' auf der Rechnung und berechnet 0% USt",
+        "wichtig": "Reverse Charge ist NICHT dasselbe wie innergemeinschaftliche Lieferung!",
+        "kleinunternehmer": {
+          "wichtig": "KLEINUNTERNEHMER UND REVERSE CHARGE — HÄUFIGER IRRTUM!",
+          "regel": "Kleinunternehmer müssen TROTZDEM eine UStVA stellen wenn sie Reverse-Charge-Leistungen empfangen!",
+          "beispiele": [
+            "Google Ads",
+            "Anthropic API",
+            "AWS",
+            "Zoom",
+            "Adobe Creative Cloud",
+            "Shopify",
+            "Alle ausländischen Dienstleister"
+          ],
+          "ustVA_kleinunternehmer": {
+            "zeile_52": "MUSS ausgefüllt werden — Steuerschuld nach §13b UStG",
+            "zeile_67": "BLEIBT LEER — Kleinunternehmer haben keinen Vorsteuerabzug!",
+            "erklaerung": "Kleinunternehmer zahlen die Umsatzsteuer ans Finanzamt aber bekommen sie NICHT zurück. Das ist der Unterschied zu regelbesteuerten Unternehmern die Zeile 52 und 67 beide ausfüllen und sich so die Steuer gegenseitig aufheben."
+          },
+          "beispiel_google_ads": "Google Ads 500€ netto: Kleinunternehmer bucht 500€ Betriebsausgabe + 95€ USt-Schuld (Zeile 52). Die 95€ muss er ans Finanzamt zahlen — er bekommt sie NICHT als Vorsteuer zurück!",
+          "nicht_verwechseln": "Kein Vorsteuerabzug bedeutet NICHT dass nichts in der UStVA auftaucht. Zeile 52 muss trotzdem ausgefüllt werden!"
+        }
+      },
+      "innergemeinschaftlich": {
+        "lieferung_ausgehend": {
+          "paragraph": "§4 Nr. 1b UStG",
+          "beschreibung": "Du verkaufst Waren an Unternehmer in anderen EU-Ländern",
+          "steuersatz": 0,
+          "voraussetzungen": [
+            "Käufer hat gültige USt-ID (im VIES-System prüfbar)",
+            "Ware wird tatsächlich ins EU-Ausland transportiert",
+            "Nachweis des Transports (Lieferschein, CMR etc.)"
+          ],
+          "auf_rechnung": "'Steuerfreie innergemeinschaftliche Lieferung gem. §4 Nr. 1b UStG' + USt-ID des Käufers",
+          "zusammenfassende_meldung": "Muss in ZM (Zusammenfassende Meldung) gemeldet werden"
+        },
+        "erwerb_eingehend": {
+          "paragraph": "§1a UStG",
+          "beschreibung": "Du kaufst Waren von Unternehmern in anderen EU-Ländern",
+          "buchung": "Ähnlich wie Reverse Charge — USt und VSt buchen",
+          "ustva": "Zeile 41 (innergemeinschaftliche Erwerbe) UND Zeile 67 (VSt)"
+        },
+        "dienstleistungen": {
+          "beschreibung": "Bei Dienstleistungen zwischen EU-Unternehmern gilt Reverse Charge (§13b)",
+          "beispiel": "Französische Agentur erstellt Website für deutsches Unternehmen → Reverse Charge"
+        }
+      },
+      "rechnungspflichtangaben": {
+        "paragraph": "§14 UStG",
+        "pflichtfelder_vollrechnung": [
+          "Vollständiger Name und Anschrift des Lieferanten",
+          "Vollständiger Name und Anschrift des Empfängers",
+          "Steuernummer ODER USt-ID des Lieferanten (eines reicht)",
+          "Ausstellungsdatum der Rechnung",
+          "Fortlaufende eindeutige Rechnungsnummer",
+          "Menge und handelsübliche Bezeichnung der Leistung",
+          "Zeitpunkt der Lieferung oder Leistung (Monat reicht oft)",
+          "Nach Steuersätzen aufgeschlüsseltes Entgelt (Netto)",
+          "Im Voraus vereinbarte Entgeltminderungen (Rabatte, Skonti)",
+          "Steuersatz und Steuerbetrag — oder Hinweis auf Steuerbefreiung",
+          "Bruttobetrag (Gesamtbetrag)"
+        ],
+        "kleinbetragsrechnung": {
+          "grenze_brutto": 250,
+          "vereinfachte_pflichtfelder": [
+            "Ausstellungsdatum",
+            "Name und Anschrift Lieferant",
+            "Menge und Art der Leistung",
+            "Entgelt und Steuerbetrag (oder Brutto + Steuersatz)",
+            "Steuersatz"
+          ]
+        },
+        "gutschrift": "Wenn der Leistungsempfänger die Rechnung ausstellt (umgekehrte Rechnung) — muss als 'Gutschrift' bezeichnet werden"
+      }
+    },
+    "einkommensteuer": {
+      "euer": {
+        "name": "Einnahmen-Überschuss-Rechnung",
+        "paragraph": "§4 Abs. 3 EStG",
+        "wer_darf": "Freiberufler (immer), Gewerbetreibende bis 60.000€ Gewinn ODER 600.000€ Umsatz im Vorjahr",
+        "wer_muss_bilanz": "GmbH, UG, AG immer. Gewerbetreibende über den Grenzen.",
+        "prinzip": "Zufluss-Abfluss-Prinzip: Einnahmen und Ausgaben zählen wenn Geld fließt (nicht wenn Rechnung gestellt wird)",
+        "abgabe": "Anlage EÜR zur Einkommensteuererklärung, elektronisch via ELSTER",
+        "frist": "31. Juli des Folgejahres (mit Steuerberater: 28./29. Februar übernächstes Jahr)"
+      },
+      "betriebsausgaben": {
+        "sofort_abzugsfaehig": [
+          "Büromaterial, Druckerpatronen, Papier",
+          "Software-Abonnements (monatlich/jährlich)",
+          "Telefon und Internet (bei privater Mitnutzung nur betrieblicher Anteil)",
+          "Fachliteratur und Fachzeitschriften",
+          "Fortbildungskosten (Kurse, Seminare, Webinare)",
+          "Werbung und Marketing (Google Ads, Social Media Ads, Drucksachen)",
+          "Buchhalter und Steuerberater",
+          "Kontoführungsgebühren (Geschäftskonto)",
+          "Versicherungen (betriebliche: Berufshaftpflicht, Betriebshaftpflicht)",
+          "Porto und Versandkosten",
+          "Reisekosten (Fahrtkosten, Übernachtung, Verpflegungspauschale)",
+          "Geschäftliche Bewirtung (70% des Nettobetrags)",
+          "Arbeitskleidung (wenn ausschließlich beruflich)",
+          "Mitgliedsbeiträge (Berufsverbände, IHK)"
+        ],
+        "homeoffice": {
+          "tagespauschale": 6,
+          "max_tage": 210,
+          "max_betrag": 1260,
+          "gilt_seit": "2023 — vereinfachte Regelung",
+          "alternativ": "Tatsächliche anteilige Kosten wenn separates Arbeitszimmer (Miete, Nebenkosten, Strom anteilig nach Fläche)"
+        },
+        "fahrtkosten": {
+          "km_pauschale_1_20": 0.3,
+          "km_pauschale_ab_21": 0.38,
+          "hinweis": "Für Fahrten zwischen Wohnung und erster Tätigkeitsstätte (Pendlerpauschale). Für Dienstreisen gilt die tatsächliche Entfernung vollständig.",
+          "fahrtenbuch": "Alternativ tatsächliche Kosten mit Fahrtenbuch (aufwändiger aber oft günstiger bei neuem/teurem Auto)"
+        },
+        "verpflegungspauschale": {
+          "8_bis_24_stunden": 14,
+          "ab_24_stunden": 28,
+          "anreisetag": 14,
+          "abreisetag": 14,
+          "hinweis": "Gilt bei Abwesenheit von Wohnung und erster Tätigkeitsstätte"
+        },
+        "bewirtungskosten": {
+          "abzugsfaehig": 0.7,
+          "nachweis": "Bewirtungsbeleg mit: Datum, Ort, Anlass, Teilnehmer, Betrag — muss zeitnah ausgefüllt werden",
+          "nicht_abzugsfaehig": "Bewirtung von Arbeitnehmern im Rahmen von Betriebsveranstaltungen (andere Regelung)"
+        },
+        "fahrtkosten_2026": {
+          "aenderung_ab_2026": "Erhöhte Pendlerpauschale ab 01.01.2026",
+          "km_1_20": 0.32,
+          "km_ab_21": 0.4,
+          "vorher_2025": "0,30€ und 0,38€",
+          "hinweis": "Gilt für Fahrten zwischen Wohnung und erster Tätigkeitsstätte"
+        }
+      },
+      "abschreibungen": {
+        "afa": {
+          "name": "Absetzung für Abnutzung",
+          "beschreibung": "Wirtschaftsgüter über 800€ netto werden über ihre Nutzungsdauer verteilt abgeschrieben",
+          "afa_tabelle": "Finanzverwaltung gibt Nutzungsdauern vor (z.B. PC 3 Jahre, PKW 6 Jahre, Büromöbel 13 Jahre)",
+          "beispiel": "Laptop für 1.200€ netto, Nutzungsdauer 3 Jahre → 400€ Abschreibung pro Jahr"
+        },
+        "gwg": {
+          "name": "Geringwertige Wirtschaftsgüter",
+          "paragraph": "§6 Abs. 2 EStG",
+          "grenze_sofortabzug_netto": 800,
+          "grenze_sofortabzug_brutto_19": 952,
+          "grenze_sofortabzug_brutto_7": 856,
+          "unter_250_netto": "Immer Sofortabzug (Vereinfachungsregel)",
+          "250_bis_800_netto": "Wahlrecht: Sofortabzug ODER Sammelposten über 5 Jahre",
+          "ueber_800_netto": "Pflicht zur Abschreibung über Nutzungsdauer",
+          "wichtig": "GRENZE IST 800€ NETTO — nicht 1.000€! Häufiger Irrtum! Grenze gilt seit 2018.",
+          "selbstaendig_nutzbar": "Wirtschaftsgut muss selbstständig nutzbar sein (z.B. Laptop ja, RAM-Erweiterung nein)"
+        },
+        "sonderabschreibung": {
+          "paragraph": "§7g EStG",
+          "beschreibung": "Kleine und mittlere Unternehmen können bis zu 50% der Anschaffungskosten bereits vor der Anschaffung abschreiben (Investitionsabzugsbetrag) oder im Anschaffungsjahr zusätzlich zur normalen AfA",
+          "voraussetzung": "Betriebsvermögen unter 200.000€"
+        }
+      },
+      "vorauszahlungen": {
+        "beschreibung": "Selbstständige zahlen Einkommensteuer vierteljährlich im Voraus — nicht einmal jährlich!",
+        "faelligkeiten_2026": {
+          "q1": "10. März 2026",
+          "q2": "10. Juni 2026",
+          "q3": "10. September 2026",
+          "q4": "10. Dezember 2026"
+        },
+        "berechnung": "Finanzamt teilt letzte Jahressteuer durch 4. Erste Vorauszahlung nach erstem Steuerbescheid.",
+        "mindestbetrag": "Nur wenn Jahressteuer mindestens 400€ und Quartalsrate mindestens 100€ (§37 Abs. 5 EStG)",
+        "neugruender": "Im ersten Jahr schätzt Finanzamt den voraussichtlichen Gewinn",
+        "anpassung": "Vorauszahlungen können beim Finanzamt angepasst werden wenn Gewinn stark schwankt",
+        "wichtig": "Das Finanzamt schickt KEINE Zahlungserinnerung! SEPA-Lastschrift empfehlenswert um Säumniszuschläge zu vermeiden.",
+        "steuersaetze_2026": {
+          "grundfreibetrag": 12348,
+          "eingangssteuersatz": "14% ab 12.348€",
+          "spitzensteuersatz": "42% ab ca. 69.879€",
+          "reichensteuer": "45% ab 277.826€",
+          "soli": "Für die meisten Selbstständigen nicht mehr fällig. Freigrenze: 20.350€ Jahressteuer."
+        }
+      }
+    },
+    "gwg": {
+      "zusammenfassung": "GWG-Grenze = 800€ NETTO (nicht 1.000€!). Gilt seit 2018.",
+      "details": "Siehe einkommensteuer.abschreibungen.gwg"
+    },
+    "aufbewahrungsfristen": {
+      "10_jahre_buchhaltungsunterlagen": [
+        "Bücher und Aufzeichnungen",
+        "Jahresabschlüsse und Bilanzen",
+        "Inventare",
+        "Eröffnungsbilanzen",
+        "Lageberichte",
+        "Arbeitsanweisungen und Verfahrensdokumentation"
+      ],
+      "8_jahre_buchungsbelege_seit_2025": [
+        "Eingangsrechnungen",
+        "Ausgangsrechnungen",
+        "Kontoauszüge",
+        "Kassenbelege und Quittungen",
+        "Lieferscheine (wenn Buchungsbeleg)",
+        "Auftragsbestätigungen",
+        "Zahlungsbelege"
+      ],
+      "6_jahre_geschaeftsbriefe": [
+        "Empfangene Handelsbriefe (E-Mails, Briefe)",
+        "Kopien abgesandter Handelsbriefe",
+        "Angebote (wenn Auftrag zustande kam)"
+      ],
+      "gesetzliche_grundlage": "Viertes Bürokratieentlastungsgesetz (BEG IV) vom 29.10.2024 — gilt seit 01.01.2025",
+      "fristbeginn": "Ende des Kalenderjahres in dem das Dokument entstanden ist",
+      "beispiel": "Rechnung vom 15. März 2025 → Frist beginnt 31.12.2025 → aufbewahren bis mindestens 31.12.2033 (8 Jahre)",
+      "wichtig": "RECHNUNGEN = 8 JAHRE seit 2025! Früher waren es 10 Jahre. Das BEG IV hat die Frist verkürzt.",
+      "andrea_hatte_recht": "Andrea sagte 'Sind das nicht 8 Jahre?' — sie hatte RECHT! Die Frist wurde 2025 von 10 auf 8 Jahre verkürzt.",
+      "ausnahme_banken": "Banken, Versicherungen und Wertpapierinstitute: weiterhin 10 Jahre für Buchungsbelege",
+      "digital": "Digitale Belege müssen im Originalformat aufbewahrt werden — Ausdruck allein reicht nicht (GoBD)"
+    },
+    "gobd": {
+      "name": "Grundsätze zur ordnungsmäßigen Führung und Aufbewahrung von Büchern",
+      "kernprinzipien": {
+        "unveraenderbarkeit": "Einmal gebuchte Belege dürfen nicht gelöscht oder überschrieben werden",
+        "vollstaendigkeit": "Alle Geschäftsvorfälle müssen lückenlos erfasst werden",
+        "nachvollziehbarkeit": "Jede Buchung muss zu einem Originalbeleg führen (Belegprinzip)",
+        "zeitgerechtigkeit": "Buchungen müssen zeitnah nach dem Geschäftsvorfall erfolgen",
+        "ordnung": "Systematische und übersichtliche Ablage",
+        "aufbewahrung": "10 Jahre für Buchungsbelege, 6 Jahre für Handelsbriefe"
+      },
+      "digitale_belege": "Digitale Belege sind erlaubt wenn: unveränderbar gespeichert, jederzeit lesbar, auffindbar",
+      "kontolux_hinweis": "Kontolux AI unterstützt GoBD-orientiertes Arbeiten durch Belegarchivierung und Zeitstempel. Kontolux ist kein zertifiziertes GoBD-System und ersetzt keine professionelle Buchhaltungssoftware oder Steuerberaterleistung."
+    },
+    "fristen_2026_2027": {
+      "ustVA_monatlich_ohne_dauerfrist": {
+        "januar_2026": "10. Februar 2026",
+        "februar_2026": "10. März 2026",
+        "maerz_2026": "10. April 2026",
+        "april_2026": "10. Mai 2026",
+        "mai_2026": "10. Juni 2026",
+        "juni_2026": "10. Juli 2026",
+        "juli_2026": "11. August 2026",
+        "august_2026": "10. September 2026",
+        "september_2026": "12. Oktober 2026",
+        "oktober_2026": "10. November 2026",
+        "november_2026": "10. Dezember 2026",
+        "dezember_2026": "11. Januar 2027"
+      },
+      "ustVA_monatlich_mit_dauerfrist": {
+        "sondervorauszahlung_2026": "10. Februar 2026",
+        "januar_2026": "10. März 2026",
+        "februar_2026": "10. April 2026",
+        "maerz_2026": "12. Mai 2026",
+        "april_2026": "10. Juni 2026",
+        "mai_2026": "10. Juli 2026",
+        "juni_2026": "11. August 2026",
+        "juli_2026": "10. September 2026",
+        "august_2026": "12. Oktober 2026",
+        "september_2026": "10. November 2026",
+        "oktober_2026": "10. Dezember 2026",
+        "november_2026": "12. Januar 2027",
+        "dezember_2026": "10. Februar 2027"
+      },
+      "jahresfristen_2026": {
+        "einkommensteuer_2025": "31. Juli 2026 (ohne Steuerberater)",
+        "einkommensteuer_2025_mit_steuerberater": "28. Februar 2027",
+        "gewerbesteuer_2025": "31. Juli 2026",
+        "koerperschaftsteuer_2025": "31. Juli 2026",
+        "jahresabschluss_2025": "31. Dezember 2026 (Offenlegungspflicht GmbH)"
+      }
+    },
+    "buchungskonten": {
+      "skr03": {
+        "hinweis": "SKR03 = Standard-Kontenrahmen für Freiberufler und kleine Gewerbetreibende",
+        "einnahmen": {
+          "8400": "Erlöse 19% USt — Standardkonto für Einnahmen",
+          "8300": "Erlöse 7% USt",
+          "8200": "Steuerfreie Erlöse §4 UStG",
+          "8100": "Nicht steuerbare Umsätze",
+          "8125": "Innergemeinschaftliche Lieferungen §4 Nr. 1b UStG (0%)",
+          "1776": "Umsatzsteuer 19%"
+        },
+        "ausgaben": {
+          "4980": "Bürobedarf (Schreibwaren, Druckerpapier, Toner)",
+          "4920": "Telefon und Internet",
+          "4930": "Kfz-Kosten (Benzin, Reparatur, Versicherung Kfz)",
+          "4650": "Werbekosten (Google Ads, Flyer, Social Media)",
+          "4830": "Aus- und Fortbildungskosten",
+          "4670": "Reisekosten",
+          "4200": "Raumkosten (Miete Büro, Nebenkosten)",
+          "4260": "Energie (Strom, Gas)",
+          "5400": "Wareneinkauf 19% VSt — KORREKT (nicht 6000!)",
+          "5300": "Wareneinkauf 7% VSt",
+          "4730": "Löhne und Gehälter",
+          "4320": "Abschreibungen auf Sachanlagen (AfA)",
+          "0480": "Geringwertige Wirtschaftsgüter (GWG) bis 800€",
+          "1576": "Abziehbare Vorsteuer 19%",
+          "1571": "Abziehbare Vorsteuer 7%",
+          "1787": "Umsatzsteuer nach §13b UStG (Reverse Charge Zeile 52)",
+          "1583": "Vorsteuer nach §13b UStG (Reverse Charge Zeile 67)"
+        }
+      },
+      "skr04": {
+        "hinweis": "SKR04 = Kontenrahmen für größere Unternehmen und GmbHs",
+        "einnahmen": {
+          "4400": "Umsatzerlöse 19% USt",
+          "4300": "Umsatzerlöse 7% USt",
+          "4200": "Steuerfreie Umsätze",
+          "4120": "Innergemeinschaftliche Lieferungen"
+        },
+        "ausgaben": {
+          "6800": "Bürobedarf",
+          "6805": "Telefon und Internet",
+          "6820": "Kfz-Kosten",
+          "6600": "Werbeaufwand",
+          "6830": "Reisekosten",
+          "3400": "Wareneinkauf 19% VSt — KORREKT (nicht 5000!)",
+          "3300": "Wareneinkauf 7% VSt",
+          "6300": "Abschreibungen",
+          "0670": "Geringwertige Wirtschaftsgüter (GWG)"
+        }
+      }
+    },
+    "sozialversicherung": {
+      "hinweis": "Selbstständige sind NICHT automatisch sozialversichert!",
+      "krankenversicherung": {
+        "pflicht": "Ja — entweder gesetzlich (GKV) oder privat (PKV)",
+        "gkv_mindestbeitrag_2026": "ca. 200€/Monat (Mindestbemessungsgrundlage)",
+        "gkv_beitragssatz": "14,6% + Zusatzbeitrag der Kasse (ca. 1-2%)",
+        "pkv": "Oft günstiger für Junge/Gesunde, aber Rückkehr zu GKV schwierig"
+      },
+      "rentenversicherung": {
+        "pflicht_fuer": "Bestimmte Berufsgruppen (Handwerker, Lehrer, Künstler KSK)",
+        "freiwillig": "Freiwillige Einzahlung möglich und empfehlenswert",
+        "kuenstlersozialkasse": "KSK — Künstler und Publizisten zahlen nur halben Beitrag"
+      },
+      "arbeitslosenversicherung": {
+        "freiwillig_moeglich": "Ja, unter bestimmten Voraussetzungen"
+      }
+    },
+    "haeufige_fehler_ki": [
+      {
+        "fehler": "GWG-Grenze ist 1.000€",
+        "richtig": "GWG-Grenze ist 800€ NETTO seit 2018. Nicht 1.000€!",
+        "konsequenz": "Falsche Buchung — zu früher oder zu später Abzug"
+      },
+      {
+        "fehler": "Aufbewahrungsfrist für Rechnungen ist 10 Jahre",
+        "richtig": "Aufbewahrungsfrist für Rechnungen ist seit 01.01.2025 NUR NOCH 8 JAHRE! (BEG IV). Früher waren es 10 Jahre.",
+        "konsequenz": "Zu späte Vernichtung — unnötige Archivierungskosten. Aber besser zu lang als zu kurz aufbewahren."
+      },
+      {
+        "fehler": "Bei Reverse Charge taucht nichts in der UStVA auf",
+        "richtig": "Bei Reverse Charge müssen SOWOHL USt (Zeile 52) als auch VSt (Zeile 67) ausgewiesen werden",
+        "konsequenz": "Fehlerhafte UStVA — Nachzahlungen möglich"
+      },
+      {
+        "fehler": "Innergemeinschaftliche Lieferung = Reverse Charge",
+        "richtig": "Das sind zwei verschiedene Tatbestände mit unterschiedlichen Paragraphen und UStVA-Zeilen",
+        "konsequenz": "Falsche Buchung und falsche UStVA"
+      },
+      {
+        "fehler": "Kleinunternehmer können keine Vorsteuer abziehen aber berechnen keine USt",
+        "richtig": "Korrekt — aber: Kleinunternehmer sollten trotzdem §19-Hinweis auf Rechnungen schreiben",
+        "konsequenz": "Ohne Hinweis kann Finanzamt USt einfordern"
+      },
+      {
+        "fehler": "Bewirtungskosten sind zu 100% absetzbar",
+        "richtig": "Bewirtungskosten sind nur zu 70% als Betriebsausgabe absetzbar",
+        "konsequenz": "Zu hoher Betriebsausgabenabzug — Nachzahlung bei Prüfung"
+      },
+      {
+        "fehler": "Homeoffice-Pauschale ist unbegrenzt",
+        "richtig": "Homeoffice-Pauschale max. 1.260€ pro Jahr (6€/Tag, max. 210 Arbeitstage)",
+        "konsequenz": "Zu hoher Abzug"
+      },
+      {
+        "fehler": "Bei Dauerfristverlängerung gilt Sondervorauszahlung im Januar",
+        "richtig": "Sondervorauszahlung ist im Februar fällig (10. Februar), nicht Januar",
+        "konsequenz": "Verspätete Zahlung — Säumniszuschläge"
+      },
+      {
+        "fehler": "Unter 1.000€ Anschaffungskosten = Sofortabzug",
+        "richtig": "Sofortabzug nur bis 800€ NETTO. Zwischen 800€ und 1.000€ netto normale AfA!",
+        "konsequenz": "Falscher Sofortabzug — Korrektur nötig"
+      },
+      {
+        "fehler": "Wareneinkauf auf Konto 6000 (SKR03) buchen",
+        "richtig": "Wareneinkauf SKR03 = Konto 5400 (19%) oder 5300 (7%). Konto 6000 existiert im SKR03 nicht für Wareneinkauf!",
+        "konsequenz": "Falsche Buchung — DATEV-Export fehlerhaft"
+      },
+      {
+        "fehler": "Wareneinkauf auf Konto 5000 (SKR04) buchen",
+        "richtig": "Wareneinkauf SKR04 = Konto 3400 (19%) oder 3300 (7%). Konto 5000 ist im SKR04 für Materialaufwand.",
+        "konsequenz": "Falsche Kontierung"
+      },
+      {
+        "fehler": "Wareneinkauf auf Konto 6000 buchen (SKR03)",
+        "richtig": "Wareneinkauf SKR03 = 5400 (19%) oder 5300 (7%). Konto 6000 ist falsch!",
+        "konsequenz": "Falsche Buchung — DATEV-Export fehlerhaft"
+      },
+      {
+        "fehler": "Wareneinkauf auf Konto 5000 buchen (SKR04)",
+        "richtig": "Wareneinkauf SKR04 = 3400 (19%) oder 3300 (7%).",
+        "konsequenz": "Falsche Kontierung"
+      },
+      {
+        "fehler": "Kleinunternehmer müssen bei Reverse Charge gar keine UStVA stellen",
+        "richtig": "Kleinunternehmer müssen bei Reverse-Charge-Leistungen (Google Ads, Anthropic etc.) trotzdem UStVA Zeile 52 ausfüllen! Zeile 67 bleibt leer (kein Vorsteuerabzug).",
+        "konsequenz": "Steuernachzahlung + Säumniszuschläge wenn Zeile 52 nicht ausgefüllt wird"
+      },
+      {
+        "fehler": "Bei Reverse Charge zieht der Kleinunternehmer die Vorsteuer sofort wieder ab",
+        "richtig": "NUR regelbesteuerte Unternehmer ziehen Vorsteuer ab (Zeile 67). Kleinunternehmer zahlen die Steuer aus Zeile 52 ohne Gegenbuchung!",
+        "konsequenz": "Falscher Steuerabzug — Rückforderung durch Finanzamt"
+      },
+      {
+        "fehler": "Kleinunternehmer verliert Status erst zum Jahresende bei Überschreitung der 100.000€ Grenze",
+        "richtig": "Status endet SOFORT wenn 100.000€ überschritten wird — ab dieser Rechnung Pflicht zur USt-Ausweisung!",
+        "konsequenz": "Falsch ausgestellte Rechnungen müssen korrigiert werden"
+      },
+      {
+        "fehler": "Einkommensteuer-Vorauszahlungen vergessen",
+        "richtig": "Fällig am 10. März, 10. Juni, 10. September, 10. Dezember — das Finanzamt schickt KEINE Erinnerung!",
+        "konsequenz": "Säumniszuschläge 1% pro angefangenen Monat"
+      },
+      {
+        "fehler": "Freiberufler müssen Gewerbesteuer zahlen",
+        "richtig": "Freiberufler (Ärzte, Anwälte, IT-Freelancer, Designer etc.) zahlen KEINE Gewerbesteuer!",
+        "konsequenz": "Unnötige Steuerzahlung"
+      }
+    ],
+    "sachkonten_erklaerung": {
+      "beschreibung": "Sachkonten sind die konkreten Buchungskonten — jeder Geschäftsvorfall wird einem Sachkonto zugeordnet",
+      "wichtigkeit": "Für DATEV-Export und Steuerberater essenziell — jede Buchung braucht korrektes Sachkonto",
+      "bot_verhalten": "Bei jeder Buchung das passende Sachkonto nennen und im DATEV-Export korrekt verwenden",
+      "kritisch": "Wareneinkauf = 5400 (SKR03) NICHT 6000! Das ist der häufigste Fehler."
+    }
+  }
+}
