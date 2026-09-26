@@ -4234,6 +4234,60 @@ async function verifyMolliePayment(paymentId, apiKey, testmodus = false) {
   return { valid: true, payment };
 }
 
+
+/**
+ * Bucht neue Erstattungen (Status "refunded") und Rückbuchungen einer Mollie-Zahlung als Abfluss
+ * (typ 'rechnung_eingehend', analog zu Stripes charge.refunded). Daten kommen direkt aus der
+ * Mollie-API (GET /v2/payments/{id}/refunds bzw. /chargebacks) mit dem API-Key des Nutzers — dem
+ * Webhook-Aufruf selbst wird wie bei der Zahlung nicht vertraut. Dedup je Erstattungs-/
+ * Rückbuchungs-ID. "processing"-Erstattungen werden noch nicht gebucht (können scheitern);
+ * Mollie ruft den Webhook erneut auf, sobald sie "refunded" sind.
+ * @returns {Promise<number>} Anzahl neu gebuchter Belege
+ */
+async function mollieErstattungenBuchen(userId, payment, apiKey, env, adminToken) {
+  const wert = (b) => parseFloat(b?.value) || 0;
+  const hatErstattung = wert(payment.amountRefunded) > 0 || (payment._links?.refunds && !payment.amountRefunded);
+  const hatRueckbuchung = wert(payment.amountChargedBack) > 0 || (payment._links?.chargebacks && !payment.amountChargedBack);
+  if (!hatErstattung && !hatRueckbuchung) return 0;
+  const hole = async (pfad) => {
+    const res = await fetch(`https://api.mollie.com/v2/payments/${encodeURIComponent(payment.id)}/${pfad}`, { headers: { 'Authorization': `Bearer ${apiKey}` } });
+    if (!res.ok) throw new Error(`Mollie ${pfad} ${res.status}`);
+    return (await res.json())?._embedded?.[pfad] || [];
+  };
+  const posten = [];
+  try {
+    if (hatErstattung) for (const r of await hole('refunds')) if (r.status === 'refunded') posten.push({ id: r.id, art: 'Rückerstattung', betrag: wert(r.amount), datum: r.createdAt, text: r.description });
+    if (hatRueckbuchung) for (const c of await hole('chargebacks')) if (!c.reversedAt) posten.push({ id: c.id, art: 'Rückbuchung', betrag: wert(c.amount), datum: c.createdAt, text: c.reason?.description });
+  } catch (e) {
+    // Nicht kritisch für die Zahlung selbst — beim nächsten Webhook-Aufruf erneut versucht.
+    console.warn('Mollie-Webhook: Erstattungen abrufen fehlgeschlagen:', e.message, 'paymentId=', payment.id);
+    return 0;
+  }
+  let gebucht = 0;
+  for (const p of posten) {
+    if (!(p.betrag > 0) || await isAlreadyProcessed(userId, p.id, adminToken)) continue;
+    const datum = p.datum ? new Date(p.datum) : new Date();
+    const gueltig = isNaN(datum.getTime()) ? new Date() : datum;
+    const monatJahr = BERLIN_MONAT_JAHR_FORMATTER.format(gueltig);
+    const beschreibung = payment.description || null;
+    await writeBelegAsAdmin(userId, {
+      typ: 'rechnung_eingehend',
+      betrag: p.betrag,
+      absender: payment.metadata?.email || 'Mollie-Kunde',
+      bezahlt: true,
+      bezahlt_am: berlinDatumAlsString(gueltig),
+      mwst_satz: 'keine',
+      quelle: 'mollie_webhook',
+      name: `Mollie-${p.art}${beschreibung ? `: ${beschreibung}` : ''} ${monatJahr}`,
+      buchungstext: `Mollie-${p.art} zu ${payment.id}${p.text ? ` – ${p.text}` : ''}`
+    }, env, adminToken);
+    await markAsProcessed(userId, p.id, adminToken);
+    await incrementWebhookBelegCount(userId, env);
+    gebucht++;
+  }
+  return gebucht;
+}
+
 /**
  * Wandelt ein bereits als 'paid' verifiziertes Mollie-Payment-Objekt in ein Beleg-Objekt für
  * writeBelegAsAdmin() um — reine Funktion, einzeln testbar (kein Netzwerk-/Firestore-Zugriff),
@@ -4323,49 +4377,51 @@ async function handleMollieWebhook(request, url, env, cors) {
     }
     const payment = verifyResult.payment;
 
-    if (await isAlreadyProcessed(userId, payment.id, adminToken)) {
-      return new Response(JSON.stringify({ received: true, dedup: true }), {
-        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
-      });
-    }
+    // Mollie ruft den Webhook für DIESELBE Zahlungs-ID erneut auf, wenn eine Erstattung den Status
+    // processing/refunded/failed erreicht oder eine Rückbuchung eingeht (docs.mollie.com/reference/
+    // webhooks) — die Zahlung selbst bleibt dabei "paid". Früher endete jeder weitere Aufruf am
+    // Duplikat-Check der Zahlung, Erstattungen gingen so nie in die Buchhaltung. Jetzt: Zahlung nur
+    // einmal buchen, danach bei JEDEM Aufruf Erstattungen/Rückbuchungen der Zahlung abgleichen.
+    let docId = null;
+    if (!(await isAlreadyProcessed(userId, payment.id, adminToken))) {
+      const belegData = mollieEventToBeleg(payment);
 
-    const belegData = mollieEventToBeleg(payment);
-
-    // ── MwSt-Setting + Sachkonto — identisches Muster wie handleStripeWebhook ──────────
-    const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(fields.mwst_setting));
-    belegData.mwst_satz = mwst_satz;
-    belegData.kategorie = kategorie;
-    try {
-      const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
-      const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
-      belegData.sachkonto = resolveSachkonto(kategorie, skr) || '';
-    } catch (e) {
-      console.warn('Mollie-Webhook: datev_skr-Lookup fehlgeschlagen, sachkonto bleibt leer:', e.message);
-    }
-
-    // ── Invoice-PDF archivieren — nur wenn Mollie eine mitliefert (laut Aufgabenstellung
-    // selten, `_links.invoicePdf.href`) — eigener try/catch, ein fehlgeschlagener PDF-Download/
-    // -Upload darf den Beleg selbst nie blockieren (identisches Muster wie handleStripeWebhook).
-    if (payment._links?.invoicePdf?.href) {
+      // ── MwSt-Setting + Sachkonto — identisches Muster wie handleStripeWebhook ──────────
+      const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(fields.mwst_setting));
+      belegData.mwst_satz = mwst_satz;
+      belegData.kategorie = kategorie;
       try {
-        belegData.storage_url = await archiveInvoicePdf(userId, 'mollie', payment.id, payment._links.invoicePdf.href, env);
+        const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
+        const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
+        belegData.sachkonto = resolveSachkonto(kategorie, skr) || '';
       } catch (e) {
-        console.error('Mollie-Webhook: Invoice-PDF-Archivierung fehlgeschlagen, Beleg wird trotzdem angelegt:', e.message, 'userId=', userId, 'paymentId=', payment.id);
+        console.warn('Mollie-Webhook: datev_skr-Lookup fehlgeschlagen, sachkonto bleibt leer:', e.message);
       }
+
+      // ── Invoice-PDF archivieren — nur wenn Mollie eine mitliefert (`_links.invoicePdf.href`) —
+      // eigener try/catch, ein fehlgeschlagener PDF-Download/-Upload darf den Beleg nie blockieren.
+      if (payment._links?.invoicePdf?.href) {
+        try {
+          belegData.storage_url = await archiveInvoicePdf(userId, 'mollie', payment.id, payment._links.invoicePdf.href, env);
+        } catch (e) {
+          console.error('Mollie-Webhook: Invoice-PDF-Archivierung fehlgeschlagen, Beleg wird trotzdem angelegt:', e.message, 'userId=', userId, 'paymentId=', payment.id);
+        }
+      }
+
+      const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
+      // Als verarbeitet markieren SOBALD der Beleg sicher gespeichert ist — identische Abwägung
+      // wie handleStripeWebhook.
+      await markAsProcessed(userId, payment.id, adminToken);
+      await incrementWebhookBelegCount(userId, env);
+      if (result.tagesbewegungWarnung) {
+        console.error('Mollie-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
+      }
+      docId = result.docId;
     }
 
-    const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
-    // Als verarbeitet markieren SOBALD der Beleg sicher gespeichert ist — auch wenn die
-    // Tagesbewegung selbst noch fehlschlagen sollte (result.tagesbewegungWarnung), identische
-    // Abwägung wie handleStripeWebhook.
-    await markAsProcessed(userId, payment.id, adminToken);
-    await incrementWebhookBelegCount(userId, env);
+    const erstattungen = await mollieErstattungenBuchen(userId, payment, apiKey, env, adminToken);
 
-    if (result.tagesbewegungWarnung) {
-      console.error('Mollie-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
-    }
-
-    return new Response(JSON.stringify({ received: true, docId: result.docId }), {
+    return new Response(JSON.stringify({ received: true, ...(docId ? { docId } : { dedup: true }), ...(erstattungen ? { erstattungen } : {}) }), {
       status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
     });
   } catch (e) {

@@ -28,6 +28,7 @@ const json = (status, body) => new Response(JSON.stringify(body), { status, head
 
 // ── Nachgebaute Plattform-APIs ────────────────────────────────────────────────────────────
 const mollieZahlungen = new Map(); // id → payment
+const mollieErstattungen = new Map(), mollieRueckbuchungen = new Map();
 let paypalVerify = 'SUCCESS';      // 'SUCCESS' | 'FAILURE' | 'DOWN'
 const sumupTransaktionen = [];     // items der history-API
 let sumupKeyGueltig = true;
@@ -39,7 +40,9 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.startsWith('https://oauth2.googleapis.com/token')) return json(200, { access_token: 'test-token', expires_in: 3600 });
   // Mollie
   if (url.startsWith('https://api.mollie.com/v2/payments/')) {
-    const id = decodeURIComponent(url.split('/').pop());
+    const [id, unter] = url.slice('https://api.mollie.com/v2/payments/'.length).split('/').map(decodeURIComponent);
+    if (unter === 'refunds') return json(200, { _embedded: { refunds: mollieErstattungen.get(id) || [] } });
+    if (unter === 'chargebacks') return json(200, { _embedded: { chargebacks: mollieRueckbuchungen.get(id) || [] } });
     return mollieZahlungen.has(id) ? json(200, mollieZahlungen.get(id)) : json(404, { title: 'Not Found' });
   }
   // PayPal
@@ -145,6 +148,21 @@ abschnitt('Mollie');
   mollieZahlungen.set('tr_expired', { id: 'tr_expired', status: 'expired', amount: { value: '10.00' } });
   r = await post('mollie', form('tr_expired'), H);
   pruefe('Abgelaufene Zahlung → 200 ohne Beleg (keine Retry-Flut)', r.status === 200 && belege('mollie_webhook').length === 1, r.text);
+  // Erstattung: Mollie ruft den Webhook mit derselben Zahlungs-ID erneut auf, Zahlung bleibt "paid"
+  mollieZahlungen.set('tr_live1', { ...mollieZahlungen.get('tr_live1'), amountRefunded: { value: '20.00', currency: 'EUR' } });
+  mollieErstattungen.set('tr_live1', [{ id: 're_laeuft', status: 'processing', amount: { value: '5.00' }, createdAt: '2026-09-21T10:00:00+02:00' }]);
+  r = await post('mollie', form('tr_live1'), H);
+  pruefe('Erstattung "processing" wird noch nicht gebucht', r.status === 200 && belege('mollie_webhook').length === 1, r.text);
+  mollieErstattungen.set('tr_live1', [{ id: 're_laeuft', status: 'refunded', amount: { value: '5.00' }, createdAt: '2026-09-21T10:00:00+02:00' }, { id: 're_2', status: 'refunded', amount: { value: '15.00' }, createdAt: '2026-09-22T10:00:00+02:00' }]);
+  r = await post('mollie', form('tr_live1'), H);
+  const erst = belege('mollie_webhook').filter(b => w(b, 'typ') === 'rechnung_eingehend');
+  pruefe('Erneuter Webhook: 2 Erstattungen (5 € + 15 €) als Abfluss gebucht, Zahlung nicht doppelt', erst.length === 2 && erst.map(b => w(b, 'betrag')).sort().join() === '15,5' && belege('mollie_webhook').filter(b => w(b, 'typ') === 'rechnung_ausgehend').length === 1, r.text);
+  r = await post('mollie', form('tr_live1'), H);
+  pruefe('Weiterer Aufruf bucht Erstattungen nicht doppelt', belege('mollie_webhook').length === 3);
+  mollieZahlungen.set('tr_live1', { ...mollieZahlungen.get('tr_live1'), amountChargedBack: { value: '59.50' } });
+  mollieRueckbuchungen.set('tr_live1', [{ id: 'chb_1', amount: { value: '59.50' }, createdAt: '2026-09-25T10:00:00+02:00', reason: { description: 'Kartenrückbuchung' } }]);
+  r = await post('mollie', form('tr_live1'), H);
+  pruefe('Rückbuchung (Chargeback) als Abfluss gebucht', belege('mollie_webhook').some(b => w(b, 'typ') === 'rechnung_eingehend' && w(b, 'betrag') === 59.5 && String(w(b, 'name')).includes('Rückbuchung')));
 }
 
 // ═══ Digistore24 ══════════════════════════════════════════════════════════════════════════
