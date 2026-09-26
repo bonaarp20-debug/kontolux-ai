@@ -192,6 +192,9 @@ export default {
     if (request.method === 'POST' && url.pathname.startsWith('/webhook/ablefy/')) {
       return handleAblefyWebhook(request, url, env, cors);
     }
+    if (request.method === 'POST' && url.pathname.startsWith('/webhook/shopify/')) {
+      return handleShopifyWebhook(request, url, env, cors);
+    }
 
     // Origin-Check — nur erlaubte Domains
     if (origin && !ALLOWED_ORIGINS.includes(origin)) {
@@ -3363,7 +3366,11 @@ const WEBHOOK_SECRET_FELDER = {
   // Zugangsdaten nötig, "Speichern" aktiviert die Route nur (generiert url_secret, setzt
   // enabled=true) und speichert die MwSt-Einstellung. Sicherheitsgrenze ist allein der
   // url_secret-Teil der Webhook-URL (siehe Sektions-Kommentar bei handleAblefyWebhook).
-  ablefy: { felder: [] }
+  ablefy: { felder: [] },
+  // Shopify: der Signaturschlüssel steht im Shopify-Admin unter Einstellungen → Benachrichtigungen
+  // → Webhooks ("Your webhooks will be signed with …") — gilt für alle manuell angelegten Webhooks
+  // eines Shops. Entsteht unabhängig von der URL, die URL kommt trotzdem per 'prepare' zuerst.
+  shopify: { felder: [{ bodyFeld: 'webhookSecret', firestoreFeld: 'webhook_secret', fehlermeldung: 'Bitte den Shopify-Webhook-Signaturschlüssel eintragen.' }] }
 };
 
 /**
@@ -5365,5 +5372,189 @@ async function handleAblefyWebhook(request, url, env, cors) {
     return new Response(JSON.stringify({ error: 'Server error' }), {
       status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
     });
+  }
+}
+
+
+// ════════════════════════════════════════════════════════════════════════
+// ── SHOPIFY-INTEGRATION ─────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════
+// Shopify signiert jeden Webhook mit HMAC-SHA256 über den ROHEN Body, Ergebnis Base64 im Header
+// `X-Shopify-Hmac-Sha256` (verifiziert gegen shopify.dev "Deliver webhooks through HTTPS",
+// 2026-09). Schlüssel ist bei manuell im Admin angelegten Webhooks der shopweite Signaturschlüssel
+// aus Einstellungen → Benachrichtigungen → Webhooks. Das Thema steht im Header `X-Shopify-Topic`.
+//
+// Gebucht werden:
+//   orders/paid     → Einnahme-Beleg über `total_price` (Brutto in Shop-Währung)
+//   refunds/create  → Erstattungs-Beleg (typ 'rechnung_eingehend', Geldabfluss im Cash-Modell —
+//                     identisch zu Stripes charge.refunded und Ablefys Erstattungen)
+// Idempotenz doppelt: (a) `X-Shopify-Webhook-Id` gegen Zustell-Wiederholungen (Shopify retryt bis
+// zu 8× in 4 Stunden), (b) ein fachlicher Schlüssel pro Bestellung bzw. Erstattung — damit bucht
+// auch ein versehentlich doppelt angelegter Webhook (zwei Abos, zwei Webhook-IDs) nur einmal.
+
+/**
+ * Verifiziert eine Shopify-Webhook-Signatur (HMAC-SHA256 über den rohen Body, Base64-kodiert).
+ * @returns {Promise<{valid: boolean, reason?: string}>}
+ */
+async function verifyShopifySignature(rawBody, signatureHeader, secret) {
+  if (!signatureHeader) return { valid: false, reason: 'missing_header' };
+  let expectedSig;
+  try {
+    expectedSig = Uint8Array.from(atob(signatureHeader.trim()), (c) => c.charCodeAt(0));
+  } catch (e) {
+    return { valid: false, reason: 'malformed_signature' };
+  }
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']
+  );
+  // crypto.subtle.verify vergleicht zeitkonstant — kein eigener String-Vergleich nötig
+  const valid = await crypto.subtle.verify('HMAC', key, expectedSig, new TextEncoder().encode(rawBody));
+  return { valid, ...(valid ? {} : { reason: 'signature_mismatch' }) };
+}
+
+/** Summe der erfolgreichen Erstattungs-Transaktionen eines Shopify-Refund-Objekts. */
+function shopifyErstattungsBetrag(refund) {
+  const transaktionen = Array.isArray(refund.transactions) ? refund.transactions : [];
+  const erfolgreich = transaktionen.filter((t) => t && t.kind === 'refund' && (t.status === 'success' || !t.status));
+  if (erfolgreich.length) return erfolgreich.reduce((sum, t) => sum + (parseFloat(t.amount) || 0), 0);
+  // Fallback, falls keine Transaktionen mitgeschickt werden: Positionen inkl. Steuer
+  const positionen = Array.isArray(refund.refund_line_items) ? refund.refund_line_items : [];
+  return positionen.reduce((sum, p) => sum + (parseFloat(p.subtotal) || 0) + (parseFloat(p.total_tax) || 0), 0);
+}
+
+/**
+ * Wandelt ein bereits verifiziertes Shopify-Event in ein Beleg-Objekt für writeBelegAsAdmin() —
+ * reine Funktion, einzeln testbar. mwst_satz/kategorie setzt handleShopifyWebhook danach (nur für
+ * Einnahmen), identisch zu den anderen Plattformen.
+ * @param {string} topic - 'orders/paid' | 'refunds/create'
+ * @param {object} payload
+ * @returns {object|null} null für nicht gebuchte Themen
+ */
+function shopifyEventToBeleg(topic, payload) {
+  const quelle = 'shopify_webhook';
+  const waehrung = payload.currency && payload.currency !== 'EUR' ? ` (${payload.currency})` : '';
+
+  if (topic === 'orders/paid') {
+    const datum = new Date(payload.processed_at || payload.created_at || Date.now());
+    const gueltig = isNaN(datum.getTime()) ? new Date() : datum;
+    const email = payload.email || payload.contact_email || payload.customer?.email || null;
+    const kunde = [payload.customer?.first_name, payload.customer?.last_name].filter(Boolean).join(' ') || null;
+    const bestellung = payload.name || (payload.order_number ? `#${payload.order_number}` : String(payload.id || ''));
+    return {
+      typ: 'rechnung_ausgehend',
+      betrag: parseFloat(payload.total_price) || 0,
+      absender: email || kunde || 'Shopify-Kunde',
+      rechnungsnr: bestellung,
+      bezahlt: true,
+      bezahlt_am: berlinDatumAlsString(gueltig),
+      mwst_satz: 'keine',
+      quelle,
+      name: `Shopify: Bestellung ${bestellung}${waehrung} ${BERLIN_MONAT_JAHR_FORMATTER.format(gueltig)}`,
+      buchungstext: `Shopify-Bestellung ${bestellung}${kunde ? ` – ${kunde}` : ''}`
+    };
+  }
+
+  if (topic === 'refunds/create') {
+    const datum = new Date(payload.processed_at || payload.created_at || Date.now());
+    const gueltig = isNaN(datum.getTime()) ? new Date() : datum;
+    const betrag = shopifyErstattungsBetrag(payload);
+    if (!(betrag > 0)) return null; // z.B. reine Restock-Erstattung ohne Geldfluss
+    return {
+      typ: 'rechnung_eingehend',
+      betrag,
+      absender: 'Shopify-Kunde',
+      bezahlt: true,
+      bezahlt_am: berlinDatumAlsString(gueltig),
+      mwst_satz: 'keine',
+      quelle,
+      name: `Shopify-Erstattung zu Bestellung ${payload.order_id || ''} ${BERLIN_MONAT_JAHR_FORMATTER.format(gueltig)}`.replace(/\s+/g, ' ').trim(),
+      buchungstext: `Shopify-Erstattung ${payload.id || ''} zu Bestellung ${payload.order_id || ''}`.replace(/\s+/g, ' ').trim()
+    };
+  }
+  return null;
+}
+
+/** Fachlicher Idempotenz-Schlüssel (eine Bestellung wird nur einmal bezahlt, eine Erstattung nur einmal gebucht). */
+function shopifyFachSchluessel(topic, payload) {
+  if (topic === 'orders/paid' && payload.id) return `shopify_order_paid_${payload.id}`;
+  if (topic === 'refunds/create' && payload.id) return `shopify_refund_${payload.id}`;
+  return null;
+}
+
+/**
+ * Haupt-Handler für POST /webhook/shopify/{userId}/{urlSecret}. Auth zweistufig wie bei den
+ * anderen Plattformen: URL-Secret (billige 404) + HMAC-Signaturprüfung (eigentliche Grenze).
+ */
+async function handleShopifyWebhook(request, url, env, cors) {
+  const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
+  const segments = url.pathname.split('/').filter(Boolean); // ['webhook','shopify',userId,urlSecret]
+  const userId = segments[2];
+  const urlSecret = segments[3];
+  if (!userId || !urlSecret) return new Response('Not found', { status: 404, headers: cors });
+
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/shopify`, adminToken);
+    const configFields = configDoc?.fields || {};
+    const storedUrlSecret = firestoreValue(configFields.url_secret);
+    const webhookSecret = firestoreValue(configFields.webhook_secret);
+    const enabled = firestoreValue(configFields.enabled) === true;
+    if (!enabled || !storedUrlSecret || storedUrlSecret !== urlSecret || !webhookSecret) {
+      return new Response('Not found', { status: 404, headers: cors });
+    }
+
+    const rawBody = await request.text();
+    const sigCheck = await verifyShopifySignature(rawBody, request.headers.get('X-Shopify-Hmac-Sha256'), webhookSecret);
+    if (!sigCheck.valid) {
+      console.warn('Shopify-Webhook Signaturprüfung fehlgeschlagen:', sigCheck.reason, 'userId=', userId);
+      return json({ error: 'Invalid signature' }, 401);
+    }
+
+    let payload;
+    try { payload = JSON.parse(rawBody); } catch (e) { return json({ error: 'Invalid JSON' }, 400); }
+
+    const topic = (request.headers.get('X-Shopify-Topic') || '').toLowerCase();
+    const webhookId = request.headers.get('X-Shopify-Webhook-Id');
+    const zustellSchluessel = webhookId ? `shopify_webhook_${webhookId}` : null;
+    const fachSchluessel = shopifyFachSchluessel(topic, payload);
+
+    if ((zustellSchluessel && await isAlreadyProcessed(userId, zustellSchluessel, adminToken)) ||
+        (fachSchluessel && await isAlreadyProcessed(userId, fachSchluessel, adminToken))) {
+      return json({ received: true, dedup: true });
+    }
+
+    const belegData = shopifyEventToBeleg(topic, payload);
+    if (!belegData) {
+      // Nicht gebuchtes Thema (oder Erstattung ohne Geldfluss) — trotzdem 200, sonst retryt Shopify
+      // 8× und löscht danach das Webhook-Abo automatisch.
+      if (zustellSchluessel) await markAsProcessed(userId, zustellSchluessel, adminToken);
+      return json({ received: true, ignored: topic || 'unknown' });
+    }
+
+    if (belegData.typ === 'rechnung_ausgehend') {
+      const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(configFields.mwst_setting));
+      belegData.mwst_satz = mwst_satz;
+      belegData.kategorie = kategorie;
+      try {
+        const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
+        const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
+        belegData.sachkonto = resolveSachkonto(kategorie, skr) || '';
+      } catch (e) {
+        console.warn('Shopify-Webhook: datev_skr-Lookup fehlgeschlagen, sachkonto bleibt leer:', e.message);
+      }
+    }
+
+    const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
+    // Marker erst NACH dem sicheren Speichern — identische Abwägung wie bei handleStripeWebhook
+    if (fachSchluessel) await markAsProcessed(userId, fachSchluessel, adminToken);
+    if (zustellSchluessel) await markAsProcessed(userId, zustellSchluessel, adminToken);
+    await incrementWebhookBelegCount(userId, env);
+    if (result.tagesbewegungWarnung) {
+      console.error('Shopify-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
+    }
+    return json({ received: true, docId: result.docId });
+  } catch (e) {
+    console.error('handleShopifyWebhook Error:', e.message, e.stack);
+    return json({ error: 'Server error' }, 500);
   }
 }
