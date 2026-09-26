@@ -108,7 +108,13 @@ export default {
     // Format wird zwar sofort lokal abgelehnt, aber auch das ist ohne Limit ein
     // günstiger Vektor, um den Worker mit Requests zu fluten.
     const clientIP = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || 'unknown';
-    if (!checkRateLimit(clientIP)) {
+    // Webhooks (Integrations-Audit 2026-09-26): Stripe, PayPal, Shopify & Co. schicken die
+    // Zustellungen ALLER Kontolux-Nutzer von denselben wenigen Server-IPs — ein gemeinsames
+    // 20er-Limit pro IP hätte bei mehreren Kunden oder einem Verkaufs-Peak echte Zahlungen mit 429
+    // abgewiesen. Deshalb eigenes, großzügigeres Kontingent pro IP + Plattform + Nutzer.
+    const istWebhook = request.method === 'POST' && url.pathname.startsWith('/webhook/');
+    const limitSchluessel = istWebhook ? `${clientIP}|${url.pathname.split('/').slice(2, 4).join('/')}` : clientIP;
+    if (!checkRateLimit(limitSchluessel, istWebhook ? 60 : 20)) {
       return new Response('Too Many Requests', { status: 429, headers: cors });
     }
 
@@ -297,6 +303,12 @@ export default {
   },
 
   async scheduled(event, env) {
+    // Mehrere Zeitpläne (wrangler.toml [triggers]) — nur der Monats-Cron verschickt Erinnerungen,
+    // sonst gingen sie bei jedem SumUp-Abruf erneut raus.
+    if (event.cron === SUMUP_SYNC_CRON) {
+      await syncAlleSumupNutzer(env);
+      return;
+    }
     await sendMonthlyReminders(env);
   }
 };
@@ -3253,7 +3265,9 @@ function generateWebhookSecret() {
  * @returns {Promise<{success: true, docId: string, tagesbewegungWarnung?: string}>}
  */
 async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
-  const docId = `beleg_webhook_${Date.now()}`;
+  // Zufallssuffix: der SumUp-Abruf schreibt mehrere Belege direkt hintereinander — reine
+  // Date.now()-IDs könnten in derselben Millisekunde kollidieren und sich überschreiben.
+  const docId = `beleg_webhook_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
   const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}`;
 
   const name = belegData.name || (belegData.absender ? `Beleg von ${belegData.absender}` : 'Beleg');
@@ -3305,6 +3319,34 @@ async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
   }
 
   return { success: true, docId, ...(tagesbewegungWarnung ? { tagesbewegungWarnung } : {}) };
+}
+
+
+// ── Gemeinsame Webhook-Helfer (Integrations-Audit 2026-09-26) ─────────────────────────────
+// Test-Abkürzungen (Mollie `tr_test_`, PayPal Client-ID `test_`) sind nur noch aktiv, wenn die
+// Worker-Variable WEBHOOK_TESTMODUS="1" gesetzt ist (lokale Tests). Vorher galten sie auch live:
+// Wer die Webhook-URL eines Nutzers kannte, konnte bei Mollie mit beliebigen `tr_test_…`-IDs
+// unbegrenzt gefälschte 10-€-Einnahmen in dessen Buchhaltung schreiben.
+function webhookTestmodus(env) {
+  return env?.WEBHOOK_TESTMODUS === '1';
+}
+
+// Digistore24 und CopeCart sind Wiederverkäufer: Vertragspartner des Endkunden ist die Plattform,
+// der Verkäufer erhält eine Gutschrift über seinen Anteil. Einnahme des Nutzers ist deshalb NICHT
+// der Kundenpreis, sondern sein Netto-Anteil — bei Regelbesteuerung zuzüglich der USt, die die
+// Plattform auf der Gutschrift ausweist (Kleinunternehmer: netto = Auszahlung).
+function plattformAnteilBrutto(nettoAnteil, mwstSetting) {
+  const faktor = mwstSetting === 'keine' ? 1 : (mwstSetting === '7' ? 1.07 : 1.19);
+  return Math.round(Math.abs(nettoAnteil) * faktor * 100) / 100;
+}
+
+// Digistore24 und CopeCart werten einen IPN-Aufruf nur dann als erfolgreich, wenn die Antwort
+// exakt "OK" lautet — sonst gilt er als fehlgeschlagen und wird wiederholt (CopeCart: 10× in 3 h).
+function ipnOk(cors, status = 200) {
+  return new Response('OK', { status, headers: { ...cors, 'Content-Type': 'text/plain' } });
+}
+function ipnFehler(cors, status, text) {
+  return new Response(`ERROR: ${text}`, { status, headers: { ...cors, 'Content-Type': 'text/plain' } });
 }
 
 /**
@@ -3361,7 +3403,8 @@ const WEBHOOK_SECRET_FELDER = {
     { bodyFeld: 'clientSecret', firestoreFeld: 'client_secret', fehlermeldung: 'Bitte dein PayPal Client Secret eintragen.' },
     { bodyFeld: 'webhookId', firestoreFeld: 'webhook_id', fehlermeldung: 'Bitte deine PayPal Webhook ID eintragen.' }
   ] },
-  sumup: { felder: [{ bodyFeld: 'webhookSecret', firestoreFeld: 'webhook_secret', fehlermeldung: 'Bitte ein gültiges Webhook-Secret eintragen.' }] },
+  // SumUp: Abruf per API-Key (Kartenterminal-Zahlungen lösen keine Webhooks aus) — siehe syncSumupFuerNutzer.
+  sumup: { felder: [{ bodyFeld: 'apiKey', firestoreFeld: 'api_key', fehlermeldung: 'Bitte einen gültigen SumUp API-Key eintragen (beginnt mit sup_sk_).' }] },
   // Ablefy bietet keine Signatur-/API-Verifikation an — `felder: []` (leer) heißt: keine
   // Zugangsdaten nötig, "Speichern" aktiviert die Route nur (generiert url_secret, setzt
   // enabled=true) und speichert die MwSt-Einstellung. Sicherheitsgrenze ist allein der
@@ -3484,6 +3527,14 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
           return new Response(JSON.stringify({ error: f.fehlermeldung }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
         }
       }
+      let sumupMerchant = null;
+      if (plattform === 'sumup') {
+        try {
+          sumupMerchant = await sumupMerchantCode(body.apiKey.trim());
+        } catch (e) {
+          return new Response(JSON.stringify({ error: 'SumUp hat den API-Key abgelehnt. Bitte prüfe ihn im SumUp-Dashboard unter Entwickler → API-Schlüssel.' }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+        }
+      }
       const existing = await firestoreGetDoc(docPath, adminToken);
       // url_secret nur EINMALIG erzeugen — ein Nutzer, der seine Zugangsdaten aktualisiert, soll
       // nicht plötzlich eine neue Webhook-URL bekommen und sie beim Anbieter neu hinterlegen müssen.
@@ -3504,6 +3555,13 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
 
       const feldWerte = {};
       for (const f of felder) feldWerte[f.firestoreFeld] = { stringValue: body[f.bodyFeld].trim() };
+      if (sumupMerchant) {
+        // Der PATCH unten ersetzt das ganze Dokument — Abruf-Stand deshalb explizit mitschreiben.
+        feldWerte.merchant_code = { stringValue: sumupMerchant };
+        feldWerte.sync_seit = { stringValue: firestoreValue(existing?.fields?.sync_seit) || now };
+        const cursorAlt = firestoreValue(existing?.fields?.sync_cursor);
+        if (cursorAlt) feldWerte.sync_cursor = { stringValue: cursorAlt };
+      }
 
       const writeRes = await fetch(
         `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/${docPath}`,
@@ -3525,6 +3583,11 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
       if (!writeRes.ok) {
         const errText = await writeRes.text();
         throw new Error(`Firestore-Write fehlgeschlagen (${writeRes.status}): ${errText.slice(0, 200)}`);
+      }
+
+      if (plattform === 'sumup') {
+        await registriereSumupSync(verifiedUid, env);
+        try { await syncSumupFuerNutzer(verifiedUid, env, adminToken); } catch (e) { console.warn('SumUp-Erstabruf fehlgeschlagen:', e.message); }
       }
 
       return new Response(JSON.stringify({
@@ -4110,10 +4173,10 @@ async function handleStripeWebhook(request, url, env, cors) {
  * @param {string} apiKey - aus users/{userId}/webhook_secrets/mollie, Feld `api_key`
  * @returns {Promise<{valid: boolean, reason?: string, payment?: object}>}
  */
-async function verifyMolliePayment(paymentId, apiKey) {
+async function verifyMolliePayment(paymentId, apiKey, testmodus = false) {
   if (!paymentId) return { valid: false, reason: 'missing_id' };
 
-  if (paymentId.startsWith('tr_test_')) {
+  if (testmodus && paymentId.startsWith('tr_test_')) {
     return {
       valid: true,
       payment: {
@@ -4223,7 +4286,15 @@ async function handleMollieWebhook(request, url, env, cors) {
       });
     }
 
-    const verifyResult = await verifyMolliePayment(paymentId, apiKey);
+    const verifyResult = await verifyMolliePayment(paymentId, apiKey, webhookTestmodus(env));
+    // Mollie ruft den Webhook bei JEDER Statusänderung auf (auch expired/failed/canceled). Das ist
+    // keine Fälschung, nur (noch) keine Einnahme — mit 200 bestätigen, sonst wiederholt Mollie den
+    // Aufruf bis zu 10× über 26 Stunden.
+    if (!verifyResult.valid && verifyResult.reason === 'not_paid') {
+      return new Response(JSON.stringify({ received: true, ignored: 'not_paid' }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
     if (!verifyResult.valid) {
       console.warn('Mollie-Webhook Verifikation fehlgeschlagen:', verifyResult.reason, 'userId=', userId);
       return new Response(JSON.stringify({ error: 'Invalid payment' }), {
@@ -4405,6 +4476,7 @@ async function verifyDigistore24Signature(fields, passphrase) {
 // on_rebill_cancelled, last_paid_day, ...) wird ignoriert — 200 zurück, kein Beleg (siehe
 // handleDigistore24Webhook), exakt wie im Auftrag gefordert.
 const DIGISTORE24_BUCHEN_EVENTS = new Set(['on_payment', 'sale', 'rebill']);
+const DIGISTORE24_ERSTATTUNG_EVENTS = new Set(['on_refund', 'on_chargeback', 'refund', 'chargeback']);
 
 /**
  * Wandelt geparste Digistore24-IPN-Felder eines bereits verifizierten `on_payment`/SALE/REBILL-
@@ -4416,25 +4488,33 @@ const DIGISTORE24_BUCHEN_EVENTS = new Set(['on_payment', 'sale', 'rebill']);
  * @param {Record<string,string>} fields
  * @returns {object}
  */
-function digistore24EventToBeleg(fields) {
+function digistore24EventToBeleg(fields, mwstSetting = '19', istErstattung = false) {
   const productName = digistore24FieldValue(fields, 'product_name') || 'Digistore24-Produkt';
   const email = digistore24FieldValue(fields, 'email', 'buyer_email', 'customer_email');
   const orderId = digistore24FieldValue(fields, 'order_id') || '';
-  const amountRaw = digistore24FieldValue(fields, 'transaction_amount', 'amount_brutto', 'amount');
   const zahlungsDatum = parseDigistore24Date(digistore24FieldValue(fields, 'transaction_date', 'order_date', 'payment_date'));
   const monatJahr = BERLIN_MONAT_JAHR_FORMATTER.format(zahlungsDatum);
 
+  // Wiederverkäufer-Modell (siehe plattformAnteilBrutto): gebucht wird der Verkäufer-Anteil
+  // `amount_vendor` (netto) inkl. USt laut Gutschrift. Nur wenn Digistore24 ihn nicht mitsendet
+  // (ältere IPN-Versionen), fällt es auf den Transaktionsbetrag zurück.
+  const vendorAnteil = parseFloat(fields.amount_vendor);
+  const betrag = !isNaN(vendorAnteil) && vendorAnteil !== 0
+    ? plattformAnteilBrutto(vendorAnteil, mwstSetting)
+    : Math.abs(parseFloat(digistore24FieldValue(fields, 'transaction_amount', 'amount_brutto', 'amount')) || 0);
+
   return {
-    typ: 'rechnung_ausgehend',
-    betrag: parseFloat(amountRaw) || 0,
-    absender: email || 'Digistore24-Kunde',
+    typ: istErstattung ? 'rechnung_eingehend' : 'rechnung_ausgehend',
+    betrag,
+    // Vertragspartner ist Digistore24, nicht der Endkunde — der Käufer steht im Buchungstext.
+    absender: 'Digistore24 GmbH',
     rechnungsnr: orderId,
     bezahlt: true,
     bezahlt_am: berlinDatumAlsString(zahlungsDatum),
     mwst_satz: 'keine',
     quelle: 'digistore24_webhook',
-    name: `Digistore24: ${productName} ${monatJahr}`,
-    buchungstext: `Digistore24: ${productName}${email ? ` – ${email}` : ''}`
+    name: istErstattung ? `Digistore24-Rückerstattung: ${productName} ${monatJahr}` : `Digistore24: ${productName} ${monatJahr}`,
+    buchungstext: `Digistore24-${istErstattung ? 'Rückerstattung' : 'Gutschrift'} (Verkäuferanteil): ${productName}${email ? ` – ${email}` : ''}`
   };
 }
 
@@ -4468,70 +4548,61 @@ async function handleDigistore24Webhook(request, url, env, cors) {
     // Werte müssen in Signaturprüfung UND Beleg-Mapping verwendet werden (siehe Sektions-Kommentar).
     const rawBody = await request.text();
     const fields = Object.fromEntries(new URLSearchParams(rawBody));
+    const eventRaw = (fields.event || fields.event_type || '').toLowerCase();
+
+    // "Verbindung testen" im Digistore24-Backend — erwartet laut Doku immer "OK". Kommt vor der
+    // transaction_id-Prüfung (der Test hat keine), schreibt nichts, braucht daher keine Signatur.
+    if (eventRaw === 'connection_test') return ipnOk(cors);
 
     const sigCheck = await verifyDigistore24Signature(fields, passphrase);
     if (!sigCheck.valid) {
       console.warn('Digistore24-Webhook Signaturprüfung fehlgeschlagen:', sigCheck.reason, 'userId=', userId);
-      return new Response(JSON.stringify({ error: 'Invalid signature' }), {
-        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
-      });
+      return ipnFehler(cors, 400, 'invalid signature');
     }
+
+    // Testkäufe (api_mode=test) nie als echte Einnahme buchen.
+    if (String(fields.api_mode || '').toLowerCase() === 'test') return ipnOk(cors);
+
+    const istErstattung = DIGISTORE24_ERSTATTUNG_EVENTS.has(eventRaw);
+    if (!DIGISTORE24_BUCHEN_EVENTS.has(eventRaw) && !istErstattung) return ipnOk(cors);
 
     const transactionId = fields.transaction_id;
-    if (!transactionId) {
-      return new Response(JSON.stringify({ error: 'Missing transaction_id' }), {
-        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
-      });
+    if (!transactionId) return ipnFehler(cors, 400, 'missing transaction_id');
+
+    // Zahlungen behalten den bisherigen Schlüssel (reine transaction_id, kompatibel zu bereits
+    // verarbeiteten Events); Erstattungen bekommen einen eigenen, falls Digistore24 dieselbe ID sendet.
+    const dedupKey = istErstattung ? `${transactionId}_${eventRaw}` : transactionId;
+    if (await isAlreadyProcessed(userId, dedupKey, adminToken)) return ipnOk(cors);
+
+    const mwstSetting = firestoreValue(configFields.mwst_setting) || '19';
+    const belegData = digistore24EventToBeleg(fields, mwstSetting, istErstattung);
+
+    if (!istErstattung) {
+      const { mwst_satz, kategorie } = resolveMwstKategorie(mwstSetting);
+      belegData.mwst_satz = mwst_satz;
+      belegData.kategorie = kategorie;
+      try {
+        const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
+        const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
+        belegData.sachkonto = resolveSachkonto(kategorie, skr) || '';
+      } catch (e) {
+        console.warn('Digistore24-Webhook: datev_skr-Lookup fehlgeschlagen, sachkonto bleibt leer:', e.message);
+      }
     }
 
-    if (await isAlreadyProcessed(userId, transactionId, adminToken)) {
-      return new Response(JSON.stringify({ received: true, dedup: true }), {
-        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
-      });
-    }
-
-    const eventRaw = (fields.event || fields.event_type || '').toLowerCase();
-    if (!DIGISTORE24_BUCHEN_EVENTS.has(eventRaw)) {
-      // z.B. on_refund/REFUND, on_chargeback/CHARGEBACK, on_payment_missed, ... — trotzdem 200,
-      // sonst retryt Digistore24 sinnlos ein Event, das wir nie verarbeiten werden (analoges
-      // Muster zu handleStripeWebhook).
-      return new Response(JSON.stringify({ received: true, ignored: fields.event || fields.event_type || 'unknown' }), {
-        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
-      });
-    }
-
-    const belegData = digistore24EventToBeleg(fields);
-
-    // ── MwSt-Setting + Sachkonto — identisches Muster wie handleStripeWebhook/handleMollieWebhook
-    const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(configFields.mwst_setting));
-    belegData.mwst_satz = mwst_satz;
-    belegData.kategorie = kategorie;
-    try {
-      const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
-      const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
-      belegData.sachkonto = resolveSachkonto(kategorie, skr) || '';
-    } catch (e) {
-      console.warn('Digistore24-Webhook: datev_skr-Lookup fehlgeschlagen, sachkonto bleibt leer:', e.message);
-    }
+    if (!(belegData.betrag > 0)) return ipnOk(cors); // z.B. 0-€-Testbestellung: nichts zu buchen
 
     const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
-    // Als verarbeitet markieren SOBALD der Beleg sicher gespeichert ist — identische Abwägung wie
-    // handleStripeWebhook/handleMollieWebhook (siehe dort für die ausführliche Begründung).
-    await markAsProcessed(userId, transactionId, adminToken);
+    await markAsProcessed(userId, dedupKey, adminToken);
     await incrementWebhookBelegCount(userId, env);
 
     if (result.tagesbewegungWarnung) {
       console.error('Digistore24-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
     }
-
-    return new Response(JSON.stringify({ received: true, docId: result.docId }), {
-      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
-    });
+    return ipnOk(cors);
   } catch (e) {
     console.error('handleDigistore24Webhook Error:', e.message, e.stack);
-    return new Response(JSON.stringify({ error: 'Server error' }), {
-      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
-    });
+    return ipnFehler(cors, 500, 'server error');
   }
 }
 
@@ -4543,9 +4614,15 @@ async function handleDigistore24Webhook(request, url, env, cors) {
 // verifyStripeSignature: rawBody muss vor dem JSON.parse gelesen werden, sonst würde ein
 // neu serialisiertes Objekt (andere Key-Reihenfolge/Whitespace) einen abweichenden Hash ergeben.
 // Anders als Stripe hat der Header hier KEINEN eingebetteten Timestamp/Replay-Schutz (kein
-// "t=...,v1=..."-Format, nur der reine Hex-Hash) — es gibt deshalb keine Replay-Toleranzprüfung
-// wie bei Stripe, das URL-Secret + die Dedup-Prüfung über `id` sind hier die einzigen zusätzlichen
-// Verteidigungsebenen.
+// "t=...,v1=..."-Format, nur der Base64-HMAC) — es gibt deshalb keine Replay-Toleranzprüfung
+// wie bei Stripe, das URL-Secret + die Dedup-Prüfung über `transaction_id` sind hier die einzigen
+// zusätzlichen Verteidigungsebenen.
+//
+// Integrations-Audit 2026-09-26 (gegen die offizielle CopeCart IPN-Doku v1.6.7): Die erste
+// Implementierung erwartete eine Hex-Signatur und ein verschachteltes Format (`event`, `id`,
+// `payment.amount` in Cent), CopeCart sendet aber Base64 und flache Felder (`event_type`,
+// `transaction_id`, `transaction_earned_amount`, …) und erwartet als Antwort exakt "OK" — echte
+// CopeCart-Zahlungen wären also nie gebucht worden. Jetzt nach Doku umgesetzt, inkl. Erstattungen.
 
 /**
  * Verifiziert eine CopeCart-Webhook-Signatur (HMAC-SHA256, Hex) rein mit Web Crypto — identisches
@@ -4557,22 +4634,17 @@ async function handleDigistore24Webhook(request, url, env, cors) {
  */
 async function verifyCopecartSignature(rawBody, signatureHeader, secret) {
   if (!signatureHeader) return { valid: false, reason: 'missing_header' };
-
-  let expectedSig;
-  try {
-    expectedSig = hexToBytes(signatureHeader.trim());
-  } catch (e) {
-    return { valid: false, reason: 'malformed_signature' };
-  }
-
+  // Offizielles Format (CopeCart IPN-Doku v1.6.7): Base64(HMAC-SHA256(body, secret)). Hex wird
+  // zusätzlich akzeptiert — so verifizierte die erste Implementierung, und beides ist derselbe
+  // HMAC, nur anders kodiert (kein Sicherheitsverlust).
   const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['verify']
+    'raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
   );
-  const valid = await crypto.subtle.verify('HMAC', key, expectedSig, new TextEncoder().encode(rawBody));
+  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(rawBody)));
+  const b64 = btoa(String.fromCharCode(...mac));
+  const hex = Array.from(mac).map(x => x.toString(16).padStart(2, '0')).join('');
+  const erhalten = signatureHeader.trim();
+  const valid = timingSafeEqualHex(erhalten, b64) || timingSafeEqualHex(erhalten.toLowerCase(), hex);
   return { valid, ...(valid ? {} : { reason: 'signature_mismatch' }) };
 }
 
@@ -4586,23 +4658,33 @@ async function verifyCopecartSignature(rawBody, signatureHeader, secret) {
  * @param {object} event - komplettes CopeCart-Event-Objekt (bereits geparst)
  * @returns {object}
  */
-function copecartEventToBeleg(event) {
-  const productName = event.product?.name || 'CopeCart-Produkt';
-  const email = event.customer?.email || null;
-  const zahlungsDatum = event.created_at ? new Date(event.created_at) : new Date();
+const COPECART_ERSTATTUNG_EVENTS = new Set(['payment.refunded', 'payment.charged_back']);
+
+function copecartEventToBeleg(event, mwstSetting = '19', istErstattung = false) {
+  const productName = event.product_name || 'CopeCart-Produkt';
+  const email = event.buyer_email || null;
+  const zahlungsDatum = new Date(event.transaction_date || event.transaction_processed_at || event.order_date || Date.now());
   const gueltigesDatum = isNaN(zahlungsDatum.getTime()) ? new Date() : zahlungsDatum;
   const monatJahr = BERLIN_MONAT_JAHR_FORMATTER.format(gueltigesDatum);
 
+  // Wiederverkäufer-Modell (siehe plattformAnteilBrutto): CopeCart schreibt dem Verkäufer eine
+  // Gutschrift über den Netto-Anteil `transaction_earned_amount` (Fallback `earned_amount`).
+  const nettoAnteil = parseFloat(event.transaction_earned_amount ?? event.earned_amount);
+  const betrag = !isNaN(nettoAnteil) && nettoAnteil !== 0
+    ? plattformAnteilBrutto(nettoAnteil, mwstSetting)
+    : Math.abs(parseFloat(event.transaction_amount) || 0);
+
   return {
-    typ: 'rechnung_ausgehend',
-    betrag: (event.payment?.amount || 0) / 100,
-    absender: email || 'CopeCart-Kunde',
+    typ: istErstattung ? 'rechnung_eingehend' : 'rechnung_ausgehend',
+    betrag,
+    absender: 'CopeCart GmbH',
+    rechnungsnr: event.order_id || '',
     bezahlt: true,
     bezahlt_am: berlinDatumAlsString(gueltigesDatum),
     mwst_satz: 'keine',
     quelle: 'copecart_webhook',
-    name: `CopeCart: ${productName} ${monatJahr}`,
-    buchungstext: `CopeCart: ${productName}${email ? ` – ${email}` : ''}`
+    name: istErstattung ? `CopeCart-Rückerstattung: ${productName} ${monatJahr}` : `CopeCart: ${productName} ${monatJahr}`,
+    buchungstext: `CopeCart-${istErstattung ? 'Rückerstattung' : 'Gutschrift'} (Verkäuferanteil): ${productName}${email ? ` – ${email}` : ''}`
   };
 }
 
@@ -4638,9 +4720,7 @@ async function handleCopecartWebhook(request, url, env, cors) {
     const sigCheck = await verifyCopecartSignature(rawBody, request.headers.get('X-Copecart-Signature'), webhookSecret);
     if (!sigCheck.valid) {
       console.warn('CopeCart-Webhook Signaturprüfung fehlgeschlagen:', sigCheck.reason, 'userId=', userId);
-      return new Response(JSON.stringify({ error: 'Invalid signature' }), {
-        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
-      });
+      return ipnFehler(cors, 400, 'invalid signature');
     }
 
     // Erst NACH erfolgreicher Signaturprüfung parsen — ungeprüfte Bytes werden nie interpretiert.
@@ -4648,63 +4728,55 @@ async function handleCopecartWebhook(request, url, env, cors) {
     try {
       event = JSON.parse(rawBody);
     } catch (e) {
-      return new Response(JSON.stringify({ error: 'Invalid JSON' }), {
-        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
-      });
+      return ipnFehler(cors, 400, 'invalid json');
     }
 
-    if (!event.id) {
-      return new Response(JSON.stringify({ error: 'Missing id' }), {
-        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
-      });
+    const eventType = String(event.event_type || '');
+    const istErstattung = COPECART_ERSTATTUNG_EVENTS.has(eventType);
+    const istZahlung = eventType === 'payment.made' || (eventType === 'payment.trial' && event.payment_status === 'paid');
+    // Alles andere (pending, failed, recurring.cancelled, …) ist keine Buchung — trotzdem "OK",
+    // sonst wiederholt CopeCart den Aufruf 10× in 3 Stunden.
+    if (!istZahlung && !istErstattung) return ipnOk(cors);
+
+    // Testzahlungen nie als echte Einnahme buchen.
+    if (event.test_payment === true || event.test_payment === 'true' || String(event.payment_status || '').startsWith('test_') || event.payment_method === 'test') {
+      return ipnOk(cors);
     }
 
-    if (await isAlreadyProcessed(userId, event.id, adminToken)) {
-      return new Response(JSON.stringify({ received: true, dedup: true }), {
-        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
-      });
+    const transactionId = event.transaction_id;
+    if (!transactionId) return ipnFehler(cors, 400, 'missing transaction_id');
+    const dedupKey = `copecart_${transactionId}_${eventType}`.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    if (await isAlreadyProcessed(userId, dedupKey, adminToken)) return ipnOk(cors);
+
+    const mwstSetting = firestoreValue(configFields.mwst_setting) || '19';
+    const belegData = copecartEventToBeleg(event, mwstSetting, istErstattung);
+
+    if (!istErstattung) {
+      const { mwst_satz, kategorie } = resolveMwstKategorie(mwstSetting);
+      belegData.mwst_satz = mwst_satz;
+      belegData.kategorie = kategorie;
+      try {
+        const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
+        const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
+        belegData.sachkonto = resolveSachkonto(kategorie, skr) || '';
+      } catch (e) {
+        console.warn('CopeCart-Webhook: datev_skr-Lookup fehlgeschlagen, sachkonto bleibt leer:', e.message);
+      }
     }
 
-    if (event.event !== 'order.completed') {
-      // z.B. order.refunded, order.chargeback, ... — trotzdem 200, sonst retryt CopeCart
-      // sinnlos ein Event, das wir nie verarbeiten werden (analoges Muster zu handleStripeWebhook).
-      return new Response(JSON.stringify({ received: true, ignored: event.event || 'unknown' }), {
-        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
-      });
-    }
-
-    const belegData = copecartEventToBeleg(event);
-
-    // ── MwSt-Setting + Sachkonto — identisches Muster wie bei den anderen Plattformen ────────
-    const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(configFields.mwst_setting));
-    belegData.mwst_satz = mwst_satz;
-    belegData.kategorie = kategorie;
-    try {
-      const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
-      const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
-      belegData.sachkonto = resolveSachkonto(kategorie, skr) || '';
-    } catch (e) {
-      console.warn('CopeCart-Webhook: datev_skr-Lookup fehlgeschlagen, sachkonto bleibt leer:', e.message);
-    }
+    if (!(belegData.betrag > 0)) return ipnOk(cors);
 
     const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
-    // Als verarbeitet markieren SOBALD der Beleg sicher gespeichert ist — identische Abwägung wie
-    // bei den anderen Plattformen (siehe handleStripeWebhook für die ausführliche Begründung).
-    await markAsProcessed(userId, event.id, adminToken);
+    await markAsProcessed(userId, dedupKey, adminToken);
     await incrementWebhookBelegCount(userId, env);
 
     if (result.tagesbewegungWarnung) {
       console.error('CopeCart-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
     }
-
-    return new Response(JSON.stringify({ received: true, docId: result.docId }), {
-      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
-    });
+    return ipnOk(cors);
   } catch (e) {
     console.error('handleCopecartWebhook Error:', e.message, e.stack);
-    return new Response(JSON.stringify({ error: 'Server error' }), {
-      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
-    });
+    return ipnFehler(cors, 500, 'server error');
   }
 }
 
@@ -4769,7 +4841,7 @@ async function getPaypalAccessToken(clientId, clientSecret) {
  * @returns {Promise<{status: 'valid'|'invalid'|'verification_unavailable'}>}
  */
 async function verifyPaypalWebhookSignature(request, event, config) {
-  if (config.clientId.startsWith('test_')) {
+  if (config.testmodus && config.clientId.startsWith('test_')) {
     return { status: 'valid' };
   }
 
@@ -4924,7 +4996,7 @@ async function handlePaypalWebhook(request, url, env, cors) {
       });
     }
 
-    const verifyResult = await verifyPaypalWebhookSignature(request, event, { clientId, clientSecret, webhookId });
+    const verifyResult = await verifyPaypalWebhookSignature(request, event, { clientId, clientSecret, webhookId, testmodus: webhookTestmodus(env) });
     if (verifyResult.status === 'invalid') {
       console.warn('PayPal-Webhook Signaturprüfung fehlgeschlagen: userId=', userId, 'eventId=', event.id);
       return new Response(JSON.stringify({ error: 'Invalid signature' }), {
@@ -4932,35 +5004,45 @@ async function handlePaypalWebhook(request, url, env, cors) {
       });
     }
     if (verifyResult.status === 'verification_unavailable') {
-      // Siehe Sektions-Kommentar: bewusst 200 OHNE Beleg, sonst retryt PayPal endlos gegen eine
-      // gerade nicht erreichbare Verifikations-API.
-      console.error('PayPal-Webhook: Verifikation nicht verfügbar — kein Beleg angelegt. userId=', userId, 'eventId=', event.id);
-      return new Response(JSON.stringify({ received: true, verificationUnavailable: true }), {
-        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      // 503 (Integrations-Audit 2026-09-26, vorher 200): Mit 200 galt das Event für PayPal als
+      // zugestellt — war die Verifikations-API nur kurz gestört, ging die Zahlung dauerhaft
+      // verloren. PayPal wiederholt nicht-2xx-Zustellungen begrenzt (bis zu 25× über 3 Tage),
+      // ein "endloser" Retry-Sturm entsteht dadurch nicht.
+      console.error('PayPal-Webhook: Verifikation nicht verfügbar — Retry angefordert. userId=', userId, 'eventId=', event.id);
+      return new Response(JSON.stringify({ error: 'Verification unavailable, retry later' }), {
+        status: 503, headers: { ...cors, 'Content-Type': 'application/json' }
       });
     }
 
     // Case-sensitive geprüft (laut Aufgabenstellung: Event-Typ ist GROSSBUCHSTABEN) — nur
     // PAYMENT.CAPTURE.COMPLETED bucht, alles andere (PAYMENT.CAPTURE.DENIED, ...REFUNDED, ...)
     // trotzdem 200, sonst retryt PayPal sinnlos ein Event, das wir nie verarbeiten werden.
-    if (event.event_type !== 'PAYMENT.CAPTURE.COMPLETED') {
+    // PAYMENT.CAPTURE.REFUNDED (seit 2026-09-26) bucht die Erstattung als Geldabfluss, analog zu
+    // Stripes charge.refunded — vorher wurde sie ignoriert und die Einnahme blieb zu hoch.
+    const istErstattung = event.event_type === 'PAYMENT.CAPTURE.REFUNDED';
+    if (event.event_type !== 'PAYMENT.CAPTURE.COMPLETED' && !istErstattung) {
       return new Response(JSON.stringify({ received: true, ignored: event.event_type || 'unknown' }), {
         status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
       });
     }
 
     const belegData = paypalEventToBeleg(event);
-
-    // ── MwSt-Setting + Sachkonto — identisches Muster wie bei den anderen Plattformen ────────
-    const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(configFields.mwst_setting));
-    belegData.mwst_satz = mwst_satz;
-    belegData.kategorie = kategorie;
-    try {
-      const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
-      const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
-      belegData.sachkonto = resolveSachkonto(kategorie, skr) || '';
-    } catch (e) {
-      console.warn('PayPal-Webhook: datev_skr-Lookup fehlgeschlagen, sachkonto bleibt leer:', e.message);
+    if (istErstattung) {
+      belegData.typ = 'rechnung_eingehend';
+      belegData.name = belegData.name.replace(/^PayPal(-Zahlung|:)/, 'PayPal-Rückerstattung');
+      belegData.buchungstext = `PayPal-Rückerstattung${belegData.absender && belegData.absender !== 'PayPal-Kunde' ? ` an ${belegData.absender}` : ''}`;
+    } else {
+      // ── MwSt-Setting + Sachkonto — identisches Muster wie bei den anderen Plattformen ────────
+      const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(configFields.mwst_setting));
+      belegData.mwst_satz = mwst_satz;
+      belegData.kategorie = kategorie;
+      try {
+        const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
+        const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
+        belegData.sachkonto = resolveSachkonto(kategorie, skr) || '';
+      } catch (e) {
+        console.warn('PayPal-Webhook: datev_skr-Lookup fehlgeschlagen, sachkonto bleibt leer:', e.message);
+      }
     }
 
     const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
@@ -4987,184 +5069,189 @@ async function handlePaypalWebhook(request, url, env, cors) {
 // ════════════════════════════════════════════════════════════════════════
 // ── SUMUP-INTEGRATION ───────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════
-// SumUp schickt application/json mit einem `X-SumUp-Signature`-Header im Format "sha256=<hex>" —
-// HMAC-SHA256 über den rohen Body, identisches Muster zu CopeCarts verifyCopecartSignature, nur
-// mit einem "sha256="-Präfix vor dem eigentlichen Hex-Digest (den man vor hexToBytes() abstreifen
-// muss). rawBody muss wie bei Stripe/CopeCart vor dem JSON.parse gelesen werden.
+// SumUp-Umsätze werden per API abgeholt (Cron alle 3 Stunden + sofort beim Speichern), nicht per
+// Webhook: SumUp sendet Webhooks nur für per API erstellte Online-Checkouts — unsigniert und nur
+// mit einer Checkout-ID —, Zahlungen am Kartenterminal lösen gar keinen aus (Integrations-Audit
+// 2026-09-26, geprüft gegen developer.sumup.com). Der Nutzer hinterlegt einen API-Key
+// (SumUp-Dashboard → Entwickler → API-Schlüssel), Kontolux liest damit /transactions/history.
 
-/**
- * Verifiziert eine SumUp-Webhook-Signatur (HMAC-SHA256, Hex mit "sha256="-Präfix) rein mit Web
- * Crypto — identisches Muster zu verifyCopecartSignature, nur mit dem zusätzlichen Präfix-Abstreifen.
- * @param {string} rawBody - unverändertes Body-Text (NICHT re-serialisiertes JSON)
- * @param {string} signatureHeader - Wert des "X-SumUp-Signature"-Headers, z.B. "sha256=abcd..."
- * @param {string} secret - Webhook-Secret aus den Integrationen-Settings
- * @returns {Promise<{valid: boolean, reason?: string}>}
- */
-async function verifySumupSignature(rawBody, signatureHeader, secret) {
-  if (!signatureHeader) return { valid: false, reason: 'missing_header' };
-  const PREFIX = 'sha256=';
-  if (!signatureHeader.startsWith(PREFIX)) return { valid: false, reason: 'malformed_header' };
-  const hexSig = signatureHeader.slice(PREFIX.length).trim();
+const SUMUP_API = 'https://api.sumup.com';
+const SUMUP_SYNC_CRON = '15 */3 * * *'; // alle 3 Stunden — muss exakt zu wrangler.toml [triggers] passen
+// KV-Schlüssel mit allen Nutzer-IDs, deren SumUp-Abruf aktiv ist (für den Cron-Durchlauf) —
+// Firestore bietet ohne Collection-Group-Index keine "alle Nutzer mit SumUp aktiv"-Abfrage.
+const SUMUP_SYNC_KV_KEY = 'sumup_sync_uids';
 
-  let expectedSig;
+async function sumupGet(pfad, apiKey) {
+  const res = await fetch(`${SUMUP_API}${pfad}`, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Accept': 'application/json' } });
+  if (!res.ok) throw new Error(`SumUp-API ${res.status} für ${pfad.split('?')[0]}`);
+  return res.json();
+}
+
+/** Händler-Code zum API-Key (für die Transaktions-Endpunkte nötig) — prüft damit zugleich den Key. */
+async function sumupMerchantCode(apiKey) {
   try {
-    expectedSig = hexToBytes(hexSig);
-  } catch (e) {
-    return { valid: false, reason: 'malformed_signature' };
-  }
-
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['verify']
-  );
-  const valid = await crypto.subtle.verify('HMAC', key, expectedSig, new TextEncoder().encode(rawBody));
-  return { valid, ...(valid ? {} : { reason: 'signature_mismatch' }) };
+    const me = await sumupGet('/v0.1/me', apiKey);
+    const code = me?.merchant_profile?.merchant_code || me?.merchant_code;
+    if (code) return code;
+  } catch (e) { /* Fallback unten */ }
+  const profil = await sumupGet('/v0.1/me/merchant-profile', apiKey);
+  if (!profil?.merchant_code) throw new Error('SumUp: kein merchant_code');
+  return profil.merchant_code;
 }
 
 /**
- * Wandelt ein bereits signatur-verifiziertes SumUp "PAYMENT"/"SUCCESSFUL"-Event in ein Beleg-
- * Objekt für writeBelegAsAdmin() um — reine Funktion, einzeln testbar, analog zu
- * copecartEventToBeleg/paypalEventToBeleg.
- * mwst_satz ist hier nur ein Platzhalter ('keine'), kategorie wird hier gar nicht gesetzt —
- * handleSumupWebhook ergänzt/überschreibt beide direkt nach diesem Aufruf mit
- * resolveMwstKategorie() (identisches Muster wie bei den anderen Plattformen).
- * @param {object} event - komplettes SumUp-Event-Objekt (bereits geparst)
- * @returns {object}
+ * SumUp-Transaktion (Eintrag aus /transactions/history) → Beleg, oder null wenn (noch) nichts
+ * zu buchen ist. PAYMENT mit Status SUCCESSFUL/REFUNDED/PAID_OUT (eine später erstattete Zahlung
+ * war trotzdem erst eine Einnahme; die Erstattung kommt als eigener REFUND-Eintrag) → Einnahme;
+ * REFUND/CHARGE_BACK → Rückerstattung (Geldabfluss, typ 'rechnung_eingehend' wie bei Stripe).
+ * Reine Funktion, einzeln testbar.
  */
-function sumupEventToBeleg(event) {
-  const payload = event.payload || {};
-  const description = payload.description || null;
-  const email = payload.customer?.email || null;
-  const last4 = payload.card?.last_4_digits || null;
-  const zahlungsDatum = payload.timestamp ? new Date(payload.timestamp) : new Date();
-  const gueltigesDatum = isNaN(zahlungsDatum.getTime()) ? new Date() : zahlungsDatum;
+function sumupTransaktionZuBeleg(item) {
+  const typ = String(item.type || 'PAYMENT').toUpperCase();
+  const status = String(item.status || '').toUpperCase();
+  if (['FAILED', 'CANCELLED', 'PENDING'].includes(status)) return null;
+  const istErstattung = typ === 'REFUND' || typ === 'CHARGE_BACK';
+  if (!istErstattung && typ !== 'PAYMENT') return null;
+  if (!istErstattung && !['SUCCESSFUL', 'REFUNDED', 'PAID_OUT'].includes(status)) return null;
+  const betrag = Math.abs(parseFloat(item.amount) || 0);
+  if (!(betrag > 0)) return null;
+  const datum = new Date(item.timestamp || Date.now());
+  const gueltigesDatum = isNaN(datum.getTime()) ? new Date() : datum;
   const monatJahr = BERLIN_MONAT_JAHR_FORMATTER.format(gueltigesDatum);
-  const betrag = parseFloat(payload.amount) || 0;
-
-  // Reihenfolge laut Aufgabenstellung: E-Mail-basierter Buchungstext hat Vorrang vor dem
-  // Karten-Buchungstext — beide sind optional (Kartenzahlung am Terminal hat oft keine
-  // Kunden-E-Mail), deshalb ein zusätzlicher dritter Fallback (analog zum Namensfeld), falls
-  // SumUp keins von beidem mitliefert.
-  let buchungstext;
-  if (email) buchungstext = `SumUp-Zahlung von ${email}`;
-  else if (last4) buchungstext = `SumUp-Kartenzahlung ****${last4}`;
-  else buchungstext = `SumUp-Zahlung ${monatJahr}`;
-
+  const code = item.transaction_code || '';
+  const art = item.payment_type === 'CASH' ? 'Barzahlung' : item.payment_type === 'ECOM' ? 'Online-Zahlung' : 'Kartenzahlung';
   return {
-    typ: 'rechnung_ausgehend',
+    typ: istErstattung ? 'rechnung_eingehend' : 'rechnung_ausgehend',
     betrag,
-    absender: email || 'SumUp-Kunde',
+    absender: 'SumUp-Kunde',
+    rechnungsnr: code,
     bezahlt: true,
     bezahlt_am: berlinDatumAlsString(gueltigesDatum),
     mwst_satz: 'keine',
     quelle: 'sumup_webhook',
-    name: description ? `SumUp: ${description} ${monatJahr}` : `SumUp-Zahlung ${monatJahr}`,
-    buchungstext
+    name: istErstattung ? `SumUp-Rückerstattung ${monatJahr}` : `SumUp-${art} ${monatJahr}`,
+    buchungstext: istErstattung
+      ? `SumUp-${typ === 'CHARGE_BACK' ? 'Rückbuchung' : 'Rückerstattung'}${code ? ` ${code}` : ''}`
+      : `SumUp-${art}${code ? ` ${code}` : ''}`
   };
 }
 
 /**
- * Haupt-Handler für POST /webhook/sumup/{userId}/{urlSecret}. Kein Firebase-Token (externer
- * Server) — Auth läuft zweistufig wie bei den anderen Plattformen: der URL-Secret lehnt geratene/
- * falsche Pfade billig ab (generische 404), die eigentliche Sicherheitsgrenze ist die HMAC-
- * Signaturprüfung danach (siehe verifySumupSignature).
+ * Holt neue SumUp-Transaktionen eines Nutzers ab und bucht sie. Startpunkt ist `sync_cursor`
+ * (Zeitstempel der zuletzt verarbeiteten Transaktion) bzw. beim ersten Lauf `sync_seit` (Moment
+ * der Aktivierung — ältere Umsätze werden bewusst NICHT nachgebucht, sie sind meist schon manuell
+ * erfasst). oldest_time ist inklusive, die letzte Transaktion kommt also erneut — die Dedup-
+ * Sammlung verhindert die Doppelbuchung. Bei einer noch offenen (PENDING) Transaktion bleibt der
+ * Cursor davor stehen, damit sie beim nächsten Lauf mit ihrem Endstatus gebucht wird.
+ * @returns {Promise<{gebucht: number, uebersprungen?: string}>}
+ */
+async function syncSumupFuerNutzer(userId, env, adminToken) {
+  const docPath = `users/${userId}/webhook_secrets/sumup`;
+  const cfgDoc = await firestoreGetDoc(docPath, adminToken);
+  const f = cfgDoc?.fields || {};
+  const apiKey = firestoreValue(f.api_key);
+  const merchantCode = firestoreValue(f.merchant_code);
+  if (firestoreValue(f.enabled) !== true || !apiKey || !merchantCode) return { gebucht: 0, uebersprungen: 'nicht_aktiv' };
+
+  const seit = firestoreValue(f.sync_cursor) || firestoreValue(f.sync_seit) || new Date().toISOString();
+  const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(f.mwst_setting) || '19');
+  let sachkonto = '';
+  try {
+    const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
+    sachkonto = resolveSachkonto(kategorie, firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03') || '';
+  } catch (e) { /* Sachkonto bleibt leer, Beleg trotzdem buchen */ }
+
+  const basis = `/v2.1/merchants/${encodeURIComponent(merchantCode)}/transactions/history`;
+  let query = `?order=ascending&limit=100&oldest_time=${encodeURIComponent(seit)}&types[]=PAYMENT&types[]=REFUND&types[]=CHARGE_BACK`;
+  let cursor = seit;
+  let cursorGesperrt = false;
+  let gebucht = 0;
+
+  for (let seite = 0; seite < 10 && query; seite++) {
+    const daten = await sumupGet(basis + query, apiKey);
+    for (const item of daten?.items || []) {
+      if (String(item.status || '').toUpperCase() === 'PENDING') { cursorGesperrt = true; continue; }
+      if (!cursorGesperrt && item.timestamp) cursor = item.timestamp;
+      const belegData = sumupTransaktionZuBeleg(item);
+      if (!belegData) continue;
+      const dedupKey = `sumup_${item.transaction_id || item.id || item.transaction_code}_${String(item.type || 'PAYMENT').toUpperCase()}`.replace(/[^a-zA-Z0-9_.-]/g, '_');
+      if (await isAlreadyProcessed(userId, dedupKey, adminToken)) continue;
+      if (belegData.typ === 'rechnung_ausgehend') {
+        belegData.mwst_satz = mwst_satz;
+        belegData.kategorie = kategorie;
+        if (sachkonto) belegData.sachkonto = sachkonto;
+      }
+      await writeBelegAsAdmin(userId, belegData, env, adminToken);
+      await markAsProcessed(userId, dedupKey, adminToken);
+      await incrementWebhookBelegCount(userId, env);
+      gebucht++;
+    }
+    const next = (daten?.links || []).find(l => l.rel === 'next')?.href;
+    query = next ? (next.includes('?') ? next.slice(next.indexOf('?')) : null) : null;
+  }
+
+  const mask = ['sync_cursor', 'sync_letzter_lauf'].map(k => `updateMask.fieldPaths=${k}`).join('&');
+  await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/${docPath}?${mask}`, {
+    method: 'PATCH',
+    headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields: { sync_cursor: { stringValue: cursor }, sync_letzter_lauf: { timestampValue: new Date().toISOString() } } })
+  });
+  return { gebucht };
+}
+
+async function registriereSumupSync(userId, env) {
+  const liste = JSON.parse((await env.PROFIL_KV.get(SUMUP_SYNC_KV_KEY)) || '[]');
+  if (!liste.includes(userId)) {
+    liste.push(userId);
+    await env.PROFIL_KV.put(SUMUP_SYNC_KV_KEY, JSON.stringify(liste));
+  }
+}
+
+/** Cron: alle registrierten Nutzer nacheinander abrufen; ein Fehler bei einem Nutzer stoppt die anderen nicht. */
+async function syncAlleSumupNutzer(env) {
+  const liste = JSON.parse((await env.PROFIL_KV.get(SUMUP_SYNC_KV_KEY)) || '[]');
+  if (!liste.length) return;
+  const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+  const aktiv = [];
+  for (const uid of liste) {
+    try {
+      const r = await syncSumupFuerNutzer(uid, env, adminToken);
+      if (r.uebersprungen !== 'nicht_aktiv') aktiv.push(uid);
+      if (r.gebucht) console.log('SumUp-Abruf:', r.gebucht, 'Beleg(e) für', uid);
+    } catch (e) {
+      aktiv.push(uid); // vorübergehender Fehler (z.B. SumUp nicht erreichbar) → beim nächsten Lauf erneut
+      console.error('SumUp-Abruf fehlgeschlagen für', uid, e.message);
+    }
+  }
+  // Deaktivierte/gelöschte Nutzer aus der Liste entfernen
+  if (aktiv.length !== liste.length) await env.PROFIL_KV.put(SUMUP_SYNC_KV_KEY, JSON.stringify(aktiv));
+}
+
+/**
+ * POST /webhook/sumup/{userId}/{urlSecret} — SumUp sendet Webhooks nur für Online-Checkouts, ohne
+ * Signatur und nur mit einer Checkout-ID (developer.sumup.com/online-payments/webhooks). Dem
+ * Inhalt wird deshalb NICHT vertraut: ein Aufruf löst lediglich einen sofortigen Abruf über die
+ * API aus (dieselbe Logik wie der Cron), gebucht wird nur, was SumUp dort selbst meldet.
+ * Antwort: leeres 2xx, wie von SumUp verlangt.
  */
 async function handleSumupWebhook(request, url, env, cors) {
   const segments = url.pathname.split('/').filter(Boolean); // ['webhook','sumup',userId,urlSecret]
   const userId = segments[2];
   const urlSecret = segments[3];
-  if (!userId || !urlSecret) {
-    return new Response('Not found', { status: 404, headers: cors });
-  }
-
+  if (!userId || !urlSecret) return new Response('Not found', { status: 404, headers: cors });
   try {
     const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
-    const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/sumup`, adminToken);
-    const configFields = configDoc?.fields || {};
-    const storedUrlSecret = firestoreValue(configFields.url_secret);
-    const webhookSecret = firestoreValue(configFields.webhook_secret);
-    const enabled = firestoreValue(configFields.enabled) === true;
-
-    if (!enabled || !storedUrlSecret || storedUrlSecret !== urlSecret || !webhookSecret) {
+    const cfgDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/sumup`, adminToken);
+    const storedUrlSecret = firestoreValue(cfgDoc?.fields?.url_secret);
+    if (!storedUrlSecret || storedUrlSecret !== urlSecret || firestoreValue(cfgDoc?.fields?.enabled) !== true) {
       return new Response('Not found', { status: 404, headers: cors });
     }
-
-    // Roher Body als Text — NICHT request.json(), die Signatur ist über die exakten Bytes
-    // berechnet (siehe verifySumupSignature).
-    const rawBody = await request.text();
-    const sigCheck = await verifySumupSignature(rawBody, request.headers.get('X-SumUp-Signature'), webhookSecret);
-    if (!sigCheck.valid) {
-      console.warn('SumUp-Webhook Signaturprüfung fehlgeschlagen:', sigCheck.reason, 'userId=', userId);
-      return new Response(JSON.stringify({ error: 'Invalid signature' }), {
-        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
-      });
-    }
-
-    // Erst NACH erfolgreicher Signaturprüfung parsen — ungeprüfte Bytes werden nie interpretiert.
-    let event;
-    try {
-      event = JSON.parse(rawBody);
-    } catch (e) {
-      return new Response(JSON.stringify({ error: 'Invalid JSON' }), {
-        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
-      });
-    }
-
-    if (!event.id) {
-      return new Response(JSON.stringify({ error: 'Missing id' }), {
-        status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
-      });
-    }
-
-    if (await isAlreadyProcessed(userId, event.id, adminToken)) {
-      return new Response(JSON.stringify({ received: true, dedup: true }), {
-        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
-      });
-    }
-
-    if (event.event_type !== 'PAYMENT' || event.payload?.status !== 'SUCCESSFUL') {
-      // z.B. PAYMENT/FAILED, REFUND, ... — trotzdem 200, sonst retryt SumUp sinnlos ein Event,
-      // das wir nie verarbeiten werden (analoges Muster zu handleStripeWebhook).
-      return new Response(JSON.stringify({ received: true, ignored: `${event.event_type || 'unknown'}/${event.payload?.status || 'unknown'}` }), {
-        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
-      });
-    }
-
-    const belegData = sumupEventToBeleg(event);
-
-    // ── MwSt-Setting + Sachkonto — identisches Muster wie bei den anderen Plattformen ────────
-    const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(configFields.mwst_setting));
-    belegData.mwst_satz = mwst_satz;
-    belegData.kategorie = kategorie;
-    try {
-      const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
-      const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
-      belegData.sachkonto = resolveSachkonto(kategorie, skr) || '';
-    } catch (e) {
-      console.warn('SumUp-Webhook: datev_skr-Lookup fehlgeschlagen, sachkonto bleibt leer:', e.message);
-    }
-
-    const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
-    // Als verarbeitet markieren SOBALD der Beleg sicher gespeichert ist — identische Abwägung wie
-    // bei den anderen Plattformen (siehe handleStripeWebhook für die ausführliche Begründung).
-    await markAsProcessed(userId, event.id, adminToken);
-    await incrementWebhookBelegCount(userId, env);
-
-    if (result.tagesbewegungWarnung) {
-      console.error('SumUp-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
-    }
-
-    return new Response(JSON.stringify({ received: true, docId: result.docId }), {
-      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
-    });
+    await syncSumupFuerNutzer(userId, env, adminToken);
+    return new Response(null, { status: 204, headers: cors });
   } catch (e) {
-    console.error('handleSumupWebhook Error:', e.message, e.stack);
-    return new Response(JSON.stringify({ error: 'Server error' }), {
-      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
-    });
+    console.error('handleSumupWebhook Error:', e.message);
+    // 204 statt 5xx: der nächste Cron-Lauf holt die Zahlung ohnehin ab, Retries brächten nichts.
+    return new Response(null, { status: 204, headers: cors });
   }
 }
 
@@ -5224,11 +5311,44 @@ function ablefyEventKey(orderId, eventType, createdAt) {
  * @param {boolean} istRueckerstattung
  * @returns {object}
  */
+/**
+ * Ablefy-Body robust lesen: JSON oder application/x-www-form-urlencoded mit Klammer-Schlüsseln
+ * (`product[name]=…`, `payer[email]=…`) — Ablefy dokumentiert das Format nicht verbindlich,
+ * Make/Zapier-Beispiele zeigen beides. Gibt null zurück, wenn beides scheitert.
+ */
+function parseAblefyBody(text) {
+  const roh = String(text || '').trim();
+  if (!roh) return null;
+  if (roh.startsWith('{')) {
+    try { return JSON.parse(roh); } catch (e) { return null; }
+  }
+  const obj = {};
+  for (const [schluessel, wert] of new URLSearchParams(roh)) {
+    const teile = schluessel.replace(/\]/g, '').split('[');
+    let ziel = obj;
+    teile.forEach((teil, i) => {
+      if (i === teile.length - 1) ziel[teil] = wert;
+      else ziel = (ziel[teil] = typeof ziel[teil] === 'object' && ziel[teil] !== null ? ziel[teil] : {});
+    });
+  }
+  return Object.keys(obj).length ? obj : null;
+}
+
+/** Ablefy-Datum: "25.06.2026 14:54" (laut Ablefy-Doku) oder ISO — ungültig → jetzt. */
+function parseAblefyDatum(raw) {
+  const m = String(raw || '').match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:[ T](\d{1,2}):(\d{2}))?/);
+  if (m) {
+    const d = new Date(Date.UTC(+m[3], +m[2] - 1, +m[1], +(m[4] || 12), +(m[5] || 0)));
+    return isNaN(d.getTime()) ? new Date() : d;
+  }
+  const d = raw ? new Date(raw) : new Date();
+  return isNaN(d.getTime()) ? new Date() : d;
+}
+
 function ablefyEventToBeleg(payload, istRueckerstattung) {
   const productName = payload.product?.name || null;
-  const email = payload.email || null;
-  const zahlungsDatum = payload.created_at ? new Date(payload.created_at) : new Date();
-  const gueltigesDatum = isNaN(zahlungsDatum.getTime()) ? new Date() : zahlungsDatum;
+  const email = payload.payer?.email || payload.email || null;
+  const gueltigesDatum = parseAblefyDatum(payload.success_date || payload.created_at);
   const monatJahr = BERLIN_MONAT_JAHR_FORMATTER.format(gueltigesDatum);
   const betrag = parseFloat(payload.amount) || 0;
   const quelle = 'ablefy_webhook';
@@ -5291,11 +5411,9 @@ async function handleAblefyWebhook(request, url, env, cors) {
       return new Response('Not found', { status: 404, headers: cors });
     }
 
-    let payload;
-    try {
-      payload = JSON.parse(await request.text());
-    } catch (e) {
-      return new Response(JSON.stringify({ error: 'Invalid JSON' }), {
+    const payload = parseAblefyBody(await request.text());
+    if (!payload) {
+      return new Response(JSON.stringify({ error: 'Invalid body' }), {
         status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
       });
     }

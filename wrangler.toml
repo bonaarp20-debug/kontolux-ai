@@ -21,7 +21,7 @@ binding = "PDF_RESULTS"
 id = "ee721a489b6f41ada490ff65e31104ed"
 
 [triggers]
-crons = ["0 8 1 * *"]
+crons = ["0 8 1 * *", "15 */3 * * *"]
 
 [vars]
 ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
