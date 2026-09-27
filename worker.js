@@ -178,28 +178,28 @@ export default {
     // abweichenden Hash ergeben. Details/Abwägungen: docs/webhook_implementierungsplan.md
     // (Kontolux-Frontend-Repo).
     if (request.method === 'POST' && url.pathname.startsWith('/webhook/stripe/')) {
-      return handleStripeWebhook(request, url, env, cors);
+      return mitEmpfangsnachweis(handleStripeWebhook(request, url, env, cors), url, env);
     }
     if (request.method === 'POST' && url.pathname.startsWith('/webhook/mollie/')) {
-      return handleMollieWebhook(request, url, env, cors);
+      return mitEmpfangsnachweis(handleMollieWebhook(request, url, env, cors), url, env);
     }
     if (request.method === 'POST' && url.pathname.startsWith('/webhook/digistore24/')) {
-      return handleDigistore24Webhook(request, url, env, cors);
+      return mitEmpfangsnachweis(handleDigistore24Webhook(request, url, env, cors), url, env);
     }
     if (request.method === 'POST' && url.pathname.startsWith('/webhook/copecart/')) {
-      return handleCopecartWebhook(request, url, env, cors);
+      return mitEmpfangsnachweis(handleCopecartWebhook(request, url, env, cors), url, env);
     }
     if (request.method === 'POST' && url.pathname.startsWith('/webhook/paypal/')) {
-      return handlePaypalWebhook(request, url, env, cors);
+      return mitEmpfangsnachweis(handlePaypalWebhook(request, url, env, cors), url, env);
     }
     if (request.method === 'POST' && url.pathname.startsWith('/webhook/sumup/')) {
-      return handleSumupWebhook(request, url, env, cors);
+      return mitEmpfangsnachweis(handleSumupWebhook(request, url, env, cors), url, env);
     }
     if (request.method === 'POST' && url.pathname.startsWith('/webhook/ablefy/')) {
-      return handleAblefyWebhook(request, url, env, cors);
+      return mitEmpfangsnachweis(handleAblefyWebhook(request, url, env, cors), url, env);
     }
     if (request.method === 'POST' && url.pathname.startsWith('/webhook/shopify/')) {
-      return handleShopifyWebhook(request, url, env, cors);
+      return mitEmpfangsnachweis(handleShopifyWebhook(request, url, env, cors), url, env);
     }
 
     // Origin-Check — nur erlaubte Domains
@@ -3354,8 +3354,46 @@ function plattformAnteilBrutto(nettoAnteil, mwstSetting) {
 
 // Digistore24 und CopeCart werten einen IPN-Aufruf nur dann als erfolgreich, wenn die Antwort
 // exakt "OK" lautet — sonst gilt er als fehlgeschlagen und wird wiederholt (CopeCart: 10× in 3 h).
-function ipnOk(cors, status = 200) {
-  return new Response('OK', { status, headers: { ...cors, 'Content-Type': 'text/plain' } });
+function ipnOk(cors, status = 200, empfang = null) {
+  return new Response('OK', { status, headers: { ...cors, 'Content-Type': 'text/plain', ...(empfang ? { [EMPFANG_HEADER]: empfang } : {}) } });
+}
+
+// ── Empfangsnachweis je Integration (2026-09-27) ─────────────────────────────────────────
+// Jede Nachricht, die die Prüfung (URL-Secret + Signatur bzw. API-Abgleich) besteht, hinterlässt in
+// users/{uid}/webhook_secrets/{plattform} Zeitpunkt und Art des letzten Empfangs. Die App zeigt das
+// in der Integrationskarte ("Testzahlung empfangen – Verbindung funktioniert"). So lassen sich die
+// offiziellen Testwege der Plattformen (CopeCart-Testbestellung, Ablefy-0-€-Testkauf, Digistore24
+// "Verbindung testen") nachweisen, obwohl Test- und 0-€-Zahlungen bewusst nicht gebucht werden.
+// Handler setzen die Art über einen internen Antwort-Header, der Router schreibt sie und entfernt
+// den Header wieder, bevor die Antwort den Worker verlässt.
+const EMPFANG_HEADER = 'X-Kontolux-Empfang';
+async function merkeEmpfang(env, userId, plattform, art, info = '') {
+  if (!userId || !plattform || !WEBHOOK_SECRET_FELDER[plattform]) return;
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const mask = ['letzter_empfang', 'letzter_empfang_art', 'letzter_empfang_info'].map(k => `updateMask.fieldPaths=${k}`).join('&');
+    await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/webhook_secrets/${plattform}?${mask}&currentDocument.exists=true`, {
+      method: 'PATCH',
+      headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields: {
+        letzter_empfang: { timestampValue: new Date().toISOString() },
+        letzter_empfang_art: { stringValue: String(art).slice(0, 40) },
+        letzter_empfang_info: { stringValue: String(info || '').slice(0, 200) }
+      } })
+    });
+  } catch (e) { console.warn('Empfangsnachweis nicht gespeichert:', e.message); }
+}
+async function mitEmpfangsnachweis(antwortPromise, url, env) {
+  const res = await antwortPromise;
+  const art = res.headers.get(EMPFANG_HEADER);
+  if (res.status < 200 || res.status >= 300) return res;
+  const [, plattform, userId] = url.pathname.split('/').filter(Boolean);
+  // 'intern': der Handler hat den Nachweis schon selbst (genauer) geschrieben, z.B. SumUp-Abruf
+  if (art !== 'intern') await merkeEmpfang(env, userId, plattform, art || 'nachricht');
+  if (!art) return res;
+  const bereinigt = new Response(res.body, res);
+  bereinigt.headers.delete(EMPFANG_HEADER);
+  return bereinigt;
 }
 function ipnFehler(cors, status, text) {
   return new Response(`ERROR: ${text}`, { status, headers: { ...cors, 'Content-Type': 'text/plain' } });
@@ -3488,7 +3526,10 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
         // damit die UI schon beim ersten Laden denselben Wert vorausgewählt zeigt, den der
         // Worker auch tatsächlich verwenden würde, falls nie explizit gespeichert wurde.
         mwstSetting: firestoreValue(fields.mwst_setting) || '19',
-        ...(plattform === 'ablefy' ? { verkaufsmodell: firestoreValue(fields.verkaufsmodell) || null } : {})
+        ...(plattform === 'ablefy' ? { verkaufsmodell: firestoreValue(fields.verkaufsmodell) || null } : {}),
+        letzterEmpfang: firestoreValue(fields.letzter_empfang)
+          ? { zeit: firestoreValue(fields.letzter_empfang), art: firestoreValue(fields.letzter_empfang_art) || 'nachricht', info: firestoreValue(fields.letzter_empfang_info) || '' }
+          : null
       }), { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
     }
 
@@ -3545,7 +3586,7 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
         try {
           sumupMerchant = await sumupMerchantCode(body.apiKey.trim());
         } catch (e) {
-          return new Response(JSON.stringify({ error: 'SumUp hat den API-Key abgelehnt. Bitte prüfe ihn im SumUp-Dashboard unter Entwickler → API-Schlüssel.' }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+          return new Response(JSON.stringify({ error: 'SumUp hat den API-Key abgelehnt. Bitte prüfe ihn im SumUp-Dashboard unter Einstellungen → API-Schlüssel (me.sumup.com/settings/api-keys).' }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
         }
       }
       const existing = await firestoreGetDoc(docPath, adminToken);
@@ -3607,7 +3648,7 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
 
       if (plattform === 'sumup') {
         await registriereSumupSync(verifiedUid, env);
-        try { await syncSumupFuerNutzer(verifiedUid, env, adminToken); } catch (e) { console.warn('SumUp-Erstabruf fehlgeschlagen:', e.message); }
+        try { await syncSumupFuerNutzer(verifiedUid, env, adminToken); } catch (e) { console.warn('SumUp-Erstabruf fehlgeschlagen:', e.message); await merkeEmpfang(env, verifiedUid, 'sumup', 'abruf_fehler', e.message); }
       }
 
       return new Response(JSON.stringify({
@@ -4081,7 +4122,7 @@ async function handleStripeWebhook(request, url, env, cors) {
 
     if (await isAlreadyProcessed(userId, event.id, adminToken)) {
       return new Response(JSON.stringify({ received: true, dedup: true }), {
-        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json', [EMPFANG_HEADER]: 'duplikat' }
       });
     }
 
@@ -4154,7 +4195,7 @@ async function handleStripeWebhook(request, url, env, cors) {
     }
 
     return new Response(JSON.stringify({ received: true, docId: result.docId }), {
-      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      status: 200, headers: { ...cors, 'Content-Type': 'application/json', [EMPFANG_HEADER]: 'buchung' }
     });
   } catch (e) {
     console.error('handleStripeWebhook Error:', e.message, e.stack);
@@ -4422,7 +4463,7 @@ async function handleMollieWebhook(request, url, env, cors) {
     const erstattungen = await mollieErstattungenBuchen(userId, payment, apiKey, env, adminToken);
 
     return new Response(JSON.stringify({ received: true, ...(docId ? { docId } : { dedup: true }), ...(erstattungen ? { erstattungen } : {}) }), {
-      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      status: 200, headers: { ...cors, 'Content-Type': 'application/json', [EMPFANG_HEADER]: docId || erstattungen ? 'buchung' : 'duplikat' }
     });
   } catch (e) {
     console.error('handleMollieWebhook Error:', e.message, e.stack);
@@ -4628,7 +4669,7 @@ async function handleDigistore24Webhook(request, url, env, cors) {
 
     // "Verbindung testen" im Digistore24-Backend — erwartet laut Doku immer "OK". Kommt vor der
     // transaction_id-Prüfung (der Test hat keine), schreibt nichts, braucht daher keine Signatur.
-    if (eventRaw === 'connection_test') return ipnOk(cors);
+    if (eventRaw === 'connection_test') return ipnOk(cors, 200, 'verbindungstest');
 
     const sigCheck = await verifyDigistore24Signature(fields, passphrase);
     if (!sigCheck.valid) {
@@ -4637,7 +4678,7 @@ async function handleDigistore24Webhook(request, url, env, cors) {
     }
 
     // Testkäufe (api_mode=test) nie als echte Einnahme buchen.
-    if (String(fields.api_mode || '').toLowerCase() === 'test') return ipnOk(cors);
+    if (String(fields.api_mode || '').toLowerCase() === 'test') return ipnOk(cors, 200, 'testzahlung');
 
     const istErstattung = DIGISTORE24_ERSTATTUNG_EVENTS.has(eventRaw);
     if (!DIGISTORE24_BUCHEN_EVENTS.has(eventRaw) && !istErstattung) return ipnOk(cors);
@@ -4675,7 +4716,7 @@ async function handleDigistore24Webhook(request, url, env, cors) {
     if (result.tagesbewegungWarnung) {
       console.error('Digistore24-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
     }
-    return ipnOk(cors);
+    return ipnOk(cors, 200, 'buchung');
   } catch (e) {
     console.error('handleDigistore24Webhook Error:', e.message, e.stack);
     return ipnFehler(cors, 500, 'server error');
@@ -4816,13 +4857,13 @@ async function handleCopecartWebhook(request, url, env, cors) {
 
     // Testzahlungen nie als echte Einnahme buchen.
     if (event.test_payment === true || event.test_payment === 'true' || String(event.payment_status || '').startsWith('test_') || event.payment_method === 'test') {
-      return ipnOk(cors);
+      return ipnOk(cors, 200, 'testzahlung');
     }
 
     const transactionId = event.transaction_id;
     if (!transactionId) return ipnFehler(cors, 400, 'missing transaction_id');
     const dedupKey = `copecart_${transactionId}_${eventType}`.replace(/[^a-zA-Z0-9_.-]/g, '_');
-    if (await isAlreadyProcessed(userId, dedupKey, adminToken)) return ipnOk(cors);
+    if (await isAlreadyProcessed(userId, dedupKey, adminToken)) return ipnOk(cors, 200, 'duplikat');
 
     const mwstSetting = firestoreValue(configFields.mwst_setting) || '19';
     const belegData = copecartEventToBeleg(event, mwstSetting, istErstattung);
@@ -4849,7 +4890,7 @@ async function handleCopecartWebhook(request, url, env, cors) {
     if (result.tagesbewegungWarnung) {
       console.error('CopeCart-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
     }
-    return ipnOk(cors);
+    return ipnOk(cors, 200, 'buchung');
   } catch (e) {
     console.error('handleCopecartWebhook Error:', e.message, e.stack);
     return ipnFehler(cors, 500, 'server error');
@@ -5068,7 +5109,7 @@ async function handlePaypalWebhook(request, url, env, cors) {
 
     if (await isAlreadyProcessed(userId, event.id, adminToken)) {
       return new Response(JSON.stringify({ received: true, dedup: true }), {
-        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json', [EMPFANG_HEADER]: 'duplikat' }
       });
     }
 
@@ -5132,7 +5173,7 @@ async function handlePaypalWebhook(request, url, env, cors) {
     }
 
     return new Response(JSON.stringify({ received: true, docId: result.docId }), {
-      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      status: 200, headers: { ...cors, 'Content-Type': 'application/json', [EMPFANG_HEADER]: 'buchung' }
     });
   } catch (e) {
     console.error('handlePaypalWebhook Error:', e.message, e.stack);
@@ -5272,6 +5313,7 @@ async function syncSumupFuerNutzer(userId, env, adminToken) {
     headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ fields: { sync_cursor: { stringValue: cursor }, sync_letzter_lauf: { timestampValue: new Date().toISOString() } } })
   });
+  await merkeEmpfang(env, userId, 'sumup', 'abruf', `${gebucht} neue Umsätze`);
   return { gebucht };
 }
 
@@ -5297,6 +5339,7 @@ async function syncAlleSumupNutzer(env) {
     } catch (e) {
       aktiv.push(uid); // vorübergehender Fehler (z.B. SumUp nicht erreichbar) → beim nächsten Lauf erneut
       console.error('SumUp-Abruf fehlgeschlagen für', uid, e.message);
+      await merkeEmpfang(env, uid, 'sumup', 'abruf_fehler', e.message);
     }
   }
   // Deaktivierte/gelöschte Nutzer aus der Liste entfernen
@@ -5323,7 +5366,7 @@ async function handleSumupWebhook(request, url, env, cors) {
       return new Response('Not found', { status: 404, headers: cors });
     }
     await syncSumupFuerNutzer(userId, env, adminToken);
-    return new Response(null, { status: 204, headers: cors });
+    return new Response(null, { status: 204, headers: { ...cors, [EMPFANG_HEADER]: 'intern' } });
   } catch (e) {
     console.error('handleSumupWebhook Error:', e.message);
     // 204 statt 5xx: der nächste Cron-Lauf holt die Zahlung ohnehin ab, Retries brächten nichts.
@@ -5556,7 +5599,7 @@ async function handleAblefyWebhook(request, url, env, cors) {
 
     if (await isAlreadyProcessed(userId, eventKey, adminToken)) {
       return new Response(JSON.stringify({ received: true, dedup: true }), {
-        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json', [EMPFANG_HEADER]: 'duplikat' }
       });
     }
 
@@ -5574,7 +5617,7 @@ async function handleAblefyWebhook(request, url, env, cors) {
     const belegData = ablefyEventToBeleg(payload, istRueckerstattung, ablefyModell, firestoreValue(configFields.mwst_setting) || '19');
     if (!(belegData.betrag > 0)) {
       return new Response(JSON.stringify({ received: true, ignored: 'kein_betrag' }), {
-        status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json', [EMPFANG_HEADER]: 'ohne_betrag' }
       });
     }
 
@@ -5617,7 +5660,7 @@ async function handleAblefyWebhook(request, url, env, cors) {
     }
 
     return new Response(JSON.stringify({ received: true, docId: result.docId }), {
-      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+      status: 200, headers: { ...cors, 'Content-Type': 'application/json', [EMPFANG_HEADER]: 'buchung' }
     });
   } catch (e) {
     console.error('handleAblefyWebhook Error:', e.message, e.stack);
@@ -5738,7 +5781,7 @@ function shopifyFachSchluessel(topic, payload) {
  * anderen Plattformen: URL-Secret (billige 404) + HMAC-Signaturprüfung (eigentliche Grenze).
  */
 async function handleShopifyWebhook(request, url, env, cors) {
-  const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
+  const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json', ...(obj.docId ? { [EMPFANG_HEADER]: 'buchung' } : obj.dedup ? { [EMPFANG_HEADER]: 'duplikat' } : {}) } });
   const segments = url.pathname.split('/').filter(Boolean); // ['webhook','shopify',userId,urlSecret]
   const userId = segments[2];
   const urlSecret = segments[3];

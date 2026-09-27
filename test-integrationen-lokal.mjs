@@ -99,10 +99,11 @@ function config(plattform, felder, mwst = '19') {
 }
 async function post(plattform, body, headers = {}, secret = URL_SECRET) {
   const res = await worker.fetch(new Request(`https://worker.test/webhook/${plattform}/${USER}/${secret}`, { method: 'POST', headers, body }), env, ctx);
-  return { status: res.status, text: await res.text() };
+  return { status: res.status, text: await res.text(), interneHeader: res.headers.has('X-Kontolux-Empfang') };
 }
 const belege = (quelle) => [...docs.entries()].filter(([p, f]) => p.startsWith(`users/${USER}/dokumente/`) && f.quelle?.stringValue === quelle).map(([, f]) => f);
 const w = (f, k) => f?.[k]?.stringValue ?? f?.[k]?.doubleValue;
+const empfang = (plattform) => w(docs.get(`users/${USER}/webhook_secrets/${plattform}`), 'letzter_empfang_art');
 let ok = 0, fehler = 0;
 const pruefe = (name, bedingung, info = '') => { console.log(`${bedingung ? '✓' : '✗'} ${name}${!bedingung && info ? ' — ' + info : ''}`); bedingung ? ok++ : fehler++; };
 const abschnitt = (t) => console.log(`\n── ${t} ${'─'.repeat(Math.max(0, 60 - t.length))}`);
@@ -178,6 +179,7 @@ abschnitt('Digistore24');
   const zahlung = { event: 'on_payment', api_mode: 'live', transaction_id: '3999938', order_id: '34DEFS45DE2', transaction_date: '2026-09-21', product_name: 'Online-Kurs', email: 'kaeufer@example.com', transaction_amount: '97.00', amount_brutto: '97.00', amount_netto: '81.51', amount_vendor: '51.00', currency: 'EUR' };
   let r = await post('digistore24', 'event=connection_test', { 'Content-Type': 'application/x-www-form-urlencoded' });
   pruefe('"Verbindung testen" antwortet "OK"', r.status === 200 && r.text === 'OK', `${r.status} ${r.text}`);
+  pruefe('Empfangsnachweis: Verbindungstest gespeichert, interner Header nicht nach außen', empfang('digistore24') === 'verbindungstest' && !r.interneHeader, empfang('digistore24'));
   r = await sende(zahlung);
   const b = belege('digistore24_webhook')[0];
   pruefe('Zahlung antwortet exakt "OK"', r.status === 200 && r.text === 'OK', `${r.status} ${r.text}`);
@@ -222,6 +224,7 @@ abschnitt('CopeCart');
   pruefe('Falsche Signatur → 400', r.status === 400);
   r = await sende({ ...zahlung, transaction_id: 'x3', test_payment: true, payment_status: 'test_paid' });
   pruefe('Testzahlung wird nicht gebucht', r.text === 'OK' && belege('copecart_webhook').length === 2);
+  pruefe('Empfangsnachweis: CopeCart-Testzahlung als "testzahlung" gespeichert', empfang('copecart') === 'testzahlung' && !r.interneHeader, empfang('copecart'));
   r = await sende({ ...zahlung, event_type: 'payment.refunded', transaction_id: 'r1', transaction_type: 'refund' });
   pruefe('Erstattung (payment.refunded) als Abfluss gebucht', r.text === 'OK' && belege('copecart_webhook').some(x => w(x, 'typ') === 'rechnung_eingehend'));
   r = await sende({ ...zahlung, event_type: 'payment.failed', transaction_id: 'f1' });
@@ -277,6 +280,7 @@ abschnitt('SumUp (API-Abruf)');
   const cron = () => worker.scheduled({ cron: '15 */3 * * *' }, env, ctx);
   await cron();
   const sb = belege('sumup_webhook');
+  pruefe('Empfangsnachweis: SumUp-Abruf mit Anzahl gespeichert', empfang('sumup') === 'abruf' && w(docs.get(`users/${USER}/webhook_secrets/sumup`), 'letzter_empfang_info') === '3 neue Umsätze', `${empfang('sumup')} ${w(docs.get(`users/${USER}/webhook_secrets/sumup`), 'letzter_empfang_info')}`);
   pruefe('Cron bucht Terminal- und Barzahlung (23,80 € + 5 €)', sb.filter(x => w(x, 'typ') === 'rechnung_ausgehend').map(x => w(x, 'betrag')).sort().join() === '23.8,5', sb.map(x => w(x, 'betrag')).join());
   pruefe('Umsätze vor der Aktivierung werden nicht nachgebucht', !sb.some(x => w(x, 'betrag') === 99));
   pruefe('Fehlgeschlagene Zahlung wird nicht gebucht', !sb.some(x => w(x, 'betrag') === 10));
@@ -287,6 +291,10 @@ abschnitt('SumUp (API-Abruf)');
   pruefe('Webhook-Aufruf löst nur Abruf aus, fremder Inhalt bucht nichts (204)', r.status === 204 && belege('sumup_webhook').length === 3, `${r.status}`);
   r = await post('sumup', '{}', { 'Content-Type': 'application/json' }, 'falsch');
   pruefe('Falsche Webhook-URL → 404', r.status === 404);
+  sumupKeyGueltig = false;
+  await cron();
+  pruefe('Empfangsnachweis: SumUp-Abruffehler sichtbar (z.B. Key widerrufen)', empfang('sumup') === 'abruf_fehler', empfang('sumup'));
+  sumupKeyGueltig = true;
   // Monats-Cron darf den SumUp-Abruf nicht auslösen und umgekehrt keine Mails beim SumUp-Cron
   sumupTransaktionen.push({ transaction_id: 't-4', type: 'PAYMENT', status: 'SUCCESSFUL', amount: 7, timestamp: spaeter(300), payment_type: 'POS' });
   try { await worker.scheduled({ cron: '0 8 1 * *' }, env, ctx); } catch (e) { /* Mailversand ohne Resend-Key im Test egal */ }
@@ -313,6 +321,8 @@ abschnitt('Ablefy');
   config('ablefy', { verkaufsmodell: S('reseller') }, 'keine');
   r = await post('ablefy', JSON.stringify(zahlung({ order_id: 'A-1004' })), J);
   pruefe('Reseller als Kleinunternehmer: netto 90,57 €', belege('ablefy_webhook').some(x => w(x, 'betrag') === 90.57));
+  r = await post('ablefy', JSON.stringify({ event: 'payment.successful', order_id: 'TEST-0', created_at: '27.09.2026 10:00', revenue: '0.00', amount: '0.00', product: { name: 'Testprodukt' } }), J);
+  pruefe('Ablefy-Testkauf (0 €): nicht gebucht, Empfangsnachweis "ohne_betrag"', r.status === 200 && !belege('ablefy_webhook').some(x => w(x, 'rechnungsnr') === 'TEST-0') && empfang('ablefy') === 'ohne_betrag', `${r.text} ${empfang('ablefy')}`);
   config('ablefy', { verkaufsmodell: S('eigener_name') });
   r = await post('ablefy', new URLSearchParams({ event: 'payment.successful', order_id: 'A-2001', created_at: '26.06.2026 09:10', revenue: '119,00', amount: '109,57', fee: '9,43', invoice_number: 'RE-2026-77', 'product[name]': 'Workshop', 'payer[email]': 'q@example.com' }).toString(), { 'Content-Type': 'application/x-www-form-urlencoded' });
   b = belege('ablefy_webhook').find(x => w(x, 'rechnungsnr') === 'RE-2026-77');
