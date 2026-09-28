@@ -266,8 +266,10 @@ export default {
         }
       }
 
-      // Verifizierte UID überschreibt client-seitige userId
-      if (verifiedUid && body.userId) body.userId = verifiedUid;
+      // Verifizierte UID überschreibt client-seitige userId — auch wenn der Client sie weglässt
+      // (Prüfung 2026-09-28): sonst fiel checkNachrichtenLimit/peekUploadLimit auf den frei
+      // wählbaren Nutzernamen zurück, und mit wechselnden Namen ließ sich das Tageslimit umgehen.
+      if (verifiedUid) body.userId = verifiedUid;
       // ✅ /abo: verifizierte E-Mail überschreibt client-seitige email — sonst könnte
       // jeder eingeloggte Nutzer beliebige fremde Adressen an-/abmelden.
       if (verifiedEmail && url.pathname === '/abo') body.email = verifiedEmail;
@@ -2908,6 +2910,25 @@ const DATEV_AUTOMATIKKONTEN_EXPORT = {
   SKR03: new Set(['8400', '8300', '3400', '3300']),
   SKR04: new Set(['4400', '4300', '5400', '5300'])
 };
+// Erlöskonten je Steuersatz (Prüfung 2026-09-28). Kleinunternehmer seit Kontenrahmen 2026:
+// 8192/4184 "Steuerfreie Erlöse Kleinunternehmer nach § 19 Abs. 1 UStG" — 8195/4185 (a.F.) sind
+// gesperrt. 8337/4337 = Erlöse, für die der Leistungsempfänger die USt nach § 13b schuldet.
+const DATEV_ERLOESKONTEN = {
+  SKR03: { '19': '8400', '7': '8300', keine: '8200', reverse_charge: '8337', kleinunternehmer: '8192' },
+  SKR04: { '19': '4400', '7': '4300', keine: '4200', reverse_charge: '4337', kleinunternehmer: '4184' }
+};
+function erloeskontoExport(mwstSatz, kleinunternehmer, skr) {
+  const k = DATEV_ERLOESKONTEN[skr] || DATEV_ERLOESKONTEN.SKR03;
+  if (kleinunternehmer) return k.kleinunternehmer;
+  const satz = String(mwstSatz ?? '');
+  if (satz === '19' || satz === '7' || satz === 'reverse_charge') return k[satz];
+  if (satz === 'keine' || satz === '0') return k.keine;
+  return k['19'];
+}
+// Buchen die Integrationen als Einnahme (rechnung_ausgehend) bzw. Erstattung (rechnung_eingehend
+// ohne Kategorie, mwst_satz 'keine') — gleiche Liste wie UST_WEBHOOK_QUELLEN in index.html.
+const DATEV_WEBHOOK_QUELLEN = ['stripe_webhook', 'mollie_webhook', 'digistore24_webhook', 'copecart_webhook', 'paypal_webhook', 'sumup_webhook', 'ablefy_webhook', 'shopify_webhook'];
+
 function buSchluesselExport(mwstSatz, kleinunternehmer, istEinnahme, gegenkonto, skr) {
   if (DATEV_AUTOMATIKKONTEN_EXPORT[skr]?.has(String(gegenkonto))) return '';
   const satz = mwstSatz || (kleinunternehmer ? 'keine' : '19');
@@ -3022,10 +3043,19 @@ async function handleDatevExport(body, env, cors = {}) {
       datevWarning = 'Mandanten-Nr. fehlt — Platzhalter (0) wurde verwendet. Bitte in den Einstellungen ergänzen.';
     }
 
-    // Erlöskonto entsprechend Kontenrahmen — 8400 (SKR03) bzw. das SKR04-Äquivalent 4400,
-    // das Standard-Erlöskonto für Rechnungen; das BU-Schlüssel-Feld trägt die tatsächliche
-    // Steuerinformation je Buchungssatz.
-    const einnahmenGegenkonto = skr === 'SKR04' ? '4400' : '8400';
+    // Einnahmen ohne Kategorie: Erlöskonto nach mwst_satz (erloeskontoExport) — vorher immer
+    // 8400/4400, ein Automatikkonto, auf dem DATEV auch steuerfreien/7-%-Einnahmen 19 % USt anrechnet.
+    const alleErloeskonten = new Set(Object.values(DATEV_ERLOESKONTEN[skr] || DATEV_ERLOESKONTEN.SKR03));
+
+    // Steuersatz je Integration aus deren Einnahmen (zuletzt verwendeter Satz, wie
+    // berechneUstSchaetzwert in index.html) — für Erstattungen, die ohne Satz gespeichert werden.
+    const satzJeQuelle = {};
+    dokDocs
+      .map(d => d.fields || {})
+      .filter(f => firestoreValue(f.typ) === 'rechnung_ausgehend' && firestoreValue(f.deleted) !== true
+        && DATEV_WEBHOOK_QUELLEN.includes(firestoreValue(f.quelle)))
+      .sort((a, b) => String(firestoreValue(a.bezahlt_am) || firestoreValue(a.datum) || '').localeCompare(String(firestoreValue(b.bezahlt_am) || firestoreValue(b.datum) || '')))
+      .forEach(f => { satzJeQuelle[firestoreValue(f.quelle)] = String(firestoreValue(f.mwst_satz) ?? ''); });
 
     // Belege des gewünschten Jahres, tatsächlich bezahlt, mit Betrag > 0
     const buchungen = [];
@@ -3097,9 +3127,24 @@ async function handleDatevExport(body, env, cors = {}) {
       const importKontoGilt = datevKontoImport
         && (firestoreValue(fields.datev_skr) || '') === skr
         && (firestoreValue(fields.datev_kategorie_import) || '') === kategorie;
-      const gegenkonto = (importKontoGilt ? datevKontoImport : '')
-        || resolveSachkonto(kategorie, skr) || (istEinnahme ? einnahmenGegenkonto : ausgabenGegenkonto);
-      const bu = buSchluesselExport(mwstSatz, kleinunternehmer, istEinnahme, gegenkonto, skr);
+      let gegenkonto = (importKontoGilt ? datevKontoImport : '')
+        || resolveSachkonto(kategorie, skr) || (istEinnahme ? erloeskontoExport(mwstSatz, kleinunternehmer, skr) : ausgabenGegenkonto);
+      // Kleinunternehmer: Einnahmen nie auf ein Regelsteuer-Erlöskonto (8400 würde in DATEV 19 % USt erzeugen).
+      if (istEinnahme && kleinunternehmer && !importKontoGilt && alleErloeskonten.has(String(gegenkonto))) {
+        gegenkonto = erloeskontoExport(mwstSatz, true, skr);
+      }
+      // Plattform-Erstattung (ohne Kategorie/Satz gespeichert): als Erlösschmälerung auf das Erlöskonto
+      // der ursprünglichen Einnahmen statt als "Sonstige Aufwendungen" — sonst fehlt dem Steuerberater
+      // die USt-Minderung, die die USt-Schätzung der App bereits abzieht.
+      const quelle = firestoreValue(fields.quelle) || '';
+      const satzErstattung = satzJeQuelle[quelle];
+      if (!istEinnahme && !kategorie && !importKontoGilt && DATEV_WEBHOOK_QUELLEN.includes(quelle)
+          && (!mwstSatz || mwstSatz === 'keine') && satzErstattung) {
+        gegenkonto = erloeskontoExport(satzErstattung, kleinunternehmer, skr);
+      }
+      // Erlöskonto ohne Umsatzsteuer (KU, steuerfrei, § 13b) bzw. Erstattung darauf: kein Steuerschlüssel.
+      const ohneSchluessel = alleErloeskonten.has(String(gegenkonto)) && (!istEinnahme || kleinunternehmer);
+      const bu = buSchluesselExport(ohneSchluessel ? 'keine' : mwstSatz, kleinunternehmer, istEinnahme, gegenkonto, skr);
       const buchungstext = istEinnahme
         ? `Rechnung ${absender}`.trim()
         : `Beleg ${absender}`.trim();
@@ -3680,25 +3725,18 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
  */
 async function verifyStripeSignature(rawBody, signatureHeader, secret) {
   if (!signatureHeader) return { valid: false, reason: 'missing_header' };
-  const parts = Object.fromEntries(
-    signatureHeader.split(',').map(p => p.split('='))
-  );
-  const timestamp = parts['t'];
-  const signature = parts['v1'];
-  if (!timestamp || !signature) return { valid: false, reason: 'malformed_header' };
+  const parts = signatureHeader.split(',').map(p => p.split('='));
+  const timestamp = parts.find(([k]) => k === 't')?.[1];
+  // Beim Rollen des Signing-Secrets schickt Stripe mehrere v1-Signaturen (alt + neu) — eine
+  // passende reicht (docs.stripe.com/webhooks, "Verify manually").
+  const signaturen = parts.filter(([k, v]) => k === 'v1' && v).map(([, v]) => v);
+  if (!timestamp || !signaturen.length) return { valid: false, reason: 'malformed_header' };
 
   if (Math.abs(Date.now() / 1000 - parseInt(timestamp, 10)) > 300) {
     return { valid: false, reason: 'replay' };
   }
 
-  let expectedSig;
-  try {
-    expectedSig = hexToBytes(signature);
-  } catch (e) {
-    return { valid: false, reason: 'malformed_signature' };
-  }
-
-  const signedPayload = `${timestamp}.${rawBody}`;
+  const signedPayload = new TextEncoder().encode(`${timestamp}.${rawBody}`);
   const key = await crypto.subtle.importKey(
     'raw',
     new TextEncoder().encode(secret),
@@ -3706,8 +3744,18 @@ async function verifyStripeSignature(rawBody, signatureHeader, secret) {
     false,
     ['verify']
   );
-  const valid = await crypto.subtle.verify('HMAC', key, expectedSig, new TextEncoder().encode(signedPayload));
-  return { valid, ...(valid ? {} : { reason: 'signature_mismatch' }) };
+  let lesbar = false;
+  for (const signature of signaturen) {
+    let expectedSig;
+    try {
+      expectedSig = hexToBytes(signature);
+    } catch (e) {
+      continue;
+    }
+    lesbar = true;
+    if (await crypto.subtle.verify('HMAC', key, expectedSig, signedPayload)) return { valid: true };
+  }
+  return { valid: false, reason: lesbar ? 'signature_mismatch' : 'malformed_signature' };
 }
 
 /** Hex-String → Bytes. Wirft bei ungerader Länge statt eine falsche letzte Byte-Berechnung zu riskieren. */
@@ -4102,7 +4150,7 @@ async function handleStripeWebhook(request, url, env, cors) {
     const signingSecret = firestoreValue(fields.stripe_signing_secret);
     const enabled = firestoreValue(fields.enabled) === true;
 
-    if (!enabled || !storedUrlSecret || storedUrlSecret !== urlSecret || !signingSecret) {
+    if (!enabled || !storedUrlSecret || !timingSafeEqualHex(storedUrlSecret, urlSecret || '') || !signingSecret) {
       return new Response('Not found', { status: 404, headers: cors });
     }
 
@@ -4386,7 +4434,7 @@ async function handleMollieWebhook(request, url, env, cors) {
     const apiKey = firestoreValue(fields.api_key);
     const enabled = firestoreValue(fields.enabled) === true;
 
-    if (!enabled || !storedUrlSecret || storedUrlSecret !== urlSecret || !apiKey) {
+    if (!enabled || !storedUrlSecret || !timingSafeEqualHex(storedUrlSecret, urlSecret || '') || !apiKey) {
       return new Response('Not found', { status: 404, headers: cors });
     }
 
@@ -4533,7 +4581,7 @@ function parseDigistore24Date(raw) {
   return isNaN(d.getTime()) ? new Date() : d;
 }
 
-/** Konstante-Zeit-Vergleich zweier gleich langer Hex-Strings (Groß-/Kleinschreibung wird vorher vereinheitlicht). */
+/** Konstante-Zeit-Vergleich zweier Strings (Signaturen, URL-Secrets); bei Hex-Signaturen Groß-/Kleinschreibung vorher vereinheitlichen. */
 function timingSafeEqualHex(a, b) {
   if (a.length !== b.length) return false;
   let diff = 0;
@@ -4657,7 +4705,7 @@ async function handleDigistore24Webhook(request, url, env, cors) {
     const passphrase = firestoreValue(configFields.passphrase);
     const enabled = firestoreValue(configFields.enabled) === true;
 
-    if (!enabled || !storedUrlSecret || storedUrlSecret !== urlSecret || !passphrase) {
+    if (!enabled || !storedUrlSecret || !timingSafeEqualHex(storedUrlSecret, urlSecret || '') || !passphrase) {
       return new Response('Not found', { status: 404, headers: cors });
     }
 
@@ -4827,7 +4875,7 @@ async function handleCopecartWebhook(request, url, env, cors) {
     const webhookSecret = firestoreValue(configFields.webhook_secret);
     const enabled = firestoreValue(configFields.enabled) === true;
 
-    if (!enabled || !storedUrlSecret || storedUrlSecret !== urlSecret || !webhookSecret) {
+    if (!enabled || !storedUrlSecret || !timingSafeEqualHex(storedUrlSecret, urlSecret || '') || !webhookSecret) {
       return new Response('Not found', { status: 404, headers: cors });
     }
 
@@ -5088,7 +5136,7 @@ async function handlePaypalWebhook(request, url, env, cors) {
     const webhookId = firestoreValue(configFields.webhook_id);
     const enabled = firestoreValue(configFields.enabled) === true;
 
-    if (!enabled || !storedUrlSecret || storedUrlSecret !== urlSecret || !clientId || !clientSecret || !webhookId) {
+    if (!enabled || !storedUrlSecret || !timingSafeEqualHex(storedUrlSecret, urlSecret || '') || !clientId || !clientSecret || !webhookId) {
       return new Response('Not found', { status: 404, headers: cors });
     }
 
@@ -5362,7 +5410,7 @@ async function handleSumupWebhook(request, url, env, cors) {
     const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
     const cfgDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/sumup`, adminToken);
     const storedUrlSecret = firestoreValue(cfgDoc?.fields?.url_secret);
-    if (!storedUrlSecret || storedUrlSecret !== urlSecret || firestoreValue(cfgDoc?.fields?.enabled) !== true) {
+    if (!storedUrlSecret || !timingSafeEqualHex(storedUrlSecret, urlSecret || '') || firestoreValue(cfgDoc?.fields?.enabled) !== true) {
       return new Response('Not found', { status: 404, headers: cors });
     }
     await syncSumupFuerNutzer(userId, env, adminToken);
@@ -5576,7 +5624,7 @@ async function handleAblefyWebhook(request, url, env, cors) {
     const storedUrlSecret = firestoreValue(configFields.url_secret);
     const enabled = firestoreValue(configFields.enabled) === true;
 
-    if (!enabled || !storedUrlSecret || storedUrlSecret !== urlSecret) {
+    if (!enabled || !storedUrlSecret || !timingSafeEqualHex(storedUrlSecret, urlSecret || '')) {
       return new Response('Not found', { status: 404, headers: cors });
     }
 
@@ -5794,7 +5842,7 @@ async function handleShopifyWebhook(request, url, env, cors) {
     const storedUrlSecret = firestoreValue(configFields.url_secret);
     const webhookSecret = firestoreValue(configFields.webhook_secret);
     const enabled = firestoreValue(configFields.enabled) === true;
-    if (!enabled || !storedUrlSecret || storedUrlSecret !== urlSecret || !webhookSecret) {
+    if (!enabled || !storedUrlSecret || !timingSafeEqualHex(storedUrlSecret, urlSecret || '') || !webhookSecret) {
       return new Response('Not found', { status: 404, headers: cors });
     }
 

@@ -129,6 +129,12 @@ abschnitt('Stripe');
   r = await post('stripe', refund, { 'Stripe-Signature': signiere(refund) });
   const erst = belege('stripe_webhook').find(b => w(b, 'typ') === 'rechnung_eingehend');
   pruefe('Rückerstattung wird als Abfluss gebucht (50 €)', w(erst, 'betrag') === 50);
+  // Secret-Rotation: Stripe schickt alte + neue Signatur, die passende steht nicht zwingend zuletzt
+  const pi2 = JSON.stringify({ id: 'evt_pi_2', type: 'payment_intent.succeeded', data: { object: { id: 'pi_2', amount_received: 5000, created: 1790000600, description: 'Coaching 2' } } });
+  const t = Math.floor(Date.now() / 1000);
+  const rotiert = `t=${t},v1=${crypto.createHmac('sha256', SECRET).update(`${t}.${pi2}`).digest('hex')},v1=${crypto.createHmac('sha256', 'whsec_alt').update(`${t}.${pi2}`).digest('hex')}`;
+  r = await post('stripe', pi2, { 'Stripe-Signature': rotiert });
+  pruefe('Mehrere v1-Signaturen (Secret-Rotation) → gebucht', r.status === 200 && belege('stripe_webhook').length === 3, `${r.status} ${r.text}`);
 }
 
 // ═══ Mollie ═══════════════════════════════════════════════════════════════════════════════

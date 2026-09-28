@@ -81,5 +81,45 @@ pruefe('Rundreise: Werbekosten bleiben Werbekosten', nach(238)?.kategorie === 'W
 pruefe('Rundreise: Kfz bleibt Kfz, Wareneinkauf bleibt Wareneinkauf (19 % über Automatikkonto)', nach(59.5)?.kategorie === 'Kfz-Kosten' && nach(119)?.kategorie === 'Wareneinkauf 19%' && nach(119).mwst_satz === '19');
 pruefe('Rundreise: Rechnungsnummer bleibt erhalten', nach(1190)?.rechnungsnr === 'RE-2026-001');
 
+// ── Prüfung 2026-09-28: SKR04, Plattform-Erstattungen, Einnahmen ohne Kategorie, Kleinunternehmer ──
+async function exportiere(profil, belege) {
+  for (const k of [...docs.keys()]) if (k.startsWith(`users/${USER}/`)) docs.delete(k);
+  docs.set(`users/${USER}/profil/settings`, { datev_bankkonto: S('1800'), datev_berater_nr: S('1001'), datev_mandanten_nr: S('1'), ...profil });
+  for (const [id, f] of Object.entries(belege)) beleg(id, f);
+  const r = await worker.fetch(new Request('https://worker.test/datev-export', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://app.kontolux-ai.de', Authorization: 'Bearer tok' },
+    body: JSON.stringify({ userId: USER, jahr: 2026, token: 'tok' })
+  }), env, { waitUntil() {} });
+  const text = new TextDecoder('utf-8').decode(new Uint8Array(await r.arrayBuffer()));
+  const z = text.replace(/^﻿/, '').split('\r\n').filter(Boolean).slice(2).map(x => x.split(';'));
+  return (betrag) => z.find(x => x[0] === betrag) || [];
+}
+const plattform = {
+  s1: { typ: S('rechnung_ausgehend'), betrag: N(119), bezahlt: B(true), bezahlt_am: S('2026-06-01'), mwst_satz: S('19'), kategorie: S('Einnahmen 19%'), quelle: S('stripe_webhook'), absender: S('Kunde') },
+  r1: { typ: S('rechnung_eingehend'), betrag: N(59.5), bezahlt: B(true), bezahlt_am: S('2026-06-10'), mwst_satz: S('keine'), quelle: S('stripe_webhook'), absender: S('Stripe-Rückerstattung') },
+  p1: { typ: S('rechnung_ausgehend'), betrag: N(107), bezahlt: B(true), bezahlt_am: S('2026-06-02'), mwst_satz: S('7'), kategorie: S('Einnahmen 7%'), quelle: S('shopify_webhook'), absender: S('Shop') },
+  r2: { typ: S('rechnung_eingehend'), betrag: N(21.4), bezahlt: B(true), bezahlt_am: S('2026-06-11'), mwst_satz: S('keine'), quelle: S('shopify_webhook'), absender: S('Shopify-Erstattung') },
+  m1: { typ: S('rechnung_ausgehend'), betrag: N(321), bezahlt: B(true), bezahlt_am: S('2026-06-03'), mwst_satz: S('7'), absender: S('Ohne Kategorie 7 %') },
+  m2: { typ: S('rechnung_ausgehend'), betrag: N(400), bezahlt: B(true), bezahlt_am: S('2026-06-04'), mwst_satz: S('reverse_charge'), absender: S('EU-Kunde') },
+  m3: { typ: S('rechnung_ausgehend'), betrag: N(250), bezahlt: B(true), bezahlt_am: S('2026-06-05'), mwst_satz: S('keine'), absender: S('Steuerfrei') },
+};
+let z = await exportiere({ datev_skr: S('SKR04'), kleinunternehmer: S('Nein') }, plattform);
+pruefe('SKR04: Stripe-Einnahme 19 % auf 4400', z('119,00')[7] === '4400' && z('119,00')[8] === '', z('119,00').join(';'));
+pruefe('SKR04: Stripe-Erstattung als Erlösschmälerung auf 4400 (vorher 6300 ohne USt-Minderung)', z('59,50')[1] === 'H' && z('59,50')[7] === '4400' && z('59,50')[8] === '', z('59,50').join(';'));
+pruefe('SKR04: Shopify-Erstattung (7 %) auf 4300', z('21,40')[7] === '4300' && z('21,40')[8] === '', z('21,40').join(';'));
+pruefe('SKR04: Einnahme 7 % ohne Kategorie auf 4300 (vorher 4400 = 19 %)', z('321,00')[7] === '4300', z('321,00').join(';'));
+pruefe('SKR04: § 13b-Einnahme auf 4337 ohne Schlüssel', z('400,00')[7] === '4337' && z('400,00')[8] === '', z('400,00').join(';'));
+pruefe('SKR04: steuerfreie Einnahme ohne Kategorie auf 4200', z('250,00')[7] === '4200' && z('250,00')[8] === '', z('250,00').join(';'));
+z = await exportiere({ datev_skr: S('SKR03'), kleinunternehmer: B(true) }, {
+  k1: { ...plattform.s1, mwst_satz: S('keine'), kategorie: S('Einnahmen steuerfrei') },
+  k2: { typ: S('rechnung_ausgehend'), betrag: N(500), bezahlt: B(true), bezahlt_am: S('2026-06-06'), mwst_satz: S('19'), kategorie: S('Einnahmen 19%'), absender: S('Falsch kategorisiert') },
+  k3: { ...plattform.r1 },
+  k4: { typ: S('rechnung_eingehend'), betrag: N(35.7), bezahlt: B(true), bezahlt_am: S('2026-06-07'), mwst_satz: S('19'), kategorie: S('Bürobedarf'), absender: S('Papier') },
+});
+pruefe('KU (SKR03): Einnahme auf 8192 (seit Kontenrahmen 2026, 8195 gesperrt), ohne Schlüssel', z('119,00')[7] === '8192' && z('119,00')[8] === '', z('119,00').join(';'));
+pruefe('KU: Einnahme mit Kategorie 19 % trotzdem auf 8192, kein USt-Schlüssel', z('500,00')[7] === '8192' && z('500,00')[8] === '', z('500,00').join(';'));
+pruefe('KU: Erstattung mindert 8192', z('59,50')[7] === '8192' && z('59,50')[1] === 'H', z('59,50').join(';'));
+pruefe('KU: Ausgabe bleibt auf Bürobedarf 4930', z('35,70')[7] === '4930', z('35,70').join(';'));
+
 console.log(`\n${ok} bestanden, ${fehler} fehlgeschlagen`);
 process.exit(fehler ? 1 : 0);
