@@ -571,56 +571,56 @@ async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
 // tatsächlichen Gegenkontos verwendet (resolveSachkonto). WICHTIG: dieselbe Tabelle ist in
 // index.html gespiegelt (dort für den Belegarchiv-Regel-Vorschlag ohne API-Call) — bei
 // Änderungen beide Stellen synchron halten.
-// euer_zeile: Zuordnung zur Anlage-EÜR-Zeile — Basis für die EÜR-Aggregation im Monats-/
+// euer_zeile (Anlage EÜR 2026, BMF-Vordruck vom 01.09.2026 — muss zu index.html passen): Zuordnung zur Anlage-EÜR-Zeile — Basis für die EÜR-Aggregation im Monats-/
 // Jahresabschluss (siehe Analyse). SKR03-Kollisionen aufgelöst 2026-09: "Bewirtung (70%)" lag
 // vorher auf demselben Konto wie "Werbekosten" (4650), "Sonstiges" auf demselben wie
 // "Bürobedarf" (4980) — beide EÜR-Zeilen wären dadurch nie unterscheidbar gewesen.
 // Konten-Korrektur 2026-09-26 (geprüft gegen den offiziellen SKR03-/SKR04-Kontenplan des
 // Klausurenverbunds der Steuerberaterkammern, Haufe und epago): SKR03 4650 ist Bewirtung (nicht
-// Werbekosten → 4610), 4930 ist Bürobedarf (nicht Kfz → Fahrzeugkosten 4500/6500), 4830 sind
+// Werbekosten → 4600; ein Konto 4610 gibt es im SKR03 nicht — Prüfung 2026-09-29 gegen den DATEV-Kontenrahmen 2026), 4930 ist Bürobedarf (nicht Kfz → Fahrzeugkosten 4500/6500), 4830 sind
 // Abschreibungen (Fortbildung → 4945/6821), 4240 ist Gas/Strom/Wasser (Steuerberater → 4950),
 // Wareneingang liegt auf den Automatikkonten 3400/3300 bzw. 5400/5300, sonstige betriebliche
 // Aufwendungen auf 4900/6300. Betrifft DATEV-Export und DATEV-Import gleichermaßen.
 const SACHKONTO_MAPPING = {
-  'Werbekosten':               { SKR03: '4610', SKR04: '6600', euer_zeile: 'Z.54' },
+  'Werbekosten':               { SKR03: '4600', SKR04: '6600', euer_zeile: 'Z.55' },
   // SKR04 6800 war falsch (Audit-Korrektur 2026-09) — das ist real "Porto", nicht Bürobedarf.
   // Korrekt: 6815 (Sequenz 6800 Porto/6805 Telefon/6810 Internetkosten/6815 Bürobedarf).
-  'Bürobedarf':                { SKR03: '4930', SKR04: '6815', euer_zeile: 'Z.51' },
-  'Telefon/Internet':          { SKR03: '4920', SKR04: '6805', euer_zeile: 'Z.43' },
+  'Bürobedarf':                { SKR03: '4930', SKR04: '6815', euer_zeile: 'Z.52' },
+  'Telefon/Internet':          { SKR03: '4920', SKR04: '6805', euer_zeile: 'Z.44' },
   // SKR04 6830 war falsch (Audit-Korrektur 2026-09) — das ist real "Buchführungskosten", nicht
   // Reisekosten. Jetzt 4676/6680 "Übernachtungsaufwand und Reisenebenkosten" — genau die
   // DATEV-Unterkonten-Bezeichnung, die wörtlich zu EÜR Z.44 passt. Kilometerpauschale und
   // Verpflegungsmehraufwand werden seit dieser Korrektur separat ausgewiesen, siehe
   // 'Fahrtkosten (Kilometerpauschale)'/'Verpflegungsmehraufwand' unten.
-  'Reisekosten':                { SKR03: '4676', SKR04: '6680', euer_zeile: 'Z.44' },
-  'Fortbildung':                { SKR03: '4945', SKR04: '6821', euer_zeile: 'Z.45' },
-  'Kfz-Kosten':                 { SKR03: '4500', SKR04: '6500', euer_zeile: 'Z.70' },
-  'Miete/Raumkosten':           { SKR03: '4200', SKR04: '6310', euer_zeile: 'Z.39' },
+  'Reisekosten':                { SKR03: '4676', SKR04: '6680', euer_zeile: 'Z.45' },
+  'Fortbildung':                { SKR03: '4945', SKR04: '6821', euer_zeile: 'Z.46' },
+  'Kfz-Kosten':                 { SKR03: '4500', SKR04: '6500', euer_zeile: 'Z.71' },
+  'Miete/Raumkosten':           { SKR03: '4200', SKR04: '6310', euer_zeile: 'Z.40' },
   // SKR04 3400/3300 waren falsch (Audit-Korrektur 2026-09) — Aktiv/Passiv-Verwechslung: das sind
   // real "Verbindlichkeiten..." (Fremdkapitalkonten), da SKR04 dem Abschlussgliederungsprinzip
   // folgt (Klasse 3 = kurzfristiges Fremdkapital), anders als SKR03 (Klasse 3 = Wareneingang).
   // Korrekt: 5130/5110 "Einkauf Roh-, Hilfs- und Betriebsstoffe 19%/7% Vorsteuer".
-  'Wareneinkauf 19%':           { SKR03: '3400', SKR04: '5400', euer_zeile: 'Z.27' },
-  'Wareneinkauf 7%':            { SKR03: '3300', SKR04: '5300', euer_zeile: 'Z.27' },
-  'GWG bis 800€':               { SKR03: '0480', SKR04: '0670', euer_zeile: 'Z.36' },
-  'Versicherungen':             { SKR03: '4360', SKR04: '6400', euer_zeile: 'Z.49' },
-  'Steuerberater/Buchhaltung':  { SKR03: '4950', SKR04: '6825', euer_zeile: 'Z.46' },
-  // Bewirtung 4650/6640 (abzugsfähiger Teil), Werbekosten seit 2026-09-26 auf 4610 — siehe Korrektur oben.
-  'Bewirtung (70%)':            { SKR03: '4650', SKR04: '6640', euer_zeile: 'Z.63' },
-  'Sonstiges':                  { SKR03: '4900', SKR04: '6300', euer_zeile: 'Z.60' },
+  'Wareneinkauf 19%':           { SKR03: '3400', SKR04: '5400', euer_zeile: 'Z.29' },
+  'Wareneinkauf 7%':            { SKR03: '3300', SKR04: '5300', euer_zeile: 'Z.29' },
+  'GWG bis 800€':               { SKR03: '0480', SKR04: '0670', euer_zeile: 'Z.37' },
+  'Versicherungen':             { SKR03: '4360', SKR04: '6400', euer_zeile: 'Z.50' },
+  'Steuerberater/Buchhaltung':  { SKR03: '4950', SKR04: '6825', euer_zeile: 'Z.47' },
+  // Bewirtung 4650/6640 (abzugsfähiger Teil), Werbekosten SKR03 4600 (nicht 4610) — siehe Korrektur oben.
+  'Bewirtung (70%)':            { SKR03: '4650', SKR04: '6640', euer_zeile: 'Z.64' },
+  'Sonstiges':                  { SKR03: '4900', SKR04: '6300', euer_zeile: 'Z.61' },
   // Software/EDV/SaaS: 4806/6495 \"Wartungskosten für Hard- und Software\" (EÜR Z.50). Laufende
   // SaaS-Abos sind sofort abzugsfähig; einmalige Software-Käufe >800€ gehören aufs Anlagevermögen.
-  'Software/EDV/SaaS':          { SKR03: '4806', SKR04: '6495', euer_zeile: 'Z.50' },
-  'Fremdleistungen':            { SKR03: '3100', SKR04: '5900', euer_zeile: 'Z.29' },
+  'Software/EDV/SaaS':          { SKR03: '4806', SKR04: '6495', euer_zeile: 'Z.51' },
+  'Fremdleistungen':            { SKR03: '3100', SKR04: '5900', euer_zeile: 'Z.30' },
   // Neu (Audit-Korrektur 2026-09): Aufsplittung der bisherigen Sammelkategorie "Reisekosten" —
   // Kilometerpauschale und Verpflegungsmehraufwand haben je eine eigene EÜR-Zeile und ein eigenes
   // DATEV-Unterkonto (siehe reichereMitBelegKategorieAn/splitReisekostenPosition in index.html),
   // werden aber nie direkt aus einem Absendernamen erkannt (kein KATEGORIE_REGELN-Eintrag nötig).
-  'Fahrtkosten (Kilometerpauschale)': { SKR03: '4673', SKR04: '6673', euer_zeile: 'Z.70' },
-  'Verpflegungsmehraufwand':    { SKR03: '4674', SKR04: '6674', euer_zeile: 'Z.64' },
+  'Fahrtkosten (Kilometerpauschale)': { SKR03: '4673', SKR04: '6673', euer_zeile: 'Z.71' },
+  'Verpflegungsmehraufwand':    { SKR03: '4674', SKR04: '6674', euer_zeile: 'Z.65' },
   'Einnahmen 19%':              { SKR03: '8400', SKR04: '4400', euer_zeile: 'Z.15' },
   'Einnahmen 7%':               { SKR03: '8300', SKR04: '4300', euer_zeile: 'Z.15' },
-  'Einnahmen steuerfrei':       { SKR03: '8200', SKR04: '4200', euer_zeile: 'Z.11' }
+  'Einnahmen steuerfrei':       { SKR03: '8200', SKR04: '4200', euer_zeile: 'Z.12' }
 };
 
 function resolveSachkonto(kategorie, skr) {
@@ -855,7 +855,7 @@ Wer: Regelbesteuerte Unternehmer die B2B-Dienstleistungen oder Warenlieferungen 
 
 Was wird gemeldet: Keine Steuerbeträge — nur Geschäftsvorgänge (USt-IdNr. des EU-Kunden + Umsatzhöhe). Keine Nullmeldung wenn keine EU-B2B-Umsätze im Monat.
 
-Frist: 25. des Folgemonats (monatlich bei >50.000€ EU-Umsatz pro Quartal, sonst quartalsweise am 25.01./25.04./25.07./25.10.). Im Finanzkalender erscheint die ZM als monatlicher Eintrag, sobald der Nutzer im Onboarding EU-B2B-Geschäfte bejaht hat (Profilfeld calendarSettings.eu_b2b) — die Quartals-/Monats-Schwelle selbst wird dort nicht automatisch geprüft, bei konkreten Fragen dazu auf diese Regel verweisen.
+Frist: 25. Tag nach Ablauf des Meldezeitraums — Warenlieferungen an EU-Unternehmer monatlich, vierteljährlich (25.01./25.04./25.07./25.10.) nur wenn die innergemeinschaftlichen WARENlieferungen weder im Quartal noch in den vier Vorquartalen 50.000€ übersteigen (§ 18a Abs. 1 UStG); sonstige Leistungen an EU-Unternehmer immer vierteljährlich (§ 18a Abs. 2 UStG). Im Finanzkalender erscheint die ZM als monatlicher Eintrag, sobald der Nutzer im Onboarding EU-B2B-Geschäfte bejaht hat (Profilfeld calendarSettings.eu_b2b) — die Quartals-/Monats-Schwelle selbst wird dort nicht automatisch geprüft, bei konkreten Fragen dazu auf diese Regel verweisen.
 
 Wo abgeben: BZStOnline-Portal (www.bzst.de) ODER ELSTER — nicht beim lokalen Finanzamt!
 
@@ -971,8 +971,8 @@ Antwort abwarten; bereits genannte Angaben (z.B. km) nicht erneut abfragen, aus 
 
 Pauschalen 2026 — ausschließlich diese verwenden, niemals eigene Werte annehmen, niemals mit der Pendlerpauschale verwechseln:
 - Dienstreisen-Kilometerpauschale (das ist die für Selbstständige relevante!): 0,30€/km PAUSCHAL für die GESAMTE gefahrene Strecke (Hin- und Rückfahrt) — KEINE Staffelung nach Distanz, unabhängig ob 5km oder 500km.
-- NIEMALS die Pendlerpauschale/Entfernungspauschale (0,38€/km, nur einfache Strecke) hier verwenden — die gilt ausschließlich für den täglichen Arbeitsweg von Angestellten zur ersten Tätigkeitsstätte, nie für Dienstreisen/Kundentermine, auch nicht bei Selbstständigen.
-- Verpflegungspauschale: 14€ bei 8-24h Abwesenheit, 28€ ab 24h Abwesenheit, unter 8h kein Abzug möglich
+- NIEMALS die Entfernungspauschale (0,38€/km, nur einfache Strecke) hier verwenden — sie gilt für den täglichen Weg Wohnung ↔ erste Tätigkeitsstätte (Angestellte) bzw. erste Betriebsstätte außerhalb der Wohnung (auch Selbstständige, § 4 Abs. 5 Satz 1 Nr. 6 EStG), nie für Dienstreisen/Kundentermine.
+- Verpflegungspauschale: 14€ bei MEHR ALS 8h Abwesenheit, 28€ bei 24h Abwesenheit (je Kalendertag); bei genau 8h oder weniger kein Abzug möglich (verpflegung_stunden=8 bedeutet "mehr als 8 Stunden", sonst 0)
 - Übernachtung: nur tatsächliche Kosten laut Beleg (Selbstständige haben keine Pauschale ohne Beleg) — ohne Beleg nachfragen oder weglassen, nie schätzen
 km_betrag = km × 0,30€ (keine Staffelung!), verpflegung_betrag nach obigen Regeln — beides selbst ausrechnen und zur Anzeige in der Antwort nennen; das System rechnet zur Kontrolle unabhängig nach und korrigiert falsche Werte.
 

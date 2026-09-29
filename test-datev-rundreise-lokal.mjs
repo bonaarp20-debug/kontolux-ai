@@ -62,7 +62,7 @@ const zeilen = csv.replace(/^﻿/, '').split('\r\n').filter(Boolean).slice(2).ma
 const zeileMit = (betrag) => zeilen.find(z => z[0] === betrag);
 pruefe('Einnahme 19 % auf Automatikkonto 8400 ohne Steuerschlüssel (vorher 9 = Vorsteuer)', zeileMit('1190,00')?.[7] === '8400' && zeileMit('1190,00')?.[8] === '', zeileMit('1190,00')?.join(';'));
 pruefe('Einnahme 7 % auf Automatikkonto 8300 ohne Steuerschlüssel', zeileMit('107,00')?.[7] === '8300' && zeileMit('107,00')?.[8] === '');
-pruefe('Werbekosten jetzt auf 4610 (vorher 4650 = Bewirtung), Vorsteuer 9', zeileMit('238,00')?.[7] === '4610' && zeileMit('238,00')?.[8] === '9', zeileMit('238,00')?.join(';'));
+pruefe('Werbekosten auf 4600 (DATEV-SKR03 2026; vorher 4650 = Bewirtung, 4610 existiert nicht), Vorsteuer 9', zeileMit('238,00')?.[7] === '4600' && zeileMit('238,00')?.[8] === '9', zeileMit('238,00')?.join(';'));
 pruefe('Kfz-Kosten jetzt auf 4500 (vorher 4930 = Bürobedarf)', zeileMit('59,50')?.[7] === '4500');
 pruefe('Wareneinkauf auf Automatikkonto 3400, ohne Steuerschlüssel', zeileMit('119,00')?.[7] === '3400' && zeileMit('119,00')?.[8] === '');
 pruefe('Bürobedarf jetzt auf 4930', zeileMit('35,70')?.[7] === '4930');
