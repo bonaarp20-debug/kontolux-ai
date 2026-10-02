@@ -3316,7 +3316,7 @@ function generateWebhookSecret() {
  *
  * @param {string} userId
  * @param {object} belegData - { typ, betrag, absender, rechnungsnr?, bezahlt, bezahlt_am?,
- *   mwst_satz, kategorie?, sachkonto?, buchungstext?, quelle, name?, storage_url? }
+ *   mwst_satz, kategorie?, sachkonto?, buchungstext?, quelle, name?, storage_url?, betrag_netto? }
  * @param {object} env
  * @param {string} adminToken - von getGoogleAccessToken(env, FIRESTORE_SCOPE)
  * @returns {Promise<{success: true, docId: string, tagesbewegungWarnung?: string}>}
@@ -3344,7 +3344,8 @@ async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
       ...(belegData.kategorie ? { kategorie: { stringValue: belegData.kategorie } } : {}),
       ...(belegData.sachkonto ? { sachkonto: { stringValue: belegData.sachkonto } } : {}),
       ...(belegData.buchungstext ? { buchungstext: { stringValue: belegData.buchungstext } } : {}),
-      ...(belegData.storage_url ? { storage_url: { stringValue: belegData.storage_url } } : {})
+      ...(belegData.storage_url ? { storage_url: { stringValue: belegData.storage_url } } : {}),
+      ...(belegData.betrag_netto != null ? { betrag_netto: { doubleValue: belegData.betrag_netto } } : {})
     }
   };
 
@@ -5783,9 +5784,18 @@ function shopifyEventToBeleg(topic, payload) {
     const email = payload.email || payload.contact_email || payload.customer?.email || null;
     const kunde = [payload.customer?.first_name, payload.customer?.last_name].filter(Boolean).join(' ') || null;
     const bestellung = payload.name || (payload.order_number ? `#${payload.order_number}` : String(payload.id || ''));
+    const totalPrice = parseFloat(payload.total_price) || 0;
+    const totalTax = parseFloat(payload.total_tax);
+    // betrag_netto: total_price − total_tax wenn total_tax im Payload vorhanden und ≥ 0.
+    // Für Kleinunternehmer ist total_tax = 0 → netto = brutto (korrekt).
+    // Für Regelbesteuerte wird betrag_netto von der App für den EÜR-Nettowert genutzt.
+    const betrag_netto = (!isNaN(totalTax) && totalTax >= 0)
+      ? Math.round((totalPrice - totalTax) * 100) / 100
+      : null;
     return {
       typ: 'rechnung_ausgehend',
-      betrag: parseFloat(payload.total_price) || 0,
+      betrag: totalPrice,
+      ...(betrag_netto != null ? { betrag_netto } : {}),
       absender: email || kunde || 'Shopify-Kunde',
       rechnungsnr: bestellung,
       bezahlt: true,

@@ -92,7 +92,7 @@ let fehler = 0;
 const pruefe = (name, ok, info = '') => { console.log(`${ok ? '✓' : '✗'} ${name}${info ? ' — ' + info : ''}`); if (!ok) fehler++; };
 
 const bestellung = {
-  id: 5500112233, name: '#1042', order_number: 1042, total_price: '119.00', currency: 'EUR',
+  id: 5500112233, name: '#1042', order_number: 1042, total_price: '119.00', total_tax: '19.00', currency: 'EUR',
   email: 'kundin@example.com', processed_at: '2026-09-26T10:15:00+02:00',
   customer: { first_name: 'Maria', last_name: 'Muster' }, line_items: [{ title: 'Kurs' }],
 };
@@ -104,6 +104,7 @@ let r = await sende('orders/paid', bestellung, { webhookId: 'wh-1' }); await war
 const b1 = belege()[0];
 pruefe('1 orders/paid: HTTP 200 + Beleg', r.status === 200 && !!r.body.docId, JSON.stringify(r.body));
 pruefe('1 Betrag brutto 119 €', wert(b1, 'betrag') === 119);
+pruefe('1 betrag_netto 100 € (total_price − total_tax)', wert(b1, 'betrag_netto') === 100, `betrag_netto=${wert(b1, 'betrag_netto')}`);
 pruefe('1 Einnahme mit Bestellnummer', wert(b1, 'typ') === 'rechnung_ausgehend' && wert(b1, 'rechnungsnr') === '#1042');
 pruefe('1 MwSt 19 % + Sachkonto 8400', wert(b1, 'mwst_satz') === '19' && wert(b1, 'sachkonto') === '8400', `${wert(b1, 'mwst_satz')} / ${wert(b1, 'sachkonto')}`);
 pruefe('1 quelle shopify_webhook', wert(b1, 'quelle') === 'shopify_webhook');
