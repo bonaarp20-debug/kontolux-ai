@@ -1969,7 +1969,7 @@ export async function detectAndParseERechnung(bytes, filename, mimeType, sellerN
 
 // ── /document Handler ─────────────────────────────────────
 async function handleDocument(body, env, cors = {}, ctx) {
-  const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz, content, sellerNameHint, e_rechnung_format, duplikatBestaetigt, kategorie, sachkonto, buchungstext } = body;
+  const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz, content, sellerNameHint, e_rechnung_format, duplikatBestaetigt, kategorie, sachkonto, buchungstext, betrag_netto, bezahlt_am: bezahlt_am_client } = body;
 
   // ── E-RECHNUNG PARSEN (Vorschau vor dem Speichern, kein Firestore-Write) ────
   // Wird beim Auswählen einer .xml/.pdf-Datei im Belegarchiv-Upload-Modal aufgerufen, BEVOR der
@@ -2059,10 +2059,11 @@ async function handleDocument(body, env, cors = {}, ctx) {
           bezahlt: { booleanValue: !!bezahlt },
           mwst_satz: { stringValue: mwst_satz || 'keine' },
           createdAt: { timestampValue: new Date().toISOString() },
-          ...(bezahlt ? { bezahlt_am: { stringValue: berlinDatumAlsString() } } : {}),
+          ...(bezahlt ? { bezahlt_am: { stringValue: bezahlt_am_client || berlinDatumAlsString() } } : {}),
           ...(kategorie ? { kategorie: { stringValue: kategorie } } : {}),
           ...(sachkonto ? { sachkonto: { stringValue: sachkonto } } : {}),
-          ...(buchungstext ? { buchungstext: { stringValue: buchungstext } } : {})
+          ...(buchungstext ? { buchungstext: { stringValue: buchungstext } } : {}),
+          ...(betrag_netto != null ? { betrag_netto: { doubleValue: parseFloat(betrag_netto) } } : {})
         }
       };
 
@@ -2218,11 +2219,16 @@ async function handleDocument(body, env, cors = {}, ctx) {
       if (absender) metadata.fields.absender = { stringValue: absender };
       if (mwst_satz) metadata.fields.mwst_satz = { stringValue: mwst_satz };
       if (rechnungsnr) metadata.fields.rechnungsnr = { stringValue: rechnungsnr };
-      if (bezahlt) metadata.fields.bezahlt_am = { stringValue: berlinDatumAlsString() };
+      if (bezahlt) metadata.fields.bezahlt_am = { stringValue: bezahlt_am_client || berlinDatumAlsString() };
       if (kategorie) metadata.fields.kategorie = { stringValue: kategorie };
       if (sachkonto) metadata.fields.sachkonto = { stringValue: sachkonto };
       if (buchungstext) metadata.fields.buchungstext = { stringValue: buchungstext };
       if (e_rechnung_format) metadata.fields.e_rechnung_format = { stringValue: e_rechnung_format };
+      if (betrag_netto != null) {
+        metadata.fields.betrag_netto = { doubleValue: parseFloat(betrag_netto) };
+      } else if (betrag && mwst_satz) {
+        metadata.fields.betrag_netto = { doubleValue: nettoAusBrutto(parseFloat(betrag), mwst_satz) };
+      }
 
       const firestoreRes = await fetch(firestoreUrl, {
         method: 'PATCH',
@@ -3321,6 +3327,12 @@ function generateWebhookSecret() {
  * @param {string} adminToken - von getGoogleAccessToken(env, FIRESTORE_SCOPE)
  * @returns {Promise<{success: true, docId: string, tagesbewegungWarnung?: string}>}
  */
+function nettoAusBrutto(brutto, mwst_satz) {
+  if (mwst_satz === '19') return Math.round(brutto / 1.19 * 100) / 100;
+  if (mwst_satz === '7')  return Math.round(brutto / 1.07 * 100) / 100;
+  return brutto;
+}
+
 async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
   // Zufallssuffix: der SumUp-Abruf schreibt mehrere Belege direkt hintereinander — reine
   // Date.now()-IDs könnten in derselben Millisekunde kollidieren und sich überschreiben.
@@ -3345,7 +3357,7 @@ async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
       ...(belegData.sachkonto ? { sachkonto: { stringValue: belegData.sachkonto } } : {}),
       ...(belegData.buchungstext ? { buchungstext: { stringValue: belegData.buchungstext } } : {}),
       ...(belegData.storage_url ? { storage_url: { stringValue: belegData.storage_url } } : {}),
-      ...(belegData.betrag_netto != null ? { betrag_netto: { doubleValue: belegData.betrag_netto } } : {})
+      betrag_netto: { doubleValue: belegData.betrag_netto != null ? belegData.betrag_netto : nettoAusBrutto(belegData.betrag, belegData.mwst_satz) }
     }
   };
 
