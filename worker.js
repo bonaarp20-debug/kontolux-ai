@@ -1871,11 +1871,17 @@ function extractInvoiceFields(xmlObj) {
     let tax = settlement.ApplicableTradeTax;
     if (Array.isArray(tax)) tax = tax[0];
     const dateStr = textOf(doc.IssueDateTime?.DateTimeString) || textOf(doc.IssueDateTime);
+    // TaxBasisTotalAmount = Nettobetrag (Summe aller Positionen ohne USt) — direkter Feldwert aus CII,
+    // genauer als Rückrechnung aus Brutto. Falls fehlt, wird im Aufrufer nettoAusBrutto() als Fallback
+    // verwendet (BELEG_SPEICHERN). Verifiziert gegen ZUGFeRD 2.1 Spec: SpecifiedTradeSettlementHeader-
+    // MonetarySummation/TaxBasisTotalAmount enthält den Netto-Gesamtbetrag der Rechnung.
+    const betrag_netto_cii = parseFloat(textOf(summation.TaxBasisTotalAmount)) || null;
     return {
       rechnungsnr: textOf(doc.ID),
       datum: parseCiiDate(dateStr),
       absender: textOf(seller.Name),
       betrag: parseFloat(textOf(summation.GrandTotalAmount)) || null,
+      betrag_netto: betrag_netto_cii > 0 ? betrag_netto_cii : null,
       mwst_satz: parseFloat(textOf(tax?.RateApplicablePercent)),
     };
   }
@@ -1886,11 +1892,15 @@ function extractInvoiceFields(xmlObj) {
     let taxSub = inv.TaxTotal?.TaxSubtotal;
     if (Array.isArray(taxSub)) taxSub = taxSub[0];
     const percent = taxSub?.TaxCategory?.Percent;
+    // TaxExclusiveAmount = Nettobetrag (Summe excl. USt) — direktes Feld aus UBL/XRechnung.
+    // Präziser als Rückrechnung aus PayableAmount, daher bevorzugt wenn vorhanden und > 0.
+    const betrag_netto_ubl = parseFloat(textOf(inv.LegalMonetaryTotal?.TaxExclusiveAmount)) || null;
     return {
       rechnungsnr: textOf(inv.ID),
       datum: textOf(inv.IssueDate),
       absender: sellerName,
       betrag: parseFloat(textOf(inv.LegalMonetaryTotal?.PayableAmount)) || null,
+      betrag_netto: betrag_netto_ubl > 0 ? betrag_netto_ubl : null,
       mwst_satz: parseFloat(textOf(percent)),
     };
   }
@@ -1907,6 +1917,7 @@ async function parseXRechnungXml(text, sellerNameHint) {
   return {
     format: 'xrechnung',
     betrag: fields.betrag,
+    betrag_netto: fields.betrag_netto || null,
     mwst_satz: isNaN(fields.mwst_satz) ? null : (fields.mwst_satz === 0 ? 'keine' : String(fields.mwst_satz)),
     absender: fields.absender || null,
     rechnungsnr: fields.rechnungsnr || null,
