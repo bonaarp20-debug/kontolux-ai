@@ -603,7 +603,11 @@ const SACHKONTO_MAPPING = {
   'Wareneinkauf 19%':           { SKR03: '3400', SKR04: '5400', euer_zeile: 'Z.29' },
   'Wareneinkauf 7%':            { SKR03: '3300', SKR04: '5300', euer_zeile: 'Z.29' },
   'GWG bis 800€':               { SKR03: '0480', SKR04: '0670', euer_zeile: 'Z.37' },
-  'Abschreibung (AfA)':         { SKR03: '4830', SKR04: '6220', euer_zeile: 'Z.27' },
+  // AfA nach §7 EStG (lineare Abschreibung). SKR03 4832/SKR04 6832 = Abschreibungen auf Betriebs-
+  // und Geschäftsausstattung (allgemeines AfA-Konto für EÜR). EÜR Z.35 (2026+) = Anlage EÜR
+  // "Absetzung für Abnutzung (AfA) gem. §7 EStG". §4 Abs.3 Satz 3 EStG: AfA ist vom Zufluss-
+  // Abfluss-Prinzip ausgenommen — zeitanteiliger Abzug, nicht bei Zahlung.
+  'Abschreibung (AfA)':         { SKR03: '4832', SKR04: '6832', euer_zeile: 'Z.35' },
   'Versicherungen':             { SKR03: '4360', SKR04: '6400', euer_zeile: 'Z.50' },
   'Steuerberater/Buchhaltung':  { SKR03: '4950', SKR04: '6825', euer_zeile: 'Z.47' },
   // Bewirtung 4650/6640 (abzugsfähiger Teil), Werbekosten SKR03 4600 (nicht 4610) — siehe Korrektur oben.
@@ -808,10 +812,11 @@ Nutzer nennt ein Wirtschaftsgut (Computer, Kamera, Fahrzeug, Maschine, Möbel, S
 2. GWG-Prüfung: Anschaffungswert ≤ 800€ netto → Sofortabschreibung: afa_betrag_jaehrlich = anschaffungswert, nutzungsdauer_jahre = 1.
 3. Anschaffungswert > 800€ netto → lineare AfA: afa_betrag_jaehrlich = anschaffungswert ÷ nutzungsdauer_jahre (auf volle Euro abrunden).
    AfA-Tabelle §7 EStG (immer erst nachfragen): Computer/Laptop/Tablet/Smartphone seit 2021 optional 1 J (BMF-Schreiben 26.02.2021, EDV-Wirtschaftsgüter — Sofortabschreibung unabhängig vom Preis), Kamera 7 J, Pkw 6 J, Büromöbel 13 J, Software-Kauflizenz 3 J, Sonstige: amtliche AfA-Tabelle BMF. Hinweis ausgeben: Diese Angabe ist eine Orientierung — bei Unklarheiten Steuerberater konsultieren.
-4. Sachkonto: SKR03 4830 / SKR04 6220, EÜR Z.27, Buchungstext "AfA [Gerät] [Jahr]".
+4. Sachkonto: SKR03 4832 / SKR04 6832 (Abschreibungen auf Betriebs-/Geschäftsausstattung), EÜR Z.34 (2025) / Z.35 (2026+). Buchungstext "AfA [Gerät] [Jahr]".
 5. Bei Bestätigung sofort buchen:
 AUSGABE_UPDATE:datum=[YYYY-MM-DD],betrag=[afa_betrag_jaehrlich],beschreibung=[Gerätename],kategorie=Abschreibung (AfA),anschaffungswert=[Netto-Anschaffungswert],nutzungsdauer_jahre=[Jahre]
 Datum = 31.12. des Anschaffungsjahrs (laufendes Jahr: aktuelles Datum). Nur den Jahres-AfA-Betrag als betrag angeben, nie den vollen Anschaffungswert.
+Hinweis: Kontolux bucht den Jahres-AfA-Betrag im Anschaffungsjahr (AUSGABE_UPDATE). Folgejahre werden automatisch aus dem Abschreibungen-Tab übernommen (§4 Abs.3 Satz 3 EStG — AfA ist vom Zufluss-Abfluss-Prinzip ausgenommen).
 
 ## TAGESEINNAHMEN SPEICHERN
 Nutzer nennt Einnahmen für einen Tag → zusammenfassen, fragen: "Als Tageseinnahmen für [Datum] speichern? (j/n)". Bei Bestätigung → kurze Reaktion MIT Sachkonto (SACHKONTO BEI BUCHUNGEN unten) + Befehl:
@@ -1281,10 +1286,11 @@ Nutzer nennt ein Wirtschaftsgut (Computer, Kamera, Fahrzeug, Maschine, Möbel, S
 2. GWG-Prüfung: Anschaffungswert ≤ 800€ netto → Sofortabschreibung: afa_betrag_jaehrlich = anschaffungswert, nutzungsdauer_jahre = 1.
 3. Anschaffungswert > 800€ netto → lineare AfA: afa_betrag_jaehrlich = anschaffungswert ÷ nutzungsdauer_jahre (auf volle Euro abrunden).
    AfA-Tabelle §7 EStG (immer erst nachfragen): Computer/Laptop/Tablet/Smartphone seit 2021 optional 1 J (BMF-Schreiben 26.02.2021, EDV-Wirtschaftsgüter — Sofortabschreibung unabhängig vom Preis), Kamera 7 J, Pkw 6 J, Büromöbel 13 J, Software-Kauflizenz 3 J, Sonstige: amtliche AfA-Tabelle BMF. Hinweis ausgeben: Diese Angabe ist eine Orientierung — bei Unklarheiten Steuerberater konsultieren.
-4. Sachkonto: SKR03 4830 / SKR04 6220, EÜR Z.27, Buchungstext "AfA [Gerät] [Jahr]".
+4. Sachkonto: SKR03 4832 / SKR04 6832 (Abschreibungen auf Betriebs-/Geschäftsausstattung), EÜR Z.34 (2025) / Z.35 (2026+). Buchungstext "AfA [Gerät] [Jahr]".
 5. Bei Bestätigung sofort buchen:
 AUSGABE_UPDATE:datum=[YYYY-MM-DD],betrag=[afa_betrag_jaehrlich],beschreibung=[Gerätename],kategorie=Abschreibung (AfA),anschaffungswert=[Netto-Anschaffungswert],nutzungsdauer_jahre=[Jahre]
 Datum = 31.12. des Anschaffungsjahrs (laufendes Jahr: aktuelles Datum). Nur den Jahres-AfA-Betrag als betrag angeben, nie den vollen Anschaffungswert.
+Hinweis: Kontolux bucht den Jahres-AfA-Betrag im Anschaffungsjahr (AUSGABE_UPDATE). Folgejahre werden automatisch aus dem Abschreibungen-Tab übernommen (§4 Abs.3 Satz 3 EStG — AfA ist vom Zufluss-Abfluss-Prinzip ausgenommen).
 
 ## TAGESEINNAHMEN SPEICHERN
 Nutzer nennt Einnahmen für einen Tag → zusammenfassen, fragen: "Als Tageseinnahmen für [Datum] speichern? (j/n)". Bei Bestätigung → kurze Reaktion MIT Sachkonto (SACHKONTO BEI BUCHUNGEN unten) + Befehl:
