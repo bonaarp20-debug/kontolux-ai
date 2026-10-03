@@ -1958,11 +1958,13 @@ async function handleChat(body, env, cors = {}, ctx) {
   const { Nachricht, Verlauf, Nutzername, Profil, FristType, Datum, userId, ChatId, ErsteNachricht, Datei } = body;
 
   try {
-    // Nachrichtenlimit-Check, Steuerrecht und Dashboard-Prognose parallel laden.
-    const [limit, steuerrechtText, dashboardText] = await Promise.all([
+    // Nachrichtenlimit-Check und Steuerrecht parallel laden.
+    // loadDashboardContext entfernt: las von nutzer/{userId}/dashboard (falscher Pfad, immer null).
+    // Dashboard-Liquiditätsdaten sind bereits im Profil-String enthalten (frontend baut ihn
+    // direkt aus profil/prognose auf, inkl. dashboard_gesamtruecklage etc. seit v1.3.x).
+    const [limit, steuerrechtText] = await Promise.all([
       checkNachrichtenLimit(Nutzername, env, userId, ctx),
       loadSteuerrechtContext(env),
-      loadDashboardContext(env, userId)
     ]);
     if (!limit.erlaubt) {
       return new Response('Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
@@ -1976,10 +1978,7 @@ async function handleChat(body, env, cors = {}, ctx) {
     const requiredModules = detectRequiredModules(Nachricht, FristType, hatDatei); // nur noch für Logging
     const abGruppe = 'A';
     const kiOptimierungAktiv = false;
-    // Dashboard-Prognose ans Profil anhängen, damit die KI die echten Zahlen hat
-    const profilMitDashboard = dashboardText
-      ? (Profil ? `${Profil}\n${dashboardText}` : dashboardText)
-      : Profil;
+    const profilMitDashboard = Profil;
     const dynamicContext = buildDynamicContext(
       profilMitDashboard, Datum, FristType, ErsteNachricht,
       null // kein Modul-Filtering — volles Profil
