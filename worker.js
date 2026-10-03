@@ -807,7 +807,7 @@ Nutzer nennt ein Wirtschaftsgut (Computer, Kamera, Fahrzeug, Maschine, Möbel, S
 1. In einer Frage abfragen: "Anschaffungswert netto und Nutzungsdauer in Jahren?"
 2. GWG-Prüfung: Anschaffungswert ≤ 800€ netto → Sofortabschreibung: afa_betrag_jaehrlich = anschaffungswert, nutzungsdauer_jahre = 1.
 3. Anschaffungswert > 800€ netto → lineare AfA: afa_betrag_jaehrlich = anschaffungswert ÷ nutzungsdauer_jahre (auf volle Euro abrunden).
-   Richtwerte (immer erst nachfragen): Computer/Laptop 3 J, Smartphone 5 J, Kamera 7 J, Pkw 6 J, Büromöbel 13 J, Software-Kauflizenz 3 J.
+   AfA-Tabelle §7 EStG (immer erst nachfragen): Computer/Laptop/Tablet/Smartphone seit 2021 optional 1 J (BMF-Schreiben 26.02.2021, EDV-Wirtschaftsgüter — Sofortabschreibung unabhängig vom Preis), Kamera 7 J, Pkw 6 J, Büromöbel 13 J, Software-Kauflizenz 3 J, Sonstige: amtliche AfA-Tabelle BMF. Hinweis ausgeben: Diese Angabe ist eine Orientierung — bei Unklarheiten Steuerberater konsultieren.
 4. Sachkonto: SKR03 4830 / SKR04 6220, EÜR Z.27, Buchungstext "AfA [Gerät] [Jahr]".
 5. Bei Bestätigung sofort buchen:
 AUSGABE_UPDATE:datum=[YYYY-MM-DD],betrag=[afa_betrag_jaehrlich],beschreibung=[Gerätename],kategorie=Abschreibung (AfA),anschaffungswert=[Netto-Anschaffungswert],nutzungsdauer_jahre=[Jahre]
@@ -1280,7 +1280,7 @@ Nutzer nennt ein Wirtschaftsgut (Computer, Kamera, Fahrzeug, Maschine, Möbel, S
 1. In einer Frage abfragen: "Anschaffungswert netto und Nutzungsdauer in Jahren?"
 2. GWG-Prüfung: Anschaffungswert ≤ 800€ netto → Sofortabschreibung: afa_betrag_jaehrlich = anschaffungswert, nutzungsdauer_jahre = 1.
 3. Anschaffungswert > 800€ netto → lineare AfA: afa_betrag_jaehrlich = anschaffungswert ÷ nutzungsdauer_jahre (auf volle Euro abrunden).
-   Richtwerte (immer erst nachfragen): Computer/Laptop 3 J, Smartphone 5 J, Kamera 7 J, Pkw 6 J, Büromöbel 13 J, Software-Kauflizenz 3 J.
+   AfA-Tabelle §7 EStG (immer erst nachfragen): Computer/Laptop/Tablet/Smartphone seit 2021 optional 1 J (BMF-Schreiben 26.02.2021, EDV-Wirtschaftsgüter — Sofortabschreibung unabhängig vom Preis), Kamera 7 J, Pkw 6 J, Büromöbel 13 J, Software-Kauflizenz 3 J, Sonstige: amtliche AfA-Tabelle BMF. Hinweis ausgeben: Diese Angabe ist eine Orientierung — bei Unklarheiten Steuerberater konsultieren.
 4. Sachkonto: SKR03 4830 / SKR04 6220, EÜR Z.27, Buchungstext "AfA [Gerät] [Jahr]".
 5. Bei Bestätigung sofort buchen:
 AUSGABE_UPDATE:datum=[YYYY-MM-DD],betrag=[afa_betrag_jaehrlich],beschreibung=[Gerätename],kategorie=Abschreibung (AfA),anschaffungswert=[Netto-Anschaffungswert],nutzungsdauer_jahre=[Jahre]
