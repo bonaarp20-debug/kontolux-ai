@@ -1970,28 +1970,22 @@ async function handleChat(body, env, cors = {}, ctx) {
       });
     }
 
-    // A/B-Test: KI_OPTIMIERUNG_AKTIV=true → 90% modular (B), 10% Baseline-Kontrolle (A)
-    const kiOptimierungAktiv = env.KI_OPTIMIERUNG_AKTIV === 'true';
+    // A/B-Test deaktiviert — immer voller Kontext (STATIC_SYSTEM_INSTRUCTIONS, ungefilteter Profil,
+    // Steuerrecht immer). Kostenoptimierung zurückgestellt bis KI wieder zuverlässig funktioniert.
     const hatDatei = !!(Datei && Datei.base64);
-    const requiredModules = detectRequiredModules(Nachricht, FristType, hatDatei);
-    let abGruppe = 'A';
-    let staticOverride = null;
-    if (kiOptimierungAktiv) {
-      abGruppe = Math.random() < 0.9 ? 'B' : 'A';
-      if (abGruppe === 'B') staticOverride = buildStaticForModules(requiredModules);
-    }
+    const requiredModules = detectRequiredModules(Nachricht, FristType, hatDatei); // nur noch für Logging
+    const abGruppe = 'A';
+    const kiOptimierungAktiv = false;
     // Dashboard-Prognose ans Profil anhängen, damit die KI die echten Zahlen hat
     const profilMitDashboard = dashboardText
       ? (Profil ? `${Profil}\n${dashboardText}` : dashboardText)
       : Profil;
     const dynamicContext = buildDynamicContext(
       profilMitDashboard, Datum, FristType, ErsteNachricht,
-      abGruppe === 'B' ? requiredModules : null
+      null // kein Modul-Filtering — volles Profil
     );
-    // Gruppe B: Steuerrecht-Block nur bei Steuerfragen oder Datei-Upload — spart ~2,71c cacheWrite
-    const steuerrechtFuerDieseAnfrage = (abGruppe !== 'B' || requiredModules.includes('steuer') || hatDatei)
-      ? steuerrechtText : null;
-    const system = buildSystemBlocks(dynamicContext, steuerrechtFuerDieseAnfrage, staticOverride);
+    const steuerrechtFuerDieseAnfrage = steuerrechtText; // immer Steuerrecht einbeziehen
+    const system = buildSystemBlocks(dynamicContext, steuerrechtFuerDieseAnfrage, null); // null = STATIC_SYSTEM_INSTRUCTIONS
 
   // Verlauf parsen — Format: "Nutzer: ... | Kontolux AI: ..."
   const messages = [];
@@ -2044,9 +2038,9 @@ async function handleChat(body, env, cors = {}, ctx) {
   // beiden stabilen Blöcke (Steuerrecht, STATIC_SYSTEM_INSTRUCTIONS) bleiben wie gehabt gecacht
   // — nur die für dieses Muster wirkungslose zusätzliche Ebene entfällt.
 
-  // Intent-Router: requiredModules bestimmt max_tokens. core-only → 1024, sonst → 2048. Modell immer Haiku.
+  // Modell und max_tokens — immer 2048, kein Intent-Routing mehr.
   const model = 'claude-haiku-4-5-20251001';
-  const maxTokensForRequest = (requiredModules.length === 1) ? 1024 : 2048;
+  const maxTokensForRequest = 2048;
 
   // Claude aufrufen und SSE parsen → reinen Text streamen
   const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
