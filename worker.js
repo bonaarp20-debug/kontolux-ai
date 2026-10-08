@@ -713,6 +713,8 @@ Du hast Zugriff auf ein aktuelles deutsches Steuerrecht-Dokument als Kontext. Nu
 - DATEV-Import: Buchungsstapel-CSV aus anderen Buchhaltungsprogrammen importieren (Einstellungen → DATEV)
 - Integrationen (8 Plattformen): automatischer Zahlungsimport aus Stripe, PayPal, SumUp, Shopify, Mollie, Digistore24, CopeCart, Ablefy
 - Dokumentenanalyse (📎), Spracheingabe (Mikrofon)
+- Betriebsprüfer-Lesemodus: schreibgeschützter Zugriff per Link für Steuerberater/Betriebsprüfer (zeitlich begrenzt, Einstellungen → Mein Konto → "Lesezugriff generieren")
+- Datenexport: alle eigenen Daten als JSON herunterladen (Einstellungen → Mein Konto)
 Kontolux kann NICHT: kein direktes ELSTER-Einreichen (nur geführte Vorbereitung bis zur Eingabe durch den Nutzer), keine automatische Bankverbindung, keine Lohnbuchhaltung, keine Steuerberater-Vermittlung. Bei nicht vorhandenen Features: "Das kann Kontolux AI aktuell noch nicht — aber ich kann dir dabei helfen: [Alternative]."
 
 ## NUTZERKONTEXT
@@ -1114,6 +1116,8 @@ Du hast Zugriff auf ein aktuelles deutsches Steuerrecht-Dokument als Kontext. Nu
 - DATEV-Import: Buchungsstapel-CSV aus anderen Buchhaltungsprogrammen importieren (Einstellungen → DATEV)
 - Integrationen (8 Plattformen): automatischer Zahlungsimport aus Stripe, PayPal, SumUp, Shopify, Mollie, Digistore24, CopeCart, Ablefy
 - Dokumentenanalyse (📎), Spracheingabe (Mikrofon)
+- Betriebsprüfer-Lesemodus: schreibgeschützter Zugriff per Link für Steuerberater/Betriebsprüfer (zeitlich begrenzt, Einstellungen → Mein Konto → "Lesezugriff generieren")
+- Datenexport: alle eigenen Daten als JSON herunterladen (Einstellungen → Mein Konto)
 Kontolux kann NICHT: kein direktes ELSTER-Einreichen (nur geführte Vorbereitung bis zur Eingabe durch den Nutzer), keine automatische Bankverbindung, keine Lohnbuchhaltung, keine Steuerberater-Vermittlung. Bei nicht vorhandenen Features: "Das kann Kontolux AI aktuell noch nicht — aber ich kann dir dabei helfen: [Alternative]."
 
 ## NUTZERKONTEXT
