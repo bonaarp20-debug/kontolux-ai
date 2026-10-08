@@ -2914,6 +2914,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
         },
         body: JSON.stringify({
           model: 'claude-haiku-5-5',
+          thinking: { type: 'disabled' },
           max_tokens: 1024,
           system: systemPrompt,
           messages
@@ -3019,6 +3020,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
     },
     body: JSON.stringify({
       model: 'claude-haiku-5-5',
+      thinking: { type: 'disabled' },
       max_tokens: 2048,
       stream: true,
       system,
