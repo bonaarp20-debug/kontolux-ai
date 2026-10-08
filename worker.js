@@ -1080,7 +1080,7 @@ function detectRequiredModules(nachricht, fristType, hatDatei) {
   if (fristType) { modules.push('steuer', 'euer'); return modules; }
   if (/rechnung|mahnung|angebot|storniere|stornierung|xrechnung|faktura|rechnungspr[uü]f/.test(t)) modules.push('rechnungen');
   if (/ausgabe|einnahme|tageseinnahmen|monatsabschluss|buchung|datev|sachkonto|abschluss|beleg|afa\b|abschreib|skr|gwg|e[uü]r\b|reverse.?charge/.test(t)) modules.push('euer');
-  if (/ustva|voranmeldung|steuererklärung|einkommensteuer|gewerbesteuer|e[uü]r\b|vorsteuer|umsatzsteuer|kleinunternehmer|reverse.?charge|zusammenfassend|frist/.test(t)) modules.push('steuer');
+  if (/ustva|voranmeldung|steuererklärung|einkommensteuer|gewerbesteuer|e[uü]r\b|vorsteuer|umsatzsteuer|kleinunternehmer|reverse.?charge|zusammenfassend|frist|vorauszahlung|steuerr[uü]cklage|r[uü]cklage|jahresprognose|dashboard|grundfreibetrag|steuerklasse|steuersatz/.test(t)) modules.push('steuer');
   if (/zeiterfassung|reisekost|km.*gefahr|gefahr.*km|dienstreise|stunden.*erfass|erfass.*stunden|hochgeladen|upload/.test(t)) modules.push('tools');
   if (/stripe|paypal|sumup|shopify|digistore|copecart|ablefy|mollie|webhook|integration/.test(t)) modules.push('integrationen');
   // Abhängigkeiten: rechnungen und tools brauchen euer (SACHKONTO-Querverweise)
@@ -1998,19 +1998,20 @@ async function handleChat(body, env, cors = {}, ctx) {
       });
     }
 
-    // A/B-Test deaktiviert — immer voller Kontext (STATIC_SYSTEM_INSTRUCTIONS, ungefilteter Profil,
-    // Steuerrecht immer). Kostenoptimierung zurückgestellt bis KI wieder zuverlässig funktioniert.
+    // Modulares System aktiv: nur benötigte Module laden, Profil filtern.
+    // Steuerrecht bleibt immer drin (Block 1, bereits cached — kein Kostenvorteil beim Weglassen).
     const hatDatei = !!(Datei && Datei.base64);
-    const requiredModules = detectRequiredModules(Nachricht, FristType, hatDatei); // nur noch für Logging
-    const abGruppe = 'A';
-    const kiOptimierungAktiv = false;
+    const requiredModules = detectRequiredModules(Nachricht, FristType, hatDatei);
+    const abGruppe = 'B';
+    const kiOptimierungAktiv = true;
     const profilMitDashboard = Profil;
     const dynamicContext = buildDynamicContext(
       profilMitDashboard, Datum, FristType, ErsteNachricht,
-      null // kein Modul-Filtering — volles Profil
+      requiredModules // Profil auf benötigte Module filtern
     );
     const steuerrechtFuerDieseAnfrage = steuerrechtText; // immer Steuerrecht einbeziehen
-    const system = buildSystemBlocks(dynamicContext, steuerrechtFuerDieseAnfrage, null); // null = STATIC_SYSTEM_INSTRUCTIONS
+    const staticPrompt = buildStaticForModules(requiredModules);
+    const system = buildSystemBlocks(dynamicContext, steuerrechtFuerDieseAnfrage, staticPrompt);
 
   // Verlauf parsen — Format: "Nutzer: ... | Kontolux AI: ..."
   const messages = [];
