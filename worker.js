@@ -417,6 +417,35 @@ function pruefeBetragZeile(line) {
       return line.slice(0, ausgabeUpdateMatch.index) + 'Ich kann diese Ausgabe noch nicht buchen — mir fehlt die Kategorie (z.B. Bürobedarf, Software/EDV/SaaS, Werbekosten, Reisekosten). Welche passt hier am besten?';
     }
   }
+  // DOKUMENT_SPEICHERN ohne Kategorie: analog zu AUSGABE_UPDATE — Kategorie ist Pflicht für die
+  // EÜR-Zuordnung, sonst bleibt der Beleg kategorisierungslos in Firestore.
+  const dokSpeichernMatch = line.match(/DOKUMENT_SPEICHERN:(.*)$/i);
+  if (dokSpeichernMatch) {
+    const mKat = dokSpeichernMatch[1].match(/kategorie=([^,]*)/i);
+    const kategorie = mKat ? mKat[1].trim() : '';
+    if (!kategorie) {
+      return line.slice(0, dokSpeichernMatch.index) + 'Ich kann dieses Dokument noch nicht buchen — mir fehlt die Kategorie (z.B. Bürobedarf, Software/EDV/SaaS, Werbekosten, Reisekosten). Welche passt hier am besten?';
+    }
+  }
+  // ANGEBOT_ERSTELLEN ohne gültige Einzelpreise: analog zu RECHNUNG_ERSTELLEN — alle Positionen
+  // müssen einen Einzelpreis > 0 haben, sonst wird ein Angebot mit Nullbeträgen erstellt.
+  const angebotMatch = line.match(/ANGEBOT_ERSTELLEN:(.*)$/i);
+  if (angebotMatch) {
+    const mPos = angebotMatch[1].match(/positionen=([^,]*)/i);
+    const positionen = mPos ? mPos[1].trim() : '';
+    if (!positionen) {
+      return line.slice(0, angebotMatch.index) + 'Ich kann dieses Angebot nicht erstellen — es wurden keine Positionen angegeben. Bitte nenne mir mindestens eine Position mit Beschreibung, Menge und Einzelpreis.';
+    }
+    const posArr = positionen.split(';').filter(p => p.trim());
+    const ungueltig = posArr.some(p => {
+      const parts = p.trim().split(':');
+      const einzelpreis = parseFloat(parts[parts.length - 1]);
+      return !Number.isFinite(einzelpreis) || einzelpreis <= 0;
+    });
+    if (ungueltig) {
+      return line.slice(0, angebotMatch.index) + 'Ich kann dieses Angebot nicht erstellen — alle Einzelpreise müssen größer als 0 sein. Bitte prüfe die Positionen.';
+    }
+  }
   return line;
 }
 
@@ -898,6 +927,18 @@ Was der Bot konkret tun soll:
 - NIEMALS behaupten Kleinunternehmer müssen ZM abgeben
 - Bei konkreten Fragen zu Zeilen/Kennzahlen: ZM hat keine UStVA-Kennzahlen — sie ist ein eigenes Formular im BZStOnline-Portal
 
+## EU-KLEINUNTERNEHMERREGELUNG §19a UStG (ab 2025)
+Wer: Kleinunternehmer (§19 UStG) die ihre Steuerbefreiung GRENZÜBERSCHREITEND in anderen EU-Mitgliedstaaten nutzen wollen. Voraussetzung: Gesamtumsatz im EU-Gebiet ≤ 100.000€ im Vorjahr UND im laufenden Jahr. Dafür braucht der Nutzer vom BZSt eine EU-KU-Identifikationsnummer.
+
+Meldepflicht: Quartalsweise beim BZSt (nicht ELSTER, nicht lokales Finanzamt) — Frist: Ende des Monats nach Ablauf des Quartals (30.04, 31.07, 31.10, 31.01). Im Finanzkalender erscheint diese Frist sobald der Nutzer im Onboarding eu_kleinunternehmer_eu = true gesetzt hat.
+
+Abgrenzung zur ZM: Die §19a-Meldung ist KEINE Zusammenfassende Meldung. Sie meldet die Teilnahme an der grenzüberschreitenden KU-Regelung, keine Umsätze im Sinne der ZM.
+
+Was der Bot konkret tun soll:
+- Wenn ein KU nach EU-Kunden fragt: §19a erwähnen und erklären (Befreiung auch im EU-Ausland, aber Registrierung beim BZSt nötig)
+- Wenn KU fragt ob er ZM abgeben muss: NEIN — KU sind von der ZM (§18a) ausgenommen; stattdessen ggf. §19a erläutern falls EU-Kunden vorhanden
+- §19a ist freiwillig — ohne Registrierung gelten im EU-Ausland die dortigen Steuerregeln
+
 ## VORSTEUER & MWST
 Kleinunternehmer (§19 UStG) haben keine Vorsteuer — Status zuerst prüfen, dann ist dieser ganze Abschnitt irrelevant.
 Mögliche mwst_satz-Werte: 19, 7, 0, "keine", "unbekannt", "reverse_charge".
@@ -935,7 +976,7 @@ Alles vorhanden → antworte SO, absender_name/eigene_adresse/steuernummer/bankv
 "Super, ich erstelle deine Rechnung!"
 RECHNUNG_ERSTELLEN:absender_name=[echter Name/Firma],empfaenger_name=[Name],empfaenger_anrede=[Herr/Frau/Firma],empfaenger_adresse=[Straße;PLZ;Ort],leistung=[Beschreibung],leistungsdatum=[Datum als "15. August 2026"],zahlungsziel=[Datum als "15. August 2026"],betrag_netto=[Zahl],rechnungsnummer=[Nummer],steuernummer=[echte Steuernummer],eigene_adresse=[Straße;PLZ;Ort],bankverbindung=[echte IBAN],verwendungszweck=[Standard: identisch zur Rechnungsnummer, nie frei erfunden],format=[pdf/xrechnung/beide],mwst_satz=[19/7/0],empfaenger_ust_id=[nur bei EU-Ausland-Reverse-Charge, sonst weglassen]
 
-WICHTIG: Befehl MUSS in der Antwort stehen, sonst keine PDF. Keine Zusammenfassung, nur der Befehl. RECHNUNGSNUMMER IN DER ANTWORT: Bei rechnungsnummer=auto kennst du die tatsächlich vergebene Nummer beim Schreiben deiner Antwort noch NICHT (sie wird erst danach clientseitig aus dem fortlaufenden Zähler aufgelöst) — nenne in diesem Fall selbst KEINE konkrete Nummer und erfinde keine, das System bestätigt sie automatisch direkt im Anschluss an deine Antwort ("RE-2026-09-002 wurde automatisch als nächste fortlaufende Rechnungsnummer vergeben."). Nur wenn der Nutzer selbst eine eigene Rechnungsnummer vorgegeben hat (nicht auto), darfst du genau diese in deiner Antwort nennen. Danach fragen: "Wurde diese Rechnung bereits bezahlt? Dann speichere ich sie als Tageseinnahme." Datumsangaben im Befehl deutsches Langformat "15. August 2026" (nie YYYY-MM-DD/DD.MM.YYYY). Kommas in Werten → Semikolon. Betrag nur Zahl ohne €. betrag_netto MUSS größer als 0 sein — ist der genannte/berechnete Betrag 0 oder negativ, KEINEN RECHNUNG_ERSTELLEN-Befehl ausgeben, sondern nachfragen, welcher Betrag korrekt ist. Empfänger-Name UND -Adresse sind ebenfalls Pflicht — fehlt eines, KEINEN Befehl ausgeben, erst nachfragen. KU: mwst_satz=0, §19-Hinweis, kein Steuerausweis. Nicht-KU: mwst_satz=19 oder 7, USt. ausweisen (außer Reverse Charge, siehe oben). mwst_satz und format IMMER angeben, nie weglassen (format-Default pdf). verwendungszweck NIEMALS erfinden oder frei formulieren — Standard ist immer die Rechnungsnummer (rechnungsnummer-Wert exakt übernehmen), nur wenn der Nutzer von sich aus explizit einen anderen Text nennt, den exakt verwenden.
+WICHTIG: Befehl MUSS in der Antwort stehen, sonst keine PDF. Keine Zusammenfassung, nur der Befehl. RECHNUNGSNUMMER IN DER ANTWORT: Bei rechnungsnummer=auto kennst du die tatsächlich vergebene Nummer beim Schreiben deiner Antwort noch NICHT (sie wird erst danach clientseitig aus dem fortlaufenden Zähler aufgelöst) — nenne in diesem Fall selbst KEINE konkrete Nummer und erfinde keine, das System bestätigt sie automatisch direkt im Anschluss an deine Antwort ("RE-JJJJ-MM-NNN wurde automatisch als nächste fortlaufende Rechnungsnummer vergeben."). Nur wenn der Nutzer selbst eine eigene Rechnungsnummer vorgegeben hat (nicht auto), darfst du genau diese in deiner Antwort nennen. Danach fragen: "Wurde diese Rechnung bereits bezahlt? Dann speichere ich sie als Tageseinnahme." Datumsangaben im Befehl deutsches Langformat "15. August 2026" (nie YYYY-MM-DD/DD.MM.YYYY). Kommas in Werten → Semikolon. Betrag nur Zahl ohne €. betrag_netto MUSS größer als 0 sein — ist der genannte/berechnete Betrag 0 oder negativ, KEINEN RECHNUNG_ERSTELLEN-Befehl ausgeben, sondern nachfragen, welcher Betrag korrekt ist. Empfänger-Name UND -Adresse sind ebenfalls Pflicht — fehlt eines, KEINEN Befehl ausgeben, erst nachfragen. KU: mwst_satz=0, §19-Hinweis, kein Steuerausweis. Nicht-KU: mwst_satz=19 oder 7, USt. ausweisen (außer Reverse Charge, siehe oben). mwst_satz und format IMMER angeben, nie weglassen (format-Default pdf). verwendungszweck NIEMALS erfinden oder frei formulieren — Standard ist immer die Rechnungsnummer (rechnungsnummer-Wert exakt übernehmen), nur wenn der Nutzer von sich aus explizit einen anderen Text nennt, den exakt verwenden.
 
 ## E-RECHNUNGEN (XRECHNUNG/ZUGFERD)
 Seit 2025 müssen Unternehmen (B2B) Eingangsrechnungen als E-Rechnung empfangen können — deshalb XRechnung aktiv empfehlen wenn der Empfänger erkennbar ein Unternehmen ist (siehe RECHNUNG ERSTELLEN). Hochgeladene XRechnung-XML/ZUGFeRD-PDF werden im Belegarchiv automatisch erkannt und ausgelesen (Betrag/Absender/Rechnungsnr/MwSt-Satz) — Nutzer bestätigt nur noch, trägt nicht von Hand ein.
@@ -1080,7 +1121,7 @@ function detectRequiredModules(nachricht, fristType, hatDatei) {
   if (fristType) { modules.push('steuer', 'euer'); return modules; }
   if (/rechnung|mahnung|angebot|storniere|stornierung|xrechnung|faktura|rechnungspr[uü]f/.test(t)) modules.push('rechnungen');
   if (/ausgabe|einnahme|tageseinnahmen|monatsabschluss|buchung|datev|sachkonto|abschluss|beleg|afa\b|abschreib|skr|gwg|e[uü]r\b|reverse.?charge/.test(t)) modules.push('euer');
-  if (/ustva|voranmeldung|steuererklärung|einkommensteuer|gewerbesteuer|e[uü]r\b|vorsteuer|umsatzsteuer|kleinunternehmer|reverse.?charge|zusammenfassend|frist|vorauszahlung|steuerr[uü]cklage|r[uü]cklage|jahresprognose|dashboard|grundfreibetrag|steuerklasse|steuersatz/.test(t)) modules.push('steuer');
+  if (/ustva|voranmeldung|steuererklärung|einkommensteuer|gewerbesteuer|e[uü]r\b|vorsteuer|umsatzsteuer|kleinunternehmer|reverse.?charge|zusammenfassend|frist|vorauszahlung|steuerr[uü]cklage|r[uü]cklage|jahresprognose|dashboard|grundfreibetrag|steuerklasse|steuersatz|steuer\b/.test(t)) modules.push('steuer');
   if (/zeiterfassung|reisekost|km.*gefahr|gefahr.*km|dienstreise|stunden.*erfass|erfass.*stunden|hochgeladen|upload/.test(t)) modules.push('tools');
   if (/stripe|paypal|sumup|shopify|digistore|copecart|ablefy|mollie|webhook|integration/.test(t)) modules.push('integrationen');
   // Abhängigkeiten: rechnungen und tools brauchen euer (SACHKONTO-Querverweise)
@@ -1148,10 +1189,7 @@ Antworte präzise und kurz:
 - Nie unnötige Wiederholungen oder Fülltext
 
 ## CHAT-TITEL
-ErsteNachricht=true → Antwort beginnt mit TITEL:kurzer_titel_max_5_wörter
-ANTWORT:
-(also TITEL: und ANTWORT: jeweils auf eigener Zeile, durch einen ECHTEN Zeilenumbruch getrennt —
-niemals die zwei Zeichen "\\n" als Text ausgeben, das erkennt der Client nicht als Trenner.)
+Wenn im Nutzerkontext "FORMAT PFLICHT (erste Nachricht)" steht, gilt: Die allererste Zeile deiner Antwort MUSS exakt sein → TITEL:Titel hier (max 5 Wörter), danach sofort neue Zeile → ANTWORT:Text. Kein Text vor TITEL:, kein Leerzeichen nach "TITEL:" oder "ANTWORT:".
 Beispiel:
 TITEL:Kleinunternehmerregelung erklärt
 ANTWORT:...
@@ -1217,6 +1255,18 @@ Was der Bot konkret tun soll:
 - Wenn Nutzer eine EU-B2B-Rechnung erstellt: aktiv auf die ZM-Pflicht hinweisen
 - NIEMALS behaupten Kleinunternehmer müssen ZM abgeben
 - Bei konkreten Fragen zu Zeilen/Kennzahlen: ZM hat keine UStVA-Kennzahlen — sie ist ein eigenes Formular im BZStOnline-Portal
+
+## EU-KLEINUNTERNEHMERREGELUNG §19a UStG (ab 2025)
+Wer: Kleinunternehmer (§19 UStG) die ihre Steuerbefreiung GRENZÜBERSCHREITEND in anderen EU-Mitgliedstaaten nutzen wollen. Voraussetzung: Gesamtumsatz im EU-Gebiet ≤ 100.000€ im Vorjahr UND im laufenden Jahr. Dafür braucht der Nutzer vom BZSt eine EU-KU-Identifikationsnummer.
+
+Meldepflicht: Quartalsweise beim BZSt (nicht ELSTER, nicht lokales Finanzamt) — Frist: Ende des Monats nach Ablauf des Quartals (30.04, 31.07, 31.10, 31.01). Im Finanzkalender erscheint diese Frist sobald der Nutzer im Onboarding eu_kleinunternehmer_eu = true gesetzt hat.
+
+Abgrenzung zur ZM: Die §19a-Meldung ist KEINE Zusammenfassende Meldung. Sie meldet die Teilnahme an der grenzüberschreitenden KU-Regelung, keine Umsätze im Sinne der ZM.
+
+Was der Bot konkret tun soll:
+- Wenn ein KU nach EU-Kunden fragt: §19a erwähnen und erklären (Befreiung auch im EU-Ausland, aber Registrierung beim BZSt nötig)
+- Wenn KU fragt ob er ZM abgeben muss: NEIN — KU sind von der ZM (§18a) ausgenommen; stattdessen ggf. §19a erläutern falls EU-Kunden vorhanden
+- §19a ist freiwillig — ohne Registrierung gelten im EU-Ausland die dortigen Steuerregeln
 
 ## VORSTEUER & MWST
 Kleinunternehmer (§19 UStG) haben keine Vorsteuer — Status zuerst prüfen, dann ist dieser ganze Abschnitt irrelevant.
@@ -1373,7 +1423,7 @@ Alles vorhanden → antworte SO, absender_name/eigene_adresse/steuernummer/bankv
 "Super, ich erstelle deine Rechnung!"
 RECHNUNG_ERSTELLEN:absender_name=[echter Name/Firma],empfaenger_name=[Name],empfaenger_anrede=[Herr/Frau/Firma],empfaenger_adresse=[Straße;PLZ;Ort],leistung=[Beschreibung],leistungsdatum=[Datum als "15. August 2026"],zahlungsziel=[Datum als "15. August 2026"],betrag_netto=[Zahl],rechnungsnummer=[Nummer],steuernummer=[echte Steuernummer],eigene_adresse=[Straße;PLZ;Ort],bankverbindung=[echte IBAN],verwendungszweck=[Standard: identisch zur Rechnungsnummer, nie frei erfunden],format=[pdf/xrechnung/beide],mwst_satz=[19/7/0],empfaenger_ust_id=[nur bei EU-Ausland-Reverse-Charge, sonst weglassen]
 
-WICHTIG: Befehl MUSS in der Antwort stehen, sonst keine PDF. Keine Zusammenfassung, nur der Befehl. RECHNUNGSNUMMER IN DER ANTWORT: Bei rechnungsnummer=auto kennst du die tatsächlich vergebene Nummer beim Schreiben deiner Antwort noch NICHT (sie wird erst danach clientseitig aus dem fortlaufenden Zähler aufgelöst) — nenne in diesem Fall selbst KEINE konkrete Nummer und erfinde keine, das System bestätigt sie automatisch direkt im Anschluss an deine Antwort ("RE-2026-09-002 wurde automatisch als nächste fortlaufende Rechnungsnummer vergeben."). Nur wenn der Nutzer selbst eine eigene Rechnungsnummer vorgegeben hat (nicht auto), darfst du genau diese in deiner Antwort nennen. Danach fragen: "Wurde diese Rechnung bereits bezahlt? Dann speichere ich sie als Tageseinnahme." Datumsangaben im Befehl deutsches Langformat "15. August 2026" (nie YYYY-MM-DD/DD.MM.YYYY). Kommas in Werten → Semikolon. Betrag nur Zahl ohne €. betrag_netto MUSS größer als 0 sein — ist der genannte/berechnete Betrag 0 oder negativ, KEINEN RECHNUNG_ERSTELLEN-Befehl ausgeben, sondern nachfragen, welcher Betrag korrekt ist. Empfänger-Name UND -Adresse sind ebenfalls Pflicht — fehlt eines, KEINEN Befehl ausgeben, erst nachfragen. KU: mwst_satz=0, §19-Hinweis, kein Steuerausweis. Nicht-KU: mwst_satz=19 oder 7, USt. ausweisen (außer Reverse Charge, siehe oben). mwst_satz und format IMMER angeben, nie weglassen (format-Default pdf). verwendungszweck NIEMALS erfinden oder frei formulieren — Standard ist immer die Rechnungsnummer (rechnungsnummer-Wert exakt übernehmen), nur wenn der Nutzer von sich aus explizit einen anderen Text nennt, den exakt verwenden.
+WICHTIG: Befehl MUSS in der Antwort stehen, sonst keine PDF. Keine Zusammenfassung, nur der Befehl. RECHNUNGSNUMMER IN DER ANTWORT: Bei rechnungsnummer=auto kennst du die tatsächlich vergebene Nummer beim Schreiben deiner Antwort noch NICHT (sie wird erst danach clientseitig aus dem fortlaufenden Zähler aufgelöst) — nenne in diesem Fall selbst KEINE konkrete Nummer und erfinde keine, das System bestätigt sie automatisch direkt im Anschluss an deine Antwort ("RE-JJJJ-MM-NNN wurde automatisch als nächste fortlaufende Rechnungsnummer vergeben."). Nur wenn der Nutzer selbst eine eigene Rechnungsnummer vorgegeben hat (nicht auto), darfst du genau diese in deiner Antwort nennen. Danach fragen: "Wurde diese Rechnung bereits bezahlt? Dann speichere ich sie als Tageseinnahme." Datumsangaben im Befehl deutsches Langformat "15. August 2026" (nie YYYY-MM-DD/DD.MM.YYYY). Kommas in Werten → Semikolon. Betrag nur Zahl ohne €. betrag_netto MUSS größer als 0 sein — ist der genannte/berechnete Betrag 0 oder negativ, KEINEN RECHNUNG_ERSTELLEN-Befehl ausgeben, sondern nachfragen, welcher Betrag korrekt ist. Empfänger-Name UND -Adresse sind ebenfalls Pflicht — fehlt eines, KEINEN Befehl ausgeben, erst nachfragen. KU: mwst_satz=0, §19-Hinweis, kein Steuerausweis. Nicht-KU: mwst_satz=19 oder 7, USt. ausweisen (außer Reverse Charge, siehe oben). mwst_satz und format IMMER angeben, nie weglassen (format-Default pdf). verwendungszweck NIEMALS erfinden oder frei formulieren — Standard ist immer die Rechnungsnummer (rechnungsnummer-Wert exakt übernehmen), nur wenn der Nutzer von sich aus explizit einen anderen Text nennt, den exakt verwenden.
 
 ## E-RECHNUNGEN (XRECHNUNG/ZUGFERD)
 Seit 2025 müssen Unternehmen (B2B) Eingangsrechnungen als E-Rechnung empfangen können — deshalb XRechnung aktiv empfehlen wenn der Empfänger erkennbar ein Unternehmen ist (siehe RECHNUNG ERSTELLEN). Hochgeladene XRechnung-XML/ZUGFeRD-PDF werden im Belegarchiv automatisch erkannt und ausgelesen (Betrag/Absender/Rechnungsnr/MwSt-Satz) — Nutzer bestätigt nur noch, trägt nicht von Hand ein.
@@ -1495,18 +1545,28 @@ function filterProfilForModules(profil, modules) {
   if (!profil) return profil;
   if (['euer','rechnungen','tools'].every(m => modules.includes(m))) return profil;
   const ABSCHNITTE = [
+    // Nur Grenzen — nie entfernt, aber stoppen die Lösch-Range benachbarter Sektionen
+    { pre: 'Jahresprognose ',                                 mod: null },
+    { pre: 'Monatsabschluss ',                                mod: null },
+    { pre: 'Ausgaben-Monatssumme ',                           mod: null },
+    { pre: 'Voraussichtliche ESt-Vo',                         mod: null },
+    { pre: 'Voraussichtliche GewSt-Vo',                       mod: null },
+    { pre: 'Laufende USt-Zahllast ',                          mod: null },
+    { pre: 'WARNUNG ESt-Nachzahlung',                         mod: null },
+    { pre: 'WARNUNG GewSt-Nachzahlung',                       mod: null },
+    // Gefilterte Sektionen
     { pre: 'Tageseinnahmen ',                                 mod: 'euer' },
     { pre: 'Ausgaben/Verbindlichkeiten aus Finanzkalender:', mod: 'euer' },
     { pre: 'Bekannte Absender-Kategorien:',                   mod: 'euer' },
     { pre: 'Belegarchiv ',                                    mod: 'euer' },
     { pre: 'Gespeicherte Kunden/Lieferanten',                 mod: 'rechnungen' },
     { pre: 'Akzeptierte, noch nicht zu Rechnung',             mod: 'rechnungen' },
-    { pre: 'Offene (nicht abgerechnete) Zeiteinträge',   mod: 'tools' },
+    { pre: 'Offene (nicht abgerechnete) Zeiteinträge',        mod: 'tools' },
     { pre: 'Offene, noch nicht weiterberechnete Reisekosten', mod: 'tools' },
   ];
   let s = profil;
   for (const { pre, mod } of ABSCHNITTE) {
-    if (modules.includes(mod)) continue;
+    if (!mod || modules.includes(mod)) continue;
     const sep = '. ' + pre;
     let idx = s.startsWith(pre) ? 0 : s.indexOf(sep);
     if (idx === -1) continue;
@@ -1536,7 +1596,7 @@ ${filteredProfil}
 Aktuelles Datum: ${datum}`;
 
   if (ersteNachricht) {
-    dyn += '\n\nWICHTIG FÜR DIESE ERSTE NACHRICHT: Beginne deine Antwort IMMER mit TITEL:kurzer_titel_max_5_wörter\nANTWORT:deine_antwort — also genau so formatiert. Der Titel soll das Thema kurz beschreiben.';
+    dyn += '\n\nFORMAT PFLICHT (erste Nachricht): Deine Antwort MUSS mit exakt diesen zwei Zeilen beginnen — kein Text davor, kein Leerzeichen nach dem Doppelpunkt:\nTITEL:Kurzer Titel max 5 Wörter\nANTWORT:Deine eigentliche Antwort hier';
   } else if (fristType) {
     dyn += `\n\n## GEFÜHRTE FRIST-VORBEREITUNG\nDer Frist-Typ ist: ${fristType}\nEine Frage pro Nachricht. Jede Antwort beginnt mit Schritt X von Y.`;
   }
@@ -2152,7 +2212,7 @@ async function handleChat(body, env, cors = {}, ctx) {
         await writer.write(encoder.encode(pruefeBetragZeile(textLineBuffer)));
       }
       const costCents = estimateCostCents(model, usageInfo);
-      console.log(`[chat-usage] model=${model} stop=${stopReason} ab=${abGruppe} intent=${requiredModules.join(',')} in=${usageInfo.input_tokens ?? '?'} cacheWrite=${usageInfo.cache_creation_input_tokens ?? 0} cacheRead=${usageInfo.cache_read_input_tokens ?? 0} out=${usageInfo.output_tokens ?? '?'} costCents=${costCents}`);
+      console.log(`[chat-usage] model=${model} stop=${stopReason} ab=${abGruppe} intent=${requiredModules.join(',')} in=${usageInfo.input_tokens ?? '?'} cacheWrite=${usageInfo.cache_creation_input_tokens ?? 0} cacheRead=${usageInfo.cache_read_input_tokens ?? 0} out=${usageInfo.output_tokens ?? '?'} costCents=${costCents} erste=${ErsteNachricht} start=${JSON.stringify(fullText.substring(0, 80))}`);
 
       // A/B-Test-Log zu Firestore (nur wenn Feature-Flag aktiv)
       if (kiOptimierungAktiv && ctx) {
@@ -2550,7 +2610,7 @@ export async function detectAndParseERechnung(bytes, filename, mimeType, sellerN
 
 // ── /document Handler ─────────────────────────────────────
 async function handleDocument(body, env, cors = {}, ctx) {
-  const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz, content, sellerNameHint, e_rechnung_format, duplikatBestaetigt, kategorie, sachkonto, buchungstext, betrag_netto, bezahlt_am: bezahlt_am_client } = body;
+  const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz, datum, content, sellerNameHint, e_rechnung_format, duplikatBestaetigt, kategorie, sachkonto, buchungstext, betrag_netto, bezahlt_am: bezahlt_am_client } = body;
 
   // ── E-RECHNUNG PARSEN (Vorschau vor dem Speichern, kein Firestore-Write) ────
   // Wird beim Auswählen einer .xml/.pdf-Datei im Belegarchiv-Upload-Modal aufgerufen, BEVOR der
@@ -2640,11 +2700,14 @@ async function handleDocument(body, env, cors = {}, ctx) {
           bezahlt: { booleanValue: !!bezahlt },
           mwst_satz: { stringValue: mwst_satz || 'keine' },
           createdAt: { timestampValue: new Date().toISOString() },
+          ...(datum ? { datum: { stringValue: datum } } : {}),
           ...(bezahlt ? { bezahlt_am: { stringValue: bezahlt_am_client || berlinDatumAlsString() } } : {}),
           ...(kategorie ? { kategorie: { stringValue: kategorie } } : {}),
           ...(sachkonto ? { sachkonto: { stringValue: sachkonto } } : {}),
           ...(buchungstext ? { buchungstext: { stringValue: buchungstext } } : {}),
-          ...(betrag_netto != null ? { betrag_netto: { doubleValue: parseFloat(betrag_netto) } } : {})
+          ...(betrag_netto != null
+            ? { betrag_netto: { doubleValue: parseFloat(betrag_netto) } }
+            : (betrag && mwst_satz ? { betrag_netto: { doubleValue: nettoAusBrutto(parseFloat(betrag), mwst_satz) } } : {}))
         }
       };
 
@@ -2696,7 +2759,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
         success: true,
         docId: docId,
         name: `Beleg von ${absender}`,
-        typ: 'rechnung_eingehend',
+        typ: typ || 'rechnung_eingehend',
         message: 'Beleg erfolgreich gespeichert',
         ...(tagesbewegungWarnung ? { warning: tagesbewegungWarnung } : {})
       }), {
@@ -2755,13 +2818,16 @@ async function handleDocument(body, env, cors = {}, ctx) {
         const windowStart = Date.now() - 10 * 60 * 1000;
         const isDuplicate = existingDocs.some(d => {
           const f = d.fields || {};
-          if (name && f.name?.stringValue === name) {
-            const createdAtMs = f.createdAt?.timestampValue ? new Date(f.createdAt.timestampValue).getTime() : 0;
-            if (createdAtMs >= windowStart) return true;
-          }
-          if (!betrag || !absender) return false;
           const createdAtMs = f.createdAt?.timestampValue ? new Date(f.createdAt.timestampValue).getTime() : 0;
           if (createdAtMs < windowStart) return false;
+          // Name-basierter Check: nur Duplikat wenn auch Absender UND Betrag übereinstimmen —
+          // zwei Rechnungen verschiedener Absender mit gleichem Dateinamen (z.B. "Rechnung.pdf")
+          // dürfen nicht fälschlich geblockt werden.
+          if (name && f.name?.stringValue === name && absender && betrag) {
+            const fBetrag = f.betrag?.doubleValue ?? f.betrag?.integerValue;
+            if (f.absender?.stringValue === absender && parseFloat(fBetrag) === parseFloat(betrag)) return true;
+          }
+          if (!betrag || !absender) return false;
           const fBetrag = f.betrag?.doubleValue ?? f.betrag?.integerValue;
           return f.absender?.stringValue === absender && parseFloat(fBetrag) === parseFloat(betrag) && (f.typ?.stringValue || 'rechnung_eingehend') === (typ || 'rechnung_eingehend');
         });
@@ -2798,6 +2864,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
 
       if (betrag) metadata.fields.betrag = { doubleValue: parseFloat(betrag) };
       if (absender) metadata.fields.absender = { stringValue: absender };
+      if (datum) metadata.fields.datum = { stringValue: datum };
       if (mwst_satz) metadata.fields.mwst_satz = { stringValue: mwst_satz };
       if (rechnungsnr) metadata.fields.rechnungsnr = { stringValue: rechnungsnr };
       if (bezahlt) metadata.fields.bezahlt_am = { stringValue: bezahlt_am_client || berlinDatumAlsString() };
