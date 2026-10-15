@@ -229,7 +229,7 @@ export default {
       // ✅ /send-verification-email geschützt — E-Mail kommt aus dem verifizierten
       // Token, nie vom Client, sonst könnte jeder Verifizierungsmails an beliebige
       // Adressen auslösen (Spam-Vektor).
-      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/usage', '/abo', '/delete-account-data', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback'];
+      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/usage', '/abo', '/delete-account-data', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/pruefer-zugang'];
 
       if (protectedPaths.includes(url.pathname)) {
         try {
@@ -283,6 +283,7 @@ export default {
       if (url.pathname === '/usage')    return handleUsage(body, env, cors);
       if (url.pathname === '/datev-export') return handleDatevExport(body, env, cors);
       if (url.pathname === '/webhook-settings') return handleWebhookSettings(body, env, cors, verifiedUid, url.origin);
+      if (url.pathname === '/pruefer-zugang') return handlePrueferZugang(body, env, cors, verifiedUid);
       if (url.pathname === '/kontakt')   return handleKontakt(body, env, cors);
       if (url.pathname === '/delete-account-data') return handleDeleteAccountData(body, env, cors);
       if (url.pathname === '/send-verification-email') return handleSendVerificationEmail(verifiedEmail, env, cors);
@@ -3361,6 +3362,76 @@ async function handleDeleteAccountData(body, env, cors = {}) {
 // Die Prüfung läuft deshalb komplett hier, mit dem Admin-Service-Account (bypasst Firestore
 // Rules bewusst, wie schon bei handleDeleteAccountData/loadSteuerrechtContext oben) — niemals
 // mit einer Client-Anmeldung, die es für einen anonymen Prüfer gar nicht gibt.
+async function handlePrueferZugang(body, env, cors, verifiedUid) {
+  const jsonAntwort = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
+  const docPfad = `users/${verifiedUid}/profil/prueferZugang`;
+  const linkFuer = (token) => `https://app.kontolux-ai.de/?prueferToken=${token}`;
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    if (body.action === 'erstellen') {
+      const token = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(24)));
+      const { ct, iv } = await tokenVerschluesseln(token, env);
+      const ablauf = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
+      const res = await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/${docPfad}`, {
+        method: 'PATCH',
+        headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields: {
+          token_ct: { stringValue: ct },
+          token_iv: { stringValue: iv },
+          token_hash: { stringValue: await sha256Hex(token) },
+          aktiv: { booleanValue: true },
+          ablauf: { timestampValue: ablauf },
+          erstellt: { timestampValue: new Date().toISOString() }
+        } })
+      });
+      if (!res.ok) throw new Error(`Firestore-Write fehlgeschlagen (${res.status})`);
+      return jsonAntwort({ link: linkFuer(token), ablauf });
+    }
+    if (body.action === 'anzeigen') {
+      const doc = await firestoreGetDoc(docPfad, adminToken);
+      const felder = doc?.fields || {};
+      const ablaufIso = firestoreValue(felder.ablauf);
+      const ablaufMs = ablaufIso ? new Date(ablaufIso).getTime() : NaN;
+      if (firestoreValue(felder.aktiv) !== true || !Number.isFinite(ablaufMs) || ablaufMs <= Date.now()) return jsonAntwort({ aktiv: false });
+      // Übergang bis zur Migration: Klartext-token wird nur gelesen, solange kein Ciphertext existiert.
+      const ct = firestoreValue(felder.token_ct);
+      const iv = firestoreValue(felder.token_iv);
+      const token = ct && iv ? await tokenEntschluesseln(ct, iv, env) : firestoreValue(felder.token);
+      if (!token) return jsonAntwort({ aktiv: false });
+      return jsonAntwort({ aktiv: true, ablauf: ablaufIso, link: linkFuer(token) });
+    }
+    return jsonAntwort({ error: 'Unbekannte Aktion' }, 400);
+  } catch (e) {
+    console.error('handlePrueferZugang Error:', e.message);
+    return jsonAntwort({ error: 'Server error' }, 500);
+  }
+}
+
+async function sha256Hex(text) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function prueferZugangSuchen(adminToken, feld, wert) {
+  const res = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      structuredQuery: {
+        from: [{ collectionId: 'profil', allDescendants: true }],
+        where: { fieldFilter: { field: { fieldPath: feld }, op: 'EQUAL', value: { stringValue: wert } } },
+        limit: 1
+      }
+    })
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Query fehlgeschlagen: ${res.status} ${errText.slice(0, 300)}`);
+  }
+  const rows = await res.json();
+  return Array.isArray(rows) ? rows.find(r => r.document?.name) || null : null;
+}
+
 async function handlePrueferDaten(body, env, cors = {}) {
   const token = (body.token || '').trim();
   // 32-Zeichen-Base64Url (siehe generierePrueferToken im Frontend) — Format-Check VOR der
@@ -3385,23 +3456,9 @@ async function handlePrueferDaten(body, env, cors = {}) {
     // prueferZugang-förmigen Dokumente ein, weil settings/kalender nie ein "token"-Feld haben.
     // Die UID des Nutzers ist aus der Prüfer-URL NICHT bekannt, deshalb über alle
     // users/*/profil-Dokumente hinweg suchen statt einen bekannten Pfad direkt zu lesen.
-    const queryRes = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        structuredQuery: {
-          from: [{ collectionId: 'profil', allDescendants: true }],
-          where: { fieldFilter: { field: { fieldPath: 'token' }, op: 'EQUAL', value: { stringValue: token } } },
-          limit: 1
-        }
-      })
-    });
-    if (!queryRes.ok) {
-      const errText = await queryRes.text().catch(() => '');
-      throw new Error(`Query fehlgeschlagen: ${queryRes.status} ${errText.slice(0, 300)}`);
-    }
-    const rows = await queryRes.json();
-    const match = Array.isArray(rows) ? rows.find(r => r.document?.name) : null;
+    let match = await prueferZugangSuchen(adminToken, 'token_hash', await sha256Hex(token));
+    // Übergang bis zur Migration: Klartext-Token vor dem Umbau.
+    if (!match) match = await prueferZugangSuchen(adminToken, 'token', token);
 
     // Absichtlich dieselbe generische Fehlermeldung für "kein Token-Treffer" UND "Treffer, aber
     // inaktiv/abgelaufen" — sonst könnte ein Angreifer aus der Antwort ablesen, ob ein geratener
