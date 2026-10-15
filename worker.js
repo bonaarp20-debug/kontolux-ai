@@ -4182,6 +4182,19 @@ async function gespeichertesGeheimnis(fields, feld, env) {
   return tokenEntschluesseln(ct, iv, env);
 }
 
+// Übergang bis zur Migration: Klartext-url_secret wird nur gelesen, solange kein Ciphertext existiert.
+async function urlSecretLesen(fields, env) {
+  const ct = firestoreValue(fields.url_secret_ct);
+  const iv = firestoreValue(fields.url_secret_iv);
+  if (ct && iv) return tokenEntschluesseln(ct, iv, env);
+  return firestoreValue(fields.url_secret);
+}
+
+async function urlSecretFelder(urlSecret, env) {
+  const { ct, iv } = await tokenVerschluesseln(urlSecret, env);
+  return { url_secret_ct: { stringValue: ct }, url_secret_iv: { stringValue: iv } };
+}
+
 // Plattform-spezifische Credential-Felder — jeweils eine LISTE (nicht ein einzelnes Feld), da
 // PayPal drei getrennte Werte braucht (Client ID/Secret/Webhook ID), alle anderen Plattformen
 // genau einen. Body-Feldname und Firestore-Feldname bewusst pro Eintrag getrennt gehalten (nicht
@@ -4242,7 +4255,7 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
     if (action === 'get') {
       const doc = await firestoreGetDoc(docPath, adminToken);
       const fields = doc?.fields || {};
-      const urlSecret = firestoreValue(fields.url_secret);
+      const urlSecret = await urlSecretLesen(fields, env);
       const enabled = firestoreValue(fields.enabled) === true;
 
       // Pro Feld eine eigene Preview (nötig für PayPals drei getrennte Werte) — das volle Secret
@@ -4291,18 +4304,18 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
     // vollständigen 'save' weiterhin mit 404 ab. Das spätere 'save' übernimmt den url_secret.
     if (action === 'prepare') {
       const existing = await firestoreGetDoc(docPath, adminToken);
-      let urlSecret = firestoreValue(existing?.fields?.url_secret);
+      let urlSecret = await urlSecretLesen(existing?.fields || {}, env);
       if (!urlSecret) {
         urlSecret = generateWebhookSecret();
         const now = new Date().toISOString();
-        const mask = ['url_secret', 'created_at', 'updated_at'].map(k => `updateMask.fieldPaths=${k}`).join('&');
+        const mask = ['url_secret_ct', 'url_secret_iv', 'created_at', 'updated_at'].map(k => `updateMask.fieldPaths=${k}`).join('&');
         const writeRes = await fetch(
           `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/${docPath}?${mask}`,
           {
             method: 'PATCH',
             headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ fields: {
-              url_secret: { stringValue: urlSecret },
+              ...(await urlSecretFelder(urlSecret, env)),
               created_at: { timestampValue: now },
               updated_at: { timestampValue: now }
             } })
@@ -4345,7 +4358,7 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
       // PATCH ohne updateMask ERSETZT das komplette Dokument (siehe handleSeedSteuerrecht-
       // Kommentar zum Gegenteil) — bestehende Werte müssen deshalb explizit mitgeschickt werden,
       // sonst gingen sie bei jedem Speichern verloren.
-      const urlSecret = firestoreValue(existing?.fields?.url_secret) || generateWebhookSecret();
+      const urlSecret = (await urlSecretLesen(existing?.fields || {}, env)) || generateWebhookSecret();
       const now = new Date().toISOString();
       const createdAt = firestoreValue(existing?.fields?.created_at) || now;
       // Gültige Werte wie im Frontend-Select — bei ungültigem/fehlendem Wert den bisher
@@ -4391,7 +4404,7 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
           body: JSON.stringify({
             fields: {
               ...feldWerte,
-              url_secret: { stringValue: urlSecret },
+              ...(await urlSecretFelder(urlSecret, env)),
               enabled: { booleanValue: true },
               mwst_setting: { stringValue: neuesMwstSetting },
               created_at: { timestampValue: createdAt },
@@ -4860,7 +4873,7 @@ async function handleStripeWebhook(request, url, env, cors) {
     const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
     const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/stripe`, adminToken);
     const fields = configDoc?.fields || {};
-    const storedUrlSecret = firestoreValue(fields.url_secret);
+    const storedUrlSecret = await urlSecretLesen(fields, env);
     const signingSecret = await gespeichertesGeheimnis(fields, 'stripe_signing_secret', env);
     const enabled = firestoreValue(fields.enabled) === true;
 
@@ -5144,7 +5157,7 @@ async function handleMollieWebhook(request, url, env, cors) {
     const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
     const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/mollie`, adminToken);
     const fields = configDoc?.fields || {};
-    const storedUrlSecret = firestoreValue(fields.url_secret);
+    const storedUrlSecret = await urlSecretLesen(fields, env);
     const apiKey = await gespeichertesGeheimnis(fields, 'api_key', env);
     const enabled = firestoreValue(fields.enabled) === true;
 
@@ -5415,7 +5428,7 @@ async function handleDigistore24Webhook(request, url, env, cors) {
     const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
     const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/digistore24`, adminToken);
     const configFields = configDoc?.fields || {};
-    const storedUrlSecret = firestoreValue(configFields.url_secret);
+    const storedUrlSecret = await urlSecretLesen(configFields, env);
     const passphrase = await gespeichertesGeheimnis(configFields, 'passphrase', env);
     const enabled = firestoreValue(configFields.enabled) === true;
 
@@ -5585,7 +5598,7 @@ async function handleCopecartWebhook(request, url, env, cors) {
     const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
     const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/copecart`, adminToken);
     const configFields = configDoc?.fields || {};
-    const storedUrlSecret = firestoreValue(configFields.url_secret);
+    const storedUrlSecret = await urlSecretLesen(configFields, env);
     const webhookSecret = await gespeichertesGeheimnis(configFields, 'webhook_secret', env);
     const enabled = firestoreValue(configFields.enabled) === true;
 
@@ -5844,7 +5857,7 @@ async function handlePaypalWebhook(request, url, env, cors) {
     const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
     const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/paypal`, adminToken);
     const configFields = configDoc?.fields || {};
-    const storedUrlSecret = firestoreValue(configFields.url_secret);
+    const storedUrlSecret = await urlSecretLesen(configFields, env);
     const clientId = firestoreValue(configFields.client_id);
     const clientSecret = await gespeichertesGeheimnis(configFields, 'client_secret', env);
     const webhookId = firestoreValue(configFields.webhook_id);
@@ -6124,7 +6137,7 @@ async function handleSumupWebhook(request, url, env, cors) {
   try {
     const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
     const cfgDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/sumup`, adminToken);
-    const storedUrlSecret = firestoreValue(cfgDoc?.fields?.url_secret);
+    const storedUrlSecret = await urlSecretLesen(cfgDoc?.fields || {}, env);
     if (!storedUrlSecret || !timingSafeEqualHex(storedUrlSecret, urlSecret || '') || firestoreValue(cfgDoc?.fields?.enabled) !== true) {
       return new Response('Not found', { status: 404, headers: cors });
     }
@@ -6336,7 +6349,7 @@ async function handleAblefyWebhook(request, url, env, cors) {
     const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
     const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/ablefy`, adminToken);
     const configFields = configDoc?.fields || {};
-    const storedUrlSecret = firestoreValue(configFields.url_secret);
+    const storedUrlSecret = await urlSecretLesen(configFields, env);
     const enabled = firestoreValue(configFields.enabled) === true;
 
     if (!enabled || !storedUrlSecret || !timingSafeEqualHex(storedUrlSecret, urlSecret || '')) {
@@ -6563,7 +6576,7 @@ async function handleShopifyWebhook(request, url, env, cors) {
     const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
     const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/shopify`, adminToken);
     const configFields = configDoc?.fields || {};
-    const storedUrlSecret = firestoreValue(configFields.url_secret);
+    const storedUrlSecret = await urlSecretLesen(configFields, env);
     const webhookSecret = await gespeichertesGeheimnis(configFields, 'webhook_secret', env);
     const enabled = firestoreValue(configFields.enabled) === true;
     if (!enabled || !storedUrlSecret || !timingSafeEqualHex(storedUrlSecret, urlSecret || '') || !webhookSecret) {
