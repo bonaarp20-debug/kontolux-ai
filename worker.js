@@ -289,7 +289,6 @@ export default {
       if (url.pathname === '/send-password-reset') return handleSendPasswordReset(body, env, cors);
       if (url.pathname === '/send-email-change-verification') return handleSendEmailChangeVerification(verifiedEmail, body, env, cors);
       if (url.pathname === '/admin/seed-steuerrecht') return handleSeedSteuerrecht(request, body, env, cors);
-      if (url.pathname === '/admin/migrate-webhook-secrets') return handleMigrateWebhookSecrets(request, body, env, cors);
       // Bewusst NICHT in protectedPaths: ein Betriebsprüfer hat keinen Firebase-Login, der
       // Zugriffsnachweis ist der Besitz des Tokens selbst (siehe handlePrueferDaten unten).
       if (url.pathname === '/pruefer-daten') return handlePrueferDaten(body, env, cors);
@@ -4176,12 +4175,11 @@ async function tokenEntschluesseln(ct, iv, env) {
   return new TextDecoder().decode(plaintext);
 }
 
-// Übergang bis zur Migration: Solange kein Ciphertext existiert, wird der Klartext gelesen.
 async function gespeichertesGeheimnis(fields, feld, env) {
   const ct = firestoreValue(fields[`${feld}_ct`]);
   const iv = firestoreValue(fields[`${feld}_iv`]);
-  if (ct && iv) return tokenEntschluesseln(ct, iv, env);
-  return firestoreValue(fields[feld]);
+  if (!ct || !iv) return null;
+  return tokenEntschluesseln(ct, iv, env);
 }
 
 // Plattform-spezifische Credential-Felder — jeweils eine LISTE (nicht ein einzelnes Feld), da
@@ -4254,7 +4252,7 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
       let alleVorhanden = true;
       for (const f of felder) {
         if (f.verschluesselt) {
-          const vorhanden = !!(firestoreValue(fields[`${f.firestoreFeld}_ct`]) || firestoreValue(fields[f.firestoreFeld]));
+          const vorhanden = !!firestoreValue(fields[`${f.firestoreFeld}_ct`]);
           secretPreviews[f.firestoreFeld] = vorhanden ? '••••••••' : null;
           if (!vorhanden) alleVorhanden = false;
           continue;
@@ -5947,64 +5945,6 @@ async function handlePaypalWebhook(request, url, env, cors) {
   }
 }
 
-async function handleMigrateWebhookSecrets(request, body, env, cors) {
-  const adminKey = request.headers.get('X-Admin-Key') || '';
-  if (!env.ADMIN_SEED_KEY || adminKey !== env.ADMIN_SEED_KEY) {
-    return new Response('Unauthorized', { status: 401, headers: cors });
-  }
-  const dryRun = body?.dryRun !== false;
-  const base = 'https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents';
-  try {
-    const token = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
-    const res = await fetch(`${base}:runQuery`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'webhook_secrets', allDescendants: true }] } })
-    });
-    if (!res.ok) throw new Error(`runQuery fehlgeschlagen (${res.status})`);
-    const rows = await res.json();
-    const gefunden = {};
-    for (const row of rows) {
-      const doc = row.document;
-      if (!doc) continue;
-      const plattform = doc.name.split('/webhook_secrets/')[1];
-      const konfig = WEBHOOK_SECRET_FELDER[plattform];
-      if (!konfig) continue;
-      const fields = doc.fields || {};
-      const zuMigrieren = konfig.felder.filter(f =>
-        f.verschluesselt && firestoreValue(fields[f.firestoreFeld]) && !firestoreValue(fields[`${f.firestoreFeld}_ct`]));
-      if (!zuMigrieren.length) continue;
-      gefunden[plattform] = (gefunden[plattform] || 0) + zuMigrieren.length;
-      if (dryRun) continue;
-      const schreibFelder = {};
-      const maske = [];
-      for (const f of zuMigrieren) {
-        const { ct, iv } = await tokenVerschluesseln(firestoreValue(fields[f.firestoreFeld]), env);
-        schreibFelder[`${f.firestoreFeld}_ct`] = { stringValue: ct };
-        schreibFelder[`${f.firestoreFeld}_iv`] = { stringValue: iv };
-        maske.push(`${f.firestoreFeld}_ct`, `${f.firestoreFeld}_iv`, f.firestoreFeld);
-      }
-      const pfad = doc.name.split('/documents/')[1];
-      const writeRes = await fetch(
-        `${base}/${pfad}?${maske.map(m => `updateMask.fieldPaths=${m}`).join('&')}`,
-        {
-          method: 'PATCH',
-          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ fields: schreibFelder })
-        }
-      );
-      if (!writeRes.ok) throw new Error(`Schreiben fehlgeschlagen (${writeRes.status}) bei ${plattform}`);
-    }
-    return new Response(JSON.stringify({ dryRun, gefunden }), {
-      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
-    });
-  } catch (e) {
-    console.error('handleMigrateWebhookSecrets Error:', e.message);
-    return new Response(JSON.stringify({ error: e.message }), {
-      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
-    });
-  }
-}
 
 // ════════════════════════════════════════════════════════════════════════
 // ── SUMUP-INTEGRATION ───────────────────────────────────────────────────
