@@ -3193,8 +3193,9 @@ async function handleUsage(body, env, cors) {
 
 // ── /feedback Handler ─────────────────────────────────────
 async function handleFeedback(body, env, cors = {}) {
-  const { feedback, nutzername, gut, schlecht, wunsch, datum } = body;
-  const nutzernameSafe = escapeHtml(nutzername) || 'Unbekannt';
+  const { feedback, gut, schlecht, wunsch, datum } = body;
+  const absender = body.userName || body.nutzername || 'Nutzer';
+  const nutzernameSafe = escapeHtml(absender);
   const gutSafe = escapeHtml(gut);
   const schlechtSafe = escapeHtml(schlecht);
   const wunschSafe = escapeHtml(wunsch);
@@ -3210,7 +3211,17 @@ async function handleFeedback(body, env, cors = {}) {
     ${feedbackSafe ? `<p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0"><strong>Feedback:</strong> ${feedbackSafe}</p>` : ''}
   `);
 
-  await sendEmail('jona@kontolux-ai.de', `Feedback von ${nutzername || 'Nutzer'}`.slice(0, 200), html, env);
+  let versendet = false;
+  try {
+    versendet = await sendEmail('jona@kontolux-ai.de', `Feedback von ${absender}`.slice(0, 200), html, env);
+  } catch (e) {
+    console.error('handleFeedback Versand-Exception:', e.message);
+  }
+  if (!versendet) {
+    return new Response(JSON.stringify({ ok: false, fehler: 'Versand fehlgeschlagen' }), {
+      status: 502, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
   return new Response('OK', { headers: cors });
 }
 
