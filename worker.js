@@ -229,7 +229,7 @@ export default {
       // ✅ /send-verification-email geschützt — E-Mail kommt aus dem verifizierten
       // Token, nie vom Client, sonst könnte jeder Verifizierungsmails an beliebige
       // Adressen auslösen (Spam-Vektor).
-      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/usage', '/abo', '/delete-account-data', '/send-verification-email', '/send-email-change-verification', '/webhook-settings'];
+      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/usage', '/abo', '/delete-account-data', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback'];
 
       if (protectedPaths.includes(url.pathname)) {
         try {
@@ -289,6 +289,7 @@ export default {
       if (url.pathname === '/send-password-reset') return handleSendPasswordReset(body, env, cors);
       if (url.pathname === '/send-email-change-verification') return handleSendEmailChangeVerification(verifiedEmail, body, env, cors);
       if (url.pathname === '/admin/seed-steuerrecht') return handleSeedSteuerrecht(request, body, env, cors);
+      if (url.pathname === '/admin/migrate-webhook-secrets') return handleMigrateWebhookSecrets(request, body, env, cors);
       // Bewusst NICHT in protectedPaths: ein Betriebsprüfer hat keinen Firebase-Login, der
       // Zugriffsnachweis ist der Besitz des Tokens selbst (siehe handlePrueferDaten unten).
       if (url.pathname === '/pruefer-daten') return handlePrueferDaten(body, env, cors);
@@ -4146,23 +4147,60 @@ async function incrementWebhookBelegCount(userId, env) {
   } catch (e) { /* rein informativ — darf nichts blockieren */ }
 }
 
+// AES-GCM für Zugangs-Tokens. Schlüssel = SHA-256 über TOKEN_ENCRYPTION_KEY, damit jede
+// Secret-Länge funktioniert. Gespeichert werden nur Ciphertext und IV (base64).
+async function tokenSchluessel(env) {
+  if (!env.TOKEN_ENCRYPTION_KEY) throw new Error('TOKEN_ENCRYPTION_KEY nicht gesetzt');
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(env.TOKEN_ENCRYPTION_KEY));
+  return crypto.subtle.importKey('raw', hash, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+}
+
+function base64Kodieren(bytes) {
+  return btoa(String.fromCharCode(...bytes));
+}
+
+function base64Dekodieren(text) {
+  return Uint8Array.from(atob(text), c => c.charCodeAt(0));
+}
+
+async function tokenVerschluesseln(klartext, env) {
+  const key = await tokenSchluessel(env);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(klartext));
+  return { ct: base64Kodieren(new Uint8Array(ciphertext)), iv: base64Kodieren(iv) };
+}
+
+async function tokenEntschluesseln(ct, iv, env) {
+  const key = await tokenSchluessel(env);
+  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: base64Dekodieren(iv) }, key, base64Dekodieren(ct));
+  return new TextDecoder().decode(plaintext);
+}
+
+// Übergang bis zur Migration: Solange kein Ciphertext existiert, wird der Klartext gelesen.
+async function gespeichertesGeheimnis(fields, feld, env) {
+  const ct = firestoreValue(fields[`${feld}_ct`]);
+  const iv = firestoreValue(fields[`${feld}_iv`]);
+  if (ct && iv) return tokenEntschluesseln(ct, iv, env);
+  return firestoreValue(fields[feld]);
+}
+
 // Plattform-spezifische Credential-Felder — jeweils eine LISTE (nicht ein einzelnes Feld), da
 // PayPal drei getrennte Werte braucht (Client ID/Secret/Webhook ID), alle anderen Plattformen
 // genau einen. Body-Feldname und Firestore-Feldname bewusst pro Eintrag getrennt gehalten (nicht
 // z.B. ein generisches "secret") — die bestehenden Feldnamen (z.B. `stripe_signing_secret`)
 // bleiben unverändert, damit produktiv bereits gespeicherte Konfigurationen nicht brechen.
 const WEBHOOK_SECRET_FELDER = {
-  stripe: { felder: [{ bodyFeld: 'signingSecret', firestoreFeld: 'stripe_signing_secret', fehlermeldung: 'Bitte ein gültiges Webhook-Secret eintragen.' }] },
-  mollie: { felder: [{ bodyFeld: 'apiKey', firestoreFeld: 'api_key', fehlermeldung: 'Bitte einen gültigen Mollie API-Key eintragen.' }] },
-  digistore24: { felder: [{ bodyFeld: 'passphrase', firestoreFeld: 'passphrase', fehlermeldung: 'Bitte eine gültige Digistore24 API-Passphrase eintragen.' }] },
-  copecart: { felder: [{ bodyFeld: 'webhookSecret', firestoreFeld: 'webhook_secret', fehlermeldung: 'Bitte ein gültiges Webhook-Secret eintragen.' }] },
+  stripe: { felder: [{ bodyFeld: 'signingSecret', firestoreFeld: 'stripe_signing_secret', verschluesselt: true, fehlermeldung: 'Bitte ein gültiges Webhook-Secret eintragen.' }] },
+  mollie: { felder: [{ bodyFeld: 'apiKey', firestoreFeld: 'api_key', verschluesselt: true, fehlermeldung: 'Bitte einen gültigen Mollie API-Key eintragen.' }] },
+  digistore24: { felder: [{ bodyFeld: 'passphrase', firestoreFeld: 'passphrase', verschluesselt: true, fehlermeldung: 'Bitte eine gültige Digistore24 API-Passphrase eintragen.' }] },
+  copecart: { felder: [{ bodyFeld: 'webhookSecret', firestoreFeld: 'webhook_secret', verschluesselt: true, fehlermeldung: 'Bitte ein gültiges Webhook-Secret eintragen.' }] },
   paypal: { felder: [
     { bodyFeld: 'clientId', firestoreFeld: 'client_id', fehlermeldung: 'Bitte deine PayPal Client ID eintragen.' },
-    { bodyFeld: 'clientSecret', firestoreFeld: 'client_secret', fehlermeldung: 'Bitte dein PayPal Client Secret eintragen.' },
+    { bodyFeld: 'clientSecret', firestoreFeld: 'client_secret', verschluesselt: true, fehlermeldung: 'Bitte dein PayPal Client Secret eintragen.' },
     { bodyFeld: 'webhookId', firestoreFeld: 'webhook_id', fehlermeldung: 'Bitte deine PayPal Webhook ID eintragen.' }
   ] },
   // SumUp: Abruf per API-Key (Kartenterminal-Zahlungen lösen keine Webhooks aus) — siehe syncSumupFuerNutzer.
-  sumup: { felder: [{ bodyFeld: 'apiKey', firestoreFeld: 'api_key', fehlermeldung: 'Bitte einen gültigen SumUp API-Key eintragen (beginnt mit sup_sk_).' }] },
+  sumup: { felder: [{ bodyFeld: 'apiKey', firestoreFeld: 'api_key', verschluesselt: true, fehlermeldung: 'Bitte einen gültigen SumUp API-Key eintragen (beginnt mit sup_sk_).' }] },
   // Ablefy bietet keine Signatur-/API-Verifikation an — `felder: []` (leer) heißt: keine
   // Zugangsdaten nötig, "Speichern" aktiviert die Route nur (generiert url_secret, setzt
   // enabled=true) und speichert die MwSt-Einstellung. Sicherheitsgrenze ist allein der
@@ -4171,7 +4209,7 @@ const WEBHOOK_SECRET_FELDER = {
   // Shopify: der Signaturschlüssel steht im Shopify-Admin unter Einstellungen → Benachrichtigungen
   // → Webhooks ("Your webhooks will be signed with …") — gilt für alle manuell angelegten Webhooks
   // eines Shops. Entsteht unabhängig von der URL, die URL kommt trotzdem per 'prepare' zuerst.
-  shopify: { felder: [{ bodyFeld: 'webhookSecret', firestoreFeld: 'webhook_secret', fehlermeldung: 'Bitte den Shopify-Webhook-Signaturschlüssel eintragen.' }] }
+  shopify: { felder: [{ bodyFeld: 'webhookSecret', firestoreFeld: 'webhook_secret', verschluesselt: true, fehlermeldung: 'Bitte den Shopify-Webhook-Signaturschlüssel eintragen.' }] }
 };
 
 /**
@@ -4215,6 +4253,12 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
       const secretPreviews = {};
       let alleVorhanden = true;
       for (const f of felder) {
+        if (f.verschluesselt) {
+          const vorhanden = !!(firestoreValue(fields[`${f.firestoreFeld}_ct`]) || firestoreValue(fields[f.firestoreFeld]));
+          secretPreviews[f.firestoreFeld] = vorhanden ? '••••••••' : null;
+          if (!vorhanden) alleVorhanden = false;
+          continue;
+        }
         const wert = firestoreValue(fields[f.firestoreFeld]);
         secretPreviews[f.firestoreFeld] = wert ? `••••${wert.slice(-4)}` : null;
         if (!wert) alleVorhanden = false;
@@ -4316,7 +4360,16 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
         : (bisherigesMwstSetting || '19');
 
       const feldWerte = {};
-      for (const f of felder) feldWerte[f.firestoreFeld] = { stringValue: body[f.bodyFeld].trim() };
+      for (const f of felder) {
+        const wert = body[f.bodyFeld].trim();
+        if (f.verschluesselt) {
+          const { ct, iv } = await tokenVerschluesseln(wert, env);
+          feldWerte[`${f.firestoreFeld}_ct`] = { stringValue: ct };
+          feldWerte[`${f.firestoreFeld}_iv`] = { stringValue: iv };
+        } else {
+          feldWerte[f.firestoreFeld] = { stringValue: wert };
+        }
+      }
       if (plattform === 'ablefy') {
         const modell = body.verkaufsmodell === 'eigener_name' ? 'eigener_name' : (body.verkaufsmodell === 'reseller' ? 'reseller' : null);
         if (!modell) {
@@ -4810,7 +4863,7 @@ async function handleStripeWebhook(request, url, env, cors) {
     const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/stripe`, adminToken);
     const fields = configDoc?.fields || {};
     const storedUrlSecret = firestoreValue(fields.url_secret);
-    const signingSecret = firestoreValue(fields.stripe_signing_secret);
+    const signingSecret = await gespeichertesGeheimnis(fields, 'stripe_signing_secret', env);
     const enabled = firestoreValue(fields.enabled) === true;
 
     if (!enabled || !storedUrlSecret || !timingSafeEqualHex(storedUrlSecret, urlSecret || '') || !signingSecret) {
@@ -5094,7 +5147,7 @@ async function handleMollieWebhook(request, url, env, cors) {
     const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/mollie`, adminToken);
     const fields = configDoc?.fields || {};
     const storedUrlSecret = firestoreValue(fields.url_secret);
-    const apiKey = firestoreValue(fields.api_key);
+    const apiKey = await gespeichertesGeheimnis(fields, 'api_key', env);
     const enabled = firestoreValue(fields.enabled) === true;
 
     if (!enabled || !storedUrlSecret || !timingSafeEqualHex(storedUrlSecret, urlSecret || '') || !apiKey) {
@@ -5365,7 +5418,7 @@ async function handleDigistore24Webhook(request, url, env, cors) {
     const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/digistore24`, adminToken);
     const configFields = configDoc?.fields || {};
     const storedUrlSecret = firestoreValue(configFields.url_secret);
-    const passphrase = firestoreValue(configFields.passphrase);
+    const passphrase = await gespeichertesGeheimnis(configFields, 'passphrase', env);
     const enabled = firestoreValue(configFields.enabled) === true;
 
     if (!enabled || !storedUrlSecret || !timingSafeEqualHex(storedUrlSecret, urlSecret || '') || !passphrase) {
@@ -5535,7 +5588,7 @@ async function handleCopecartWebhook(request, url, env, cors) {
     const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/copecart`, adminToken);
     const configFields = configDoc?.fields || {};
     const storedUrlSecret = firestoreValue(configFields.url_secret);
-    const webhookSecret = firestoreValue(configFields.webhook_secret);
+    const webhookSecret = await gespeichertesGeheimnis(configFields, 'webhook_secret', env);
     const enabled = firestoreValue(configFields.enabled) === true;
 
     if (!enabled || !storedUrlSecret || !timingSafeEqualHex(storedUrlSecret, urlSecret || '') || !webhookSecret) {
@@ -5795,7 +5848,7 @@ async function handlePaypalWebhook(request, url, env, cors) {
     const configFields = configDoc?.fields || {};
     const storedUrlSecret = firestoreValue(configFields.url_secret);
     const clientId = firestoreValue(configFields.client_id);
-    const clientSecret = firestoreValue(configFields.client_secret);
+    const clientSecret = await gespeichertesGeheimnis(configFields, 'client_secret', env);
     const webhookId = firestoreValue(configFields.webhook_id);
     const enabled = firestoreValue(configFields.enabled) === true;
 
@@ -5894,6 +5947,65 @@ async function handlePaypalWebhook(request, url, env, cors) {
   }
 }
 
+async function handleMigrateWebhookSecrets(request, body, env, cors) {
+  const adminKey = request.headers.get('X-Admin-Key') || '';
+  if (!env.ADMIN_SEED_KEY || adminKey !== env.ADMIN_SEED_KEY) {
+    return new Response('Unauthorized', { status: 401, headers: cors });
+  }
+  const dryRun = body?.dryRun !== false;
+  const base = 'https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents';
+  try {
+    const token = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const res = await fetch(`${base}:runQuery`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'webhook_secrets', allDescendants: true }] } })
+    });
+    if (!res.ok) throw new Error(`runQuery fehlgeschlagen (${res.status})`);
+    const rows = await res.json();
+    const gefunden = {};
+    for (const row of rows) {
+      const doc = row.document;
+      if (!doc) continue;
+      const plattform = doc.name.split('/webhook_secrets/')[1];
+      const konfig = WEBHOOK_SECRET_FELDER[plattform];
+      if (!konfig) continue;
+      const fields = doc.fields || {};
+      const zuMigrieren = konfig.felder.filter(f =>
+        f.verschluesselt && firestoreValue(fields[f.firestoreFeld]) && !firestoreValue(fields[`${f.firestoreFeld}_ct`]));
+      if (!zuMigrieren.length) continue;
+      gefunden[plattform] = (gefunden[plattform] || 0) + zuMigrieren.length;
+      if (dryRun) continue;
+      const schreibFelder = {};
+      const maske = [];
+      for (const f of zuMigrieren) {
+        const { ct, iv } = await tokenVerschluesseln(firestoreValue(fields[f.firestoreFeld]), env);
+        schreibFelder[`${f.firestoreFeld}_ct`] = { stringValue: ct };
+        schreibFelder[`${f.firestoreFeld}_iv`] = { stringValue: iv };
+        maske.push(`${f.firestoreFeld}_ct`, `${f.firestoreFeld}_iv`, f.firestoreFeld);
+      }
+      const pfad = doc.name.split('/documents/')[1];
+      const writeRes = await fetch(
+        `${base}/${pfad}?${maske.map(m => `updateMask.fieldPaths=${m}`).join('&')}`,
+        {
+          method: 'PATCH',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fields: schreibFelder })
+        }
+      );
+      if (!writeRes.ok) throw new Error(`Schreiben fehlgeschlagen (${writeRes.status}) bei ${plattform}`);
+    }
+    return new Response(JSON.stringify({ dryRun, gefunden }), {
+      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  } catch (e) {
+    console.error('handleMigrateWebhookSecrets Error:', e.message);
+    return new Response(JSON.stringify({ error: e.message }), {
+      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // ── SUMUP-INTEGRATION ───────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════
@@ -5977,7 +6089,7 @@ async function syncSumupFuerNutzer(userId, env, adminToken) {
   const docPath = `users/${userId}/webhook_secrets/sumup`;
   const cfgDoc = await firestoreGetDoc(docPath, adminToken);
   const f = cfgDoc?.fields || {};
-  const apiKey = firestoreValue(f.api_key);
+  const apiKey = await gespeichertesGeheimnis(f, 'api_key', env);
   const merchantCode = firestoreValue(f.merchant_code);
   if (firestoreValue(f.enabled) !== true || !apiKey || !merchantCode) return { gebucht: 0, uebersprungen: 'nicht_aktiv' };
 
@@ -6512,7 +6624,7 @@ async function handleShopifyWebhook(request, url, env, cors) {
     const configDoc = await firestoreGetDoc(`users/${userId}/webhook_secrets/shopify`, adminToken);
     const configFields = configDoc?.fields || {};
     const storedUrlSecret = firestoreValue(configFields.url_secret);
-    const webhookSecret = firestoreValue(configFields.webhook_secret);
+    const webhookSecret = await gespeichertesGeheimnis(configFields, 'webhook_secret', env);
     const enabled = firestoreValue(configFields.enabled) === true;
     if (!enabled || !storedUrlSecret || !timingSafeEqualHex(storedUrlSecret, urlSecret || '') || !webhookSecret) {
       return new Response('Not found', { status: 404, headers: cors });
