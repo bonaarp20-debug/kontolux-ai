@@ -3393,11 +3393,10 @@ async function handlePrueferZugang(body, env, cors, verifiedUid) {
       const ablaufIso = firestoreValue(felder.ablauf);
       const ablaufMs = ablaufIso ? new Date(ablaufIso).getTime() : NaN;
       if (firestoreValue(felder.aktiv) !== true || !Number.isFinite(ablaufMs) || ablaufMs <= Date.now()) return jsonAntwort({ aktiv: false });
-      // Übergang bis zur Migration: Klartext-token wird nur gelesen, solange kein Ciphertext existiert.
       const ct = firestoreValue(felder.token_ct);
       const iv = firestoreValue(felder.token_iv);
-      const token = ct && iv ? await tokenEntschluesseln(ct, iv, env) : firestoreValue(felder.token);
-      if (!token) return jsonAntwort({ aktiv: false });
+      if (!ct || !iv) return jsonAntwort({ aktiv: false });
+      const token = await tokenEntschluesseln(ct, iv, env);
       return jsonAntwort({ aktiv: true, ablauf: ablaufIso, link: linkFuer(token) });
     }
     return jsonAntwort({ error: 'Unbekannte Aktion' }, 400);
@@ -3456,9 +3455,7 @@ async function handlePrueferDaten(body, env, cors = {}) {
     // prueferZugang-förmigen Dokumente ein, weil settings/kalender nie ein "token"-Feld haben.
     // Die UID des Nutzers ist aus der Prüfer-URL NICHT bekannt, deshalb über alle
     // users/*/profil-Dokumente hinweg suchen statt einen bekannten Pfad direkt zu lesen.
-    let match = await prueferZugangSuchen(adminToken, 'token_hash', await sha256Hex(token));
-    // Übergang bis zur Migration: Klartext-Token vor dem Umbau.
-    if (!match) match = await prueferZugangSuchen(adminToken, 'token', token);
+    const match = await prueferZugangSuchen(adminToken, 'token_hash', await sha256Hex(token));
 
     // Absichtlich dieselbe generische Fehlermeldung für "kein Token-Treffer" UND "Treffer, aber
     // inaktiv/abgelaufen" — sonst könnte ein Angreifer aus der Antwort ablesen, ob ein geratener
@@ -4239,12 +4236,11 @@ async function gespeichertesGeheimnis(fields, feld, env) {
   return tokenEntschluesseln(ct, iv, env);
 }
 
-// Übergang bis zur Migration: Klartext-url_secret wird nur gelesen, solange kein Ciphertext existiert.
 async function urlSecretLesen(fields, env) {
   const ct = firestoreValue(fields.url_secret_ct);
   const iv = firestoreValue(fields.url_secret_iv);
-  if (ct && iv) return tokenEntschluesseln(ct, iv, env);
-  return firestoreValue(fields.url_secret);
+  if (!ct || !iv) return null;
+  return tokenEntschluesseln(ct, iv, env);
 }
 
 async function urlSecretFelder(urlSecret, env) {
