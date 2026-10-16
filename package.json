@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "deploy": "wrangler deploy",
-    "dev": "wrangler dev"
+    "dev": "wrangler dev",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "fast-xml-parser": "^5.11.0",

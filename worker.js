@@ -1815,9 +1815,24 @@ async function loadDashboardContext(env, userId) {
 // Schreibt/aktualisiert Firestore steuerrecht/de, Feld "inhalt" = kompletter JSON-Inhalt der
 // mitgeschickten Datei als String. Nutzt denselben Admin-Service-Account/JWT wie oben, nur mit
 // dem Firestore-('datastore')-statt dem Identity-Toolkit-Scope.
+// Zeitkonstanter Vergleich zweier Strings. Beide Seiten werden zuerst per SHA-256 auf gleiche
+// Länge gebracht, damit weder der Inhalt noch die Länge des Secrets über die Antwortzeit leakt.
+async function istGleichesGeheimnis(a, b) {
+  const enc = new TextEncoder();
+  const [ha, hb] = await Promise.all([
+    crypto.subtle.digest('SHA-256', enc.encode(String(a))),
+    crypto.subtle.digest('SHA-256', enc.encode(String(b)))
+  ]);
+  const va = new Uint8Array(ha);
+  const vb = new Uint8Array(hb);
+  let diff = 0;
+  for (let i = 0; i < va.length; i++) diff |= va[i] ^ vb[i];
+  return diff === 0;
+}
+
 async function handleSeedSteuerrecht(request, body, env, cors) {
   const adminKey = request.headers.get('X-Admin-Key') || '';
-  if (!env.ADMIN_SEED_KEY || adminKey !== env.ADMIN_SEED_KEY) {
+  if (!env.ADMIN_SEED_KEY || !(await istGleichesGeheimnis(adminKey, env.ADMIN_SEED_KEY))) {
     return new Response('Unauthorized', { status: 401, headers: cors });
   }
   const inhalt = typeof body === 'string' ? body : JSON.stringify(body);
