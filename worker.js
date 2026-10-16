@@ -9,8 +9,15 @@ import { PDFDocument, PDFName, PDFDict, PDFStream, PDFRawStream, decodePDFRawStr
 const ALLOWED_ORIGINS = [
   'https://app.kontolux-ai.de',
   'https://kontolux-ai.de',
-  'http://localhost:5000', // lokale Entwicklung
 ];
+
+// Lokale Entwicklung (http://localhost:5000) ist nur erlaubt, wenn der Worker mit ENTWICKLUNG="1"
+// läuft. In Produktion fehlt die Variable, also ist localhost dort nicht erreichbar
+// (Security-Audit 2026-10-16).
+let entwicklungsModus = false;
+function originErlaubt(origin) {
+  return ALLOWED_ORIGINS.includes(origin) || (entwicklungsModus && origin === 'http://localhost:5000');
+}
 
 // Security-Audit-Fund 2026-09-16: handleKontakt/handleFeedback bauten die Admin-
 // Benachrichtigungs-E-Mail bisher aus rohem, ungefiltertem Nutzer-Input zusammen
@@ -43,7 +50,7 @@ const EMAIL_FORMAT = /^[^\s@<>"']+@[^\s@<>"']+\.[^\s@<>"']+$/;
 
 function getCORS(origin) {
   return {
-    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : 'https://app.kontolux-ai.de',
+    'Access-Control-Allow-Origin': originErlaubt(origin) ? origin : 'https://app.kontolux-ai.de',
     'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Origin',
     'Access-Control-Max-Age': '86400',
@@ -83,6 +90,12 @@ function isoToMonatJahr(isoString) {
   return BERLIN_MONAT_JAHR_FORMATTER.format(d);
 }
 
+// Für Logs: nur die ersten Zeichen einer UID ausgeben (Security-Audit 2026-10-16).
+function kurz(id) {
+  const s = String(id ?? '');
+  return s.length > 6 ? s.slice(0, 6) + '…' : s;
+}
+
 // ── In-Memory Rate Limiting ──────────────────
 const rateLimitMap = new Map();
 
@@ -118,6 +131,7 @@ const UID_LIMITS = {
 // ── Haupt-Router ──────────────────────────────────────────
 export default {
   async fetch(request, env, ctx) {
+    entwicklungsModus = env?.ENTWICKLUNG === '1';
     const url = new URL(request.url);
     const origin = request.headers.get('Origin') || request.headers.get('X-Origin') || '';
     const cors = getCORS(origin);
@@ -235,8 +249,14 @@ export default {
       return mitEmpfangsnachweis(handleShopifyWebhook(request, url, env, cors), url, env);
     }
 
+    // Alle Body-Routen sind POST. Andere Methoden (z. B. GET ohne Body) brechen sonst mit einem
+    // JSON-Parse-Fehler ab, der nur Log-Rauschen erzeugt.
+    if (request.method !== 'POST') {
+      return new Response('Method Not Allowed', { status: 405, headers: cors });
+    }
+
     // Origin-Check — nur erlaubte Domains
-    if (origin && !ALLOWED_ORIGINS.includes(origin)) {
+    if (origin && !originErlaubt(origin)) {
       return new Response('Forbidden', { status: 403, headers: cors });
     }
 
@@ -429,7 +449,7 @@ function pruefeBetragZeile(line) {
   if (rechnungMatch) {
     const m = rechnungMatch[1].match(/betrag_netto=([^,]*)/i);
     const betrag = m ? parseFloat(m[1]) : NaN;
-    if (!Number.isFinite(betrag) || betrag <= 0) {
+    if (!Number.isFinite(betrag) || betrag <= 0 || betrag > 10000000) {
       return line.slice(0, rechnungMatch.index) + 'Ich kann diese Rechnung nicht erstellen — der Betrag muss größer als 0 sein. Bitte nenne mir einen gültigen Betrag.';
     }
   }
@@ -548,12 +568,12 @@ async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
     });
     if (!resById.ok) {
       const errText = await resById.text();
-      console.error('checkNachrichtenLimit GET Error:', resById.status, errText, 'key=', key);
+      console.error('checkNachrichtenLimit GET Error:', resById.status, errText, 'key=', kurz(key));
       return { erlaubt: false, anzahl: 0, grund: 'infra' };
     }
     rows = await resById.json();
     if (!Array.isArray(rows)) {
-      console.error('checkNachrichtenLimit: GET lieferte kein Array:', JSON.stringify(rows).slice(0, 200), 'key=', key);
+      console.error('checkNachrichtenLimit: GET lieferte kein Array:', JSON.stringify(rows).slice(0, 200), 'key=', kurz(key));
       rows = [];
     }
 
@@ -588,7 +608,7 @@ async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
       }
       if (insertRes.status !== 409) {
         const errText = await insertRes.text();
-        console.error('checkNachrichtenLimit INSERT Error:', insertRes.status, errText, 'key=', key);
+        console.error('checkNachrichtenLimit INSERT Error:', insertRes.status, errText, 'key=', kurz(key));
         return { erlaubt: false, anzahl: 0, grund: 'infra' };
       }
       continue;
@@ -622,7 +642,7 @@ async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
 
     if (!patchRes.ok) {
       const errText = await patchRes.text();
-      console.error('Supabase PATCH Error:', patchRes.status, errText, 'key=', key);
+      console.error('Supabase PATCH Error:', patchRes.status, errText, 'key=', kurz(key));
       // Infra-Fehler (nicht Wettlauf): fail-closed. Ohne Zähler würde jeder Request die Kosten
       // ungebremst verursachen (Security-Audit 2026-10-16).
       return { erlaubt: false, anzahl: 0, grund: 'infra' };
@@ -2683,6 +2703,14 @@ export async function detectAndParseERechnung(bytes, filename, mimeType, sellerN
 // ── /document Handler ─────────────────────────────────────
 async function handleDocument(body, env, cors = {}, ctx) {
   const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz, datum, content, sellerNameHint, e_rechnung_format, duplikatBestaetigt, kategorie, sachkonto, buchungstext, betrag_netto, bezahlt_am: bezahlt_am_client } = body;
+  // Grenzen gegen überlange Eingaben und unrealistische Beträge (Security-Audit 2026-10-16).
+  const MAX_BETRAG = 10000000;
+  if (betrag !== undefined && betrag !== null && betrag !== '' && Math.abs(parseFloat(betrag)) > MAX_BETRAG) {
+    return new Response(JSON.stringify({ error: 'Betrag außerhalb des zulässigen Bereichs' }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+  }
+  if (String(name ?? '').length > 200 || String(absender ?? '').length > 200) {
+    return new Response(JSON.stringify({ error: 'Name oder Absender sind zu lang (max. 200 Zeichen)' }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+  }
 
   // ── E-RECHNUNG PARSEN (Vorschau vor dem Speichern, kein Firestore-Write) ────
   // Wird beim Auswählen einer .xml/.pdf-Datei im Belegarchiv-Upload-Modal aufgerufen, BEVOR der
@@ -4970,7 +4998,7 @@ async function handleStripeInvoiceEvent(userId, event, env, token) {
       // für dieselbe Rechnung überschreiben so dieselbe Datei statt zwei Kopien anzulegen.
       storageUrl = await archiveInvoicePdf(userId, 'stripe', invoice.id, invoice.invoice_pdf, env);
     } catch (e) {
-      console.error('Stripe-Webhook: Invoice-PDF-Archivierung fehlgeschlagen:', e.message, 'userId=', userId, 'invoiceId=', invoice.id);
+      console.error('Stripe-Webhook: Invoice-PDF-Archivierung fehlgeschlagen:', e.message, 'userId=', kurz(userId), 'invoiceId=', invoice.id);
     }
   }
   await firestorePatchFields(`users/${userId}/stripe_rechnungen/${encodeURIComponent(invoice.id)}`, {
@@ -5028,7 +5056,7 @@ async function handleStripeWebhook(request, url, env, cors) {
     const rawBody = await request.text();
     const sigCheck = await verifyStripeSignature(rawBody, request.headers.get('Stripe-Signature'), signingSecret);
     if (!sigCheck.valid) {
-      console.warn('Stripe-Webhook Signaturprüfung fehlgeschlagen:', sigCheck.reason, 'userId=', userId);
+      console.warn('Stripe-Webhook Signaturprüfung fehlgeschlagen:', sigCheck.reason, 'userId=', kurz(userId));
       return new Response(JSON.stringify({ error: 'Invalid signature' }), {
         status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
       });
@@ -5099,7 +5127,7 @@ async function handleStripeWebhook(request, url, env, cors) {
       try {
         await verknuepfeStripeZahlung(userId, event.data.object.id, result.docId, adminToken);
       } catch (e) {
-        console.error('Stripe-Webhook: Verknüpfung Zahlung ↔ Rechnung fehlgeschlagen:', e.message, 'userId=', userId, 'piId=', event.data.object.id);
+        console.error('Stripe-Webhook: Verknüpfung Zahlung ↔ Rechnung fehlgeschlagen:', e.message, 'userId=', kurz(userId), 'piId=', event.data.object.id);
       }
     }
     // Bewusst awaited statt "fire and forget": ein Cloudflare Worker kann nicht-awaitete
@@ -5108,7 +5136,7 @@ async function handleStripeWebhook(request, url, env, cors) {
     await incrementWebhookBelegCount(userId, env);
 
     if (result.tagesbewegungWarnung) {
-      console.error('Stripe-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
+      console.error('Stripe-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', kurz(userId));
     }
 
     return new Response(JSON.stringify({ received: true, docId: result.docId }), {
@@ -5328,7 +5356,7 @@ async function handleMollieWebhook(request, url, env, cors) {
       });
     }
     if (!verifyResult.valid) {
-      console.warn('Mollie-Webhook Verifikation fehlgeschlagen:', verifyResult.reason, 'userId=', userId);
+      console.warn('Mollie-Webhook Verifikation fehlgeschlagen:', verifyResult.reason, 'userId=', kurz(userId));
       return new Response(JSON.stringify({ error: 'Invalid payment' }), {
         status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
       });
@@ -5362,7 +5390,7 @@ async function handleMollieWebhook(request, url, env, cors) {
         try {
           belegData.storage_url = await archiveInvoicePdf(userId, 'mollie', payment.id, payment._links.invoicePdf.href, env);
         } catch (e) {
-          console.error('Mollie-Webhook: Invoice-PDF-Archivierung fehlgeschlagen, Beleg wird trotzdem angelegt:', e.message, 'userId=', userId, 'paymentId=', payment.id);
+          console.error('Mollie-Webhook: Invoice-PDF-Archivierung fehlgeschlagen, Beleg wird trotzdem angelegt:', e.message, 'userId=', kurz(userId), 'paymentId=', payment.id);
         }
       }
 
@@ -5372,7 +5400,7 @@ async function handleMollieWebhook(request, url, env, cors) {
       await markAsProcessed(userId, payment.id, adminToken);
       await incrementWebhookBelegCount(userId, env);
       if (result.tagesbewegungWarnung) {
-        console.error('Mollie-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
+        console.error('Mollie-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', kurz(userId));
       }
       docId = result.docId;
     }
@@ -5590,7 +5618,7 @@ async function handleDigistore24Webhook(request, url, env, cors) {
 
     const sigCheck = await verifyDigistore24Signature(fields, passphrase);
     if (!sigCheck.valid) {
-      console.warn('Digistore24-Webhook Signaturprüfung fehlgeschlagen:', sigCheck.reason, 'userId=', userId);
+      console.warn('Digistore24-Webhook Signaturprüfung fehlgeschlagen:', sigCheck.reason, 'userId=', kurz(userId));
       return ipnFehler(cors, 400, 'invalid signature');
     }
 
@@ -5631,7 +5659,7 @@ async function handleDigistore24Webhook(request, url, env, cors) {
     await incrementWebhookBelegCount(userId, env);
 
     if (result.tagesbewegungWarnung) {
-      console.error('Digistore24-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
+      console.error('Digistore24-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', kurz(userId));
     }
     return ipnOk(cors, 200, 'buchung');
   } catch (e) {
@@ -5753,7 +5781,7 @@ async function handleCopecartWebhook(request, url, env, cors) {
     const rawBody = await request.text();
     const sigCheck = await verifyCopecartSignature(rawBody, request.headers.get('X-Copecart-Signature'), webhookSecret);
     if (!sigCheck.valid) {
-      console.warn('CopeCart-Webhook Signaturprüfung fehlgeschlagen:', sigCheck.reason, 'userId=', userId);
+      console.warn('CopeCart-Webhook Signaturprüfung fehlgeschlagen:', sigCheck.reason, 'userId=', kurz(userId));
       return ipnFehler(cors, 400, 'invalid signature');
     }
 
@@ -5805,7 +5833,7 @@ async function handleCopecartWebhook(request, url, env, cors) {
     await incrementWebhookBelegCount(userId, env);
 
     if (result.tagesbewegungWarnung) {
-      console.error('CopeCart-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
+      console.error('CopeCart-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', kurz(userId));
     }
     return ipnOk(cors, 200, 'buchung');
   } catch (e) {
@@ -6086,7 +6114,7 @@ async function handlePaypalWebhook(request, url, env, cors) {
     await incrementWebhookBelegCount(userId, env);
 
     if (result.tagesbewegungWarnung) {
-      console.error('PayPal-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
+      console.error('PayPal-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', kurz(userId));
     }
 
     return new Response(JSON.stringify({ received: true, docId: result.docId }), {
@@ -6563,7 +6591,7 @@ async function handleAblefyWebhook(request, url, env, cors) {
       try {
         belegData.storage_url = await archiveInvoicePdf(userId, 'ablefy', eventKey, payload.invoice_link, env);
       } catch (e) {
-        console.error('Ablefy-Webhook: Invoice-PDF-Archivierung fehlgeschlagen, Beleg wird trotzdem angelegt:', e.message, 'userId=', userId, 'orderId=', orderId);
+        console.error('Ablefy-Webhook: Invoice-PDF-Archivierung fehlgeschlagen, Beleg wird trotzdem angelegt:', e.message, 'userId=', kurz(userId), 'orderId=', orderId);
       }
     }
 
@@ -6574,7 +6602,7 @@ async function handleAblefyWebhook(request, url, env, cors) {
     await incrementWebhookBelegCount(userId, env);
 
     if (result.tagesbewegungWarnung) {
-      console.error('Ablefy-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
+      console.error('Ablefy-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', kurz(userId));
     }
 
     return new Response(JSON.stringify({ received: true, docId: result.docId }), {
@@ -6728,7 +6756,7 @@ async function handleShopifyWebhook(request, url, env, cors) {
     const rawBody = await request.text();
     const sigCheck = await verifyShopifySignature(rawBody, request.headers.get('X-Shopify-Hmac-Sha256'), webhookSecret);
     if (!sigCheck.valid) {
-      console.warn('Shopify-Webhook Signaturprüfung fehlgeschlagen:', sigCheck.reason, 'userId=', userId);
+      console.warn('Shopify-Webhook Signaturprüfung fehlgeschlagen:', sigCheck.reason, 'userId=', kurz(userId));
       return json({ error: 'Invalid signature' }, 401);
     }
 
@@ -6772,7 +6800,7 @@ async function handleShopifyWebhook(request, url, env, cors) {
     if (zustellSchluessel) await markAsProcessed(userId, zustellSchluessel, adminToken);
     await incrementWebhookBelegCount(userId, env);
     if (result.tagesbewegungWarnung) {
-      console.error('Shopify-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', userId);
+      console.error('Shopify-Webhook:', result.tagesbewegungWarnung, 'docId=', result.docId, 'userId=', kurz(userId));
     }
     return json({ received: true, docId: result.docId });
   } catch (e) {
