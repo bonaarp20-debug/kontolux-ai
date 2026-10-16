@@ -88,6 +88,20 @@ function checkRateLimit(ip, limit = 20, windowMs = 10000) {
   return entry.count <= limit;
 }
 
+// Routen-spezifische Limits (pro IP, Fenster in ms). Nur für Routen, die externe Mails
+// versenden, Firestore-Daten für Dritte ausliefern oder ohne Login erreichbar sind.
+const ROUTEN_LIMITS = {
+  '/kontakt':               { limit: 5,  windowMs: 10 * 60 * 1000 },
+  '/send-password-reset':   { limit: 5,  windowMs: 10 * 60 * 1000 },
+  '/pruefer-daten':         { limit: 10, windowMs: 10 * 60 * 1000 },
+};
+// Pro eingeloggtem Nutzer (nach Token-Prüfung) für mailversendende Routen.
+const UID_LIMITS = {
+  '/feedback':                       { limit: 5, windowMs: 10 * 60 * 1000 },
+  '/send-verification-email':        { limit: 5, windowMs: 10 * 60 * 1000 },
+  '/send-email-change-verification': { limit: 5, windowMs: 10 * 60 * 1000 },
+};
+
 // ── Haupt-Router ──────────────────────────────────────────
 export default {
   async fetch(request, env, ctx) {
@@ -115,6 +129,12 @@ export default {
     const istWebhook = request.method === 'POST' && url.pathname.startsWith('/webhook/');
     const limitSchluessel = istWebhook ? `${clientIP}|${url.pathname.split('/').slice(2, 4).join('/')}` : clientIP;
     if (!checkRateLimit(limitSchluessel, istWebhook ? 60 : 20)) {
+      return new Response('Too Many Requests', { status: 429, headers: cors });
+    }
+    // Strengere Limits für Routen, die Mails versenden, Firestore-Daten ausliefern oder
+    // öffentlich erreichbar sind (Security-Audit 2026-10-16). Pro IP und Route.
+    const routenLimit = ROUTEN_LIMITS[url.pathname];
+    if (request.method === 'POST' && routenLimit && !checkRateLimit(`${url.pathname}|${clientIP}`, routenLimit.limit, routenLimit.windowMs)) {
       return new Response('Too Many Requests', { status: 429, headers: cors });
     }
 
@@ -270,6 +290,10 @@ export default {
       // (Prüfung 2026-09-28): sonst fiel checkNachrichtenLimit/peekUploadLimit auf den frei
       // wählbaren Nutzernamen zurück, und mit wechselnden Namen ließ sich das Tageslimit umgehen.
       if (verifiedUid) body.userId = verifiedUid;
+      const uidLimit = UID_LIMITS[url.pathname];
+      if (verifiedUid && uidLimit && !checkRateLimit(`${url.pathname}|uid|${verifiedUid}`, uidLimit.limit, uidLimit.windowMs)) {
+        return new Response(JSON.stringify({ error: 'Too Many Requests' }), { status: 429, headers: { ...getCORS(origin), 'Content-Type': 'application/json' } });
+      }
       // ✅ /abo: verifizierte E-Mail überschreibt client-seitige email — sonst könnte
       // jeder eingeloggte Nutzer beliebige fremde Adressen an-/abmelden.
       if (verifiedEmail && url.pathname === '/abo') body.email = verifiedEmail;
@@ -1960,21 +1984,19 @@ async function handleSendPasswordReset(body, env, cors = {}) {
       status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
     });
   }
+  // Enumerationsschutz: Antwort ist für existierende und nicht existierende Adressen identisch.
+  // Ob ein Konto existiert, wird nur intern geloggt, nie an den Aufrufer zurückgegeben. Die
+  // Anzahl der Reset-Mails pro Adresse ist zusätzlich begrenzt (siehe Router).
+  const antwort = () => new Response(JSON.stringify({ success: true }), {
+    status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+  });
   try {
     const link = await generateFirebaseActionLink('PASSWORD_RESET', email, env);
     await sendEmail(email, 'Passwort zurücksetzen — Kontolux AI', passwordResetEmailHtml(link), env, 'Kontolux AI <jona@kontolux-ai.de>');
-    return new Response(JSON.stringify({ success: true }), {
-      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
-    });
   } catch (err) {
-    // EMAIL_NOT_FOUND etc. — als bekannten Auth-Fehlercode zurückgeben, damit
-    // das Frontend dieselbe freundliche Meldung wie zuvor anzeigen kann.
-    const code = /EMAIL_NOT_FOUND/.test(err.message) ? 'auth/user-not-found' : 'auth/unknown-error';
-    console.error('send-password-reset Error:', err.message);
-    return new Response(JSON.stringify({ error: 'send-failed', code }), {
-      status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
-    });
+    console.error('send-password-reset Error:', /EMAIL_NOT_FOUND/.test(err.message) ? 'EMAIL_NOT_FOUND' : 'Versand/Fehler');
   }
+  return antwort();
 }
 
 // ── /send-email-change-verification Handler (authentifiziert) ────────────
