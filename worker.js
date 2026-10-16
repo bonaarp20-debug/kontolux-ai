@@ -121,6 +121,22 @@ const ROUTEN_LIMITS = {
   '/send-password-reset':   { limit: 5,  windowMs: 10 * 60 * 1000 },
   '/pruefer-daten':         { limit: 10, windowMs: 10 * 60 * 1000 },
 };
+// Globale Limits über alle IPs (KV-Zähler). Ergänzen das Limit pro IP, weil verteilte Anfragen
+// den In-Memory-Zähler pro Instanz umgehen. KV ist eventuell konsistent, deshalb ist das eine grobe Grenze.
+const GLOBALE_LIMITS = {
+  '/kontakt':             { limit: 30,  windowSec: 600 },
+  '/send-password-reset': { limit: 30,  windowSec: 600 },
+  '/feedback':            { limit: 100, windowSec: 600 },
+};
+async function globalesLimit(env, schluessel, limit, windowSec) {
+  if (!env.PROFIL_KV) return true;
+  const key = `rl:${schluessel}`;
+  const anzahl = parseInt((await env.PROFIL_KV.get(key)) || '0', 10);
+  if (anzahl >= limit) return false;
+  await env.PROFIL_KV.put(key, String(anzahl + 1), { expirationTtl: Math.max(60, windowSec) });
+  return true;
+}
+
 // Pro eingeloggtem Nutzer (nach Token-Prüfung) für mailversendende Routen.
 const UID_LIMITS = {
   '/feedback':                       { limit: 5, windowMs: 10 * 60 * 1000 },
@@ -156,6 +172,10 @@ export default {
     const istWebhook = request.method === 'POST' && url.pathname.startsWith('/webhook/');
     const limitSchluessel = istWebhook ? `${clientIP}|${url.pathname.split('/').slice(2, 4).join('/')}` : clientIP;
     if (!checkRateLimit(limitSchluessel, istWebhook ? 60 : 20)) {
+      return new Response('Too Many Requests', { status: 429, headers: cors });
+    }
+    const globalLimit = GLOBALE_LIMITS[url.pathname];
+    if (request.method === 'POST' && globalLimit && !(await globalesLimit(env, url.pathname, globalLimit.limit, globalLimit.windowSec))) {
       return new Response('Too Many Requests', { status: 429, headers: cors });
     }
     // Strengere Limits für Routen, die Mails versenden, Firestore-Daten ausliefern oder
@@ -2027,6 +2047,14 @@ async function handleSendPasswordReset(body, env, cors = {}) {
   if (!email) {
     return new Response(JSON.stringify({ error: 'Missing email' }), {
       status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+  // Pro Zieladresse höchstens 3 Reset-Mails pro Stunde (Mail-Bombing gegen Dritte). Das Limit gilt
+  // unabhängig davon, ob das Konto existiert, verrät also nichts über Registrierungen.
+  const adressLimitOk = await globalesLimit(env, 'reset-mail:' + (await sha256Hex(email.toLowerCase())), 3, 3600);
+  if (!adressLimitOk) {
+    return new Response(JSON.stringify({ error: 'Too Many Requests' }), {
+      status: 429, headers: { ...cors, 'Content-Type': 'application/json' }
     });
   }
   // Enumerationsschutz: Antwort ist für existierende und nicht existierende Adressen identisch.
