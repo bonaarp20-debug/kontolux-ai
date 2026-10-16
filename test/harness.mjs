@@ -41,7 +41,8 @@ export async function erzeugeTestEnv(overrides = {}) {
 }
 
 // Simuliert Google/Firebase/Resend. `users` bildet ID-Token -> Nutzerdaten ab.
-export function mockExterneDienste({ users = {}, firestoreStatus = 200, supabaseStatus = 200 } = {}) {
+export function mockExterneDienste({ users = {}, firestoreStatus = 200, supabaseStatus = 200, prueferDoc = null } = {}) {
+  const mockOptionen = { prueferDoc };
   const log = { mails: [], firestore: [], lookups: 0, anthropic: 0, supabaseRows: {} };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init = {}) => {
@@ -68,6 +69,10 @@ export function mockExterneDienste({ users = {}, firestoreStatus = 200, supabase
       return json({ id: 'mail-test' });
     }
     if (url.startsWith('https://firestore.googleapis.com/')) {
+      if (url.endsWith(':runQuery') && mockOptionen.prueferDoc) {
+        log.firestore.push({ url, method: 'POST', auth: (init.headers || {}).Authorization });
+        return json([{ document: { name: 'projects/kontolux-ai/databases/(default)/documents/users/uid-x/profil/prueferZugang', fields: mockOptionen.prueferDoc } }]);
+      }
       log.firestore.push({ url, method: init.method || 'GET', auth: (init.headers || {}).Authorization });
       return new Response(JSON.stringify({}), { status: firestoreStatus, headers: { 'Content-Type': 'application/json' } });
     }
