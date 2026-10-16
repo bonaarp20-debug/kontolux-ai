@@ -28,6 +28,19 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
+// Eingabe für Betreff/Einzeiler: Steuerzeichen (inkl. CR/LF) entfernen und auf maxLen kürzen.
+// Verhindert, dass Nutzerinhalte Zeilenumbrüche im Betreff erzeugen oder Mails aufblähen.
+function sicherEinzeiler(str, maxLen) {
+  return String(str ?? '').replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maxLen);
+}
+
+// Mehrzeiliger Text (Nachrichten, Feedback): Zeilenumbrüche bleiben, andere Steuerzeichen fallen weg.
+function sicherMehrzeilig(str, maxLen) {
+  return String(str ?? '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim().slice(0, maxLen);
+}
+
+const EMAIL_FORMAT = /^[^\s@<>"']+@[^\s@<>"']+\.[^\s@<>"']+$/;
+
 function getCORS(origin) {
   return {
     'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : 'https://app.kontolux-ai.de',
@@ -3173,9 +3186,14 @@ async function sendEmail(to, subject, html, env, from = 'Kontolux AI <jona@konto
 
 // ── /kontakt Handler ─────────────────────────────────────
 async function handleKontakt(body, env, cors) {
-  const { name, email, nachricht } = body;
+  const name = sicherEinzeiler(body.name, 100);
+  const email = sicherEinzeiler(body.email, 254);
+  const nachricht = sicherMehrzeilig(body.nachricht, 5000);
   if (!name || !email || !nachricht) {
     return new Response('Fehlende Felder', { status: 400, headers: cors });
+  }
+  if (!EMAIL_FORMAT.test(email)) {
+    return new Response('Ungültige E-Mail-Adresse', { status: 400, headers: cors });
   }
   const nameSafe = escapeHtml(name);
   const emailSafe = escapeHtml(email);
@@ -3189,7 +3207,7 @@ async function handleKontakt(body, env, cors) {
     <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0">${nachrichtSafe}</p>
   `);
 
-  await sendEmail('jona@kontolux-ai.de', `Kontaktanfrage von ${name}`.slice(0, 200), html, env);
+  await sendEmail('jona@kontolux-ai.de', sicherEinzeiler(`Kontaktanfrage von ${name}`, 200), html, env);
   return new Response('OK', { headers: cors });
 }
 
@@ -3230,8 +3248,12 @@ async function handleUsage(body, env, cors) {
 
 // ── /feedback Handler ─────────────────────────────────────
 async function handleFeedback(body, env, cors = {}) {
-  const { feedback, gut, schlecht, wunsch, datum } = body;
-  const absender = body.userName || body.nutzername || 'Nutzer';
+  const feedback = sicherMehrzeilig(body.feedback, 2000);
+  const gut = sicherMehrzeilig(body.gut, 2000);
+  const schlecht = sicherMehrzeilig(body.schlecht, 2000);
+  const wunsch = sicherMehrzeilig(body.wunsch, 2000);
+  const datum = sicherEinzeiler(body.datum, 30);
+  const absender = sicherEinzeiler(body.userName || body.nutzername || 'Nutzer', 100) || 'Nutzer';
   const nutzernameSafe = escapeHtml(absender);
   const gutSafe = escapeHtml(gut);
   const schlechtSafe = escapeHtml(schlecht);
@@ -3250,7 +3272,7 @@ async function handleFeedback(body, env, cors = {}) {
 
   let versendet = false;
   try {
-    versendet = await sendEmail('jona@kontolux-ai.de', `Feedback von ${absender}`.slice(0, 200), html, env);
+    versendet = await sendEmail('jona@kontolux-ai.de', sicherEinzeiler(`Feedback von ${absender}`, 200), html, env);
   } catch (e) {
     console.error('handleFeedback Versand-Exception:', e.message);
   }
