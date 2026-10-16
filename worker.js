@@ -310,6 +310,13 @@ export default {
       // ✅ /abo: verifizierte E-Mail überschreibt client-seitige email — sonst könnte
       // jeder eingeloggte Nutzer beliebige fremde Adressen an-/abmelden.
       if (verifiedEmail && url.pathname === '/abo') body.email = verifiedEmail;
+      // Security-Audit 2026-10-16: Ohne E-Mail im Token würde die vom Client gesendete Adresse
+      // übernommen. Dann könnte jeder Token-Inhaber beliebige Adressen an- oder abmelden.
+      if (url.pathname === '/abo' && !verifiedEmail) {
+        return new Response(JSON.stringify({ error: 'E-Mail im Token erforderlich' }), {
+          status: 403, headers: { ...cors, 'Content-Type': 'application/json' }
+        });
+      }
 
       if (url.pathname === '/chat')     return handleChat(body, env, cors, ctx);
       if (url.pathname === '/image')    return handleImage(body, env, cors, ctx);
