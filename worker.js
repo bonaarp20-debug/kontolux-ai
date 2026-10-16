@@ -2085,21 +2085,24 @@ async function handleSendEmailChangeVerification(currentEmail, body, env, cors =
       status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
     });
   }
-  try {
-    const link = await generateFirebaseActionLink('VERIFY_AND_CHANGE_EMAIL', currentEmail, env, newEmail);
-    await sendEmail(newEmail, 'Bestätige deine neue E-Mail-Adresse — Kontolux AI', emailChangeEmailHtml(link, newEmail), env, 'Kontolux AI <jona@kontolux-ai.de>');
-    return new Response(JSON.stringify({ success: true }), {
-      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
-    });
-  } catch (err) {
-    console.error('send-email-change-verification Error:', err.message);
-    let code = 'auth/unknown-error';
-    if (/EMAIL_EXISTS/.test(err.message)) code = 'auth/email-already-in-use';
-    else if (/INVALID_NEW_EMAIL|INVALID_EMAIL/.test(err.message)) code = 'auth/invalid-email';
-    return new Response(JSON.stringify({ error: 'send-failed', code }), {
+  // Enumerationsschutz: Die Antwort ist für vergebene und freie Adressen identisch. Ist die neue
+  // Adresse schon vergeben, wird keine Mail verschickt, aber dieselbe Erfolgsantwort gegeben.
+  // Ungültige Formate werden weiter abgelehnt, das verrät nichts über Konten.
+  const antwort = () => new Response(JSON.stringify({ success: true }), {
+    status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+  });
+  if (!EMAIL_FORMAT.test(newEmail)) {
+    return new Response(JSON.stringify({ error: 'send-failed', code: 'auth/invalid-email' }), {
       status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
     });
   }
+  try {
+    const link = await generateFirebaseActionLink('VERIFY_AND_CHANGE_EMAIL', currentEmail, env, newEmail);
+    await sendEmail(newEmail, 'Bestätige deine neue E-Mail-Adresse — Kontolux AI', emailChangeEmailHtml(link, newEmail), env, 'Kontolux AI <jona@kontolux-ai.de>');
+  } catch (err) {
+    console.error('send-email-change-verification:', /EMAIL_EXISTS/.test(err.message) ? 'Adresse vergeben' : 'Versand/Fehler');
+  }
+  return antwort();
 }
 
 // Preise in $/MTok (Stand 2026-08-28). Cache-Write als 1-STUNDEN-TTL-Satz (2x Input-Preis) —

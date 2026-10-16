@@ -59,7 +59,8 @@ export function mockExterneDienste({ users = {}, firestoreStatus = 200, supabase
       return json({ users: [{ localId: u.uid, email: u.email, emailVerified: !!u.emailVerified, providerUserInfo: u.providers || [] }] });
     }
     if (url.startsWith('https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode')) {
-      const { email } = JSON.parse(body || '{}');
+      const { email, newEmail } = JSON.parse(body || '{}');
+      if (newEmail && Object.values(users).some(u => u.email === newEmail)) return json({ error: { message: 'EMAIL_EXISTS' } }, 400);
       const bekannt = Object.values(users).some(u => u.email === email);
       if (!bekannt) return json({ error: { message: 'EMAIL_NOT_FOUND' } }, 400);
       return json({ oobLink: 'https://example.invalid/action?oob=test' });
