@@ -30,6 +30,8 @@ export async function erzeugeTestEnv(overrides = {}) {
     FIREBASE_ADMIN_CLIENT_EMAIL: 'admin@test.invalid',
     FIREBASE_ADMIN_PRIVATE_KEY: pem,
     ADMIN_SEED_KEY: 'test-seed-key-0123456789',
+    SUPABASE_URL: 'https://supabase.test.invalid',
+    SUPABASE_KEY: 'test-supabase',
     RESEND_API_KEY: 'test-resend',
     PROFIL_KV: kv(),
     ABO_KV: kv(),
@@ -39,8 +41,8 @@ export async function erzeugeTestEnv(overrides = {}) {
 }
 
 // Simuliert Google/Firebase/Resend. `users` bildet ID-Token -> Nutzerdaten ab.
-export function mockExterneDienste({ users = {}, firestoreStatus = 200 } = {}) {
-  const log = { mails: [], firestore: [], lookups: 0 };
+export function mockExterneDienste({ users = {}, firestoreStatus = 200, supabaseStatus = 200 } = {}) {
+  const log = { mails: [], firestore: [], lookups: 0, anthropic: 0, supabaseRows: {} };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init = {}) => {
     const url = typeof input === 'string' ? input : input.url;
@@ -66,8 +68,34 @@ export function mockExterneDienste({ users = {}, firestoreStatus = 200 } = {}) {
       return json({ id: 'mail-test' });
     }
     if (url.startsWith('https://firestore.googleapis.com/')) {
-      log.firestore.push({ url, method: init.method || 'GET' });
+      log.firestore.push({ url, method: init.method || 'GET', auth: (init.headers || {}).Authorization });
       return new Response(JSON.stringify({}), { status: firestoreStatus, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (url.startsWith('https://api.anthropic.com/')) {
+      log.anthropic++;
+      return new Response('mock-fehler', { status: 500 });
+    }
+    if (url.startsWith('https://supabase.test.invalid/rest/v1/nutzer_limits')) {
+      if (supabaseStatus !== 200) return new Response('mock-supabase-down', { status: supabaseStatus });
+      const u = new URL(url);
+      const name = (u.searchParams.get('nutzer_name') || '').replace(/^eq\./, '');
+      const rows = log.supabaseRows;
+      if (init.method === 'POST') {
+        const row = JSON.parse(body);
+        rows[row.nutzer_name] = { ...row };
+        return new Response(null, { status: 201 });
+      }
+      if (init.method === 'PATCH') {
+        const row = rows[name];
+        const heute = u.searchParams.get('letztes_datum');
+        const anzahl = u.searchParams.get('nachrichten_heute');
+        const passt = row && (anzahl === null || anzahl === `eq.${row.nachrichten_heute ?? 0}`)
+          && (heute === null || (heute.startsWith('eq.') && heute.slice(3) === row.letztes_datum) || (heute === 'is.null' && !row.letztes_datum));
+        if (!passt) return json([]);
+        Object.assign(row, JSON.parse(body));
+        return json([row]);
+      }
+      return json(rows[name] ? [rows[name]] : []);
     }
     return json({ error: 'unmocked' }, 599);
   };

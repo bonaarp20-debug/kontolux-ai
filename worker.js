@@ -247,7 +247,7 @@ export default {
       } catch (parseErr) {
         console.error('JSON Parse Error:', parseErr.message);
         const errorCors = getCORS(origin);
-        return new Response(JSON.stringify({ error: 'Invalid JSON', details: parseErr.message }), { 
+        return new Response(JSON.stringify({ error: 'Invalid JSON' }), { 
           status: 400, 
           headers: { ...errorCors, 'Content-Type': 'application/json' } 
         });
@@ -303,6 +303,10 @@ export default {
       // (Prüfung 2026-09-28): sonst fiel checkNachrichtenLimit/peekUploadLimit auf den frei
       // wählbaren Nutzernamen zurück, und mit wechselnden Namen ließ sich das Tageslimit umgehen.
       if (verifiedUid) body.userId = verifiedUid;
+      // Security-Audit 2026-10-16: Firestore-Zugriffe in Handlern nutzen den Token aus dem
+      // verifizierten Header, nie einen Token aus dem Body. Sonst könnte ein Aufrufer mit einem
+      // fremden Token schreiben, solange die Regeln das zufällig zulassen.
+      if (verifiedUid) body.token = authHeader.slice(7);
       const uidLimit = UID_LIMITS[url.pathname];
       if (verifiedUid && uidLimit && !checkRateLimit(`${url.pathname}|uid|${verifiedUid}`, uidLimit.limit, uidLimit.windowMs)) {
         return new Response(JSON.stringify({ error: 'Too Many Requests' }), { status: 429, headers: { ...getCORS(origin), 'Content-Type': 'application/json' } });
@@ -342,7 +346,7 @@ export default {
     } catch (e) {
       console.error('Worker Error:', e.message, e.stack);
       const errorCors = getCORS(origin);
-      return new Response(JSON.stringify({ error: 'Server Error', details: e.message }), { 
+      return new Response(JSON.stringify({ error: 'Server Error' }), { 
         status: 500, 
         headers: { ...errorCors, 'Content-Type': 'application/json' } 
       });
@@ -369,7 +373,7 @@ function uploadLimitKey(userId, jetzt) {
 // Nur lesen, NICHT hochzählen — für den Vorab-Check vor dem Storage-Upload
 // und vor dem eigentlichen Speichern (kein Zählen von Versuchen, die scheitern).
 async function peekUploadLimit(userId, env) {
-  if (!userId) return { erlaubt: true };
+  if (!userId) return { erlaubt: false };
   const jetzt = new Date();
   const key = uploadLimitKey(userId, jetzt);
 
@@ -378,7 +382,7 @@ async function peekUploadLimit(userId, env) {
     const anzahl = val ? parseInt(val) : 0;
     return { erlaubt: anzahl < UPLOAD_LIMIT, anzahl };
   } catch(e) {
-    return { erlaubt: true }; // Im Zweifel erlauben
+    return { erlaubt: false }; // Fail-closed: ohne Zähler kein Upload
   }
 }
 
@@ -530,7 +534,7 @@ async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
 
   if (!env.SUPABASE_URL || !env.SUPABASE_KEY) {
     console.error('checkNachrichtenLimit: SUPABASE_URL/SUPABASE_KEY fehlt in env!');
-    return { erlaubt: true, anzahl: 0 };
+    return { erlaubt: false, anzahl: 0, grund: 'infra' };
   }
 
   const base = supabaseRestBase(env);
@@ -545,7 +549,7 @@ async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
     if (!resById.ok) {
       const errText = await resById.text();
       console.error('checkNachrichtenLimit GET Error:', resById.status, errText, 'key=', key);
-      return { erlaubt: true, anzahl: 0 };
+      return { erlaubt: false, anzahl: 0, grund: 'infra' };
     }
     rows = await resById.json();
     if (!Array.isArray(rows)) {
@@ -585,7 +589,7 @@ async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
       if (insertRes.status !== 409) {
         const errText = await insertRes.text();
         console.error('checkNachrichtenLimit INSERT Error:', insertRes.status, errText, 'key=', key);
-        return { erlaubt: true, anzahl: 1 };
+        return { erlaubt: false, anzahl: 0, grund: 'infra' };
       }
       continue;
     }
@@ -594,7 +598,7 @@ async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
 
     if (!row || typeof row !== 'object') {
       console.error('checkNachrichtenLimit: row ungültig für key=', key, JSON.stringify(row));
-      return { erlaubt: true, anzahl: 1 };
+      return { erlaubt: false, anzahl: 0, grund: 'infra' };
     }
 
     const istHeute = row.letztes_datum === heute;
@@ -619,8 +623,9 @@ async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
     if (!patchRes.ok) {
       const errText = await patchRes.text();
       console.error('Supabase PATCH Error:', patchRes.status, errText, 'key=', key);
-      // Infra-Fehler (nicht Wettlauf) — im Zweifel durchlassen statt legitime Nutzer zu blockieren.
-      return { erlaubt: true, anzahl: neueAnzahl };
+      // Infra-Fehler (nicht Wettlauf): fail-closed. Ohne Zähler würde jeder Request die Kosten
+      // ungebremst verursachen (Security-Audit 2026-10-16).
+      return { erlaubt: false, anzahl: 0, grund: 'infra' };
     }
 
     const updated = await patchRes.json().catch(() => null);
@@ -636,7 +641,7 @@ async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
   // ein unkontrolliertes Durchrutschen zu riskieren (kostet im schlimmsten Fall eine einzelne
   // legitime Nachricht, schützt aber zuverlässig vor der Race-Condition).
   console.error('checkNachrichtenLimit: CAS-Retries erschöpft, blockiere sicherheitshalber, key=', key);
-  return { erlaubt: false, anzahl: LIMIT };
+  return { erlaubt: false, anzahl: LIMIT, grund: 'infra' };
 }
 
 // ── Sachkonto-Mapping (SKR03/SKR04) ───────────────────────
@@ -1896,7 +1901,7 @@ async function handleSeedSteuerrecht(request, body, env, cors) {
       headers: { ...cors, 'Content-Type': 'application/json' }
     });
   } catch (e) {
-    return new Response(JSON.stringify({ error: e.message }), {
+    return new Response(JSON.stringify({ error: 'Interner Fehler' }), {
       status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
     });
   }
@@ -1990,7 +1995,7 @@ async function handleSendVerificationEmail(email, env, cors = {}) {
     });
   } catch (err) {
     console.error('send-verification-email Error:', err.message);
-    return new Response(JSON.stringify({ error: 'send-failed', details: err.message }), {
+    return new Response(JSON.stringify({ error: 'send-failed' }), {
       status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
     });
   }
@@ -2111,7 +2116,7 @@ async function handleChat(body, env, cors = {}, ctx) {
       loadSteuerrechtContext(env),
     ]);
     if (!limit.erlaubt) {
-      return new Response('Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
+      return new Response(limit.grund === 'infra' ? 'Kontolux ist gerade nicht erreichbar. Bitte versuche es in ein paar Minuten noch einmal.' : 'Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
         headers: { ...cors, 'Content-Type': 'text/plain' }
       });
     }
@@ -2147,6 +2152,15 @@ async function handleChat(body, env, cors = {}, ctx) {
     if (!dateiCheck.ok) {
       return new Response(dateiCheck.error, { status: 400, headers: { ...cors, 'Content-Type': 'text/plain' } });
     }
+    // Anhänge zählen gegen das monatliche Upload-Limit wie bei /image und /document
+    // (Security-Audit 2026-10-16: vorher umging ein Chat-PDF das Limit).
+    const uploadLimit = await peekUploadLimit(userId, env);
+    if (!uploadLimit.erlaubt) {
+      return new Response('Du hast dein monatliches Upload-Limit erreicht. Chat ohne Anhang funktioniert weiterhin.', {
+        status: 429, headers: { ...cors, 'Content-Type': 'text/plain' }
+      });
+    }
+    await incrementUploadLimit(userId, env);
     const mediaType = Datei.type === 'application/pdf' ? 'application/pdf' : Datei.type;
     const userContent = [];
     if (mediaType === 'application/pdf') {
@@ -2209,7 +2223,7 @@ async function handleChat(body, env, cors = {}, ctx) {
     const errText = await claudeRes.text();
     console.error('Claude API Error:', claudeRes.status, errText.substring(0, 200));
     return new Response(
-      JSON.stringify({ error: `Claude API Error: ${claudeRes.status}`, details: errText.substring(0, 100) }),
+      JSON.stringify({ error: `Claude API Error: ${claudeRes.status}` }),
       { status: claudeRes.status, headers: { ...cors, 'Content-Type': 'application/json' } }
     );
   }
@@ -2295,7 +2309,7 @@ async function handleChat(body, env, cors = {}, ctx) {
     });
   } catch(err) {
     console.error('handleChat error:', err.message);
-    return new Response(JSON.stringify({ error: 'Chat error', details: err.message }), {
+    return new Response(JSON.stringify({ error: 'Chat error' }), {
       status: 500,
       headers: { ...cors, 'Content-Type': 'application/json' }
     });
@@ -2391,7 +2405,7 @@ async function handleImage(body, env, cors = {}, ctx) {
 
   const limit = await checkNachrichtenLimit(Nutzername, env, userId, ctx);
   if (!limit.erlaubt) {
-    return new Response('Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
+    return new Response(limit.grund === 'infra' ? 'Kontolux ist gerade nicht erreichbar. Bitte versuche es in ein paar Minuten noch einmal.' : 'Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
       headers: { ...cors, 'Content-Type': 'text/plain' }
     });
   }
@@ -2828,8 +2842,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
     } catch(err) {
       console.error('BELEG_MANUELL Error:', err.message);
       return new Response(JSON.stringify({ 
-        error: 'Server-Fehler beim Speichern',
-        details: err.message
+        error: 'Server-Fehler beim Speichern'
       }), {
         status: 500,
         headers: { ...cors, 'Content-Type': 'application/json' }
@@ -3001,8 +3014,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
     } catch(err) {
       console.error('BELEG_SPEICHERN Error:', err.message, err.stack);
       return new Response(JSON.stringify({
-        error: 'Server-Fehler beim Speichern',
-        details: err.message
+        error: 'Server-Fehler beim Speichern'
       }), {
         status: 500,
         headers: { ...cors, 'Content-Type': 'application/json' }
@@ -3081,7 +3093,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
 
   const limit = await checkNachrichtenLimit(Nutzername, env, userId, ctx);
   if (!limit.erlaubt) {
-    return new Response('Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
+    return new Response(limit.grund === 'infra' ? 'Kontolux ist gerade nicht erreichbar. Bitte versuche es in ein paar Minuten noch einmal.' : 'Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
       headers: { ...cors, 'Content-Type': 'text/plain' }
     });
   }
@@ -4025,7 +4037,7 @@ async function handleDatevExport(body, env, cors = {}) {
 
   } catch (err) {
     console.error('DATEV Export Error:', err);
-    return new Response(JSON.stringify({ error: err.message }), {
+    return new Response(JSON.stringify({ error: 'Interner Fehler' }), {
       status: 500,
       headers: { ...cors, 'Content-Type': 'application/json' }
     });
