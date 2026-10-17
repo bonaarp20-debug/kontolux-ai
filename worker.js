@@ -5,6 +5,7 @@
 
 import { XMLParser } from 'fast-xml-parser';
 import { PDFDocument, PDFName, PDFDict, PDFStream, PDFRawStream, decodePDFRawStream } from 'pdf-lib';
+import { WEGWERF_DOMAINS } from './wegwerf-domains.js';
 
 const ALLOWED_ORIGINS = [
   'https://app.kontolux-ai.de',
@@ -47,6 +48,24 @@ function sicherMehrzeilig(str, maxLen) {
 }
 
 const EMAIL_FORMAT = /^[^\s@<>"']+@[^\s@<>"']+\.[^\s@<>"']+$/;
+
+// Wegwerf-Domain? Prüft die Domain der Adresse gegen die Liste (Security-Audit 2026-10-16).
+function istWegwerfMail(email) {
+  const domain = String(email || '').split('@').pop().toLowerCase();
+  return WEGWERF_DOMAINS.has(domain);
+}
+
+// Deaktiviert ein Firebase-Konto über den Admin-Zugang. Der Nutzer kann sich danach nicht mehr
+// anmelden, und vorhandene Tokens werden bei der nächsten Prüfung abgelehnt.
+async function kontoSperren(uid, env) {
+  const accessToken = await getGoogleAccessToken(env);
+  const res = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:update', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ localId: uid, disableUser: true })
+  });
+  if (!res.ok) console.error('kontoSperren fehlgeschlagen, Status', res.status, 'uid=', kurz(uid));
+}
 
 function getCORS(origin) {
   return {
@@ -120,6 +139,7 @@ const ROUTEN_LIMITS = {
   '/kontakt':               { limit: 5,  windowMs: 10 * 60 * 1000 },
   '/send-password-reset':   { limit: 5,  windowMs: 10 * 60 * 1000 },
   '/pruefer-daten':         { limit: 10, windowMs: 10 * 60 * 1000 },
+  '/registrierung-pruefen': { limit: 30, windowMs: 10 * 60 * 1000 },
 };
 // Globale Limits über alle IPs (KV-Zähler). Ergänzen das Limit pro IP, weil verteilte Anfragen
 // den In-Memory-Zähler pro Instanz umgehen. KV ist eventuell konsistent, deshalb ist das eine grobe Grenze.
@@ -316,6 +336,14 @@ export default {
           }
           verifiedUid = verified.uid;
           verifiedEmail = verified.email;
+          // Wegwerf-Adressen werden serverseitig gesperrt, egal wie das Konto entstanden ist
+          // (Security-Audit 2026-10-16). Die Prüfung im Browser allein würde umgangen.
+          if (verifiedEmail && istWegwerfMail(verifiedEmail)) {
+            await kontoSperren(verified.uid, env);
+            return new Response(JSON.stringify({ error: 'konto-gesperrt' }), {
+              status: 403, headers: { ...cors, 'Content-Type': 'application/json' }
+            });
+          }
           // ✅ E-Mail-Verifizierungs-Hard-Block auch serverseitig durchsetzen — der
           // Hard-Block in index.html (handleAuthedUser) ist rein clientseitig; ohne
           // diese Prüfung könnte jeder unverifizierte Account mit gültigem Firebase-
@@ -381,6 +409,12 @@ export default {
       // Bewusst NICHT in protectedPaths: ein Betriebsprüfer hat keinen Firebase-Login, der
       // Zugriffsnachweis ist der Besitz des Tokens selbst (siehe handlePrueferDaten unten).
       if (url.pathname === '/pruefer-daten') return handlePrueferDaten(body, env, cors);
+      // Öffentlich: sagt nur, ob die Domain auf der Wegwerf-Liste steht (keine Kontoauskunft).
+      if (url.pathname === '/registrierung-pruefen') {
+        return new Response(JSON.stringify({ gesperrt: istWegwerfMail(body.email) }), {
+          status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+        });
+      }
 
       return new Response('Not found', { status: 404, headers: cors });
     } catch (e) {
@@ -3267,6 +3301,7 @@ async function handleKontakt(body, env, cors) {
   const name = sicherEinzeiler(body.name, 100);
   const email = sicherEinzeiler(body.email, 254);
   const nachricht = sicherMehrzeilig(body.nachricht, 5000);
+  const betreff = sicherEinzeiler(body.betreff, 120);
   if (!name || !email || !nachricht) {
     return new Response('Fehlende Felder', { status: 400, headers: cors });
   }
@@ -3285,7 +3320,7 @@ async function handleKontakt(body, env, cors) {
     <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0">${nachrichtSafe}</p>
   `);
 
-  await sendEmail('jona@kontolux-ai.de', sicherEinzeiler(`Kontaktanfrage von ${name}`, 200), html, env);
+  await sendEmail('jona@kontolux-ai.de', sicherEinzeiler(betreff ? `${betreff} — von ${name}` : `Kontaktanfrage von ${name}`, 200), html, env);
   return new Response('OK', { headers: cors });
 }
 

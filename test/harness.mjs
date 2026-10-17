@@ -43,7 +43,7 @@ export async function erzeugeTestEnv(overrides = {}) {
 // Simuliert Google/Firebase/Resend. `users` bildet ID-Token -> Nutzerdaten ab.
 export function mockExterneDienste({ users = {}, firestoreStatus = 200, supabaseStatus = 200, prueferDoc = null } = {}) {
   const mockOptionen = { prueferDoc };
-  const log = { mails: [], firestore: [], lookups: 0, anthropic: 0, supabaseRows: {} };
+  const log = { mails: [], firestore: [], lookups: 0, anthropic: 0, supabaseRows: {}, deaktiviert: [] };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init = {}) => {
     const url = typeof input === 'string' ? input : input.url;
@@ -64,6 +64,10 @@ export function mockExterneDienste({ users = {}, firestoreStatus = 200, supabase
       const bekannt = Object.values(users).some(u => u.email === email);
       if (!bekannt) return json({ error: { message: 'EMAIL_NOT_FOUND' } }, 400);
       return json({ oobLink: 'https://example.invalid/action?oob=test' });
+    }
+    if (url.startsWith('https://identitytoolkit.googleapis.com/v1/accounts:update')) {
+      log.deaktiviert.push(JSON.parse(body));
+      return json({ localId: JSON.parse(body).localId });
     }
     if (url.startsWith('https://api.resend.com/emails')) {
       log.mails.push(JSON.parse(body));
