@@ -53,8 +53,8 @@ export function mockExterneDienste({ users = {}, firestoreStatus = 200, supabase
     }
     if (url.startsWith('https://identitytoolkit.googleapis.com/v1/accounts:lookup')) {
       log.lookups++;
-      const { idToken } = JSON.parse(body || '{}');
-      const u = users[idToken];
+      const { idToken, localId } = JSON.parse(body || '{}');
+      const u = localId ? Object.values(users).find(x => x.uid === localId[0]) : users[idToken];
       if (!u) return json({ error: { message: 'INVALID_ID_TOKEN' } }, 400);
       return json({ users: [{ localId: u.uid, email: u.email, emailVerified: !!u.emailVerified, providerUserInfo: u.providers || [], createdAt: String(u.createdAt ?? Date.now()) }] });
     }

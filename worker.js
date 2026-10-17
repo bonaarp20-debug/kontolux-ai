@@ -71,6 +71,7 @@ async function kontenZaehlen(uid, ip, email, env) {
   await env.PROFIL_KV.put(schluessel, String(anzahl), { expirationTtl: FENSTER_SEKUNDEN });
   if (anzahl > KONTEN_PRO_IP) {
     await env.PROFIL_KV.put(`status:${uid}`, 'wartet');
+    if (anzahl !== KONTEN_PRO_IP + 1) return;
     const link = await freigabeLink(uid, env);
     await sendEmail('jona@kontolux-ai.de', 'Konto zur Freigabe: ' + kurz(uid), `
       <p style="font-family:sans-serif;font-size:14px">Ein neues Konto wartet auf Freigabe.</p>
@@ -91,6 +92,17 @@ async function freigabeLink(uid, env) {
   return `https://kontolux-main.jonadrews012.workers.dev/freigabe?uid=${encodeURIComponent(uid)}&exp=${exp}&sig=${sig}`;
 }
 
+async function kontoEmailHolen(uid, env) {
+  const accessToken = await getGoogleAccessToken(env);
+  const res = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:lookup', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ localId: [uid] })
+  });
+  const data = await res.json().catch(() => ({}));
+  return data.users?.[0]?.email || null;
+}
+
 async function freigabeBestaetigen(url, env) {
   const uid = url.searchParams.get('uid') || '';
   const exp = Number(url.searchParams.get('exp') || 0);
@@ -99,7 +111,21 @@ async function freigabeBestaetigen(url, env) {
   const erwartet = await freigabeSignatur(uid, exp, env);
   if (!(await istGleichesGeheimnis(sig, erwartet))) return new Response('Ungültiger Link.', { status: 400 });
   await env.PROFIL_KV.put(`status:${uid}`, 'frei');
-  return new Response(`<!doctype html><meta charset="utf-8"><p style="font-family:sans-serif">Konto ${kurz(uid)} wurde freigegeben.</p>`, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+  // Nach der Freigabe die Bestätigungsmail automatisch verschicken, damit der Nutzer nichts neu anfragen muss
+  let mailHinweis = 'Die Bestätigungsmail wurde an den Nutzer geschickt.';
+  try {
+    const email = await kontoEmailHolen(uid, env);
+    if (email) {
+      const link = await generateFirebaseActionLink('VERIFY_EMAIL', email, env);
+      await sendEmail(email, 'Bestätige deine E-Mail-Adresse — Kontolux AI', verificationEmailHtml(link), env, 'Kontolux AI <jona@kontolux-ai.de>');
+    } else {
+      mailHinweis = 'Die Bestätigungsmail konnte nicht geschickt werden (E-Mail nicht gefunden).';
+    }
+  } catch (e) {
+    console.error('Freigabe-Mail fehlgeschlagen:', e.message);
+    mailHinweis = 'Die Bestätigungsmail konnte nicht geschickt werden. Bitte prüfen.';
+  }
+  return new Response(`<!doctype html><meta charset="utf-8"><p style="font-family:sans-serif">Konto ${kurz(uid)} wurde freigegeben. ${mailHinweis}</p>`, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
 }
 
 async function freigabeStatus(uid, env) {

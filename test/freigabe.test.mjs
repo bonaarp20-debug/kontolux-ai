@@ -41,6 +41,8 @@ test('Freigabe: signierter Link gibt das Konto frei, danach funktioniert es', as
     assert.equal((await status.json()).status, 'frei');
     const nachher = await anfrage(env, { path: '/usage', body: {}, headers: { Authorization: 'Bearer tok-10' }, ip: '10.71.0.4' });
     assert.equal(nachher.status, 200);
+    // Nach der Freigabe geht die Bestätigungsmail automatisch an den Nutzer
+    assert.ok(dienste.log.mails.some(m => m.to[0] === 'nutzer10@example.invalid' && m.subject.startsWith('Bestätige deine E-Mail')));
   } finally { dienste.restore(); }
 });
 
@@ -63,5 +65,17 @@ test('Altes Konto (älter als 1 Tag) wird nicht gezählt', async () => {
     const r = await anfrage(env, { path: '/usage', body: {}, headers: { Authorization: 'Bearer tok-alt' }, ip: '10.73.0.1' });
     assert.equal(r.status, 200);
     assert.equal(await env.PROFIL_KV.get('ip-konten:10.73.0.1'), null);
+  } finally { dienste.restore(); }
+});
+
+test('Benachrichtigung: bei mehreren Konten über der Grenze nur eine Mail an den Betreiber', async () => {
+  const users = viele(13);
+  const env = await erzeugeTestEnv();
+  const dienste = mockExterneDienste({ users });
+  try {
+    for (let i = 0; i < 13; i++) {
+      await anfrage(env, { path: '/usage', body: {}, headers: { Authorization: 'Bearer tok-' + i }, ip: '10.74.0.1' });
+    }
+    assert.equal(dienste.log.mails.filter(m => m.subject.startsWith('Konto zur Freigabe')).length, 1);
   } finally { dienste.restore(); }
 });
