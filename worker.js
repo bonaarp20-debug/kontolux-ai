@@ -6,6 +6,7 @@
 import { XMLParser } from 'fast-xml-parser';
 import { PDFDocument, PDFName, PDFDict, PDFStream, PDFRawStream, decodePDFRawStream } from 'pdf-lib';
 import { WEGWERF_DOMAINS } from './wegwerf-domains.js';
+import { VPN_NETZE } from './vpn-netze.js';
 
 const ALLOWED_ORIGINS = [
   'https://app.kontolux-ai.de',
@@ -62,19 +63,64 @@ function istWegwerfMail(email) {
 const KONTEN_PRO_IP = 10;
 const FENSTER_SEKUNDEN = 7 * 24 * 60 * 60;
 
-async function kontenZaehlen(uid, ip, email, env) {
+// VPN- und Rechenzentrums-Netze: Eine IP aus diesen Netzen geht bei einem neuen Konto direkt in die
+// manuelle Prüfung, unabhängig vom Zähler (Security-Audit 2026-10-16). Die Bereiche werden einmal
+// geladen, überlappende Netze zusammengefasst und dann binär durchsucht.
+let vpnBereiche = null;
+function ipZuZahl(ip) {
+  const teile = String(ip).split('.');
+  if (teile.length !== 4) return null;
+  let zahl = 0;
+  for (const t of teile) {
+    const v = Number(t);
+    if (!Number.isInteger(v) || v < 0 || v > 255) return null;
+    zahl = zahl * 256 + v;
+  }
+  return zahl;
+}
+function vpnBereicheLaden() {
+  if (vpnBereiche) return vpnBereiche;
+  const roh = VPN_NETZE.map(c => {
+    const [adresse, bits] = c.split('/');
+    const start = ipZuZahl(adresse);
+    return [start, start + 2 ** (32 - Number(bits)) - 1];
+  }).sort((a, b) => a[0] - b[0]);
+  const zusammen = [];
+  for (const [von, bis] of roh) {
+    const letzter = zusammen[zusammen.length - 1];
+    if (letzter && von <= letzter[1] + 1) letzter[1] = Math.max(letzter[1], bis);
+    else zusammen.push([von, bis]);
+  }
+  vpnBereiche = zusammen;
+  return vpnBereiche;
+}
+function istVpnOderRechenzentrum(ip) {
+  const zahl = ipZuZahl(ip);
+  if (zahl === null) return false;
+  const b = vpnBereicheLaden();
+  let lo = 0, hi = b.length - 1;
+  while (lo <= hi) {
+    const mitte = (lo + hi) >> 1;
+    if (zahl < b[mitte][0]) hi = mitte - 1;
+    else if (zahl > b[mitte][1]) lo = mitte + 1;
+    else return true;
+  }
+  return false;
+}
+
+async function kontenZaehlen(uid, ip, email, env, verdaechtig = false) {
   if (!env.PROFIL_KV) return;
   if (await env.PROFIL_KV.get(`gezaehlt:${uid}`)) return;
   await env.PROFIL_KV.put(`gezaehlt:${uid}`, '1', { expirationTtl: FENSTER_SEKUNDEN });
   const schluessel = `ip-konten:${ip}`;
   const anzahl = parseInt((await env.PROFIL_KV.get(schluessel)) || '0', 10) + 1;
   await env.PROFIL_KV.put(schluessel, String(anzahl), { expirationTtl: FENSTER_SEKUNDEN });
-  if (anzahl > KONTEN_PRO_IP) {
+  if (verdaechtig || anzahl > KONTEN_PRO_IP) {
     await env.PROFIL_KV.put(`status:${uid}`, 'wartet');
     const link = await freigabeLink(uid, env);
     await sendEmail('jona@kontolux-ai.de', 'Konto zur Freigabe: ' + kurz(uid), `
       <p style="font-family:sans-serif;font-size:14px">Ein neues Konto wartet auf Freigabe.</p>
-      <p style="font-family:sans-serif;font-size:14px"><strong>E-Mail:</strong> ${escapeHtml(email || '(unbekannt)')}<br><strong>Zähler der IP in 7 Tagen:</strong> ${anzahl}</p>
+      <p style="font-family:sans-serif;font-size:14px"><strong>E-Mail:</strong> ${escapeHtml(email || '(unbekannt)')}<br><strong>Grund:</strong> ${verdaechtig ? 'VPN- oder Rechenzentrums-Netz' : 'Zähler der IP in 7 Tagen: ' + anzahl}</p>
       <p style="font-family:sans-serif;font-size:14px"><a href="${link}">Konto freigeben</a> (Link gilt 14 Tage)</p>`, env);
   }
 }
@@ -454,7 +500,7 @@ export default {
           verifiedEmail = verified.email;
           // Neue Konten (höchstens einen Tag alt) werden pro IP gezählt. Bestehende Nutzer nicht.
           if (verified.createdAt && Date.now() - verified.createdAt < 24 * 60 * 60 * 1000) {
-            await kontenZaehlen(verified.uid, clientIP, verified.email, env);
+            await kontenZaehlen(verified.uid, clientIP, verified.email, env, istVpnOderRechenzentrum(clientIP));
           }
           if (url.pathname !== '/freigabe-status' && (await freigabeStatus(verified.uid, env)) === 'wartet') {
             return new Response(JSON.stringify({ error: 'freigabe-ausstehend' }), {
