@@ -21,6 +21,7 @@ export async function erzeugeTestEnv(overrides = {}) {
       async get(k) { return m.has(k) ? m.get(k) : null; },
       async put(k, v) { m.set(k, String(v)); },
       async delete(k) { m.delete(k); },
+      async list({ prefix = '' } = {}) { return { keys: [...m.keys()].filter(k => k.startsWith(prefix)).map(name => ({ name })), list_complete: true }; },
       _m: m
     };
   };
@@ -64,6 +65,10 @@ export function mockExterneDienste({ users = {}, firestoreStatus = 200, supabase
       const bekannt = Object.values(users).some(u => u.email === email);
       if (!bekannt) return json({ error: { message: 'EMAIL_NOT_FOUND' } }, 400);
       return json({ oobLink: 'https://example.invalid/action?oob=test' });
+    }
+    if (url.startsWith('https://identitytoolkit.googleapis.com/v1/accounts:delete')) {
+      log.geloescht = (log.geloescht || []).concat(JSON.parse(body).localId);
+      return json({});
     }
     if (url.startsWith('https://identitytoolkit.googleapis.com/v1/accounts:update')) {
       log.deaktiviert.push(JSON.parse(body));
@@ -123,4 +128,8 @@ export async function anfrage(env, { method = 'POST', path, body, headers = {}, 
     body: body === undefined ? undefined : (typeof body === 'string' ? body : JSON.stringify(body))
   });
   return worker.fetch(req, env, { waitUntil() {} });
+}
+
+export function cron(env, ausdruck) {
+  return worker.scheduled({ cron: ausdruck }, env, {});
 }

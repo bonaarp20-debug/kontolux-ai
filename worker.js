@@ -71,7 +71,6 @@ async function kontenZaehlen(uid, ip, email, env) {
   await env.PROFIL_KV.put(schluessel, String(anzahl), { expirationTtl: FENSTER_SEKUNDEN });
   if (anzahl > KONTEN_PRO_IP) {
     await env.PROFIL_KV.put(`status:${uid}`, 'wartet');
-    if (anzahl !== KONTEN_PRO_IP + 1) return;
     const link = await freigabeLink(uid, env);
     await sendEmail('jona@kontolux-ai.de', 'Konto zur Freigabe: ' + kurz(uid), `
       <p style="font-family:sans-serif;font-size:14px">Ein neues Konto wartet auf Freigabe.</p>
@@ -142,7 +141,41 @@ async function kontoSperren(uid, env) {
     headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ localId: uid, disableUser: true })
   });
-  if (!res.ok) console.error('kontoSperren fehlgeschlagen, Status', res.status, 'uid=', kurz(uid));
+  if (!res.ok) { console.error('kontoSperren fehlgeschlagen, Status', res.status, 'uid=', kurz(uid)); return; }
+  // Zeitpunkt merken, damit der Tageslauf das Konto nach 30 Tagen löscht
+  if (env.PROFIL_KV) await env.PROFIL_KV.put(`gesperrt:${uid}`, String(Date.now()));
+}
+
+// Gesperrte Wegwerf-Konten werden nach 30 Tagen automatisch gelöscht (Datenschutzerklärung).
+const SPERRFRIST_TAGE = 30;
+async function gesperrteKontenLoeschen(env) {
+  if (!env.PROFIL_KV) return 0;
+  const grenze = Date.now() - SPERRFRIST_TAGE * 24 * 60 * 60 * 1000;
+  let geloescht = 0;
+  let cursor;
+  do {
+    const liste = await env.PROFIL_KV.list({ prefix: 'gesperrt:', cursor });
+    for (const eintrag of liste.keys) {
+      const uid = eintrag.name.slice('gesperrt:'.length);
+      const zeit = Number(await env.PROFIL_KV.get(eintrag.name));
+      if (!zeit || zeit > grenze) continue;
+      const accessToken = await getGoogleAccessToken(env);
+      const res = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:delete', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ localId: uid })
+      });
+      if (res.ok) {
+        await handleDeleteAccountData({ userId: uid }, env, {});
+        await env.PROFIL_KV.delete(eintrag.name);
+        geloescht++;
+      } else {
+        console.error('Löschen gesperrtes Konto fehlgeschlagen, Status', res.status, 'uid=', kurz(uid));
+      }
+    }
+    cursor = liste.list_complete ? undefined : liste.cursor;
+  } while (cursor);
+  return geloescht;
 }
 
 function getCORS(origin) {
@@ -529,6 +562,10 @@ export default {
     // sonst gingen sie bei jedem SumUp-Abruf erneut raus.
     if (event.cron === SUMUP_SYNC_CRON) {
       await syncAlleSumupNutzer(env);
+      return;
+    }
+    if (event.cron === GESPERRT_LOESCH_CRON) {
+      await gesperrteKontenLoeschen(env);
       return;
     }
     await sendMonthlyReminders(env);
@@ -6302,7 +6339,8 @@ async function handlePaypalWebhook(request, url, env, cors) {
 // (SumUp-Dashboard → Entwickler → API-Schlüssel), Kontolux liest damit /transactions/history.
 
 const SUMUP_API = 'https://api.sumup.com';
-const SUMUP_SYNC_CRON = '15 */3 * * *'; // alle 3 Stunden — muss exakt zu wrangler.toml [triggers] passen
+const SUMUP_SYNC_CRON = '15 */3 * * *';
+const GESPERRT_LOESCH_CRON = '0 3 * * *'; // täglich 03:00 UTC, siehe wrangler.toml // alle 3 Stunden — muss exakt zu wrangler.toml [triggers] passen
 // KV-Schlüssel mit allen Nutzer-IDs, deren SumUp-Abruf aktiv ist (für den Cron-Durchlauf) —
 // Firestore bietet ohne Collection-Group-Index keine "alle Nutzer mit SumUp aktiv"-Abfrage.
 const SUMUP_SYNC_KV_KEY = 'sumup_sync_uids';
