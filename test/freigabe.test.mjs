@@ -68,7 +68,7 @@ test('Altes Konto (älter als 1 Tag) wird nicht gezählt', async () => {
   } finally { dienste.restore(); }
 });
 
-test('Benachrichtigung: bei mehreren Konten über der Grenze nur eine Mail an den Betreiber', async () => {
+test('Benachrichtigung: jedes wartende Konto löst genau eine Mail aus', async () => {
   const users = viele(13);
   const env = await erzeugeTestEnv();
   const dienste = mockExterneDienste({ users });
@@ -76,6 +76,9 @@ test('Benachrichtigung: bei mehreren Konten über der Grenze nur eine Mail an de
     for (let i = 0; i < 13; i++) {
       await anfrage(env, { path: '/usage', body: {}, headers: { Authorization: 'Bearer tok-' + i }, ip: '10.74.0.1' });
     }
-    assert.equal(dienste.log.mails.filter(m => m.subject.startsWith('Konto zur Freigabe')).length, 1);
+    const freigaben = dienste.log.mails.filter(m => m.subject.startsWith('Konto zur Freigabe'));
+    // Jedes wartende Konto löst genau eine Mail aus (Konto 11, 12 und 13)
+    assert.equal(freigaben.length, 3);
+    assert.equal(new Set(freigaben.map(m => m.subject)).size, 3);
   } finally { dienste.restore(); }
 });
