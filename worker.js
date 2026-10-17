@@ -55,6 +55,58 @@ function istWegwerfMail(email) {
   return WEGWERF_DOMAINS.has(domain);
 }
 
+// ── Freigabe bei vielen Konten pro IP (Security-Audit 2026-10-16) ──────────────────────
+// Bis zu 10 neue Konten pro IP in 7 Tagen laufen normal durch. Ab dem 11. Konto bekommt das Konto
+// den Status „wartet“ und kann erst nach manueller Freigabe genutzt werden. Die Freigabe ist ein
+// signierter Link in einer Mail an den Betreiber.
+const KONTEN_PRO_IP = 10;
+const FENSTER_SEKUNDEN = 7 * 24 * 60 * 60;
+
+async function kontenZaehlen(uid, ip, email, env) {
+  if (!env.PROFIL_KV) return;
+  if (await env.PROFIL_KV.get(`gezaehlt:${uid}`)) return;
+  await env.PROFIL_KV.put(`gezaehlt:${uid}`, '1', { expirationTtl: FENSTER_SEKUNDEN });
+  const schluessel = `ip-konten:${ip}`;
+  const anzahl = parseInt((await env.PROFIL_KV.get(schluessel)) || '0', 10) + 1;
+  await env.PROFIL_KV.put(schluessel, String(anzahl), { expirationTtl: FENSTER_SEKUNDEN });
+  if (anzahl > KONTEN_PRO_IP) {
+    await env.PROFIL_KV.put(`status:${uid}`, 'wartet');
+    const link = await freigabeLink(uid, env);
+    await sendEmail('jona@kontolux-ai.de', 'Konto zur Freigabe: ' + kurz(uid), `
+      <p style="font-family:sans-serif;font-size:14px">Ein neues Konto wartet auf Freigabe.</p>
+      <p style="font-family:sans-serif;font-size:14px"><strong>E-Mail:</strong> ${escapeHtml(email || '(unbekannt)')}<br><strong>Zähler der IP in 7 Tagen:</strong> ${anzahl}</p>
+      <p style="font-family:sans-serif;font-size:14px"><a href="${link}">Konto freigeben</a> (Link gilt 14 Tage)</p>`, env);
+  }
+}
+
+async function freigabeSignatur(uid, exp, env) {
+  const schluessel = await crypto.subtle.importKey('raw', await crypto.subtle.digest('SHA-256', new TextEncoder().encode('freigabe|' + env.TOKEN_ENCRYPTION_KEY)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', schluessel, new TextEncoder().encode(`${uid}|${exp}`));
+  return Array.from(new Uint8Array(sig), b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function freigabeLink(uid, env) {
+  const exp = Date.now() + 14 * 24 * 60 * 60 * 1000;
+  const sig = await freigabeSignatur(uid, exp, env);
+  return `https://kontolux-main.jonadrews012.workers.dev/freigabe?uid=${encodeURIComponent(uid)}&exp=${exp}&sig=${sig}`;
+}
+
+async function freigabeBestaetigen(url, env) {
+  const uid = url.searchParams.get('uid') || '';
+  const exp = Number(url.searchParams.get('exp') || 0);
+  const sig = url.searchParams.get('sig') || '';
+  if (!uid || !exp || Date.now() > exp) return new Response('Link abgelaufen oder ungültig.', { status: 400 });
+  const erwartet = await freigabeSignatur(uid, exp, env);
+  if (!(await istGleichesGeheimnis(sig, erwartet))) return new Response('Ungültiger Link.', { status: 400 });
+  await env.PROFIL_KV.put(`status:${uid}`, 'frei');
+  return new Response(`<!doctype html><meta charset="utf-8"><p style="font-family:sans-serif">Konto ${kurz(uid)} wurde freigegeben.</p>`, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+}
+
+async function freigabeStatus(uid, env) {
+  if (!env.PROFIL_KV) return null;
+  return env.PROFIL_KV.get(`status:${uid}`);
+}
+
 // Deaktiviert ein Firebase-Konto über den Admin-Zugang. Der Nutzer kann sich danach nicht mehr
 // anmelden, und vorhandene Tokens werden bei der nächsten Prüfung abgelehnt.
 async function kontoSperren(uid, env) {
@@ -237,6 +289,11 @@ export default {
       });
     }
 
+    // Freigabe-Link aus der Betreiber-Mail (GET, signiert, Gültigkeit 14 Tage)
+    if (request.method === 'GET' && url.pathname === '/freigabe') {
+      return freigabeBestaetigen(url, env);
+    }
+
     // PDF Result
     if (request.method === 'GET' && url.pathname === '/pdf-result') {
       const corsH = getCORS(origin);
@@ -322,7 +379,7 @@ export default {
       // ✅ /send-verification-email geschützt — E-Mail kommt aus dem verifizierten
       // Token, nie vom Client, sonst könnte jeder Verifizierungsmails an beliebige
       // Adressen auslösen (Spam-Vektor).
-      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/usage', '/abo', '/delete-account-data', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/pruefer-zugang'];
+      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/usage', '/abo', '/delete-account-data', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/pruefer-zugang', '/freigabe-status'];
 
       if (protectedPaths.includes(url.pathname)) {
         try {
@@ -336,6 +393,15 @@ export default {
           }
           verifiedUid = verified.uid;
           verifiedEmail = verified.email;
+          // Neue Konten (höchstens einen Tag alt) werden pro IP gezählt. Bestehende Nutzer nicht.
+          if (verified.createdAt && Date.now() - verified.createdAt < 24 * 60 * 60 * 1000) {
+            await kontenZaehlen(verified.uid, clientIP, verified.email, env);
+          }
+          if (url.pathname !== '/freigabe-status' && (await freigabeStatus(verified.uid, env)) === 'wartet') {
+            return new Response(JSON.stringify({ error: 'freigabe-ausstehend' }), {
+              status: 403, headers: { ...cors, 'Content-Type': 'application/json' }
+            });
+          }
           // Wegwerf-Adressen werden serverseitig gesperrt, egal wie das Konto entstanden ist
           // (Security-Audit 2026-10-16). Die Prüfung im Browser allein würde umgangen.
           if (verifiedEmail && istWegwerfMail(verifiedEmail)) {
@@ -409,6 +475,11 @@ export default {
       // Bewusst NICHT in protectedPaths: ein Betriebsprüfer hat keinen Firebase-Login, der
       // Zugriffsnachweis ist der Besitz des Tokens selbst (siehe handlePrueferDaten unten).
       if (url.pathname === '/pruefer-daten') return handlePrueferDaten(body, env, cors);
+      if (url.pathname === '/freigabe-status') {
+        return new Response(JSON.stringify({ status: (await freigabeStatus(verifiedUid, env)) || 'frei' }), {
+          status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+        });
+      }
       // Öffentlich: sagt nur, ob die Domain auf der Wegwerf-Liste steht (keine Kontoauskunft).
       if (url.pathname === '/registrierung-pruefen') {
         return new Response(JSON.stringify({ gesperrt: istWegwerfMail(body.email) }), {
@@ -1749,7 +1820,7 @@ async function verifyFirebaseToken(authHeader, env) {
   // falls dieser Cache je wieder ungefiltert genutzt wird.
   const cached = tokenCache.get(token);
   if (cached && Date.now() < cached.expiry && cached.emailVerified) {
-    return { uid: cached.uid, email: cached.email, emailVerified: cached.emailVerified };
+    return { uid: cached.uid, email: cached.email, emailVerified: cached.emailVerified, createdAt: cached.createdAt };
   }
 
   try {
@@ -1767,10 +1838,10 @@ async function verifyFirebaseToken(authHeader, env) {
     const isGoogleUser = (data.users?.[0]?.providerUserInfo || []).some(p => p.providerId === 'google.com');
     const emailVerified = isGoogleUser || !!data.users?.[0]?.emailVerified;
     if (uid) {
-      tokenCache.set(token, { uid, email, emailVerified, expiry: Date.now() + 5 * 60 * 1000 });
+      tokenCache.set(token, { uid, email, emailVerified, createdAt: Number(data.users?.[0]?.createdAt) || 0, expiry: Date.now() + 5 * 60 * 1000 });
       if (tokenCache.size > 1000) tokenCache.clear(); // Speicher begrenzen
     }
-    return uid ? { uid, email, emailVerified } : null;
+    return uid ? { uid, email, emailVerified, createdAt: Number(data.users?.[0]?.createdAt) || 0 } : null;
   } catch(e) { return null; }
 }
 

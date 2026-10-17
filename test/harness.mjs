@@ -56,7 +56,7 @@ export function mockExterneDienste({ users = {}, firestoreStatus = 200, supabase
       const { idToken } = JSON.parse(body || '{}');
       const u = users[idToken];
       if (!u) return json({ error: { message: 'INVALID_ID_TOKEN' } }, 400);
-      return json({ users: [{ localId: u.uid, email: u.email, emailVerified: !!u.emailVerified, providerUserInfo: u.providers || [] }] });
+      return json({ users: [{ localId: u.uid, email: u.email, emailVerified: !!u.emailVerified, providerUserInfo: u.providers || [], createdAt: String(u.createdAt ?? Date.now()) }] });
     }
     if (url.startsWith('https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode')) {
       const { email, newEmail } = JSON.parse(body || '{}');
