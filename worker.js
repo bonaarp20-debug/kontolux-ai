@@ -1156,19 +1156,23 @@ darüber als 'Abschreibung (AfA)' buchen (AfA-Betrag aus Anschaffungswert ÷ Nut
 
 ## ABSCHREIBUNG (AfA)
 Nutzer nennt ein Wirtschaftsgut (Computer, Kamera, Fahrzeug, Maschine, Möbel, Software-Kauflizenz):
-1. In einer Frage abfragen: "Anschaffungswert netto und Nutzungsdauer in Jahren?"
-2. GWG-Prüfung: Anschaffungswert ≤ 800€ netto → Sofortabschreibung: afa_betrag_jaehrlich = anschaffungswert, nutzungsdauer_jahre = 1.
-3. Anschaffungswert > 800€ netto → lineare AfA: afa_betrag_jaehrlich = anschaffungswert ÷ nutzungsdauer_jahre (auf volle Euro abrunden).
-   AfA-Tabelle §7 EStG (immer erst nachfragen): Computer/Laptop/Tablet/Smartphone seit 2021 optional 1 J (BMF-Schreiben 26.02.2021, EDV-Wirtschaftsgüter — Sofortabschreibung unabhängig vom Preis), Kamera 7 J, Pkw 6 J, Büromöbel 13 J, Software-Kauflizenz 3 J, Sonstige: amtliche AfA-Tabelle BMF. Hinweis ausgeben: Diese Angabe ist eine Orientierung — bei Unklarheiten Steuerberater konsultieren.
-4. Sachkonto: SKR03 4832 / SKR04 6832 (Abschreibungen auf Betriebs-/Geschäftsausstattung), EÜR Z.34 (2025) / Z.35 (2026+). Buchungstext "AfA [Gerät] [Jahr]".
-5. Bei Bestätigung sofort buchen:
-AUSGABE_UPDATE:datum=[YYYY-MM-DD],betrag=[afa_betrag_jaehrlich],beschreibung=[Gerätename],kategorie=Abschreibung (AfA),anschaffungswert=[Netto-Anschaffungswert],nutzungsdauer_jahre=[Jahre]
-Datum = 31.12. des Anschaffungsjahrs (laufendes Jahr: aktuelles Datum). Nur den Jahres-AfA-Betrag als betrag angeben, nie den vollen Anschaffungswert.
-Hinweis: Kontolux bucht den Jahres-AfA-Betrag im Anschaffungsjahr (AUSGABE_UPDATE). Folgejahre werden automatisch aus dem Abschreibungen-Tab übernommen (§4 Abs.3 Satz 3 EStG — AfA ist vom Zufluss-Abfluss-Prinzip ausgenommen).
+1. In einer Frage abfragen: "Anschaffungswert netto, Anschaffungsdatum und Nutzungsdauer in Jahren?"
+2. Nutzungsdauer nach BMF-Schreiben vom 22.02.2022 (Computerhardware und Betriebs-/Anwendersoftware):
+   - Computer, Notebook, Tablet, Desktop-Thin-Client, Workstation, Monitor, Drucker, Peripherie, Speicher, Software (Betriebs-/Anwendersoftware, auch ERP): nutzungsdauer_jahre = 1 (volle Abschreibung im Anschaffungsmonat zulässig).
+   - Mobiltelefon/Smartphone: 5 Jahre. Pkw/Kombi: 6 Jahre. Büromöbel: 13 Jahre. Fotokopierer/Multifunktionsgerät: 7 Jahre. Foto-/Video-/Audiogeräte: 7 Jahre.
+   - Sonst: amtliche BMF-AfA-Tabelle für allgemein verwendbare Anlagegüter (AV) nachschlagen und nachfragen.
+   Hinweis ausgeben: Diese Angabe ist eine Orientierung, kein Steuerrat. Bei Unklarheiten einen Steuerberater fragen.
+3. GWG-Prüfung: Anschaffungswert ≤ 800€ netto → Sofortabschreibung (GWG), nutzungsdauer_jahre = 1.
+4. Anschaffungswert > 800€ netto: afa_betrag_jaehrlich = anschaffungswert ÷ nutzungsdauer_jahre (auf Cent runden).
+5. Sachkonto: SKR03 4832 / SKR04 6832 (Abschreibungen auf Betriebs-/Geschäftsausstattung), EÜR Z.34. Buchungstext "AfA [Gerät] [Jahr]".
+6. Bei Bestätigung buchen. Das Datum ist das ANSCHAFFUNGSDATUM, nicht der 31.12.:
+AUSGABE_UPDATE:datum=[Anschaffungsdatum YYYY-MM-DD],betrag=[afa_betrag_jaehrlich],beschreibung=[Gerätename],kategorie=Abschreibung (AfA),anschaffungswert=[Netto-Anschaffungswert],nutzungsdauer_jahre=[Jahre]
+Hinweis: Kontolux verteilt die AfA automatisch monatlich ab dem Anschaffungsmonat (§7 EStG). Ein Jahresbetrag wird nicht als Tagesausgabe gebucht.
 
 ## TAGESEINNAHMEN SPEICHERN
 Nutzer nennt Einnahmen für einen Tag → zusammenfassen, fragen: "Als Tageseinnahmen für [Datum] speichern? (j/n)". Bei Bestätigung → kurze Reaktion MIT Sachkonto (SACHKONTO BEI BUCHUNGEN unten) + Befehl:
 TAGES_UPDATE:datum=[YYYY-MM-DD],einnahmen=[Betrag],beschreibung=[Text]
+Hinweis (verpflichtend, nach jeder Tageseinnahme sagen): Diese Tagessumme ist eine Hilfe und nicht genau. Sie fließt NICHT in den Monatsabschluss ein; Monatsabschlüsse beziehen sich ausschließlich auf das Belegarchiv (bezahlte Belege).
 Datum: heute wenn nicht genannt, Format YYYY-MM-DD. Nur Zahl ohne €. Datum explizit genannt ("Gestern 200€") → kein "j" nötig, direkt speichern. beschreibung: kurz wer/was — fehlt sie, kurz nachfragen ("Von wem/wofür?"), da sie später im Monatsabschluss als Einzelposition erscheint.
 
 ## AUSGABEN SPEICHERN
@@ -1667,19 +1671,23 @@ darüber als 'Abschreibung (AfA)' buchen (AfA-Betrag aus Anschaffungswert ÷ Nut
 
 ## ABSCHREIBUNG (AfA)
 Nutzer nennt ein Wirtschaftsgut (Computer, Kamera, Fahrzeug, Maschine, Möbel, Software-Kauflizenz):
-1. In einer Frage abfragen: "Anschaffungswert netto und Nutzungsdauer in Jahren?"
-2. GWG-Prüfung: Anschaffungswert ≤ 800€ netto → Sofortabschreibung: afa_betrag_jaehrlich = anschaffungswert, nutzungsdauer_jahre = 1.
-3. Anschaffungswert > 800€ netto → lineare AfA: afa_betrag_jaehrlich = anschaffungswert ÷ nutzungsdauer_jahre (auf volle Euro abrunden).
-   AfA-Tabelle §7 EStG (immer erst nachfragen): Computer/Laptop/Tablet/Smartphone seit 2021 optional 1 J (BMF-Schreiben 26.02.2021, EDV-Wirtschaftsgüter — Sofortabschreibung unabhängig vom Preis), Kamera 7 J, Pkw 6 J, Büromöbel 13 J, Software-Kauflizenz 3 J, Sonstige: amtliche AfA-Tabelle BMF. Hinweis ausgeben: Diese Angabe ist eine Orientierung — bei Unklarheiten Steuerberater konsultieren.
-4. Sachkonto: SKR03 4832 / SKR04 6832 (Abschreibungen auf Betriebs-/Geschäftsausstattung), EÜR Z.34 (2025) / Z.35 (2026+). Buchungstext "AfA [Gerät] [Jahr]".
-5. Bei Bestätigung sofort buchen:
-AUSGABE_UPDATE:datum=[YYYY-MM-DD],betrag=[afa_betrag_jaehrlich],beschreibung=[Gerätename],kategorie=Abschreibung (AfA),anschaffungswert=[Netto-Anschaffungswert],nutzungsdauer_jahre=[Jahre]
-Datum = 31.12. des Anschaffungsjahrs (laufendes Jahr: aktuelles Datum). Nur den Jahres-AfA-Betrag als betrag angeben, nie den vollen Anschaffungswert.
-Hinweis: Kontolux bucht den Jahres-AfA-Betrag im Anschaffungsjahr (AUSGABE_UPDATE). Folgejahre werden automatisch aus dem Abschreibungen-Tab übernommen (§4 Abs.3 Satz 3 EStG — AfA ist vom Zufluss-Abfluss-Prinzip ausgenommen).
+1. In einer Frage abfragen: "Anschaffungswert netto, Anschaffungsdatum und Nutzungsdauer in Jahren?"
+2. Nutzungsdauer nach BMF-Schreiben vom 22.02.2022 (Computerhardware und Betriebs-/Anwendersoftware):
+   - Computer, Notebook, Tablet, Desktop-Thin-Client, Workstation, Monitor, Drucker, Peripherie, Speicher, Software (Betriebs-/Anwendersoftware, auch ERP): nutzungsdauer_jahre = 1 (volle Abschreibung im Anschaffungsmonat zulässig).
+   - Mobiltelefon/Smartphone: 5 Jahre. Pkw/Kombi: 6 Jahre. Büromöbel: 13 Jahre. Fotokopierer/Multifunktionsgerät: 7 Jahre. Foto-/Video-/Audiogeräte: 7 Jahre.
+   - Sonst: amtliche BMF-AfA-Tabelle für allgemein verwendbare Anlagegüter (AV) nachschlagen und nachfragen.
+   Hinweis ausgeben: Diese Angabe ist eine Orientierung, kein Steuerrat. Bei Unklarheiten einen Steuerberater fragen.
+3. GWG-Prüfung: Anschaffungswert ≤ 800€ netto → Sofortabschreibung (GWG), nutzungsdauer_jahre = 1.
+4. Anschaffungswert > 800€ netto: afa_betrag_jaehrlich = anschaffungswert ÷ nutzungsdauer_jahre (auf Cent runden).
+5. Sachkonto: SKR03 4832 / SKR04 6832 (Abschreibungen auf Betriebs-/Geschäftsausstattung), EÜR Z.34. Buchungstext "AfA [Gerät] [Jahr]".
+6. Bei Bestätigung buchen. Das Datum ist das ANSCHAFFUNGSDATUM, nicht der 31.12.:
+AUSGABE_UPDATE:datum=[Anschaffungsdatum YYYY-MM-DD],betrag=[afa_betrag_jaehrlich],beschreibung=[Gerätename],kategorie=Abschreibung (AfA),anschaffungswert=[Netto-Anschaffungswert],nutzungsdauer_jahre=[Jahre]
+Hinweis: Kontolux verteilt die AfA automatisch monatlich ab dem Anschaffungsmonat (§7 EStG). Ein Jahresbetrag wird nicht als Tagesausgabe gebucht.
 
 ## TAGESEINNAHMEN SPEICHERN
 Nutzer nennt Einnahmen für einen Tag → zusammenfassen, fragen: "Als Tageseinnahmen für [Datum] speichern? (j/n)". Bei Bestätigung → kurze Reaktion MIT Sachkonto (SACHKONTO BEI BUCHUNGEN unten) + Befehl:
 TAGES_UPDATE:datum=[YYYY-MM-DD],einnahmen=[Betrag],beschreibung=[Text]
+Hinweis (verpflichtend, nach jeder Tageseinnahme sagen): Diese Tagessumme ist eine Hilfe und nicht genau. Sie fließt NICHT in den Monatsabschluss ein; Monatsabschlüsse beziehen sich ausschließlich auf das Belegarchiv (bezahlte Belege).
 Datum: heute wenn nicht genannt, Format YYYY-MM-DD. Nur Zahl ohne €. Datum explizit genannt ("Gestern 200€") → kein "j" nötig, direkt speichern. beschreibung: kurz wer/was — fehlt sie, kurz nachfragen ("Von wem/wofür?"), da sie später im Monatsabschluss als Einzelposition erscheint.
 
 ## AUSGABEN SPEICHERN
