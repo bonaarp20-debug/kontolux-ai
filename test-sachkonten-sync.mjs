@@ -51,7 +51,9 @@ const DATEV_2026 = {
 let ok = 0, fehler = 0;
 const pruefe = (name, bedingung, info = '') => { console.log(`${bedingung ? '✓' : '✗'} ${name}${!bedingung && info ? ' — ' + info : ''}`); bedingung ? ok++ : fehler++; };
 
-pruefe('SACHKONTO_MAPPING in Worker und App identisch (Konten und EÜR-Zeilen)', JSON.stringify(worker) === JSON.stringify(app),
+// Reihenfolge der Schlüssel ist für die Logik egal; verglichen wird jeder Eintrag (sortierte Schlüssel).
+const sortiert = (o) => Object.fromEntries(Object.keys(o).sort().map(k => [k, o[k]]));
+pruefe('SACHKONTO_MAPPING in Worker und App identisch (Konten und EÜR-Zeilen)', JSON.stringify(sortiert(worker)) === JSON.stringify(sortiert(app)),
   Object.keys({ ...worker, ...app }).filter(k => JSON.stringify(worker[k]) !== JSON.stringify(app[k])).map(k => `${k}: worker ${JSON.stringify(worker[k])} ≠ app ${JSON.stringify(app[k])}`).join(' | '));
 pruefe('Alle Mapping-Kategorien sind gegen DATEV 2026 geprüft', JSON.stringify(Object.keys(app).sort()) === JSON.stringify(Object.keys(DATEV_2026).sort()),
   `ungeprüft: ${Object.keys(app).filter(k => !DATEV_2026[k]).join(', ')}`);

@@ -940,7 +940,7 @@ const SACHKONTO_MAPPING = {
   // und Geschäftsausstattung (allgemeines AfA-Konto für EÜR). EÜR Z.35 (2026+) = Anlage EÜR
   // "Absetzung für Abnutzung (AfA) gem. §7 EStG". §4 Abs.3 Satz 3 EStG: AfA ist vom Zufluss-
   // Abfluss-Prinzip ausgenommen — zeitanteiliger Abzug, nicht bei Zahlung.
-  'Abschreibung (AfA)':         { SKR03: '4832', SKR04: '6832', euer_zeile: 'Z.35' },
+  'Abschreibung (AfA)':         { SKR03: '4832', SKR04: '6832', euer_zeile: 'Z.34' },
   'Versicherungen':             { SKR03: '4360', SKR04: '6400', euer_zeile: 'Z.50' },
   'Steuerberater/Buchhaltung':  { SKR03: '4950', SKR04: '6825', euer_zeile: 'Z.47' },
   // Bewirtung 4650/6640 (abzugsfähiger Teil), Werbekosten SKR03 4600 (nicht 4610) — siehe Korrektur oben.
@@ -956,6 +956,11 @@ const SACHKONTO_MAPPING = {
   // werden aber nie direkt aus einem Absendernamen erkannt (kein KATEGORIE_REGELN-Eintrag nötig).
   'Fahrtkosten (Kilometerpauschale)': { SKR03: '4673', SKR04: '6673', euer_zeile: 'Z.71' },
   'Verpflegungsmehraufwand':    { SKR03: '4674', SKR04: '6674', euer_zeile: 'Z.65' },
+  // Umsatzsteuer-Durchlaufposten (Zeilen 17/18/58/59 der Anlage EÜR 2026). Gleich wie in index.html — test-sachkonten-sync.mjs.
+  'Vereinnahmte Umsatzsteuer':  { SKR03: '1775', SKR04: '3806', euer_zeile: 'Z.17' },
+  'Umsatzsteuer-Erstattung':    { SKR03: '1800', SKR04: '1809', euer_zeile: 'Z.18' },
+  'Vorsteuer':                  { SKR03: '1576', SKR04: '1406', euer_zeile: 'Z.58' },
+  'Gezahlte Umsatzsteuer':      { SKR03: '1780', SKR04: '1755', euer_zeile: 'Z.59' },
   'Einnahmen 19%':              { SKR03: '8400', SKR04: '4400', euer_zeile: 'Z.15' },
   'Einnahmen 7%':               { SKR03: '8300', SKR04: '4300', euer_zeile: 'Z.15' },
   'Einnahmen steuerfrei':       { SKR03: '8200', SKR04: '4200', euer_zeile: 'Z.12' }
@@ -4003,6 +4008,10 @@ function erloeskontoExport(mwstSatz, kleinunternehmer, skr) {
 const DATEV_WEBHOOK_QUELLEN = ['stripe_webhook', 'mollie_webhook', 'digistore24_webhook', 'copecart_webhook', 'paypal_webhook', 'sumup_webhook', 'ablefy_webhook', 'shopify_webhook'];
 
 function buSchluesselExport(mwstSatz, kleinunternehmer, istEinnahme, gegenkonto, skr) {
+  // Kleinunternehmer (§ 19 UStG): weder USt-Ausweis noch Vorsteuerabzug. Der mwst_satz eines Belegs
+  // (Standard im Dropdown: 19 %) darf daran nichts ändern — sonst bekäme ein Kleinunternehmer die
+  // Vorsteuer-Schlüssel 9/8. Deshalb vor allen anderen Regeln leer.
+  if (kleinunternehmer) return '';
   if (DATEV_AUTOMATIKKONTEN_EXPORT[skr]?.has(String(gegenkonto))) return '';
   const satz = mwstSatz || (kleinunternehmer ? 'keine' : '19');
   if (satz === '19') return istEinnahme ? '3' : '9';
