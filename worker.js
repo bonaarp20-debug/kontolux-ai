@@ -3924,6 +3924,27 @@ function extractKontoNummer(raw) {
 // von Anführungszeichen (Anführungszeichen sind für DATEV/CSV-Quoting da, nicht als
 // Excel-"das ist Text"-Marker). Ein führendes Apostroph neutralisiert das zuverlässig
 // (Excel zeigt den Rest als Klartext), ohne das DATEV-Format zu brechen.
+// Stripe-Auszahlung → Gebühren je Buchung. Eingabe: die Balance Transactions einer Auszahlung
+// (Stripe-API GET /v1/balance_transactions?payout=…). Beträge in Cent: amount = Brutto, fee = Gebühr,
+// net = Gutschrift nach Gebühr. Wird NICHT aufgerufen, solange kein Endpunkt ihn nutzt (Phase 1, vorbereitet).
+// Prüfung: Summe der Netto-Beträge muss dem Auszahlungsbetrag entsprechen, sonst wird nichts zugeordnet.
+function stripeAuszahlungPositionen(balanceTransactions, auszahlungCent) {
+  const liste = Array.isArray(balanceTransactions) ? balanceTransactions : [];
+  const positionen = liste.map(t => ({
+    referenz: t.id,
+    quelle: t.source || t.id,
+    typ: t.type,
+    waehrung: String(t.currency || '').toUpperCase(),
+    brutto: Math.round((Number(t.amount) || 0)) / 100,
+    gebuehr: Math.round((Number(t.fee) || 0)) / 100,
+    netto: Math.round((Number(t.net) || 0)) / 100,
+  }));
+  const nettoSumme = liste.reduce((s, t) => s + (Number(t.net) || 0), 0);
+  const stimmt = auszahlungCent == null ? null : nettoSumme === Number(auszahlungCent);
+  const fremdeWaehrung = positionen.some(p => p.waehrung && p.waehrung !== 'EUR');
+  return { positionen, stimmt, fremdeWaehrung, gebuehrSumme: Math.round(positionen.reduce((s, p) => s + p.gebuehr, 0) * 100) / 100 };
+}
+
 function datevText(val, maxLen) {
   let s = String(val ?? '').replace(/[\r\n]+/g, ' ');
   if (/^[=+\-@\t]/.test(s)) s = `'${s}`;
@@ -4302,7 +4323,8 @@ async function handleDatevExport(body, env, cors = {}) {
       b.gegenkonto,
       b.bu,
       datevTTMM(b.belegDatum),
-      datevText(b.belegfeld1, 12),
+      // Belegfeld 1: Format-Version 700 erlaubt 36 Zeichen (DATEV ASCII-Beschreibung). Vorher auf 12 gekürzt.
+      datevText(b.belegfeld1, 36),
       datevText(b.belegfeld2, 30),
       '',
       datevText(b.buchungstext, 60),
