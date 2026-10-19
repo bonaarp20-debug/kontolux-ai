@@ -1163,11 +1163,15 @@ Nutzer nennt ein Wirtschaftsgut (Computer, Kamera, Fahrzeug, Maschine, Möbel, S
    - Mobiltelefon/Smartphone: 5 Jahre. Pkw/Kombi: 6 Jahre. Büromöbel: 13 Jahre. Fotokopierer/Multifunktionsgerät: 7 Jahre. Foto-/Video-/Audiogeräte: 7 Jahre.
    - Sonst: amtliche BMF-AfA-Tabelle für allgemein verwendbare Anlagegüter (AV) nachschlagen und nachfragen.
    Hinweis ausgeben: Diese Angabe ist eine Orientierung, kein Steuerrat. Bei Unklarheiten einen Steuerberater fragen.
-3. Anschaffungswert ≤ 800€ netto: Wahlrecht (§ 6 Abs. 2 EStG) fragen: "Sofort als GWG abziehen oder über die Nutzungsdauer abschreiben?" Bei Sofortabzug: gwg=ja, nutzungsdauer_jahre = 1. Bei Abschreibung: gwg=nein. Über 800€ netto gibt es kein Wahlrecht: immer Abschreibung über die Nutzungsdauer.
+3. Methode nach § 6 EStG je Anschaffungswert netto (immer fragen, wenn der Betrag 250 € übersteigt):
+   - bis 800€: Wahl "sofort (GWG, § 6 Abs. 2)" oder "über die Nutzungsdauer abschreiben". Bei 250–800€ zusätzlich "Sammelposten".
+   - über 800€ bis 1.000€: Wahl "Sammelposten (§ 6 Abs. 2a)" oder "über die Nutzungsdauer abschreiben".
+   - über 1.000€: nur Abschreibung über die Nutzungsdauer.
+   Sammelposten: 1/5 pro Jahr über 5 Jahre. Im selben Jahr gilt die Methode für alle Güter zwischen 250 und 1.000€ einheitlich. Auf diese Einheitlichkeit weisen.
 4. Anschaffungswert > 800€ netto: afa_betrag_jaehrlich = anschaffungswert ÷ nutzungsdauer_jahre (auf Cent runden).
 5. Sachkonto: SKR03 4832 / SKR04 6832 (Abschreibungen auf Betriebs-/Geschäftsausstattung), EÜR Z.34. Buchungstext "AfA [Gerät] [Jahr]".
 6. Bei Bestätigung buchen. Das Datum ist das ANSCHAFFUNGSDATUM, nicht der 31.12.:
-AUSGABE_UPDATE:datum=[Anschaffungsdatum YYYY-MM-DD],betrag=[afa_betrag_jaehrlich],beschreibung=[Gerätename],kategorie=Abschreibung (AfA),anschaffungswert=[Netto-Anschaffungswert],nutzungsdauer_jahre=[Jahre],gwg=[ja|nein]
+AUSGABE_UPDATE:datum=[Anschaffungsdatum YYYY-MM-DD],betrag=[afa_betrag_jaehrlich],beschreibung=[Gerätename],kategorie=Abschreibung (AfA),anschaffungswert=[Netto-Anschaffungswert],nutzungsdauer_jahre=[Jahre],methode=[sofort|sammelposten|afa]
 Hinweis: Kontolux verteilt die AfA automatisch monatlich ab dem Anschaffungsmonat (§7 EStG). Ein Jahresbetrag wird nicht als Tagesausgabe gebucht.
 
 ## TAGESEINNAHMEN SPEICHERN
@@ -1679,11 +1683,15 @@ Nutzer nennt ein Wirtschaftsgut (Computer, Kamera, Fahrzeug, Maschine, Möbel, S
    - Mobiltelefon/Smartphone: 5 Jahre. Pkw/Kombi: 6 Jahre. Büromöbel: 13 Jahre. Fotokopierer/Multifunktionsgerät: 7 Jahre. Foto-/Video-/Audiogeräte: 7 Jahre.
    - Sonst: amtliche BMF-AfA-Tabelle für allgemein verwendbare Anlagegüter (AV) nachschlagen und nachfragen.
    Hinweis ausgeben: Diese Angabe ist eine Orientierung, kein Steuerrat. Bei Unklarheiten einen Steuerberater fragen.
-3. Anschaffungswert ≤ 800€ netto: Wahlrecht (§ 6 Abs. 2 EStG) fragen: "Sofort als GWG abziehen oder über die Nutzungsdauer abschreiben?" Bei Sofortabzug: gwg=ja, nutzungsdauer_jahre = 1. Bei Abschreibung: gwg=nein. Über 800€ netto gibt es kein Wahlrecht: immer Abschreibung über die Nutzungsdauer.
+3. Methode nach § 6 EStG je Anschaffungswert netto (immer fragen, wenn der Betrag 250 € übersteigt):
+   - bis 800€: Wahl "sofort (GWG, § 6 Abs. 2)" oder "über die Nutzungsdauer abschreiben". Bei 250–800€ zusätzlich "Sammelposten".
+   - über 800€ bis 1.000€: Wahl "Sammelposten (§ 6 Abs. 2a)" oder "über die Nutzungsdauer abschreiben".
+   - über 1.000€: nur Abschreibung über die Nutzungsdauer.
+   Sammelposten: 1/5 pro Jahr über 5 Jahre. Im selben Jahr gilt die Methode für alle Güter zwischen 250 und 1.000€ einheitlich. Auf diese Einheitlichkeit weisen.
 4. Anschaffungswert > 800€ netto: afa_betrag_jaehrlich = anschaffungswert ÷ nutzungsdauer_jahre (auf Cent runden).
 5. Sachkonto: SKR03 4832 / SKR04 6832 (Abschreibungen auf Betriebs-/Geschäftsausstattung), EÜR Z.34. Buchungstext "AfA [Gerät] [Jahr]".
 6. Bei Bestätigung buchen. Das Datum ist das ANSCHAFFUNGSDATUM, nicht der 31.12.:
-AUSGABE_UPDATE:datum=[Anschaffungsdatum YYYY-MM-DD],betrag=[afa_betrag_jaehrlich],beschreibung=[Gerätename],kategorie=Abschreibung (AfA),anschaffungswert=[Netto-Anschaffungswert],nutzungsdauer_jahre=[Jahre],gwg=[ja|nein]
+AUSGABE_UPDATE:datum=[Anschaffungsdatum YYYY-MM-DD],betrag=[afa_betrag_jaehrlich],beschreibung=[Gerätename],kategorie=Abschreibung (AfA),anschaffungswert=[Netto-Anschaffungswert],nutzungsdauer_jahre=[Jahre],methode=[sofort|sammelposten|afa]
 Hinweis: Kontolux verteilt die AfA automatisch monatlich ab dem Anschaffungsmonat (§7 EStG). Ein Jahresbetrag wird nicht als Tagesausgabe gebucht.
 
 ## TAGESEINNAHMEN SPEICHERN
