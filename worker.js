@@ -940,7 +940,7 @@ const SACHKONTO_MAPPING = {
   // und Geschäftsausstattung (allgemeines AfA-Konto für EÜR). EÜR Z.35 (2026+) = Anlage EÜR
   // "Absetzung für Abnutzung (AfA) gem. §7 EStG". §4 Abs.3 Satz 3 EStG: AfA ist vom Zufluss-
   // Abfluss-Prinzip ausgenommen — zeitanteiliger Abzug, nicht bei Zahlung.
-  'Abschreibung (AfA)':         { SKR03: '4830', SKR04: '6832', euer_zeile: 'Z.34' },
+  'Abschreibung (AfA)':         { SKR03: '4830', SKR04: '6220', euer_zeile: 'Z.34' },
   'Versicherungen':             { SKR03: '4360', SKR04: '6400', euer_zeile: 'Z.50' },
   'Steuerberater/Buchhaltung':  { SKR03: '4950', SKR04: '6825', euer_zeile: 'Z.47' },
   // Bewirtung 4650/6640 (abzugsfähiger Teil), Werbekosten SKR03 4600 (nicht 4610) — siehe Korrektur oben.
@@ -958,9 +958,9 @@ const SACHKONTO_MAPPING = {
   'Verpflegungsmehraufwand':    { SKR03: '4674', SKR04: '6674', euer_zeile: 'Z.65' },
   // Umsatzsteuer-Durchlaufposten (Zeilen 17/18/58/59 der Anlage EÜR 2026). Gleich wie in index.html — test-sachkonten-sync.mjs.
   'Vereinnahmte Umsatzsteuer':  { SKR03: '1776', SKR04: '3806', euer_zeile: 'Z.17' },
-  'Umsatzsteuer-Erstattung':    { SKR03: '1800', SKR04: '1809', euer_zeile: 'Z.18' },
+  'Umsatzsteuer-Erstattung':    { SKR03: '1780', SKR04: '3820', euer_zeile: 'Z.18' },
   'Vorsteuer':                  { SKR03: '1576', SKR04: '1406', euer_zeile: 'Z.58' },
-  'Gezahlte Umsatzsteuer':      { SKR03: '1780', SKR04: '1755', euer_zeile: 'Z.59' },
+  'Gezahlte Umsatzsteuer':      { SKR03: '1780', SKR04: '3820', euer_zeile: 'Z.59' },
   'Einnahmen 19%':              { SKR03: '8400', SKR04: '4400', euer_zeile: 'Z.15' },
   'Einnahmen 7%':               { SKR03: '8300', SKR04: '4300', euer_zeile: 'Z.15' },
   'Einnahmen steuerfrei':       { SKR03: '8200', SKR04: '4200', euer_zeile: 'Z.12' }

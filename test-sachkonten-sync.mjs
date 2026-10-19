@@ -70,6 +70,14 @@ const SKR03_PDF = {
   'Abschreibung (AfA)': ['4830', 'Abschreibungen auf Sachanlagen (ohne AfA auf Fahrzeuge und Gebäude)'],
 };
 for (const [kat, [konto]] of Object.entries(SKR03_PDF)) pruefe(`${kat}: SKR03 ${konto} laut DATEV-PDF`, app[kat]?.SKR03 === konto, `Mapping hat ${app[kat]?.SKR03}`);
+// SKR04 laut Standard-Kontenrahmen SKR04 2026 (Art.-Nr. 11175) wörtlich geprüft.
+const SKR04_PDF = {
+  'Vereinnahmte Umsatzsteuer': ['3806', 'Umsatzsteuer 19 %'],
+  'Vorsteuer': ['1406', 'Abziehbare Vorsteuer 19 %'],
+  'Gezahlte Umsatzsteuer': ['3820', 'Umsatzsteuer-Vorauszahlungen'],
+  'Abschreibung (AfA)': ['6220', 'Abschreibungen auf Sachanlagen (ohne AfA auf Fahrzeuge und Gebäude)'],
+};
+for (const [kat, [konto]] of Object.entries(SKR04_PDF)) pruefe(`${kat}: SKR04 ${konto} laut DATEV-PDF`, app[kat]?.SKR04 === konto, `Mapping hat ${app[kat]?.SKR04}`);
 const reserviert = { SKR03: ['1583', '1775', '8195', '8196'], SKR04: ['4185', '4186'] };
 const verwendet = { SKR03: new Set(Object.values(app).map(e => e.SKR03)), SKR04: new Set(Object.values(app).map(e => e.SKR04)) };
 for (const skr of ['SKR03', 'SKR04']) pruefe(`${skr}: kein reserviertes/gelöschtes Konto im Mapping`, reserviert[skr].every(k => !verwendet[skr].has(k)));
