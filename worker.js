@@ -4266,10 +4266,13 @@ async function handleDatevExport(body, env, cors = {}) {
       // Erlöskonto ohne Umsatzsteuer (KU, steuerfrei, § 13b) bzw. Erstattung darauf: kein Steuerschlüssel.
       const ohneSchluessel = alleErloeskonten.has(String(gegenkonto)) && (!istEinnahme || kleinunternehmer);
       const bu = buSchluesselExport(ohneSchluessel ? 'keine' : mwstSatz, kleinunternehmer, istEinnahme, gegenkonto, skr);
-      const buchungstext = istEinnahme
+      const freitext = firestoreValue(fields.buchungstext) || '';
+      const buchungstextBasis = istEinnahme
         ? `Rechnung ${absender}`.trim()
         : `Beleg ${absender}`.trim();
-      const belegfeld2 = firestoreValue(fields.buchungstext) || '';
+      const buchungstext = freitext ? `${buchungstextBasis} ${freitext}`.trim() : buchungstextBasis;
+      // Belegfeld 2 ist eine Belegnummer (max. 12 Stellen laut DATEV). Der freie Buchungstext gehört in den Buchungstext (max. 60).
+      const belegfeld2 = '';
       // Debitorennummer nur bei Einnahmen (Rechnung an Kunde = Debitor) relevant — bei Ausgaben
       // wäre das Gegenstück eine Kreditorennummer des Lieferanten, die hier nicht geführt wird.
       const kundeId = firestoreValue(fields.kunde_id) || '';
@@ -4335,7 +4338,7 @@ async function handleDatevExport(body, env, cors = {}) {
       datevTTMM(b.belegDatum),
       // Belegfeld 1: Format-Version 700 erlaubt 36 Zeichen (DATEV ASCII-Beschreibung). Vorher auf 12 gekürzt.
       datevText(b.belegfeld1, 36),
-      datevText(b.belegfeld2, 30),
+      datevText(b.belegfeld2, 12),
       '',
       datevText(b.buchungstext, 60),
       '', b.diverseAdressnummer, '', '', '', ''
