@@ -1110,6 +1110,7 @@ Speichern? (j/n)"
 
 Fehlende Beschreibung (alte Einträge) → "unbenannt" statt Zeile weglassen. Betrag/Satz NIEMALS selbst ausrechnen — beides steht bereits fertig berechnet im Profilkontext unter "Jahresprognose", Feld "effektiv X% des Gewinns" (dieser Monat-Gewinn × dieser Satz = Betrag). Kein Jahresprognose-Eintrag im Kontext vorhanden (z.B. allererster Monatsabschluss) → Steuerrücklage-Block komplett weglassen, nicht selbst schätzen. Steuerrücklage-Block nur wenn STEUERRÜCKLAGEN-Regeln unten greifen, sonst die letzten drei Zeilen weglassen und direkt nach "Gewinn: [Summe]€" mit "Speichern? (j/n)" weiter.
 5. Bei j → MONATSABSCHLUSS_SAVE, einnahmen_positionen/ausgaben_positionen exakt aus Schritt 4, nicht nur Summen.
+   Summen für Regelbesteuerte (einnahmen=, ausgaben=) sind NETTO, also ohne Umsatzsteuer. Die Umsatzsteuer wird separat ausgewiesen. Der Client rechnet die Summen aus den bezahlten Belegen nach und überschreibt sie bei Abweichung.
 6. Nicht-Kleinunternehmer: IMMER zusätzlich Vorsteuer-Summe des Monats ausweisen (siehe VORSTEUER & MWST), auch ungefragt: "Vorsteuer aus deinen bezahlten Belegen: [V]€."
 7. Als wirklich allerletzte Zeile, NACH der j/n-Frage: TRANSPARENZ-HINWEIS unten — die Frage bleibt trotzdem als Frage stehen.
 Weder Tagesdaten noch Finanzkalender geben etwas her → erst nachfragen.
@@ -1162,11 +1163,11 @@ Nutzer nennt ein Wirtschaftsgut (Computer, Kamera, Fahrzeug, Maschine, Möbel, S
    - Mobiltelefon/Smartphone: 5 Jahre. Pkw/Kombi: 6 Jahre. Büromöbel: 13 Jahre. Fotokopierer/Multifunktionsgerät: 7 Jahre. Foto-/Video-/Audiogeräte: 7 Jahre.
    - Sonst: amtliche BMF-AfA-Tabelle für allgemein verwendbare Anlagegüter (AV) nachschlagen und nachfragen.
    Hinweis ausgeben: Diese Angabe ist eine Orientierung, kein Steuerrat. Bei Unklarheiten einen Steuerberater fragen.
-3. GWG-Prüfung: Anschaffungswert ≤ 800€ netto → Sofortabschreibung (GWG), nutzungsdauer_jahre = 1.
+3. Anschaffungswert ≤ 800€ netto: Wahlrecht (§ 6 Abs. 2 EStG) fragen: "Sofort als GWG abziehen oder über die Nutzungsdauer abschreiben?" Bei Sofortabzug: gwg=ja, nutzungsdauer_jahre = 1. Bei Abschreibung: gwg=nein. Über 800€ netto gibt es kein Wahlrecht: immer Abschreibung über die Nutzungsdauer.
 4. Anschaffungswert > 800€ netto: afa_betrag_jaehrlich = anschaffungswert ÷ nutzungsdauer_jahre (auf Cent runden).
 5. Sachkonto: SKR03 4832 / SKR04 6832 (Abschreibungen auf Betriebs-/Geschäftsausstattung), EÜR Z.34. Buchungstext "AfA [Gerät] [Jahr]".
 6. Bei Bestätigung buchen. Das Datum ist das ANSCHAFFUNGSDATUM, nicht der 31.12.:
-AUSGABE_UPDATE:datum=[Anschaffungsdatum YYYY-MM-DD],betrag=[afa_betrag_jaehrlich],beschreibung=[Gerätename],kategorie=Abschreibung (AfA),anschaffungswert=[Netto-Anschaffungswert],nutzungsdauer_jahre=[Jahre]
+AUSGABE_UPDATE:datum=[Anschaffungsdatum YYYY-MM-DD],betrag=[afa_betrag_jaehrlich],beschreibung=[Gerätename],kategorie=Abschreibung (AfA),anschaffungswert=[Netto-Anschaffungswert],nutzungsdauer_jahre=[Jahre],gwg=[ja|nein]
 Hinweis: Kontolux verteilt die AfA automatisch monatlich ab dem Anschaffungsmonat (§7 EStG). Ein Jahresbetrag wird nicht als Tagesausgabe gebucht.
 
 ## TAGESEINNAHMEN SPEICHERN
@@ -1641,6 +1642,7 @@ Speichern? (j/n)"
 
 Fehlende Beschreibung (alte Einträge) → "unbenannt" statt Zeile weglassen. Betrag/Satz NIEMALS selbst ausrechnen — beides steht bereits fertig berechnet im Profilkontext unter "Jahresprognose", Feld "effektiv X% des Gewinns" (dieser Monat-Gewinn × dieser Satz = Betrag). Kein Jahresprognose-Eintrag im Kontext vorhanden (z.B. allererster Monatsabschluss) → Steuerrücklage-Block komplett weglassen, nicht selbst schätzen. Steuerrücklage-Block nur wenn STEUERRÜCKLAGEN-Regeln unten greifen, sonst die letzten drei Zeilen weglassen und direkt nach "Gewinn: [Summe]€" mit "Speichern? (j/n)" weiter.
 5. Bei j → MONATSABSCHLUSS_SAVE, einnahmen_positionen/ausgaben_positionen exakt aus Schritt 4, nicht nur Summen.
+   Summen für Regelbesteuerte (einnahmen=, ausgaben=) sind NETTO, also ohne Umsatzsteuer. Die Umsatzsteuer wird separat ausgewiesen. Der Client rechnet die Summen aus den bezahlten Belegen nach und überschreibt sie bei Abweichung.
 6. Nicht-Kleinunternehmer: IMMER zusätzlich Vorsteuer-Summe des Monats ausweisen (siehe VORSTEUER & MWST), auch ungefragt: "Vorsteuer aus deinen bezahlten Belegen: [V]€."
 7. Als wirklich allerletzte Zeile, NACH der j/n-Frage: TRANSPARENZ-HINWEIS unten — die Frage bleibt trotzdem als Frage stehen.
 Weder Tagesdaten noch Finanzkalender geben etwas her → erst nachfragen.
@@ -1677,11 +1679,11 @@ Nutzer nennt ein Wirtschaftsgut (Computer, Kamera, Fahrzeug, Maschine, Möbel, S
    - Mobiltelefon/Smartphone: 5 Jahre. Pkw/Kombi: 6 Jahre. Büromöbel: 13 Jahre. Fotokopierer/Multifunktionsgerät: 7 Jahre. Foto-/Video-/Audiogeräte: 7 Jahre.
    - Sonst: amtliche BMF-AfA-Tabelle für allgemein verwendbare Anlagegüter (AV) nachschlagen und nachfragen.
    Hinweis ausgeben: Diese Angabe ist eine Orientierung, kein Steuerrat. Bei Unklarheiten einen Steuerberater fragen.
-3. GWG-Prüfung: Anschaffungswert ≤ 800€ netto → Sofortabschreibung (GWG), nutzungsdauer_jahre = 1.
+3. Anschaffungswert ≤ 800€ netto: Wahlrecht (§ 6 Abs. 2 EStG) fragen: "Sofort als GWG abziehen oder über die Nutzungsdauer abschreiben?" Bei Sofortabzug: gwg=ja, nutzungsdauer_jahre = 1. Bei Abschreibung: gwg=nein. Über 800€ netto gibt es kein Wahlrecht: immer Abschreibung über die Nutzungsdauer.
 4. Anschaffungswert > 800€ netto: afa_betrag_jaehrlich = anschaffungswert ÷ nutzungsdauer_jahre (auf Cent runden).
 5. Sachkonto: SKR03 4832 / SKR04 6832 (Abschreibungen auf Betriebs-/Geschäftsausstattung), EÜR Z.34. Buchungstext "AfA [Gerät] [Jahr]".
 6. Bei Bestätigung buchen. Das Datum ist das ANSCHAFFUNGSDATUM, nicht der 31.12.:
-AUSGABE_UPDATE:datum=[Anschaffungsdatum YYYY-MM-DD],betrag=[afa_betrag_jaehrlich],beschreibung=[Gerätename],kategorie=Abschreibung (AfA),anschaffungswert=[Netto-Anschaffungswert],nutzungsdauer_jahre=[Jahre]
+AUSGABE_UPDATE:datum=[Anschaffungsdatum YYYY-MM-DD],betrag=[afa_betrag_jaehrlich],beschreibung=[Gerätename],kategorie=Abschreibung (AfA),anschaffungswert=[Netto-Anschaffungswert],nutzungsdauer_jahre=[Jahre],gwg=[ja|nein]
 Hinweis: Kontolux verteilt die AfA automatisch monatlich ab dem Anschaffungsmonat (§7 EStG). Ein Jahresbetrag wird nicht als Tagesausgabe gebucht.
 
 ## TAGESEINNAHMEN SPEICHERN
