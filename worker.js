@@ -3955,6 +3955,30 @@ function stripeAuszahlungPositionen(balanceTransactions, auszahlungCent) {
   return { positionen, stimmt, fremdeWaehrung, gebuehrSumme: Math.round(positionen.reduce((s, p) => s + p.gebuehr, 0) * 100) / 100 };
 }
 
+// Stripe: alle Balance Transactions einer Auszahlung abrufen (GET /v1/balance_transactions?payout=po_…, paginiert).
+// fetchImpl ist injizierbar, damit der Abruf ohne echten Schlüssel getestet werden kann. Es wird nichts geschrieben.
+// Der Schlüssel kommt aus env.STRIPE_SECRET_KEY (Worker-Secret); im Testmodus ist es ein sk_test_…-Schlüssel.
+async function stripeAuszahlungAbrufen(payoutId, schluessel, fetchImpl = fetch) {
+  if (!payoutId || !/^po_[A-Za-z0-9]+$/.test(payoutId)) throw new Error('Ungültige Auszahlungs-ID');
+  if (!schluessel) throw new Error('Stripe-Schlüssel fehlt');
+  const alle = [];
+  let startingAfter = null;
+  for (let seite = 0; seite < 50; seite++) {
+    const url = new URL('https://api.stripe.com/v1/balance_transactions');
+    url.searchParams.set('payout', payoutId);
+    url.searchParams.set('limit', '100');
+    if (startingAfter) url.searchParams.set('starting_after', startingAfter);
+    const res = await fetchImpl(url.toString(), { headers: { Authorization: 'Bearer ' + schluessel } });
+    if (!res.ok) throw new Error('Stripe-Abruf fehlgeschlagen: HTTP ' + res.status);
+    const daten = await res.json();
+    const liste = Array.isArray(daten.data) ? daten.data : [];
+    alle.push(...liste);
+    if (!daten.has_more || liste.length === 0) break;
+    startingAfter = liste[liste.length - 1].id;
+  }
+  return alle;
+}
+
 function datevText(val, maxLen) {
   let s = String(val ?? '').replace(/[\r\n]+/g, ' ');
   if (/^[=+\-@\t]/.test(s)) s = `'${s}`;
