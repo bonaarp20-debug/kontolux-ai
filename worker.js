@@ -484,7 +484,7 @@ export default {
       // ✅ /send-verification-email geschützt — E-Mail kommt aus dem verifizierten
       // Token, nie vom Client, sonst könnte jeder Verifizierungsmails an beliebige
       // Adressen auslösen (Spam-Vektor).
-      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/usage', '/abo', '/delete-account-data', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/pruefer-zugang', '/freigabe-status'];
+      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/stripe-gebuehren', '/usage', '/abo', '/delete-account-data', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/pruefer-zugang', '/freigabe-status'];
 
       if (protectedPaths.includes(url.pathname)) {
         try {
@@ -569,6 +569,7 @@ export default {
       if (url.pathname === '/abo')      return handleAbo(body, env, cors);
       if (url.pathname === '/usage')    return handleUsage(body, env, cors);
       if (url.pathname === '/datev-export') return handleDatevExport(body, env, cors);
+      if (url.pathname === '/stripe-gebuehren') return handleStripeGebuehren(body, env, cors, verifiedUid);
       if (url.pathname === '/webhook-settings') return handleWebhookSettings(body, env, cors, verifiedUid, url.origin);
       if (url.pathname === '/pruefer-zugang') return handlePrueferZugang(body, env, cors, verifiedUid);
       if (url.pathname === '/kontakt')   return handleKontakt(body, env, cors);
@@ -946,6 +947,7 @@ const SACHKONTO_MAPPING = {
   // Bewirtung 4650/6640 (abzugsfähiger Teil), Werbekosten SKR03 4600 (nicht 4610) — siehe Korrektur oben.
   'Bewirtung (70%)':            { SKR03: '4650', SKR04: '6640', euer_zeile: 'Z.64' },
   'Sonstiges':                  { SKR03: '4900', SKR04: '6300', euer_zeile: 'Z.61' },
+  'Bankgebühren':               { SKR03: '4970', SKR04: '6855', euer_zeile: 'Z.61' },
   // Software/EDV/SaaS: 4806/6495 \"Wartungskosten für Hard- und Software\" (EÜR Z.50). Laufende
   // SaaS-Abos sind sofort abzugsfähig; einmalige Software-Käufe >800€ gehören aufs Anlagevermögen.
   'Software/EDV/SaaS':          { SKR03: '4806', SKR04: '6495', euer_zeile: 'Z.51' },
@@ -3977,6 +3979,71 @@ async function stripeAuszahlungAbrufen(payoutId, schluessel, fetchImpl = fetch) 
     startingAfter = liste[liste.length - 1].id;
   }
   return alle;
+}
+
+// Stripe-Gebühren als Ausgaben-Belege. Feste IDs (stripe_fee_<Transaktion>) machen den Vorgang idempotent:
+// ein zweiter Lauf überschreibt dieselben Dokumente, es entstehen keine Doppelungen.
+function stripeGebuehrDokumente(positionen, txsById) {
+  return positionen
+    .filter(p => p.typ === 'charge' && p.gebuehr > 0 && p.referenz)
+    .map(p => {
+      const created = Number((txsById[p.referenz] || {}).created) || 0;
+      const datum = created ? new Date(created * 1000).toISOString().slice(0, 10) : '';
+      return {
+        id: 'stripe_fee_' + p.referenz.replace(/[^A-Za-z0-9_]/g, ''),
+        felder: {
+          name: 'Stripe-Gebühr ' + p.referenz,
+          typ: 'rechnung_eingehend',
+          betrag: p.gebuehr,
+          betrag_netto: p.gebuehr,
+          mwst_satz: 'keine',
+          kategorie: 'Bankgebühren',
+          absender: 'Stripe',
+          buchungstext: 'Stripe-Gebühr ' + p.referenz,
+          datum,
+          bezahlt: true,
+          bezahlt_am: datum,
+          quelle: 'stripe_gebuehr'
+        }
+      };
+    });
+}
+function stripeFelderZuFirestore(felder) {
+  const out = {};
+  for (const [k, v] of Object.entries(felder)) {
+    if (typeof v === 'number') out[k] = { doubleValue: v };
+    else if (typeof v === 'boolean') out[k] = { booleanValue: v };
+    else out[k] = { stringValue: String(v ?? '') };
+  }
+  return out;
+}
+// POST /stripe-gebuehren { payoutId } — nur für den angemeldeten Nutzer. Ohne Stripe-Schlüssel 503.
+// Schreibt nur, wenn die Netto-Summe der Transaktionen dem Auszahlungsbetrag entspricht.
+async function handleStripeGebuehren(body, env, cors, uid) {
+  const antwort = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
+  if (!uid) return antwort({ error: 'Nicht angemeldet' }, 401);
+  const schluessel = env.STRIPE_SECRET_KEY;
+  if (!schluessel) return antwort({ error: 'Stripe ist auf diesem Server nicht konfiguriert' }, 503);
+  const payoutId = String(body?.payoutId || '');
+  if (!/^po_[A-Za-z0-9]+$/.test(payoutId)) return antwort({ error: 'Ungültige Auszahlungs-ID' }, 400);
+  try {
+    const payoutRes = await fetch('https://api.stripe.com/v1/payouts/' + payoutId, { headers: { Authorization: 'Bearer ' + schluessel } });
+    if (!payoutRes.ok) return antwort({ error: 'Stripe-Auszahlung nicht abrufbar', status: payoutRes.status }, 502);
+    const payout = await payoutRes.json();
+    const txs = await stripeAuszahlungAbrufen(payoutId, schluessel);
+    const r = stripeAuszahlungPositionen(txs, payout.amount);
+    if (r.fremdeWaehrung) return antwort({ error: 'Fremdwährung wird noch nicht unterstützt' }, 422);
+    if (r.stimmt !== true) return antwort({ error: 'Netto-Summe der Transaktionen stimmt nicht mit der Auszahlung überein. Es wurde nichts geschrieben.' }, 422);
+    const txsById = Object.fromEntries(txs.map(t => [t.id, t]));
+    const dokumente = stripeGebuehrDokumente(r.positionen, txsById);
+    const token = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    for (const dok of dokumente) {
+      await firestorePatchFields(`users/${uid}/dokumente/${dok.id}`, stripeFelderZuFirestore(dok.felder), token);
+    }
+    return antwort({ ok: true, anzahl: dokumente.length, gebuehr: r.gebuehrSumme });
+  } catch (e) {
+    return antwort({ error: 'Stripe-Gebühren konnten nicht übernommen werden', details: String(e.message || e) }, 500);
+  }
 }
 
 function datevText(val, maxLen) {

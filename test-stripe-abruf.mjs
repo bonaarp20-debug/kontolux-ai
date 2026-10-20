@@ -12,8 +12,8 @@ function schneide(kopf) {
   for (let i = start; i < src.length; i++) { if (src[i] === '{') t++; else if (src[i] === '}' && --t === 0) return src.slice(a, i + 1); }
   throw new Error('Klammern: ' + kopf);
 }
-const { stripeAuszahlungAbrufen, stripeAuszahlungPositionen } = new Function(
-  schneide('async function stripeAuszahlungAbrufen(') + '\n' + schneide('function stripeAuszahlungPositionen(') + '\nreturn { stripeAuszahlungAbrufen, stripeAuszahlungPositionen };'
+const { stripeAuszahlungAbrufen, stripeAuszahlungPositionen, stripeGebuehrDokumente, stripeFelderZuFirestore } = new Function(
+  schneide('async function stripeAuszahlungAbrufen(') + '\n' + schneide('function stripeAuszahlungPositionen(') + '\n' + schneide('function stripeGebuehrDokumente(') + '\n' + schneide('function stripeFelderZuFirestore(') + '\nreturn { stripeAuszahlungAbrufen, stripeAuszahlungPositionen, stripeGebuehrDokumente, stripeFelderZuFirestore };'
 )();
 
 let ok = 0, fehler = 0;
@@ -75,6 +75,21 @@ const tx3 = { id: 'txn_3', object: 'balance_transaction', amount: -2000, fee: 0,
   const r = stripeAuszahlungPositionen(alle, netto);
   pruefe('Verkettung: Netto-Summe stimmt', r.stimmt, true);
   pruefe('Verkettung: Gebühren 2,65 €', r.gebuehrSumme, 2.65);
+}
+
+// Gebühren-Dokumente: nur Zahlungen mit Gebühr, feste IDs, Datum aus created, Firestore-Typen
+{
+  const txsById = { txn_1: { ...tx1, created: 1767225600 }, txn_2: { ...tx2, created: 1767312000 }, txn_3: { ...tx3, created: 1767312000 } };
+  const r = stripeAuszahlungPositionen([tx1, tx2, tx3], 9830 + 4905 - 2000);
+  const docs = stripeGebuehrDokumente(r.positionen, txsById);
+  pruefe('Nur Zahlungen mit Gebühr (Erstattung ausgeschlossen)', docs.length, 2);
+  pruefe('Feste ID je Transaktion', docs.map(d => d.id), ['stripe_fee_txn_1', 'stripe_fee_txn_2']);
+  pruefe('Gebühr 1,70 € und Kategorie Bankgebühren', [docs[0].felder.betrag, docs[0].felder.kategorie], [1.7, 'Bankgebühren']);
+  pruefe('Datum aus created (2026-01-01)', docs[0].felder.datum, '2026-01-01');
+  const fs = stripeFelderZuFirestore(docs[0].felder);
+  pruefe('Firestore: Betrag als doubleValue', fs.betrag, { doubleValue: 1.7 });
+  pruefe('Firestore: bezahlt als booleanValue', fs.bezahlt, { booleanValue: true });
+  pruefe('Firestore: Text als stringValue', fs.kategorie, { stringValue: 'Bankgebühren' });
 }
 
 console.log(`\n${ok} bestanden, ${fehler} fehlgeschlagen`);

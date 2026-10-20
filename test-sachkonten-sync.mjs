@@ -37,6 +37,7 @@ const DATEV_2026 = {
   'Steuerberater/Buchhaltung': [['4950', 'Rechts- und Beratungskosten'], ['6825', 'Rechts- und Beratungskosten']],
   'Bewirtung (70%)': [['4650', 'Bewirtungskosten'], ['6640', 'Bewirtungskosten']],
   'Sonstiges': [['4900', 'Sonstige betriebliche Aufwendungen'], ['6300', 'Sonstige betriebliche Aufwendungen']],
+  'Bankgebühren': [['4970', 'Nebenkosten des Geldverkehrs'], ['6855', 'Nebenkosten des Geldverkehrs']],
   'Software/EDV/SaaS': [['4806', 'Wartungskosten für Hard- und Software'], ['6495', 'Wartungskosten für Hard- und Software']],
   'Fremdleistungen': [['3100', 'Fremdleistungen'], ['5900', 'Fremdleistungen']],
   'Fahrtkosten (Kilometerpauschale)': [['4673', 'Reisekosten Unternehmer Fahrtkosten'], ['6673', 'Reisekosten Unternehmer Fahrtkosten']],
