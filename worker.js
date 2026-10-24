@@ -591,6 +591,8 @@ export default {
       if (url.pathname === '/anfrage') return handleAnfrage(body, env, cors);
       if (url.pathname === '/admin/anfragen') return handleAdminAnfragen(authHeader, env, cors);
       if (url.pathname === '/admin/anfrage-status') return handleAdminAnfrageStatus(request, authHeader, env, cors);
+      if (url.pathname === '/admin/zugriffslink') return handleAdminZugriffslink(request, authHeader, env, cors);
+      if (url.pathname === '/admin/zugriff-widerrufen') return handleAdminZugriffWiderrufen(request, authHeader, env, cors);
       if (url.pathname === '/send-verification-email') return handleSendVerificationEmail(verifiedEmail, env, cors);
       if (url.pathname === '/send-password-reset') return handleSendPasswordReset(body, env, cors);
       if (url.pathname === '/send-email-change-verification') return handleSendEmailChangeVerification(verifiedEmail, body, env, cors);
@@ -3980,6 +3982,11 @@ async function handlePrueferDaten(body, env, cors = {}, authHeader = null) {
     const pfadMatch = /\/documents\/users\/([^/]+)\/profil\/prueferZugang$/.exec(match.document.name || '');
     if (!pfadMatch) return generischerFehler();
     const uid = pfadMatch[1];
+    // Jeder Abruf eines Prüferlinks wird vermerkt (ohne IP-Adresse, nur Zeitpunkt, Konto und Herkunft)
+    if (env.PROFIL_KV) {
+      const jetzt = new Date().toISOString();
+      await env.PROFIL_KV.put(`pruefer-abruf:${jetzt}:${uid}`, JSON.stringify({ zeit: jetzt, uid, quelle: firestoreValue(zugangFields.quelle) || 'nutzer' }));
+    }
 
     const base = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${uid}`;
     const [dokDocs, maDocs, sammelbelegDocs] = await Promise.all([
@@ -5287,6 +5294,89 @@ async function handleAdminAnfrageStatus(request, authHeader, env, cors = {}) {
   } catch (e) {
     console.error('admin/anfrage-status:', e.message);
     return konsoleJson({ error: 'Status nicht gespeichert' }, 500, cors);
+  }
+}
+
+// ── Prüferlink für gesperrte Konten (Admin) ───────────────────────────────
+// Ein Link gibt nur Lesezugriff auf die Daten eines archivierten Kontos, ohne Anmeldung, und läuft
+// nach höchstens 90 Tagen aus. Der Link wird genau einmal angezeigt, im Speicher steht nur der Hash.
+// Er ersetzt einen bestehenden Link desselben Kontos. Anlegen geht nur mit einer bestätigten Anfrage,
+// deren E-Mail zum Konto passt. Jeder Abruf wird im Admin-Log vermerkt (siehe handlePrueferDaten).
+async function handleAdminZugriffslink(request, authHeader, env, cors = {}) {
+  const verified = await verifyFirebaseToken(authHeader, env);
+  if (!istAdmin(verified, env)) return konsoleJson({ error: 'forbidden' }, 403, cors);
+  const body = await request.json().catch(() => ({}));
+  const anfrageId = String(body.anfrage_id || '');
+  const tage = Number(body.tage);
+  const aktenzeichen = sicherEinzeiler(body.aktenzeichen || '', 100);
+  const stelle = sicherEinzeiler(body.stelle || '', 150);
+  const grund = String(body.grund || '').trim();
+  if (!/^[A-Za-z0-9_-]{5,100}$/.test(anfrageId)) return konsoleJson({ error: 'anfrage' }, 400, cors);
+  if (!Number.isInteger(tage) || tage < 1 || tage > 90) return konsoleJson({ error: 'tage' }, 400, cors);
+  if (grund.length < 5) return konsoleJson({ error: 'grund' }, 400, cors);
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const anfrage = await firestoreGetDoc(`anfragen/${anfrageId}`, adminToken);
+    if (!anfrage) return konsoleJson({ error: 'anfrage' }, 404, cors);
+    const af = anfrage.fields || {};
+    if (firestoreValue(af.status) !== 'bestaetigt') return konsoleJson({ error: 'nicht-bestaetigt' }, 400, cors);
+    const anfrageEmail = String(firestoreValue(af.email) || '').toLowerCase();
+
+    // Konto zur E-Mail der Anfrage suchen. Nur gesperrte Konten mit Archiv kommen in Frage.
+    const accessToken = await getGoogleAccessToken(env);
+    const lookup = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:lookup', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: [anfrageEmail] })
+    });
+    const konto = (await lookup.json().catch(() => ({}))).users?.[0];
+    if (!konto || !konto.disabled) return konsoleJson({ error: 'kein-archiv-konto' }, 404, cors);
+    const uid = konto.localId;
+    if (!(await firestoreGetDoc(`users/${uid}/profil/konto_archiv`, adminToken))) {
+      return konsoleJson({ error: 'kein-archiv-konto' }, 404, cors);
+    }
+
+    const token = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(24)));
+    const ablauf = new Date(Date.now() + tage * 24 * 60 * 60 * 1000).toISOString();
+    const res = await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${uid}/profil/prueferZugang`, {
+      method: 'PATCH',
+      headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields: {
+        token_hash: { stringValue: await sha256Hex(token) },
+        aktiv: { booleanValue: true },
+        ablauf: { timestampValue: ablauf },
+        erstellt: { timestampValue: new Date().toISOString() },
+        quelle: { stringValue: 'admin-anfrage' },
+        anfrage_id: { stringValue: anfrageId },
+        aktenzeichen: { stringValue: aktenzeichen },
+        stelle: { stringValue: stelle }
+      } })
+    });
+    if (!res.ok) throw new Error(`Link speichern fehlgeschlagen (${res.status})`);
+    await adminLogEintragen(env, verified.email, 'zugriffslink_erstellt', uid, { grund, anfrage_id: anfrageId, tage, aktenzeichen, stelle, ablauf });
+    return konsoleJson({ link: `https://app.kontolux-ai.de/#prueferToken=${token}`, ablauf }, 200, cors);
+  } catch (e) {
+    console.error('admin/zugriffslink:', e.message);
+    return konsoleJson({ error: 'Link nicht erstellt' }, 500, cors);
+  }
+}
+
+async function handleAdminZugriffWiderrufen(request, authHeader, env, cors = {}) {
+  const verified = await verifyFirebaseToken(authHeader, env);
+  if (!istAdmin(verified, env)) return konsoleJson({ error: 'forbidden' }, 403, cors);
+  const body = await request.json().catch(() => ({}));
+  const uid = String(body.uid || '');
+  const grund = String(body.grund || '').trim();
+  if (!/^[A-Za-z0-9]{6,128}$/.test(uid)) return konsoleJson({ error: 'uid' }, 400, cors);
+  if (grund.length < 5) return konsoleJson({ error: 'grund' }, 400, cors);
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    await firestorePatchFields(`users/${uid}/profil/prueferZugang`, { aktiv: { booleanValue: false } }, adminToken);
+    await adminLogEintragen(env, verified.email, 'zugriffslink_widerrufen', uid, { grund });
+    return konsoleJson({ ok: true }, 200, cors);
+  } catch (e) {
+    console.error('admin/zugriff-widerrufen:', e.message);
+    return konsoleJson({ error: 'Widerruf fehlgeschlagen' }, 500, cors);
   }
 }
 
