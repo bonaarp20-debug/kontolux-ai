@@ -615,6 +615,7 @@ export default {
     }
     if (event.cron === GESPERRT_LOESCH_CRON) {
       await gesperrteKontenLoeschen(env);
+      await fristErinnerungenSenden(env).catch(e => console.error('Fristen-Erinnerung:', e.message));
       return;
     }
     await sendMonthlyReminders(env);
@@ -4630,6 +4631,92 @@ async function handleDatevExport(body, env, cors = {}) {
 }
 
 // ── Monatliche Erinnerungen (Cron) ────────────────────────
+// ── Fristen-Erinnerung per Mail (7 und 1 Tag vorher) ─────────────────────
+// Nur für einmalige eigene Fristen (eigenefristen) mit erinnerung_mail == true. Das Feld setzt die App
+// erst nach der Zustimmung des Nutzers (Checkbox im Fristen-Formular, Zeitpunkt in
+// erinnerung_mail_zustimmung_am). Jeder Vorlauf wird einmal gesendet: der Zeitpunkt steht als
+// erinnerung_7_am bzw. erinnerung_1_am im Frist-Dokument. Ein Speichern der Frist in der App setzt
+// diese Felder zurück, weil das Dokument dort vollständig überschrieben wird.
+const FRIST_ERINNERUNG_TAGE = [7, 1];
+
+// Tage von heute bis zum Fristdatum (beide als YYYY-MM-DD). Reine Funktion, damit testbar.
+function fristTageBis(datum, heuteIso) {
+  const [y1, m1, d1] = datum.split('-').map(Number);
+  const [y2, m2, d2] = heuteIso.split('-').map(Number);
+  return Math.round((Date.UTC(y1, m1 - 1, d1) - Date.UTC(y2, m2 - 1, d2)) / 86400000);
+}
+
+// Heutiges Datum in Berlin als YYYY-MM-DD (en-CA liefert dieses Format).
+function heuteBerlinIso(jetzt = new Date()) {
+  return jetzt.toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' });
+}
+
+// E-Mail-Adresse eines Kontos. Gesperrte (archivierte) Konten bekommen keine Erinnerung.
+async function mailAdresseFuerErinnerung(uid, env) {
+  const accessToken = await getGoogleAccessToken(env);
+  const res = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:lookup', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ localId: [uid] })
+  });
+  if (!res.ok) return null;
+  const user = (await res.json().catch(() => ({}))).users?.[0];
+  if (!user || user.disabled || !user.email) return null;
+  return user.email;
+}
+
+async function fristErinnerungenSenden(env) {
+  const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+  const heute = heuteBerlinIso();
+  const res = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      structuredQuery: {
+        from: [{ collectionId: 'eigenefristen', allDescendants: true }],
+        where: { fieldFilter: { field: { fieldPath: 'erinnerung_mail' }, op: 'EQUAL', value: { booleanValue: true } } }
+      }
+    })
+  });
+  if (!res.ok) throw new Error(`Fristen-Abfrage fehlgeschlagen (${res.status})`);
+
+  let gesendet = 0;
+  for (const zeile of await res.json()) {
+    if (!zeile.document) continue;
+    const f = zeile.document.fields || {};
+    if (f.wiederkehrend?.booleanValue) continue;
+    const datum = f.datum?.stringValue;
+    if (!datum || !/^\d{4}-\d{2}-\d{2}$/.test(datum)) continue;
+    const tage = fristTageBis(datum, heute);
+    if (!FRIST_ERINNERUNG_TAGE.includes(tage)) continue;
+    const feldName = `erinnerung_${tage}_am`;
+    if (f[feldName]?.stringValue) continue;
+
+    // users/{uid}/eigenefristen/{id}
+    const pfad = zeile.document.name.split('/documents/')[1];
+    const [, uid, , fristId] = pfad.split('/');
+    const titel = f.titel?.stringValue || 'Frist';
+    try {
+      const email = await mailAdresseFuerErinnerung(uid, env);
+      if (!email) continue;
+      const datumDe = datum.split('-').reverse().join('.');
+      const wann = tage === 1 ? 'morgen' : 'in 7 Tagen';
+      const html = emailShell(`${titel} ist ${wann} fällig`, `
+        <h1 style="font-size:19px;color:#0f1f2e;margin:0 0 16px">Erinnerung an deine Frist</h1>
+        <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 16px"><strong>${escapeHtml(titel)}</strong> ist ${wann} fällig, am ${datumDe}.</p>
+        <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 24px">Du erhältst diese Mail, weil du bei dieser Frist die E-Mail-Erinnerung eingeschaltet hast. Zum Abbestellen in Kontolux AI den Haken bei der Frist entfernen und speichern.</p>
+        <a href="https://app.kontolux-ai.de" style="display:inline-block;background:#1d5d96;color:#ffffff;padding:13px 28px;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px">Kontolux AI öffnen</a>
+      `);
+      await sendEmail(email, `Erinnerung: ${titel} ist ${wann} fällig`, html, env, 'Kontolux AI <jona@kontolux-ai.de>');
+      await firestorePatchFields(`users/${uid}/eigenefristen/${fristId}`, { [feldName]: { stringValue: new Date().toISOString() } }, adminToken);
+      gesendet++;
+    } catch(e) {
+      console.error('Fristen-Erinnerung fehlgeschlagen:', e.message);
+    }
+  }
+  return gesendet;
+}
+
 async function sendMonthlyReminders(env) {
   const keys = await env.ABO_KV.list();
   const monat = new Date().toLocaleDateString('de-DE', { month: 'long', year: 'numeric' });
