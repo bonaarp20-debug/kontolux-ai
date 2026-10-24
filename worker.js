@@ -296,6 +296,7 @@ const ROUTEN_LIMITS = {
   '/kontakt':               { limit: 5,  windowMs: 10 * 60 * 1000 },
   '/send-password-reset':   { limit: 5,  windowMs: 10 * 60 * 1000 },
   '/pruefer-daten':         { limit: 10, windowMs: 10 * 60 * 1000 },
+  '/konto-archivieren':     { limit: 3,  windowMs: 60 * 60 * 1000 },
   '/registrierung-pruefen': { limit: 30, windowMs: 10 * 60 * 1000 },
 };
 // Globale Limits über alle IPs (KV-Zähler). Ergänzen das Limit pro IP, weil verteilte Anfragen
@@ -484,7 +485,7 @@ export default {
       // ✅ /send-verification-email geschützt — E-Mail kommt aus dem verifizierten
       // Token, nie vom Client, sonst könnte jeder Verifizierungsmails an beliebige
       // Adressen auslösen (Spam-Vektor).
-      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/stripe-gebuehren', '/usage', '/abo', '/delete-account-data', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/pruefer-zugang', '/freigabe-status'];
+      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/stripe-gebuehren', '/usage', '/abo', '/delete-account-data', '/konto-archivieren', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/pruefer-zugang', '/freigabe-status'];
 
       if (protectedPaths.includes(url.pathname)) {
         try {
@@ -574,13 +575,14 @@ export default {
       if (url.pathname === '/pruefer-zugang') return handlePrueferZugang(body, env, cors, verifiedUid);
       if (url.pathname === '/kontakt')   return handleKontakt(body, env, cors);
       if (url.pathname === '/delete-account-data') return handleDeleteAccountData(body, env, cors);
+      if (url.pathname === '/konto-archivieren') return handleKontoArchivieren(env, cors, verifiedUid);
       if (url.pathname === '/send-verification-email') return handleSendVerificationEmail(verifiedEmail, env, cors);
       if (url.pathname === '/send-password-reset') return handleSendPasswordReset(body, env, cors);
       if (url.pathname === '/send-email-change-verification') return handleSendEmailChangeVerification(verifiedEmail, body, env, cors);
       if (url.pathname === '/admin/seed-steuerrecht') return handleSeedSteuerrecht(request, body, env, cors);
       // Bewusst NICHT in protectedPaths: ein Betriebsprüfer hat keinen Firebase-Login, der
       // Zugriffsnachweis ist der Besitz des Tokens selbst (siehe handlePrueferDaten unten).
-      if (url.pathname === '/pruefer-daten') return handlePrueferDaten(body, env, cors);
+      if (url.pathname === '/pruefer-daten') return handlePrueferDaten(body, env, cors, authHeader);
       if (url.pathname === '/freigabe-status') {
         return new Response(JSON.stringify({ status: (await freigabeStatus(verifiedUid, env)) || 'frei' }), {
           status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
@@ -3735,6 +3737,97 @@ async function handleDeleteAccountData(body, env, cors = {}) {
   });
 }
 
+// ── /konto-archivieren Handler — Kontolöschung als Sperre + Archiv ──────────
+// Ersetzt die frühere Komplettlöschung. Buchungsrelevante Daten (Belege, Abschlüsse, AfA,
+// Privatvorgänge, Tagesdaten, Audit-Log, Stammdaten) bleiben unverändert erhalten, weil sie nach
+// § 147 AO zehn Jahre aufzubewahren sind. Das Konto wird gesperrt, damit sich niemand mehr
+// anmelden kann. Daten ohne Aufbewahrungspflicht (Chats, Fristen, Lernzuordnungen, Webhook-
+// Zugangsdaten) werden gelöscht. Storage (Belege) bleibt unangetastet.
+// Reihenfolge bewusst: erst löschen und markieren, zuletzt sperren. Schlägt ein Schritt fehl,
+// bleibt das Konto aktiv und der Nutzer kann es erneut versuchen.
+// Das Aufbewahrungsdatum ist konservativ: Ende des Jahres der Sperre plus 10 Jahre. Ein späterer
+// Purge-Lauf muss je Beleg gegen das Belegdatum prüfen (Stichtag mit dem Steuerberater abstimmen).
+const ARCHIV_LOESCHEN_COLLECTIONS = ['eigenefristen', 'absender_kategorien', 'webhook_secrets', 'webhook_processed'];
+
+// unterCollection: optional, wird vor jedem Dokument leergeräumt (z.B. 'messages' unter chats/{id}).
+async function loescheAlleUnterPfad(relPfad, adminToken, unterCollection = null) {
+  const basis = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/${relPfad}`;
+  for (let seite = 0; seite < 100; seite++) {
+    const res = await fetch(`${basis}?pageSize=300&mask.fieldPaths=__name__`, {
+      headers: { 'Authorization': `Bearer ${adminToken}` }
+    });
+    if (!res.ok) throw new Error(`Liste fehlgeschlagen (${res.status}) für ${relPfad}`);
+    const dokumente = (await res.json()).documents || [];
+    if (!dokumente.length) return;
+    for (const d of dokumente) {
+      if (unterCollection) {
+        await loescheAlleUnterPfad(`${relPfad}/${d.name.split('/').pop()}/${unterCollection}`, adminToken);
+      }
+      const del = await fetch(`https://firestore.googleapis.com/v1/${d.name}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${adminToken}` }
+      });
+      if (!del.ok) throw new Error(`Löschen fehlgeschlagen (${del.status})`);
+    }
+  }
+}
+
+async function handleKontoArchivieren(env, cors = {}, verifiedUid) {
+  if (!verifiedUid) {
+    return new Response(JSON.stringify({ error: 'Nicht angemeldet' }), {
+      status: 401,
+      headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+  const userId = verifiedUid;
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+
+    // Chats samt Nachrichten-Unterkollektion (keine Aufbewahrungspflicht)
+    const chatsPfad = `users/${userId}/chats`;
+    await loescheAlleUnterPfad(chatsPfad, adminToken, 'messages');
+
+    for (const coll of ARCHIV_LOESCHEN_COLLECTIONS) {
+      await loescheAlleUnterPfad(`users/${userId}/${coll}`, adminToken);
+    }
+
+    // Prüfer-Zugang beenden: der Lesezugriff endet mit der Sperre
+    await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/profil/prueferZugang`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${adminToken}` }
+    });
+
+    // Archiv-Markierung im Profil (Purge-Lauf und Nachweis)
+    const jetzt = new Date();
+    const aufbewahrungBis = `${jetzt.getFullYear() + 10}-12-31`;
+    await firestorePatchFields(`users/${userId}/profil/konto_archiv`, {
+      gesperrt_am: { stringValue: jetzt.toISOString() },
+      aufbewahrung_bis: { stringValue: aufbewahrungBis },
+      grund: { stringValue: 'kontoloeschung' }
+    }, adminToken);
+
+    // Zuletzt sperren: Anmeldung und bestehende Tokens werden danach abgelehnt
+    const authToken = await getGoogleAccessToken(env);
+    const sperre = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:update', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${authToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ localId: userId, disableUser: true })
+    });
+    if (!sperre.ok) throw new Error(`Konto-Sperre fehlgeschlagen (${sperre.status})`);
+
+    return new Response(JSON.stringify({ success: true, aufbewahrung_bis: aufbewahrungBis }), {
+      status: 200,
+      headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  } catch(e) {
+    console.error('konto-archivieren:', e.message);
+    return new Response(JSON.stringify({ error: 'Archivierung fehlgeschlagen' }), {
+      status: 500,
+      headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+}
+
 // ── /pruefer-daten Handler — Betriebsprüfer-Lesezugriff ───────────────────
 // Öffentlich erreichbar (kein Firebase-Login) — der Zugriffsnachweis ist der Besitz des
 // kryptographisch zufälligen 32-Zeichen-Tokens (users/{uid}/profil/prueferZugang, siehe
@@ -3753,7 +3846,10 @@ async function handleDeleteAccountData(body, env, cors = {}) {
 async function handlePrueferZugang(body, env, cors, verifiedUid) {
   const jsonAntwort = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
   const docPfad = `users/${verifiedUid}/profil/prueferZugang`;
-  const linkFuer = (token) => `https://app.kontolux-ai.de/?prueferToken=${token}`;
+  // Token im URL-Fragment (#): der Browser schickt ihn nicht an den Server, also nicht in Hosting-
+  // oder Worker-Logs und nicht im Referer. Alte Links mit ?prueferToken= bleiben bis zu ihrem
+  // Ablauf (90 Tage) gültig, neue Links entstehen nur noch so.
+  const linkFuer = (token) => `https://app.kontolux-ai.de/#prueferToken=${token}`;
   try {
     const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
     if (body.action === 'erstellen') {
@@ -3819,8 +3915,11 @@ async function prueferZugangSuchen(adminToken, feld, wert) {
   return Array.isArray(rows) ? rows.find(r => r.document?.name) || null : null;
 }
 
-async function handlePrueferDaten(body, env, cors = {}) {
-  const token = (body.token || '').trim();
+// Token kommt bevorzugt als "Authorization: Bearer …" (vom Link-Fragment im Client). Das Feld
+// body.token bleibt als Rückfall für bereits ausgelieferte Clients bestehen.
+async function handlePrueferDaten(body, env, cors = {}, authHeader = null) {
+  const headerToken = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+  const token = (headerToken || body.token || '').trim();
   // 32-Zeichen-Base64Url (siehe generierePrueferToken im Frontend) — Format-Check VOR der
   // Firestore-Query, um offensichtlich falsche/leere Werte günstig abzuweisen.
   if (!token || token.length < 16 || token.length > 64) {
