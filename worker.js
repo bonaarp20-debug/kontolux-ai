@@ -470,7 +470,8 @@ export default {
     try {
       let body;
       try {
-        body = await request.json();
+        // clone(): die Admin-Handler lesen den Body selbst noch einmal
+        body = await request.clone().json();
       } catch (parseErr) {
         console.error('JSON Parse Error:', parseErr.message);
         const errorCors = getCORS(origin);
