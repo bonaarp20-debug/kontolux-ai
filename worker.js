@@ -11,6 +11,8 @@ import { VPN_NETZE } from './vpn-netze.js';
 const ALLOWED_ORIGINS = [
   'https://app.kontolux-ai.de',
   'https://kontolux-ai.de',
+  'https://admin.kontolux-ai.de',
+  'https://kontolux-admin.web.app',
 ];
 
 // Lokale Entwicklung (http://localhost:5000) ist nur erlaubt, wenn der Worker mit ENTWICKLUNG="1"
@@ -576,6 +578,8 @@ export default {
       if (url.pathname === '/kontakt')   return handleKontakt(body, env, cors);
       if (url.pathname === '/delete-account-data') return handleDeleteAccountData(body, env, cors);
       if (url.pathname === '/konto-archivieren') return handleKontoArchivieren(env, cors, verifiedUid);
+      // Admin-Routen prüfen die Berechtigung selbst (siehe istAdmin), nicht über protectedPaths
+      if (url.pathname === '/admin/uebersicht') return handleAdminUebersicht(authHeader, env, cors);
       if (url.pathname === '/send-verification-email') return handleSendVerificationEmail(verifiedEmail, env, cors);
       if (url.pathname === '/send-password-reset') return handleSendPasswordReset(body, env, cors);
       if (url.pathname === '/send-email-change-verification') return handleSendEmailChangeVerification(verifiedEmail, body, env, cors);
@@ -4895,6 +4899,101 @@ async function archivLoeschlauf(env) {
   }
   console.log('Archivlauf:', JSON.stringify(zaehler));
   return zaehler;
+}
+
+// ── Admin-Konsole (nur lesen) ─────────────────────────────────────────────
+// Zugang: angemeldetes Firebase-Konto mit verifizierter E-Mail, deren Adresse in ADMIN_EMAILS steht
+// (kommaseparierte Liste in wrangler.toml). Die Prüfung läuft hier im Worker, nicht in der Oberfläche.
+// Ohne Berechtigung antwortet jede Admin-Route mit 403 ohne weitere Angaben.
+function istAdmin(verified, env) {
+  if (!verified || !verified.emailVerified || !verified.email) return false;
+  const erlaubt = String(env.ADMIN_EMAILS || '').split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
+  return erlaubt.includes(verified.email.toLowerCase());
+}
+
+// E-Mail-Adressen zu UIDs (Batch, bis 100 je Aufruf). Gesperrte Konten werden mitgeliefert.
+async function adminEmailsZuUids(uids, env) {
+  const karte = {};
+  if (!uids.length) return karte;
+  const accessToken = await getGoogleAccessToken(env);
+  for (let i = 0; i < uids.length; i += 100) {
+    const res = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:lookup', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ localId: uids.slice(i, i + 100) })
+    });
+    if (!res.ok) continue;
+    for (const u of (await res.json().catch(() => ({}))).users || []) {
+      karte[u.localId] = { email: u.email || null, gesperrt: !!u.disabled };
+    }
+  }
+  return karte;
+}
+
+// Alle KV-Schlüssel mit einem Präfix (begrenzt auf 5000)
+async function kvSchluesselMit(env, praefix) {
+  const namen = [];
+  let cursor;
+  do {
+    const liste = await env.PROFIL_KV.list({ prefix: praefix, cursor });
+    for (const k of liste.keys) namen.push(k.name);
+    cursor = liste.list_complete ? undefined : liste.cursor;
+  } while (cursor && namen.length < 5000);
+  return namen;
+}
+
+async function handleAdminUebersicht(authHeader, env, cors = {}) {
+  const verified = await verifyFirebaseToken(authHeader, env);
+  if (!istAdmin(verified, env)) {
+    return new Response(JSON.stringify({ error: 'forbidden' }), { status: 403, headers: { ...cors, 'Content-Type': 'application/json' } });
+  }
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+
+    // 1. Freigabe-Warteliste (VPN-Gate): KV status:<uid> = 'wartet'
+    const wartend = [];
+    for (const name of await kvSchluesselMit(env, 'status:')) {
+      if ((await env.PROFIL_KV.get(name)) === 'wartet') wartend.push(name.slice('status:'.length));
+    }
+
+    // 2. Gesperrte Konten mit Archiv-Markierung (Kontolöschung) und letzter Lauf
+    const archiv = await archivMarkierungenLaden(adminToken);
+    const berichte = {};
+    for (const konto of archiv) {
+      const bericht = await env.PROFIL_KV.get(`archivlauf:${konto.uid}`);
+      berichte[konto.uid] = bericht ? JSON.parse(bericht) : null;
+    }
+
+    // 3. Wegwerf-Konten mit Sperre (KV gesperrt:<uid>, Löschung nach SPERRFRIST_TAGE)
+    const wegwerf = [];
+    for (const name of await kvSchluesselMit(env, 'gesperrt:')) {
+      const zeit = Number(await env.PROFIL_KV.get(name));
+      wegwerf.push({
+        uid: name.slice('gesperrt:'.length),
+        tage_verbleibend: Math.max(0, SPERRFRIST_TAGE - Math.floor((Date.now() - zeit) / 86400000))
+      });
+    }
+
+    const emails = await adminEmailsZuUids([...wartend, ...archiv.map(k => k.uid), ...wegwerf.map(k => k.uid)], env);
+
+    return new Response(JSON.stringify({
+      stand: new Date().toISOString(),
+      freigabe_wartend: wartend.map(uid => ({ uid, email: emails[uid]?.email || null })),
+      gesperrt_archiv: archiv.map(k => ({
+        uid: k.uid,
+        email: emails[k.uid]?.email || null,
+        aufbewahrung_bis: k.fields.aufbewahrung_bis?.stringValue || null,
+        gesperrt_am: k.fields.gesperrt_am?.stringValue || null,
+        vorwarnung_am: k.fields.vorwarnung_am?.stringValue || null,
+        verfahren_aktiv: k.fields.verfahren_aktiv?.booleanValue === true,
+        letzter_lauf: berichte[k.uid] || null
+      })),
+      gesperrt_wegwerf: wegwerf.map(k => ({ uid: k.uid, email: emails[k.uid]?.email || null, tage_verbleibend: k.tage_verbleibend }))
+    }), { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
+  } catch (e) {
+    console.error('admin/uebersicht:', e.message);
+    return new Response(JSON.stringify({ error: 'Übersicht nicht verfügbar' }), { status: 500, headers: { ...cors, 'Content-Type': 'application/json' } });
+  }
 }
 
 async function sendMonthlyReminders(env) {

@@ -26,3 +26,5 @@ crons = ["0 8 1 * *", "15 */3 * * *", "0 3 * * *"]
 [vars]
 ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 KI_OPTIMIERUNG_AKTIV = "true"
+# Admin-Konsole: nur diese verifizierten Konten dürfen /admin/* aufrufen
+ADMIN_EMAILS = "johannkorn7@gmail.com"
