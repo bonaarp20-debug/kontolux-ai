@@ -119,6 +119,8 @@ async function kontenZaehlen(uid, ip, email, env, verdaechtig = false) {
   await env.PROFIL_KV.put(schluessel, String(anzahl), { expirationTtl: FENSTER_SEKUNDEN });
   if (verdaechtig || anzahl > KONTEN_PRO_IP) {
     await env.PROFIL_KV.put(`status:${uid}`, 'wartet');
+    // Grund für die Admin-Übersicht: VPN-Netz oder zu viele Konten von einer IP-Adresse
+    await env.PROFIL_KV.put(`freigabe-grund:${uid}`, verdaechtig ? 'vpn' : 'ip-limit');
     const link = await freigabeLink(uid, env);
     await sendEmail('jona@kontolux-ai.de', 'Konto zur Freigabe: ' + kurz(uid), `
       <p style="font-family:sans-serif;font-size:14px">Ein neues Konto wartet auf Freigabe.</p>
@@ -583,6 +585,7 @@ export default {
       if (url.pathname === '/konto-archivieren') return handleKontoArchivieren(env, cors, verifiedUid);
       // Admin-Routen prüfen die Berechtigung selbst (siehe istAdmin), nicht über protectedPaths
       if (url.pathname === '/admin/uebersicht') return handleAdminUebersicht(authHeader, env, cors);
+      if (url.pathname === '/admin/archiv-register') return handleAdminArchivRegister(authHeader, env, cors);
       if (url.pathname === '/admin/freigeben') return adminFreigeben(request, authHeader, env, cors);
       if (url.pathname === '/admin/ablehnen') return adminAblehnen(request, authHeader, env, cors);
       if (url.pathname === '/admin/entsperren') return adminEntsperren(request, authHeader, env, cors);
@@ -4960,6 +4963,43 @@ async function kvSchluesselMit(env, praefix) {
   return namen;
 }
 
+// Archiv-Register nachtragen: alle gesperrten Konten in Firebase Auth, die eine konto_archiv-Markierung
+// haben, bekommen den KV-Eintrag archiv:<uid>. Für Konten, die vor der Umstellung gesperrt wurden.
+async function handleAdminArchivRegister(authHeader, env, cors = {}) {
+  const verified = await verifyFirebaseToken(authHeader, env);
+  if (!istAdmin(verified, env)) return konsoleJson({ error: 'forbidden' }, 403, cors);
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const authToken = await getGoogleAccessToken(env);
+    let seite = '';
+    let gefunden = 0;
+    let geprueft = 0;
+    do {
+      const res = await fetch(`https://identitytoolkit.googleapis.com/v1/projects/kontolux-ai/accounts:query`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${authToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ returnUserInfo: true, limit: 500, ...(seite ? { nextPageToken: seite } : {}) })
+      });
+      if (!res.ok) throw new Error(`Konten laden fehlgeschlagen (${res.status})`);
+      const daten = await res.json();
+      for (const u of daten.userInfo || []) {
+        if (!u.disabled) continue;
+        geprueft++;
+        if (await firestoreGetDoc(`users/${u.localId}/profil/konto_archiv`, adminToken)) {
+          await env.PROFIL_KV.put(`archiv:${u.localId}`, new Date().toISOString());
+          gefunden++;
+        }
+      }
+      seite = daten.nextPageToken || '';
+    } while (seite);
+    await adminLogEintragen(env, verified.email, 'archiv_register_nachgetragen', '-', { gefunden, geprueft });
+    return konsoleJson({ ok: true, gefunden, geprueft }, 200, cors);
+  } catch (e) {
+    console.error('admin/archiv-register:', e.message);
+    return konsoleJson({ error: 'Nachtrag fehlgeschlagen' }, 500, cors);
+  }
+}
+
 async function handleAdminUebersicht(authHeader, env, cors = {}) {
   const verified = await verifyFirebaseToken(authHeader, env);
   if (!istAdmin(verified, env)) {
@@ -4996,7 +5036,7 @@ async function handleAdminUebersicht(authHeader, env, cors = {}) {
 
     return new Response(JSON.stringify({
       stand: new Date().toISOString(),
-      freigabe_wartend: wartend.map(uid => ({ uid, email: emails[uid]?.email || null })),
+      freigabe_wartend: await Promise.all(wartend.map(async uid => ({ uid, email: emails[uid]?.email || null, grund: (await env.PROFIL_KV.get(`freigabe-grund:${uid}`)) || null }))),
       gesperrt_archiv: archiv.map(k => ({
         uid: k.uid,
         email: emails[k.uid]?.email || null,
