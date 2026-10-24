@@ -586,6 +586,7 @@ export default {
       // Admin-Routen prüfen die Berechtigung selbst (siehe istAdmin), nicht über protectedPaths
       if (url.pathname === '/admin/uebersicht') return handleAdminUebersicht(authHeader, env, cors);
       if (url.pathname === '/admin/archiv-register') return handleAdminArchivRegister(authHeader, env, cors);
+      if (url.pathname === '/admin/loeschlauf-jetzt') return handleAdminLoeschlaufJetzt(authHeader, env, cors);
       if (url.pathname === '/admin/freigeben') return adminFreigeben(request, authHeader, env, cors);
       if (url.pathname === '/admin/ablehnen') return adminAblehnen(request, authHeader, env, cors);
       if (url.pathname === '/admin/entsperren') return adminEntsperren(request, authHeader, env, cors);
@@ -4961,6 +4962,21 @@ async function kvSchluesselMit(env, praefix) {
     cursor = liste.list_complete ? undefined : liste.cursor;
   } while (cursor && namen.length < 5000);
   return namen;
+}
+
+// Löschlauf sofort ausführen (für Tests und Kontrolle). Gleiche Logik wie der nächtliche Lauf:
+// Vorwarnung, Bericht, und Löschen nur mit gesetztem Schalter ARCHIV_LOESCHEN_AKTIV.
+async function handleAdminLoeschlaufJetzt(authHeader, env, cors = {}) {
+  const verified = await verifyFirebaseToken(authHeader, env);
+  if (!istAdmin(verified, env)) return konsoleJson({ error: 'forbidden' }, 403, cors);
+  try {
+    const zaehler = await archivLoeschlauf(env);
+    await adminLogEintragen(env, verified.email, 'loeschlauf_manuell', '-', { ...zaehler, schalter: env.ARCHIV_LOESCHEN_AKTIV === 'true' });
+    return konsoleJson({ ok: true, ...zaehler, loeschen_aktiv: env.ARCHIV_LOESCHEN_AKTIV === 'true' }, 200, cors);
+  } catch (e) {
+    console.error('admin/loeschlauf:', e.message);
+    return konsoleJson({ error: 'Löschlauf fehlgeschlagen' }, 500, cors);
+  }
 }
 
 // Archiv-Register nachtragen: alle gesperrten Konten in Firebase Auth, die eine konto_archiv-Markierung
