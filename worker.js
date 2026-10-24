@@ -299,6 +299,8 @@ const ROUTEN_LIMITS = {
   '/send-password-reset':   { limit: 5,  windowMs: 10 * 60 * 1000 },
   '/pruefer-daten':         { limit: 10, windowMs: 10 * 60 * 1000 },
   '/konto-archivieren':     { limit: 3,  windowMs: 60 * 60 * 1000 },
+  '/konto-art':              { limit: 10, windowMs: 10 * 60 * 1000 },
+  '/anfrage':               { limit: 5,  windowMs: 60 * 60 * 1000 },
   '/registrierung-pruefen': { limit: 30, windowMs: 10 * 60 * 1000 },
 };
 // Globale Limits über alle IPs (KV-Zähler). Ergänzen das Limit pro IP, weil verteilte Anfragen
@@ -585,6 +587,10 @@ export default {
       if (url.pathname === '/admin/entsperren') return adminEntsperren(request, authHeader, env, cors);
       if (url.pathname === '/admin/verfahren') return adminVerfahren(request, authHeader, env, cors);
       if (url.pathname === '/admin/aufbewahrung') return adminAufbewahrung(request, authHeader, env, cors);
+      if (url.pathname === '/konto-art') return handleKontoArt(body, env, cors);
+      if (url.pathname === '/anfrage') return handleAnfrage(body, env, cors);
+      if (url.pathname === '/admin/anfragen') return handleAdminAnfragen(authHeader, env, cors);
+      if (url.pathname === '/admin/anfrage-status') return handleAdminAnfrageStatus(request, authHeader, env, cors);
       if (url.pathname === '/send-verification-email') return handleSendVerificationEmail(verifiedEmail, env, cors);
       if (url.pathname === '/send-password-reset') return handleSendPasswordReset(body, env, cors);
       if (url.pathname === '/send-email-change-verification') return handleSendEmailChangeVerification(verifiedEmail, body, env, cors);
@@ -5154,6 +5160,133 @@ async function adminAufbewahrung(request, authHeader, env, cors) {
   } catch (e) {
     console.error('admin/aufbewahrung:', e.message);
     return adminAntwort({ error: 'Verlängerung fehlgeschlagen' }, 500, cors);
+  }
+}
+
+// ── Anfragen (gelöschte Konten und Behörden) ───────────────────────────────
+// Öffentlich erreichbar, ohne Anmeldung. Anfragen werden in der Collection anfragen gespeichert
+// (Firestore-Regeln lassen Clients nicht zu, nur der Worker schreibt und liest). Jede Anfrage
+// landet in der Admin-Konsole. Behörden-Anfragen brauchen Behörde, Aktenzeichen und eine
+// Kontaktstelle, über die du sie bestätigen kannst. Ohne Bestätigung gibt es keine Daten.
+const ANFRAGE_ARTEN = ['auskunft', 'behoerde', 'problem', 'sonstiges'];
+const ANFRAGE_STATUS = ['offen', 'bestaetigt', 'erledigt', 'abgelehnt'];
+
+function konsoleJson(objekt, status, cors) {
+  return new Response(JSON.stringify(objekt), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
+}
+
+// Welche Art Sperre liegt bei einer E-Mail vor? Nur nach einem fehlgeschlagenen Login aufrufen,
+// wenn Firebase das Konto bereits als gesperrt meldet. Liefert 'archiv', 'wegwerf' oder 'unbekannt'.
+async function handleKontoArt(body, env, cors = {}) {
+  const email = sicherEinzeiler(body.email, 254).toLowerCase();
+  if (!email.includes('@')) return konsoleJson({ art: 'unbekannt' }, 200, cors);
+  try {
+    const accessToken = await getGoogleAccessToken(env);
+    const res = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:lookup', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: [email] })
+    });
+    const user = (await res.json().catch(() => ({}))).users?.[0];
+    // Nur für gesperrte Konten Auskunft geben, sonst liefert der Endpunkt Kontoinfos zu beliebigen Adressen
+    if (!user || !user.disabled) return konsoleJson({ art: 'unbekannt' }, 200, cors);
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    if (await firestoreGetDoc(`users/${user.localId}/profil/konto_archiv`, adminToken)) {
+      return konsoleJson({ art: 'archiv' }, 200, cors);
+    }
+    if (env.PROFIL_KV && await env.PROFIL_KV.get(`gesperrt:${user.localId}`)) {
+      return konsoleJson({ art: 'wegwerf' }, 200, cors);
+    }
+    return konsoleJson({ art: 'unbekannt' }, 200, cors);
+  } catch (e) {
+    console.error('konto-art:', e.message);
+    return konsoleJson({ art: 'unbekannt' }, 200, cors);
+  }
+}
+
+function fsWert(s) { return { stringValue: String(s ?? '') }; }
+
+async function handleAnfrage(body, env, cors = {}) {
+  const art = ANFRAGE_ARTEN.includes(body.art) ? body.art : null;
+  const name = sicherEinzeiler(body.name, 100);
+  const email = sicherEinzeiler(body.email, 254).toLowerCase();
+  const nachricht = sicherMehrzeilig(body.nachricht, 3000);
+  const behoerde = sicherEinzeiler(body.behoerde, 150);
+  const aktenzeichen = sicherEinzeiler(body.aktenzeichen, 100);
+  const kontaktstelle = sicherEinzeiler(body.kontaktstelle, 200);
+  if (!art || !name || !email.includes('@') || !nachricht) {
+    return konsoleJson({ error: 'pflichtfelder' }, 400, cors);
+  }
+  if (art === 'behoerde' && (!behoerde || !aktenzeichen || !kontaktstelle)) {
+    return konsoleJson({ error: 'behoerde-pflicht' }, 400, cors);
+  }
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const res = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/anfragen', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields: {
+        art: fsWert(art), name: fsWert(name), email: fsWert(email), nachricht: fsWert(nachricht),
+        behoerde: fsWert(behoerde), aktenzeichen: fsWert(aktenzeichen), kontaktstelle: fsWert(kontaktstelle),
+        status: fsWert('offen'), erstellt_am: fsWert(new Date().toISOString())
+      } })
+    });
+    if (!res.ok) throw new Error(`Anfrage speichern fehlgeschlagen (${res.status})`);
+    const id = (await res.json()).name.split('/').pop();
+    await sendEmail('jona@kontolux-ai.de', `Neue Anfrage (${art}): ${name}`, `
+      <p style="font-family:sans-serif;font-size:14px">Neue Anfrage in der Admin-Konsole, Tab „Anfragen“.</p>
+      <p style="font-family:sans-serif;font-size:14px"><strong>Art:</strong> ${escapeHtml(art)}<br><strong>Von:</strong> ${escapeHtml(name)} (${escapeHtml(email)})</p>
+      ${art === 'behoerde' ? `<p style="font-family:sans-serif;font-size:14px"><strong>Behörde:</strong> ${escapeHtml(behoerde)}<br><strong>Aktenzeichen:</strong> ${escapeHtml(aktenzeichen)}<br><strong>Kontaktstelle zur Bestätigung:</strong> ${escapeHtml(kontaktstelle)}</p>` : ''}`, env);
+    return konsoleJson({ ok: true, id }, 200, cors);
+  } catch (e) {
+    console.error('anfrage:', e.message);
+    return konsoleJson({ error: 'speichern' }, 500, cors);
+  }
+}
+
+async function handleAdminAnfragen(authHeader, env, cors = {}) {
+  const verified = await verifyFirebaseToken(authHeader, env);
+  if (!istAdmin(verified, env)) return konsoleJson({ error: 'forbidden' }, 403, cors);
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const res = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/anfragen?pageSize=300', {
+      headers: { 'Authorization': `Bearer ${adminToken}` }
+    });
+    if (!res.ok) throw new Error(`Anfragen laden fehlgeschlagen (${res.status})`);
+    const daten = await res.json();
+    const liste = (daten.documents || []).map(d => {
+      const f = d.fields || {};
+      const feld = (k) => f[k]?.stringValue || '';
+      return { id: d.name.split('/').pop(), art: feld('art'), name: feld('name'), email: feld('email'), nachricht: feld('nachricht'),
+        behoerde: feld('behoerde'), aktenzeichen: feld('aktenzeichen'), kontaktstelle: feld('kontaktstelle'),
+        status: feld('status'), erstellt_am: feld('erstellt_am') };
+    }).sort((a, b) => b.erstellt_am.localeCompare(a.erstellt_am));
+    return konsoleJson({ anfragen: liste }, 200, cors);
+  } catch (e) {
+    console.error('admin/anfragen:', e.message);
+    return konsoleJson({ error: 'Anfragen nicht verfügbar' }, 500, cors);
+  }
+}
+
+async function handleAdminAnfrageStatus(request, authHeader, env, cors = {}) {
+  const verified = await verifyFirebaseToken(authHeader, env);
+  if (!istAdmin(verified, env)) return konsoleJson({ error: 'forbidden' }, 403, cors);
+  const body = await request.json().catch(() => ({}));
+  const id = String(body.id || '');
+  const status = String(body.status || '');
+  const grund = String(body.grund || '').trim();
+  if (!/^[A-Za-z0-9_-]{5,100}$/.test(id) || !ANFRAGE_STATUS.includes(status)) {
+    return konsoleJson({ error: 'eingabe' }, 400, cors);
+  }
+  if (grund.length < 5) return konsoleJson({ error: 'grund' }, 400, cors);
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    await firestorePatchFields(`anfragen/${id}`, { status: fsWert(status), status_grund: fsWert(grund), status_am: fsWert(new Date().toISOString()) }, adminToken);
+    await adminLogEintragen(env, verified.email, `anfrage_${status}`, id, { grund });
+    return konsoleJson({ ok: true }, 200, cors);
+  } catch (e) {
+    console.error('admin/anfrage-status:', e.message);
+    return konsoleJson({ error: 'Status nicht gespeichert' }, 500, cors);
   }
 }
 
