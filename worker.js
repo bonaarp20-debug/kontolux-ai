@@ -616,6 +616,7 @@ export default {
     if (event.cron === GESPERRT_LOESCH_CRON) {
       await gesperrteKontenLoeschen(env);
       await fristErinnerungenSenden(env).catch(e => console.error('Fristen-Erinnerung:', e.message));
+      await archivLoeschlauf(env).catch(e => console.error('Archivlauf:', e.message));
       return;
     }
     await sendMonthlyReminders(env);
@@ -4715,6 +4716,185 @@ async function fristErinnerungenSenden(env) {
     }
   }
   return gesendet;
+}
+
+// ── Archivlöschlauf (Kontolöschung als Sperre + Archiv) ──────────────────
+// Läuft im täglichen 03:00-Lauf und arbeitet nur auf Konten mit einer Archiv-Markierung
+// (users/{uid}/profil/konto_archiv, angelegt von handleKontoArchivieren). Ablauf je Konto:
+//  1. ARCHIV_VORWARN_TAGE vor dem Aufbewahrungsende: einmalige Vorwarn-Mail (vorwarnung_am).
+//  2. Nach Ablauf (aufbewahrung_bis ist überschritten): Bericht im KV (archivlauf:<uid>) mit
+//     Anzahl der Dokumente je Sammlung und der Storage-Dateien. Das ist der Trockenlauf.
+//  3. Gelöscht wird nur, wenn ARCHIV_LOESCHEN_AKTIV in wrangler.toml/Secrets auf 'true' steht.
+//     Standard ist aus. Das Löschen ist nicht rückgängig zu machen.
+// Aufbewahrungsende ist Ende des Jahres der Sperre plus 10 Jahre. Das ist konservativ: alle
+// Belege sind höchstens im Sperrjahr entstanden, also reicht ein Datum für das ganze Konto.
+const ARCHIV_VORWARN_TAGE = 30;
+const ARCHIV_SAMMLUNGEN = [
+  'chats', 'dokumente', 'monatsabschluesse', 'abschreibungen', 'privatvorgaenge', 'tagesdaten',
+  'audit_log', 'angebote', 'kunden', 'zeiteintraege', 'reisekosten', 'sammelbelege',
+  'stripe_links', 'stripe_rechnungen', 'eigenefristen', 'absender_kategorien',
+  'webhook_secrets', 'webhook_processed', 'profil'
+];
+
+// Reine Entscheidung je Konto. tageBis = Tage bis aufbewahrung_bis (negativ = abgelaufen).
+function archivAktion(tageBis, vorwarnungSchonGesendet, loeschenAktiv) {
+  if (tageBis >= 0) {
+    return tageBis <= ARCHIV_VORWARN_TAGE && !vorwarnungSchonGesendet ? 'vorwarnen' : 'warten';
+  }
+  return loeschenAktiv ? 'loeschen' : 'bericht';
+}
+
+async function archivMarkierungenLaden(adminToken) {
+  const res = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      structuredQuery: {
+        from: [{ collectionId: 'profil', allDescendants: true }],
+        where: { fieldFilter: { field: { fieldPath: 'grund' }, op: 'EQUAL', value: { stringValue: 'kontoloeschung' } } }
+      }
+    })
+  });
+  if (!res.ok) throw new Error(`Archiv-Abfrage fehlgeschlagen (${res.status})`);
+  const liste = [];
+  for (const zeile of await res.json()) {
+    const name = zeile.document?.name || '';
+    if (!name.endsWith('/profil/konto_archiv')) continue;
+    const [, uid] = name.split('/documents/')[1].split('/');
+    liste.push({ uid, docName: name, fields: zeile.document.fields || {} });
+  }
+  return liste;
+}
+
+// Mail-Adresse auch für gesperrte Konten (der Erinnerungsversand oben lässt sie aus).
+async function archivMailAdresse(uid, env) {
+  const accessToken = await getGoogleAccessToken(env);
+  const res = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:lookup', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ localId: [uid] })
+  });
+  if (!res.ok) return null;
+  return (await res.json().catch(() => ({}))).users?.[0]?.email || null;
+}
+
+// Anzahl Dokumente je Sammlung (eine Seite, bis 1000). 'mehr' markiert, wenn es weitere gibt.
+async function archivZaehlen(uid, adminToken) {
+  const bericht = {};
+  for (const coll of ARCHIV_SAMMLUNGEN) {
+    const res = await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${uid}/${coll}?pageSize=1000&mask.fieldPaths=__name__`, {
+      headers: { 'Authorization': `Bearer ${adminToken}` }
+    });
+    if (!res.ok) { bericht[coll] = 'Fehler'; continue; }
+    const data = await res.json();
+    const anzahl = (data.documents || []).length;
+    bericht[coll] = data.nextPageToken ? `${anzahl}+` : anzahl;
+  }
+  return bericht;
+}
+
+// Storage-Dateien unter users/{uid}/. Mit loeschen=false nur zählen.
+async function archivStorage(uid, env, loeschen) {
+  const token = await getGoogleAccessToken(env, STORAGE_SCOPE);
+  const bucket = 'kontolux-ai.firebasestorage.app';
+  const prefix = encodeURIComponent(`users/${uid}/`);
+  let seite = '';
+  let anzahl = 0;
+  do {
+    const res = await fetch(`https://storage.googleapis.com/storage/v1/b/${bucket}/o?prefix=${prefix}&maxResults=500${seite ? `&pageToken=${seite}` : ''}`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    if (!res.ok) throw new Error(`Storage-Liste fehlgeschlagen (${res.status})`);
+    const data = await res.json();
+    for (const objekt of data.items || []) {
+      anzahl++;
+      if (!loeschen) continue;
+      const del = await fetch(`https://storage.googleapis.com/storage/v1/b/${bucket}/o/${encodeURIComponent(objekt.name)}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!del.ok && del.status !== 404) throw new Error(`Storage-Löschen fehlgeschlagen (${del.status})`);
+    }
+    seite = data.nextPageToken || '';
+  } while (seite);
+  return anzahl;
+}
+
+async function archivKontoLoeschen(uid, env, adminToken) {
+  for (const coll of ARCHIV_SAMMLUNGEN) {
+    await loescheAlleUnterPfad(`users/${uid}/${coll}`, adminToken, coll === 'chats' ? 'messages' : null);
+  }
+  // Feedback liegt top-level und ist über das Feld userId zugeordnet (siehe handleDeleteAccountData)
+  const fbRes = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'feedback' }], where: { fieldFilter: { field: { fieldPath: 'userId' }, op: 'EQUAL', value: { stringValue: uid } } } } })
+  });
+  if (fbRes.ok) {
+    for (const zeile of await fbRes.json()) {
+      if (!zeile.document?.name) continue;
+      await fetch(`https://firestore.googleapis.com/v1/${zeile.document.name}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${adminToken}` } });
+    }
+  }
+  await archivStorage(uid, env, true);
+  const authToken = await getGoogleAccessToken(env);
+  const del = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:delete', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${authToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ localId: uid })
+  });
+  if (!del.ok) throw new Error(`Konto löschen fehlgeschlagen (${del.status})`);
+}
+
+async function archivLoeschlauf(env) {
+  const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+  const heute = heuteBerlinIso();
+  const loeschenAktiv = env.ARCHIV_LOESCHEN_AKTIV === 'true';
+  const zaehler = { vorgewarnt: 0, berichtet: 0, geloescht: 0, fehler: 0 };
+
+  for (const konto of await archivMarkierungenLaden(adminToken)) {
+    const bis = konto.fields.aufbewahrung_bis?.stringValue;
+    if (!bis || !/^\d{4}-\d{2}-\d{2}$/.test(bis)) continue;
+    const tageBis = fristTageBis(bis, heute);
+    const vorwarnungSchon = !!konto.fields.vorwarnung_am?.stringValue;
+    const aktion = archivAktion(tageBis, vorwarnungSchon, loeschenAktiv);
+    try {
+      if (aktion === 'warten') continue;
+      if (aktion === 'vorwarnen') {
+        const email = await archivMailAdresse(konto.uid, env);
+        if (!email) continue;
+        const html = emailShell(`Deine archivierten Daten werden am 31.12.${bis.slice(0, 4)} gelöscht`, `
+          <h1 style="font-size:19px;color:#0f1f2e;margin:0 0 16px">Hinweis zu deinem archivierten Konto</h1>
+          <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 16px">Dein Konto bei Kontolux AI ist gesperrt. Die Buchungsdaten bleiben aus gesetzlichen Gründen (§ 147 AO) bis zum <strong>${bis.split('-').reverse().join('.')}</strong> archiviert.</p>
+          <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 16px">Danach werden die Daten gelöscht. Wenn du vorher eine Kopie brauchst, schreib uns an jona@kontolux-ai.de.</p>
+        `);
+        await sendEmail(email, 'Hinweis: Löschung deiner archivierten Daten', html, env, 'Kontolux AI <jona@kontolux-ai.de>');
+        await firestorePatchFields(`users/${konto.uid}/profil/konto_archiv`, { vorwarnung_am: { stringValue: new Date().toISOString() } }, adminToken);
+        zaehler.vorgewarnt++;
+        continue;
+      }
+      // Frist abgelaufen: Bericht schreiben, vor dem Löschen immer
+      const bericht = {
+        zeitpunkt: new Date().toISOString(),
+        aufbewahrung_bis: bis,
+        sammlungen: await archivZaehlen(konto.uid, adminToken),
+        storage_dateien: await archivStorage(konto.uid, env, false),
+        loeschen_aktiv: loeschenAktiv
+      };
+      await env.PROFIL_KV.put(`archivlauf:${konto.uid}`, JSON.stringify(bericht));
+      zaehler.berichtet++;
+      if (aktion === 'loeschen') {
+        await archivKontoLoeschen(konto.uid, env, adminToken);
+        await env.PROFIL_KV.put(`archivlauf:${konto.uid}`, JSON.stringify({ ...bericht, geloescht_am: new Date().toISOString() }));
+        zaehler.geloescht++;
+      }
+    } catch (e) {
+      zaehler.fehler++;
+      console.error('Archivlauf:', e.message);
+    }
+  }
+  console.log('Archivlauf:', JSON.stringify(zaehler));
+  return zaehler;
 }
 
 async function sendMonthlyReminders(env) {
