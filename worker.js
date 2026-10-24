@@ -4173,6 +4173,29 @@ async function firestoreListAll(baseUrl, authHeader) {
 // bezahltem Beleg (Ist-Versteuerung/EÜR: unbezahlte Rechnungen sind noch kein Zufluss/
 // Abfluss und werden bewusst NICHT gebucht, sonst würden offene, ggf. nie eingehende
 // Forderungen als Umsatz verbucht).
+// Privatentnahmen und Einlagen (§ 4 Abs. 4a EStG) als Buchungszeile über das Buchungskonto. Ohne Gewinnwirkung,
+// aber vollständig im Stapel. Entnahme: Bank Haben / Privatentnahme Soll. Einlage: Bank Soll / Privateinlage Haben.
+const PRIVATKONTEN_EXPORT = { entnahme: { SKR03: '1800', SKR04: '2100' }, einlage: { SKR03: '1890', SKR04: '2180' } };
+function privatvorgangBuchung(v, skr, bankkonto) {
+  if (!v || v.storniert === true || !PRIVATKONTEN_EXPORT[v.art]) return null;
+  const betrag = Math.round((Number(v.betrag) || 0) * 100) / 100;
+  if (betrag <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(String(v.datum || ''))) return null;
+  const gegenkonto = PRIVATKONTEN_EXPORT[v.art][skr === 'SKR04' ? 'SKR04' : 'SKR03'];
+  const belegDatum = new Date(v.datum + 'T00:00:00');
+  return {
+    betrag,
+    sollHaben: v.art === 'einlage' ? 'S' : 'H',
+    konto: bankkonto,
+    gegenkonto,
+    bu: '',
+    belegDatum,
+    belegfeld1: 'PRIV-' + String(v.datum).replace(/-/g, ''),
+    belegfeld2: '',
+    buchungstext: (v.art === 'einlage' ? 'Privateinlage' : 'Privatentnahme') + (v.notiz ? ' ' + String(v.notiz) : ''),
+    diverseAdressnummer: ''
+  };
+}
+
 async function handleDatevExport(body, env, cors = {}) {
   const { userId, jahr } = body;
 
@@ -4381,6 +4404,16 @@ async function handleDatevExport(body, env, cors = {}) {
         buchungstext,
         diverseAdressnummer
       });
+    }
+
+    // Privatentnahmen/-einlagen des Jahres (Storno-Vorgänge bleiben draußen)
+    const privatDocs = await firestoreListAll(`${base}/privatvorgaenge`, authHeader).catch(() => []);
+    for (const pDoc of privatDocs) {
+      const f = pDoc.fields || {};
+      const v = { art: firestoreValue(f.art), datum: firestoreValue(f.datum), betrag: firestoreValue(f.betrag), notiz: firestoreValue(f.notiz), storniert: firestoreValue(f.storniert) === true };
+      if (String(v.datum || '').slice(0, 4) !== String(jahr)) continue;
+      const b = privatvorgangBuchung(v, skr, bankkonto);
+      if (b) buchungen.push(b);
     }
 
     buchungen.sort((a, b) => a.belegDatum - b.belegDatum);
