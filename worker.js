@@ -580,6 +580,11 @@ export default {
       if (url.pathname === '/konto-archivieren') return handleKontoArchivieren(env, cors, verifiedUid);
       // Admin-Routen prüfen die Berechtigung selbst (siehe istAdmin), nicht über protectedPaths
       if (url.pathname === '/admin/uebersicht') return handleAdminUebersicht(authHeader, env, cors);
+      if (url.pathname === '/admin/freigeben') return adminFreigeben(request, authHeader, env, cors);
+      if (url.pathname === '/admin/ablehnen') return adminAblehnen(request, authHeader, env, cors);
+      if (url.pathname === '/admin/entsperren') return adminEntsperren(request, authHeader, env, cors);
+      if (url.pathname === '/admin/verfahren') return adminVerfahren(request, authHeader, env, cors);
+      if (url.pathname === '/admin/aufbewahrung') return adminAufbewahrung(request, authHeader, env, cors);
       if (url.pathname === '/send-verification-email') return handleSendVerificationEmail(verifiedEmail, env, cors);
       if (url.pathname === '/send-password-reset') return handleSendPasswordReset(body, env, cors);
       if (url.pathname === '/send-email-change-verification') return handleSendEmailChangeVerification(verifiedEmail, body, env, cors);
@@ -4859,6 +4864,8 @@ async function archivLoeschlauf(env) {
   for (const konto of await archivMarkierungenLaden(adminToken)) {
     const bis = konto.fields.aufbewahrung_bis?.stringValue;
     if (!bis || !/^\d{4}-\d{2}-\d{2}$/.test(bis)) continue;
+    // Laufendes Verfahren (Behörde): Konto bleibt unberührt, bis die Markierung entfernt ist
+    if (konto.fields.verfahren_aktiv?.booleanValue === true) continue;
     const tageBis = fristTageBis(bis, heute);
     const vorwarnungSchon = !!konto.fields.vorwarnung_am?.stringValue;
     const aktion = archivAktion(tageBis, vorwarnungSchon, loeschenAktiv);
@@ -4986,6 +4993,8 @@ async function handleAdminUebersicht(authHeader, env, cors = {}) {
         gesperrt_am: k.fields.gesperrt_am?.stringValue || null,
         vorwarnung_am: k.fields.vorwarnung_am?.stringValue || null,
         verfahren_aktiv: k.fields.verfahren_aktiv?.booleanValue === true,
+        verfahren_aktenzeichen: k.fields.verfahren_aktenzeichen?.stringValue || null,
+        verfahren_stelle: k.fields.verfahren_stelle?.stringValue || null,
         letzter_lauf: berichte[k.uid] || null
       })),
       gesperrt_wegwerf: wegwerf.map(k => ({ uid: k.uid, email: emails[k.uid]?.email || null, tage_verbleibend: k.tage_verbleibend }))
@@ -4993,6 +5002,158 @@ async function handleAdminUebersicht(authHeader, env, cors = {}) {
   } catch (e) {
     console.error('admin/uebersicht:', e.message);
     return new Response(JSON.stringify({ error: 'Übersicht nicht verfügbar' }), { status: 500, headers: { ...cors, 'Content-Type': 'application/json' } });
+  }
+}
+
+// ── Admin-Konsole: Schreibaktionen ─────────────────────────────────────────
+// Jede Aktion prüft die Berechtigung (istAdmin), verlangt einen Grund (mind. 5 Zeichen) und
+// schreibt einen Eintrag ins Admin-Log (KV-Präfix admin-log:, wird nicht gelöscht).
+// Nutzer können ihre Konten nicht selbst entsperren. Das läuft nur über diese Routen.
+async function adminLogEintragen(env, admin, aktion, uid, details = {}) {
+  const zeit = new Date().toISOString();
+  const kennung = Math.random().toString(36).slice(2, 8);
+  await env.PROFIL_KV.put(`admin-log:${zeit}:${kennung}`, JSON.stringify({ zeit, admin, aktion, uid, ...details }));
+}
+
+function adminAntwort(objekt, status, cors) {
+  return new Response(JSON.stringify(objekt), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
+}
+
+// Gemeinsamer Rahmen: Berechtigung, uid, Grund. Gibt { admin, uid, grund, body } oder eine Fehlerantwort zurück.
+async function adminRahmen(authHeader, request, env, cors) {
+  const verified = await verifyFirebaseToken(authHeader, env);
+  if (!istAdmin(verified, env)) return { fehler: adminAntwort({ error: 'forbidden' }, 403, cors) };
+  const body = await request.json().catch(() => ({}));
+  const uid = String(body.uid || '');
+  if (!/^[A-Za-z0-9]{6,128}$/.test(uid)) return { fehler: adminAntwort({ error: 'uid' }, 400, cors) };
+  const grund = String(body.grund || '').trim();
+  if (grund.length < 5) return { fehler: adminAntwort({ error: 'grund' }, 400, cors) };
+  return { admin: verified.email, uid, grund, body };
+}
+
+async function konsoleKontoAktivieren(uid, env, aktiv) {
+  const accessToken = await getGoogleAccessToken(env);
+  const res = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:update', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ localId: uid, disableUser: !aktiv })
+  });
+  if (!res.ok) throw new Error(`accounts:update fehlgeschlagen (${res.status})`);
+}
+
+// Freigeben: Konto darf rein, Bestätigungsmail geht an den Nutzer (wie beim Link aus der Mail)
+async function adminFreigeben(request, authHeader, env, cors) {
+  const r = await adminRahmen(authHeader, request, env, cors);
+  if (r.fehler) return r.fehler;
+  try {
+    await env.PROFIL_KV.put(`status:${r.uid}`, 'frei');
+    let mailHinweis = 'Bestätigungsmail gesendet.';
+    const email = await kontoEmailHolen(r.uid, env);
+    if (email) {
+      const link = await generateFirebaseActionLink('VERIFY_EMAIL', email, env);
+      await sendEmail(email, 'Bestätige deine E-Mail-Adresse — Kontolux AI', verificationEmailHtml(link), env, 'Kontolux AI <jona@kontolux-ai.de>');
+    } else {
+      mailHinweis = 'Keine E-Mail-Adresse gefunden, keine Mail gesendet.';
+    }
+    await adminLogEintragen(env, r.admin, 'freigegeben', r.uid, { grund: r.grund });
+    return adminAntwort({ ok: true, hinweis: mailHinweis }, 200, cors);
+  } catch (e) {
+    console.error('admin/freigeben:', e.message);
+    return adminAntwort({ error: 'Freigabe fehlgeschlagen' }, 500, cors);
+  }
+}
+
+// Ablehnen: Konto wird gesperrt und landet in der Wegwerf-Liste (Löschung nach 30 Tagen)
+async function adminAblehnen(request, authHeader, env, cors) {
+  const r = await adminRahmen(authHeader, request, env, cors);
+  if (r.fehler) return r.fehler;
+  try {
+    await env.PROFIL_KV.put(`status:${r.uid}`, 'abgelehnt');
+    await kontoSperren(r.uid, env);
+    await adminLogEintragen(env, r.admin, 'abgelehnt', r.uid, { grund: r.grund });
+    return adminAntwort({ ok: true }, 200, cors);
+  } catch (e) {
+    console.error('admin/ablehnen:', e.message);
+    return adminAntwort({ error: 'Ablehnen fehlgeschlagen' }, 500, cors);
+  }
+}
+
+// Entsperren: Login wieder möglich. Nur mit Bestätigung, dass das Abo geklärt ist.
+// Bei einem archivierten Konto wird die Archiv-Markierung entfernt, damit der Löschlauf es nicht mehr erfasst.
+async function adminEntsperren(request, authHeader, env, cors) {
+  const r = await adminRahmen(authHeader, request, env, cors);
+  if (r.fehler) return r.fehler;
+  if (r.body.abo_geklaert !== true) return adminAntwort({ error: 'abo_geklaert' }, 400, cors);
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const archivDoc = await firestoreGetDoc(`users/${r.uid}/profil/konto_archiv`, adminToken);
+    const war = { wegwerf: false, archiv: !!archivDoc };
+    if (await env.PROFIL_KV.get(`gesperrt:${r.uid}`)) {
+      await env.PROFIL_KV.delete(`gesperrt:${r.uid}`);
+      war.wegwerf = true;
+    }
+    if (archivDoc) {
+      const del = await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${r.uid}/profil/konto_archiv`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${adminToken}` }
+      });
+      if (!del.ok) throw new Error(`konto_archiv löschen fehlgeschlagen (${del.status})`);
+    }
+    await konsoleKontoAktivieren(r.uid, env, true);
+    await env.PROFIL_KV.put(`status:${r.uid}`, 'frei');
+    await adminLogEintragen(env, r.admin, 'entsperrt', r.uid, { grund: r.grund, ...war });
+    return adminAntwort({ ok: true, hinweis: war.archiv ? 'Archiv-Markierung entfernt. Ein Teil der Daten wurde bei der Sperre bereits gelöscht.' : null }, 200, cors);
+  } catch (e) {
+    console.error('admin/entsperren:', e.message);
+    return adminAntwort({ error: 'Entsperren fehlgeschlagen' }, 500, cors);
+  }
+}
+
+// Verfahren markieren oder aufheben. Solange aktiv, überspringt der Löschlauf das Konto.
+async function adminVerfahren(request, authHeader, env, cors) {
+  const r = await adminRahmen(authHeader, request, env, cors);
+  if (r.fehler) return r.fehler;
+  const aktiv = r.body.aktiv === true;
+  const aktenzeichen = String(r.body.aktenzeichen || '').trim().slice(0, 100);
+  const stelle = String(r.body.stelle || '').trim().slice(0, 100);
+  if (aktiv && !aktenzeichen) return adminAntwort({ error: 'aktenzeichen' }, 400, cors);
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const archivDoc = await firestoreGetDoc(`users/${r.uid}/profil/konto_archiv`, adminToken);
+    if (!archivDoc) return adminAntwort({ error: 'kein Archiv-Konto' }, 404, cors);
+    const felder = { verfahren_aktiv: { booleanValue: aktiv } };
+    if (aktiv) {
+      felder.verfahren_aktenzeichen = { stringValue: aktenzeichen };
+      felder.verfahren_stelle = { stringValue: stelle };
+      felder.verfahren_seit = { stringValue: new Date().toISOString() };
+    }
+    await firestorePatchFields(`users/${r.uid}/profil/konto_archiv`, felder, adminToken);
+    await adminLogEintragen(env, r.admin, aktiv ? 'verfahren_markiert' : 'verfahren_aufgehoben', r.uid, { grund: r.grund, aktenzeichen, stelle });
+    return adminAntwort({ ok: true }, 200, cors);
+  } catch (e) {
+    console.error('admin/verfahren:', e.message);
+    return adminAntwort({ error: 'Verfahren-Markierung fehlgeschlagen' }, 500, cors);
+  }
+}
+
+// Aufbewahrung verlängern: nur nach hinten, Datum im Format YYYY-12-31
+async function adminAufbewahrung(request, authHeader, env, cors) {
+  const r = await adminRahmen(authHeader, request, env, cors);
+  if (r.fehler) return r.fehler;
+  const bis = String(r.body.bis || '');
+  if (!/^\d{4}-12-31$/.test(bis)) return adminAntwort({ error: 'bis' }, 400, cors);
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const archivDoc = await firestoreGetDoc(`users/${r.uid}/profil/konto_archiv`, adminToken);
+    if (!archivDoc) return adminAntwort({ error: 'kein Archiv-Konto' }, 404, cors);
+    const alt = archivDoc.fields?.aufbewahrung_bis?.stringValue || '';
+    if (bis <= alt) return adminAntwort({ error: 'nur verlängern' }, 400, cors);
+    await firestorePatchFields(`users/${r.uid}/profil/konto_archiv`, { aufbewahrung_bis: { stringValue: bis } }, adminToken);
+    await adminLogEintragen(env, r.admin, 'aufbewahrung_verlaengert', r.uid, { grund: r.grund, von: alt, bis });
+    return adminAntwort({ ok: true }, 200, cors);
+  } catch (e) {
+    console.error('admin/aufbewahrung:', e.message);
+    return adminAntwort({ error: 'Verlängerung fehlgeschlagen' }, 500, cors);
   }
 }
 
