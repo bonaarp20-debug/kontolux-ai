@@ -595,6 +595,7 @@ export default {
       if (url.pathname === '/admin/zugriff-widerrufen') return handleAdminZugriffWiderrufen(request, authHeader, env, cors);
       if (url.pathname === '/admin/export-liste') return handleAdminExportListe(request, authHeader, env, cors);
       if (url.pathname === '/admin/export-datei') return handleAdminExportDatei(request, authHeader, env, cors);
+      if (url.pathname === '/admin/datev') return handleAdminDatev(request, authHeader, env, cors);
       if (url.pathname === '/send-verification-email') return handleSendVerificationEmail(verifiedEmail, env, cors);
       if (url.pathname === '/send-password-reset') return handleSendPasswordReset(body, env, cors);
       if (url.pathname === '/send-email-change-verification') return handleSendEmailChangeVerification(verifiedEmail, body, env, cors);
@@ -5438,11 +5439,39 @@ async function handleAdminExportListe(request, authHeader, env, cors = {}) {
       for (const o of daten.items || []) dateien.push(o.name);
       seite = daten.nextPageToken || '';
     } while (seite);
+    // Geschäftsjahre aus den Belegdaten (für den DATEV-Export je Jahr)
+    const jahre = new Set();
+    for (const d of sammlungen.dokumente || []) {
+      const f = d.fields || {};
+      const tag = firestoreValue(f.bezahlt_am) || firestoreValue(f.datum) || '';
+      const j = parseInt(String(tag).slice(0, 4), 10);
+      if (j >= 2000 && j <= 2100) jahre.add(j);
+    }
     await adminLogEintragen(env, verified.email, 'export_erstellt', ziel.uid, { grund, anfrage_id: anfrageId, dateien: dateien.length });
-    return konsoleJson({ uid: ziel.uid, sammlungen, dateien }, 200, cors);
+    return konsoleJson({ uid: ziel.uid, sammlungen, dateien, jahre: [...jahre].sort() }, 200, cors);
   } catch (e) {
     console.error('admin/export-liste:', e.message);
     return konsoleJson({ error: 'Export nicht erstellt' }, 500, cors);
+  }
+}
+
+// DATEV-Buchungsstapel eines Jahres für ein archiviertes Konto. Der bestehende Handler liest mit dem
+// übergebenen Token; hier übergeben wir das Admin-Token. Das Ergebnis geht nur an die Admin-Seite.
+async function handleAdminDatev(request, authHeader, env, cors = {}) {
+  const verified = await verifyFirebaseToken(authHeader, env);
+  if (!istAdmin(verified, env)) return konsoleJson({ error: 'forbidden' }, 403, cors);
+  const body = await request.json().catch(() => ({}));
+  const anfrageId = String(body.anfrage_id || '');
+  const jahr = parseInt(body.jahr, 10);
+  if (!/^[A-Za-z0-9_-]{5,100}$/.test(anfrageId) || !(jahr >= 2000 && jahr <= 2100)) return konsoleJson({ error: 'eingabe' }, 400, cors);
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const ziel = await archivKontoZuBestaetigterAnfrage(anfrageId, env, adminToken);
+    if (!ziel) return konsoleJson({ error: 'nicht-freigegeben' }, 400, cors);
+    return await handleDatevExport({ userId: ziel.uid, jahr: String(jahr), token: adminToken }, env, cors);
+  } catch (e) {
+    console.error('admin/datev:', e.message);
+    return konsoleJson({ error: 'DATEV-Export nicht erstellt' }, 500, cors);
   }
 }
 
