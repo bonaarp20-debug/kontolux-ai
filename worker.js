@@ -3828,6 +3828,9 @@ async function handleKontoArchivieren(env, cors = {}, verifiedUid) {
       grund: { stringValue: 'kontoloeschung' }
     }, adminToken);
 
+    // Für die Admin-Übersicht und den Löschlauf merken (kein Index nötig)
+    await env.PROFIL_KV.put(`archiv:${userId}`, jetzt.toISOString());
+
     // Zuletzt sperren: Anmeldung und bestehende Tokens werden danach abgelehnt
     const authToken = await getGoogleAccessToken(env);
     const sperre = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:update', {
@@ -4769,24 +4772,15 @@ function archivAktion(tageBis, vorwarnungSchonGesendet, loeschenAktiv) {
   return loeschenAktiv ? 'loeschen' : 'bericht';
 }
 
-async function archivMarkierungenLaden(adminToken) {
-  const res = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      structuredQuery: {
-        from: [{ collectionId: 'profil', allDescendants: true }],
-        where: { fieldFilter: { field: { fieldPath: 'grund' }, op: 'EQUAL', value: { stringValue: 'kontoloeschung' } } }
-      }
-    })
-  });
-  if (!res.ok) throw new Error(`Archiv-Abfrage fehlgeschlagen (${res.status})`);
+// Archivierte Konten: Der Index-freie Weg. Die Liste der UIDs steht im KV (archiv:<uid>, beim Sperren
+// gesetzt). Die Markierung selbst liest der Worker direkt aus users/{uid}/profil/konto_archiv.
+async function archivMarkierungenLaden(adminToken, env) {
   const liste = [];
-  for (const zeile of await res.json()) {
-    const name = zeile.document?.name || '';
-    if (!name.endsWith('/profil/konto_archiv')) continue;
-    const [, uid] = name.split('/documents/')[1].split('/');
-    liste.push({ uid, docName: name, fields: zeile.document.fields || {} });
+  for (const name of await kvSchluesselMit(env, 'archiv:')) {
+    const uid = name.slice('archiv:'.length);
+    const doc = await firestoreGetDoc(`users/${uid}/profil/konto_archiv`, adminToken);
+    if (!doc || (doc.fields?.grund?.stringValue !== 'kontoloeschung')) continue;
+    liste.push({ uid, docName: doc.name, fields: doc.fields || {} });
   }
   return liste;
 }
@@ -4877,7 +4871,7 @@ async function archivLoeschlauf(env) {
   const loeschenAktiv = env.ARCHIV_LOESCHEN_AKTIV === 'true';
   const zaehler = { vorgewarnt: 0, berichtet: 0, geloescht: 0, fehler: 0 };
 
-  for (const konto of await archivMarkierungenLaden(adminToken)) {
+  for (const konto of await archivMarkierungenLaden(adminToken, env)) {
     const bis = konto.fields.aufbewahrung_bis?.stringValue;
     if (!bis || !/^\d{4}-\d{2}-\d{2}$/.test(bis)) continue;
     // Laufendes Verfahren (Behörde): Konto bleibt unberührt, bis die Markierung entfernt ist
@@ -4980,7 +4974,7 @@ async function handleAdminUebersicht(authHeader, env, cors = {}) {
     }
 
     // 2. Gesperrte Konten mit Archiv-Markierung (Kontolöschung) und letzter Lauf
-    const archiv = await archivMarkierungenLaden(adminToken);
+    const archiv = await archivMarkierungenLaden(adminToken, env);
     const berichte = {};
     for (const konto of archiv) {
       const bericht = await env.PROFIL_KV.get(`archivlauf:${konto.uid}`);
