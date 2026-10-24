@@ -4137,6 +4137,11 @@ function erloeskontoExport(mwstSatz, kleinunternehmer, skr) {
 // ohne Kategorie, mwst_satz 'keine') — gleiche Liste wie UST_WEBHOOK_QUELLEN in index.html.
 const DATEV_WEBHOOK_QUELLEN = ['stripe_webhook', 'mollie_webhook', 'digistore24_webhook', 'copecart_webhook', 'paypal_webhook', 'sumup_webhook', 'ablefy_webhook', 'shopify_webhook'];
 
+// Gegenkonto aus der Kategorie nur dann übernehmen, wenn sie zur Buchungsrichtung passt.
+function istEinnahmeKategorie(istEinnahme, kategorie) {
+  if (!istEinnahme) return true;
+  return /^Einnahmen/.test(String(kategorie || ''));
+}
 function buSchluesselExport(mwstSatz, kleinunternehmer, istEinnahme, gegenkonto, skr) {
   // Kleinunternehmer (§ 19 UStG): weder USt-Ausweis noch Vorsteuerabzug. Der mwst_satz eines Belegs
   // (Standard im Dropdown: 19 %) darf daran nichts ändern — sonst bekäme ein Kleinunternehmer die
@@ -4362,8 +4367,11 @@ async function handleDatevExport(body, env, cors = {}) {
       const importKontoGilt = datevKontoImport
         && (firestoreValue(fields.datev_skr) || '') === skr
         && (firestoreValue(fields.datev_kategorie_import) || '') === kategorie;
+      // Einnahme: Gegenkonto nur aus einer Einnahmen-Kategorie. Eine Ausgabenkategorie (z. B. Wareneinkauf) würde sonst
+      // den Erlös auf ein Aufwandskonto buchen.
       let gegenkonto = (importKontoGilt ? datevKontoImport : '')
-        || resolveSachkonto(kategorie, skr) || (istEinnahme ? erloeskontoExport(mwstSatz, kleinunternehmer, skr) : ausgabenGegenkonto);
+        || (istEinnahmeKategorie(istEinnahme, kategorie) ? resolveSachkonto(kategorie, skr) : null)
+        || (istEinnahme ? erloeskontoExport(mwstSatz, kleinunternehmer, skr) : ausgabenGegenkonto);
       // Kleinunternehmer: Einnahmen nie auf ein Regelsteuer-Erlöskonto (8400 würde in DATEV 19 % USt erzeugen).
       if (istEinnahme && kleinunternehmer && !importKontoGilt && alleErloeskonten.has(String(gegenkonto))) {
         gegenkonto = erloeskontoExport(mwstSatz, true, skr);
