@@ -40,14 +40,14 @@ const worker = (await import('./worker.js')).default;
 // ── Testbestand (SKR03, regelbesteuert, Ist-Versteuerung) ──────────────────────────────────
 docs.set(`users/${USER}/profil/settings`, { datev_skr: S('SKR03'), datev_bankkonto: S('1200'), datev_berater_nr: S('1001'), datev_mandanten_nr: S('1'), kleinunternehmer: S('Nein') });
 const beleg = (id, f) => docs.set(`users/${USER}/dokumente/${id}`, f);
-beleg('e1', { typ: S('rechnung_ausgehend'), betrag: N(1190), bezahlt: B(true), bezahlt_am: S('2026-03-15'), mwst_satz: S('19'), kategorie: S('Einnahmen 19%'), rechnungsnr: S('RE-2026-001'), absender: S('Müller GmbH') });
-beleg('e2', { typ: S('rechnung_ausgehend'), betrag: N(107), bezahlt: B(true), bezahlt_am: S('2026-04-01'), mwst_satz: S('7'), kategorie: S('Einnahmen 7%'), rechnungsnr: S('RE-2026-002'), absender: S('Buchladen') });
-beleg('a1', { typ: S('rechnung_eingehend'), betrag: N(238), bezahlt: B(true), bezahlt_am: S('2026-03-20'), mwst_satz: S('19'), kategorie: S('Werbekosten'), absender: S('Google') });
-beleg('a2', { typ: S('rechnung_eingehend'), betrag: N(59.5), bezahlt: B(true), bezahlt_am: S('2026-03-21'), mwst_satz: S('19'), kategorie: S('Kfz-Kosten'), absender: S('Tankstelle') });
-beleg('a3', { typ: S('rechnung_eingehend'), betrag: N(119), bezahlt: B(true), bezahlt_am: S('2026-03-22'), mwst_satz: S('19'), kategorie: S('Wareneinkauf 19%'), absender: S('Großhandel') });
-beleg('a4', { typ: S('rechnung_eingehend'), betrag: N(35.7), bezahlt: B(true), bezahlt_am: S('2026-03-23'), mwst_satz: S('19'), kategorie: S('Bürobedarf'), absender: S('Papier AG') });
-beleg('o1', { typ: S('rechnung_ausgehend'), betrag: N(500), bezahlt: B(false), datum: S('2026-05-01'), mwst_satz: S('19'), kategorie: S('Einnahmen 19%'), absender: S('Offen KG') });
-beleg('i1', { typ: S('rechnung_eingehend'), betrag: N(80), bezahlt: B(true), bezahlt_am: S('2026-03-24'), mwst_satz: S('19'), kategorie: S('Sonstiges'), datev_konto: S('4964'), datev_skr: S('SKR03'), datev_kategorie_import: S('Sonstiges'), quelle: S('datev_import'), absender: S('Import') });
+beleg('e1', { rechnungsnr: S('TEST-e1'), typ: S('rechnung_ausgehend'), betrag: N(1190), bezahlt: B(true), bezahlt_am: S('2026-03-15'), mwst_satz: S('19'), kategorie: S('Einnahmen 19%'), rechnungsnr: S('RE-2026-001'), absender: S('Müller GmbH') });
+beleg('e2', { rechnungsnr: S('TEST-e2'), typ: S('rechnung_ausgehend'), betrag: N(107), bezahlt: B(true), bezahlt_am: S('2026-04-01'), mwst_satz: S('7'), kategorie: S('Einnahmen 7%'), rechnungsnr: S('RE-2026-002'), absender: S('Buchladen') });
+beleg('a1', { rechnungsnr: S('TEST-a1'), typ: S('rechnung_eingehend'), betrag: N(238), bezahlt: B(true), bezahlt_am: S('2026-03-20'), mwst_satz: S('19'), kategorie: S('Werbekosten'), absender: S('Google') });
+beleg('a2', { rechnungsnr: S('TEST-a2'), typ: S('rechnung_eingehend'), betrag: N(59.5), bezahlt: B(true), bezahlt_am: S('2026-03-21'), mwst_satz: S('19'), kategorie: S('Kfz-Kosten'), absender: S('Tankstelle') });
+beleg('a3', { rechnungsnr: S('TEST-a3'), typ: S('rechnung_eingehend'), betrag: N(119), bezahlt: B(true), bezahlt_am: S('2026-03-22'), mwst_satz: S('19'), kategorie: S('Wareneinkauf 19%'), absender: S('Großhandel') });
+beleg('a4', { rechnungsnr: S('TEST-a4'), typ: S('rechnung_eingehend'), betrag: N(35.7), bezahlt: B(true), bezahlt_am: S('2026-03-23'), mwst_satz: S('19'), kategorie: S('Bürobedarf'), absender: S('Papier AG') });
+beleg('o1', { rechnungsnr: S('TEST-o1'), typ: S('rechnung_ausgehend'), betrag: N(500), bezahlt: B(false), datum: S('2026-05-01'), mwst_satz: S('19'), kategorie: S('Einnahmen 19%'), absender: S('Offen KG') });
+beleg('i1', { rechnungsnr: S('TEST-i1'), typ: S('rechnung_eingehend'), betrag: N(80), bezahlt: B(true), bezahlt_am: S('2026-03-24'), mwst_satz: S('19'), kategorie: S('Sonstiges'), datev_konto: S('4964'), datev_skr: S('SKR03'), datev_kategorie_import: S('Sonstiges'), quelle: S('datev_import'), absender: S('Import') });
 
 let ok = 0, fehler = 0;
 const pruefe = (name, bed, info = '') => { console.log(`${bed ? '✓' : '✗'} ${name}${!bed && info ? ' — ' + info : ''}`); bed ? ok++ : fehler++; };
@@ -99,9 +99,9 @@ const plattform = {
   r1: { typ: S('rechnung_eingehend'), betrag: N(59.5), bezahlt: B(true), bezahlt_am: S('2026-06-10'), mwst_satz: S('keine'), quelle: S('stripe_webhook'), absender: S('Stripe-Rückerstattung') },
   p1: { typ: S('rechnung_ausgehend'), betrag: N(107), bezahlt: B(true), bezahlt_am: S('2026-06-02'), mwst_satz: S('7'), kategorie: S('Einnahmen 7%'), quelle: S('shopify_webhook'), absender: S('Shop') },
   r2: { typ: S('rechnung_eingehend'), betrag: N(21.4), bezahlt: B(true), bezahlt_am: S('2026-06-11'), mwst_satz: S('keine'), quelle: S('shopify_webhook'), absender: S('Shopify-Erstattung') },
-  m1: { typ: S('rechnung_ausgehend'), betrag: N(321), bezahlt: B(true), bezahlt_am: S('2026-06-03'), mwst_satz: S('7'), absender: S('Ohne Kategorie 7 %') },
-  m2: { typ: S('rechnung_ausgehend'), betrag: N(400), bezahlt: B(true), bezahlt_am: S('2026-06-04'), mwst_satz: S('reverse_charge'), absender: S('EU-Kunde') },
-  m3: { typ: S('rechnung_ausgehend'), betrag: N(250), bezahlt: B(true), bezahlt_am: S('2026-06-05'), mwst_satz: S('keine'), absender: S('Steuerfrei') },
+  m1: { rechnungsnr: S('TEST-m1'), typ: S('rechnung_ausgehend'), betrag: N(321), bezahlt: B(true), bezahlt_am: S('2026-06-03'), mwst_satz: S('7'), absender: S('Ohne Kategorie 7 %') },
+  m2: { rechnungsnr: S('TEST-m2'), typ: S('rechnung_ausgehend'), betrag: N(400), bezahlt: B(true), bezahlt_am: S('2026-06-04'), mwst_satz: S('reverse_charge'), absender: S('EU-Kunde') },
+  m3: { rechnungsnr: S('TEST-m3'), typ: S('rechnung_ausgehend'), betrag: N(250), bezahlt: B(true), bezahlt_am: S('2026-06-05'), mwst_satz: S('keine'), absender: S('Steuerfrei') },
 };
 let z = await exportiere({ datev_skr: S('SKR04'), kleinunternehmer: S('Nein') }, plattform);
 pruefe('SKR04: Stripe-Einnahme 19 % auf 4400', z('119,00')[7] === '4400' && z('119,00')[8] === '', z('119,00').join(';'));
@@ -112,9 +112,9 @@ pruefe('SKR04: § 13b-Einnahme auf 4337 ohne Schlüssel', z('400,00')[7] === '43
 pruefe('SKR04: steuerfreie Einnahme ohne Kategorie auf 4200', z('250,00')[7] === '4200' && z('250,00')[8] === '', z('250,00').join(';'));
 z = await exportiere({ datev_skr: S('SKR03'), kleinunternehmer: B(true) }, {
   k1: { ...plattform.s1, mwst_satz: S('keine'), kategorie: S('Einnahmen steuerfrei') },
-  k2: { typ: S('rechnung_ausgehend'), betrag: N(500), bezahlt: B(true), bezahlt_am: S('2026-06-06'), mwst_satz: S('19'), kategorie: S('Einnahmen 19%'), absender: S('Falsch kategorisiert') },
+  k2: { rechnungsnr: S('TEST-k2'), typ: S('rechnung_ausgehend'), betrag: N(500), bezahlt: B(true), bezahlt_am: S('2026-06-06'), mwst_satz: S('19'), kategorie: S('Einnahmen 19%'), absender: S('Falsch kategorisiert') },
   k3: { ...plattform.r1 },
-  k4: { typ: S('rechnung_eingehend'), betrag: N(35.7), bezahlt: B(true), bezahlt_am: S('2026-06-07'), mwst_satz: S('19'), kategorie: S('Bürobedarf'), absender: S('Papier') },
+  k4: { rechnungsnr: S('TEST-k4'), typ: S('rechnung_eingehend'), betrag: N(35.7), bezahlt: B(true), bezahlt_am: S('2026-06-07'), mwst_satz: S('19'), kategorie: S('Bürobedarf'), absender: S('Papier') },
 });
 pruefe('KU (SKR03): Einnahme auf 8192 (seit Kontenrahmen 2026, 8195 gesperrt), ohne Schlüssel', z('119,00')[7] === '8192' && z('119,00')[8] === '', z('119,00').join(';'));
 pruefe('KU: Einnahme mit Kategorie 19 % trotzdem auf 8192, kein USt-Schlüssel', z('500,00')[7] === '8192' && z('500,00')[8] === '', z('500,00').join(';'));

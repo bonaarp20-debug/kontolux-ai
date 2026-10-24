@@ -4201,6 +4201,9 @@ function privatvorgangBuchung(v, skr, bankkonto) {
   };
 }
 
+// DATEV-Buchungsstapel (EXTF 700): Spaltennamen in der Reihenfolge der Spezifikation (125 Spalten, siehe Formatbeschreibung).
+const DATEV_SPALTEN_125 = ["Umsatz (ohne Soll/Haben-Kz)", "Soll/Haben-Kennzeichen", "WKZ Umsatz", "Kurs", "Basis-Umsatz", "WKZ Basis-Umsatz", "Konto", "Gegenkonto (ohne BU-Schlüssel)", "BU-Schlüssel", "Belegdatum", "Belegfeld 1", "Belegfeld 2", "Skonto", "Buchungstext", "Postensperre", "Diverse Adressnummer", "Geschäftspartnerbank", "Sachverhalt", "Zinssperre", "Beleglink", "Beleginfo - Art 1", "Beleginfo - Inhalt 1", "Beleginfo - Art 2", "Beleginfo - Inhalt 2", "Beleginfo - Art 3", "Beleginfo - Inhalt 3", "Beleginfo - Art 4", "Beleginfo - Inhalt 4", "Beleginfo - Art 5", "Beleginfo - Inhalt 5", "Beleginfo - Art 6", "Beleginfo - Inhalt 6", "Beleginfo - Art 7", "Beleginfo - Inhalt 7", "Beleginfo - Art 8", "Beleginfo - Inhalt 8", "KOST1 - Kostenstelle", "KOST2 - Kostenstelle", "Kost-Menge", "EU-Land u. UStID (Bestimmung)", "EU-Steuersatz (Bestimmung)", "Abw. Versteuerungsart", "Sachverhalt L+L", "Funktionsergänzung L+L", "BU 49 Hauptfunktionstyp", "BU 49 Hauptfunktionsnummer", "BU 49 Funktionsergänzung", "Zusatzinformation - Art 1", "Zusatzinformation- Inhalt 1", "Zusatzinformation - Art 2", "Zusatzinformation- Inhalt 2", "Zusatzinformation - Art 3", "Zusatzinformation- Inhalt 3", "Zusatzinformation - Art 4", "Zusatzinformation- Inhalt 4", "Zusatzinformation - Art 5", "Zusatzinformation- Inhalt 5", "Zusatzinformation - Art 6", "Zusatzinformation- Inhalt 6", "Zusatzinformation - Art 7", "Zusatzinformation- Inhalt 7", "Zusatzinformation - Art 8", "Zusatzinformation- Inhalt 8", "Zusatzinformation - Art 9", "Zusatzinformation- Inhalt 9", "Zusatzinformation - Art 10", "Zusatzinformation- Inhalt 10", "Zusatzinformation - Art 11", "Zusatzinformation- Inhalt 11", "Zusatzinformation - Art 12", "Zusatzinformation- Inhalt 12", "Zusatzinformation - Art 13", "Zusatzinformation- Inhalt 13", "Zusatzinformation - Art 14", "Zusatzinformation- Inhalt 14", "Zusatzinformation - Art 15", "Zusatzinformation- Inhalt 15", "Zusatzinformation - Art 16", "Zusatzinformation- Inhalt 16", "Zusatzinformation - Art 17", "Zusatzinformation- Inhalt 17", "Zusatzinformation - Art 18", "Zusatzinformation- Inhalt 18", "Zusatzinformation - Art 19", "Zusatzinformation- Inhalt 19", "Zusatzinformation - Art 20", "Zusatzinformation- Inhalt 20", "Stück", "Gewicht", "Zahlweise", "Forderungsart", "Veranlagungsjahr", "Zugeordnete Fälligkeit", "Skontotyp", "Auftragsnummer", "Buchungstyp", "USt-Schlüssel (Anzahlungen)", "EU-Land (Anzahlungen)", "Sachverhalt L+L (Anzahlungen)", "EU-Steuersatz (Anzahlungen)", "Erlöskonto (Anzahlungen)", "Herkunft-Kz", "Buchungs GUID", "KOST-Datum", "SEPA-Mandatsreferenz", "Skontosperre", "Gesellschaftername", "Beteiligtennummer", "Identifikationsnummer", "Zeichnernummer", "Postensperre bis", "Bezeichnung SoBil-Sachverhalt", "Kennzeichen SoBil-Buchung", "Festschreibung", "Leistungsdatum", "Datum Zuord. Steuerperiode", "Fälligkeit", "Generalumkehr (GU)", "Steuersatz", "Land", "Abrechnungsreferenz", "BVV-Position", "EU-Land u. UStID (Ursprung)", "EU-Steuersatz (Ursprung)", "Abw. Skontokonto"];
+
 async function handleDatevExport(body, env, cors = {}) {
   const { userId, jahr } = body;
 
@@ -4299,6 +4302,8 @@ async function handleDatevExport(body, env, cors = {}) {
 
     // Belege des gewünschten Jahres, tatsächlich bezahlt, mit Betrag > 0
     const buchungen = [];
+    const ohneRechnungsnr = [];
+    let plattformOhneNr = 0;
     let skippedUnpaid = 0;
 
     for (const doc of dokDocs) {
@@ -4349,7 +4354,18 @@ async function handleDatevExport(body, env, cors = {}) {
       }
       // Belegfeld 1 ist Pflicht (DATEV EXTF) — ohne jede Rechnungsnummer wird ersatzweise
       // das Belegdatum als TTMMJJ eingesetzt, statt das Feld leer zu lassen.
-      if (!rechnungsnr) rechnungsnr = datevTTMMJJ(belegDatum);
+      // Rechnungsnummer ist Pflicht: Ohne Nummer würde das Datum als Belegnummer dienen, und mehrere Belege am
+      // selben Tag wären nicht mehr zu unterscheiden. Der Export bricht deshalb ab und nennt die Belege.
+      // Belege von Plattformen (Stripe, PayPal, Shopify ...) entstehen automatisch und haben keine Rechnungsnummer.
+      // Für sie bleibt das Datum als Ersatz, mit Warnung. Manuell erfasste Belege müssen eine Nummer haben.
+      if (!rechnungsnr) {
+        if (DATEV_WEBHOOK_QUELLEN.includes(firestoreValue(fields.quelle))) {
+          plattformOhneNr++;
+        } else {
+          ohneRechnungsnr.push(`${firestoreValue(fields.absender) || firestoreValue(fields.name) || 'ohne Absender'} (${datevTTMMJJ(belegDatum)})`);
+        }
+        rechnungsnr = datevTTMMJJ(belegDatum);
+      }
 
       const absender = firestoreValue(fields.absender) || firestoreValue(fields.name) || '';
       const mwstSatz = firestoreValue(fields.mwst_satz);
@@ -4414,6 +4430,17 @@ async function handleDatevExport(body, env, cors = {}) {
       });
     }
 
+    if (ohneRechnungsnr.length) {
+      return new Response(JSON.stringify({
+        error: 'Rechnungsnummer fehlt',
+        details: `${ohneRechnungsnr.length} Beleg(e) ohne Rechnungsnummer: ${ohneRechnungsnr.slice(0, 10).join(', ')}. Bitte die Nummern in der App ergänzen und den Export erneut starten.`
+      }), { status: 422, headers: { ...cors, 'Content-Type': 'application/json' } });
+    }
+
+    if (plattformOhneNr > 0) {
+      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${plattformOhneNr} Plattform-Beleg(e) ohne Rechnungsnummer: Belegfeld 1 enthält dort das Belegdatum.`;
+    }
+
     // Privatentnahmen/-einlagen des Jahres (Storno-Vorgänge bleiben draußen)
     const privatDocs = await firestoreListAll(`${base}/privatvorgaenge`, authHeader).catch(() => []);
     for (const pDoc of privatDocs) {
@@ -4444,23 +4471,20 @@ async function handleDatevExport(body, env, cors = {}) {
     const erzeugtAm = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}000`;
 
     // Header-Zeile (EXTF-Kennsatz für Buchungsstapel, Formatversion 700/Kategorie 21)
+    // Kopfzeile: 31 Felder wie in der Spezifikation. Feld 27 = Kontenrahmen (03 = SKR03, 04 = SKR04).
     const headerRow = [
       '"EXTF"', '700', '21', '"Buchungsstapel"', '7',
       erzeugtAm, '', '"RE"', '"Kontolux AI"', '',
       beraterNr, mandantenNr, wjBeginnDate, '4',
       vonDatum, bisDatum, `"Kontolux Export ${jahr}"`, '""',
-      '1', '0', '0', '"EUR"', '', '', '', ''
+      '1', '0', '0', '"EUR"', '', '', '', '',
+      skr === 'SKR04' ? '"04"' : '"03"', '', '', '""', '""'
     ].join(';');
 
-    const columnRow = [
-      'Umsatz (ohne Soll/Haben-Kz)', 'Soll/Haben-Kennzeichen', 'WKZ Umsatz', 'Kurs',
-      'Basis-Umsatz', 'WKZ Basis-Umsatz', 'Konto', 'Gegenkonto (ohne BU-Schlüssel)',
-      'BU-Schlüssel', 'Belegdatum', 'Belegfeld 1', 'Belegfeld 2', 'Skonto', 'Buchungstext',
-      'Postensperre', 'Diverse Adressnummer', 'Geschäftspartnerbank', 'Sachverhalt',
-      'Zinssperre', 'Beleglink'
-    ].map(h => datevText(h)).join(';');
+    const columnRow = DATEV_SPALTEN_125.map(h => datevText(h)).join(';');
 
-    const rows = buchungen.map(b => [
+    const rows = buchungen.map(b => {
+      const zeile = [
       b.betrag.toFixed(2).replace('.', ','),
       b.sollHaben,
       '', '', '', '',
@@ -4474,7 +4498,11 @@ async function handleDatevExport(body, env, cors = {}) {
       '',
       datevText(b.buchungstext, 60),
       '', b.diverseAdressnummer, '', '', '', ''
-    ].join(';'));
+    ];
+      // Auf 125 Spalten auffüllen (Spezifikation). Nicht belegte Felder bleiben leer.
+      while (zeile.length < DATEV_SPALTEN_125.length) zeile.push('');
+      return zeile.join(';');
+    });
 
     const csvContent = [headerRow, columnRow, ...rows].join('\r\n') + '\r\n';
 
