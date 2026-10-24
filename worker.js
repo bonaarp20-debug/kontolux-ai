@@ -593,6 +593,8 @@ export default {
       if (url.pathname === '/admin/anfrage-status') return handleAdminAnfrageStatus(request, authHeader, env, cors);
       if (url.pathname === '/admin/zugriffslink') return handleAdminZugriffslink(request, authHeader, env, cors);
       if (url.pathname === '/admin/zugriff-widerrufen') return handleAdminZugriffWiderrufen(request, authHeader, env, cors);
+      if (url.pathname === '/admin/export-liste') return handleAdminExportListe(request, authHeader, env, cors);
+      if (url.pathname === '/admin/export-datei') return handleAdminExportDatei(request, authHeader, env, cors);
       if (url.pathname === '/send-verification-email') return handleSendVerificationEmail(verifiedEmail, env, cors);
       if (url.pathname === '/send-password-reset') return handleSendPasswordReset(body, env, cors);
       if (url.pathname === '/send-email-change-verification') return handleSendEmailChangeVerification(verifiedEmail, body, env, cors);
@@ -5377,6 +5379,94 @@ async function handleAdminZugriffWiderrufen(request, authHeader, env, cors = {})
   } catch (e) {
     console.error('admin/zugriff-widerrufen:', e.message);
     return konsoleJson({ error: 'Widerruf fehlgeschlagen' }, 500, cors);
+  }
+}
+
+// ── Export für gesperrte Konten (Admin, nur aus bestätigter Anfrage) ──────
+// Liefert die Daten eines archivierten Kontos. Die Admin-Seite baut daraus eine ZIP-Datei im
+// Browser und lädt sie herunter. Es gibt keine öffentliche Download-Adresse. Die Dateiliste
+// und jede einzelne Datei werden nur mit Admin-Berechtigung und nur für das Konto der Anfrage
+// ausgeliefert. Jeder Export wird im Admin-Log vermerkt.
+const EXPORT_SAMMLUNGEN_OHNE_CHATS = ARCHIV_SAMMLUNGEN.filter(c => c !== 'chats');
+
+// Konto zur E-Mail einer bestätigten Anfrage. Gibt { uid } oder null zurück.
+async function archivKontoZuBestaetigterAnfrage(anfrageId, env, adminToken) {
+  const anfrage = await firestoreGetDoc(`anfragen/${anfrageId}`, adminToken);
+  if (!anfrage) return null;
+  const af = anfrage.fields || {};
+  if (firestoreValue(af.status) !== 'bestaetigt') return null;
+  const email = String(firestoreValue(af.email) || '').toLowerCase();
+  const accessToken = await getGoogleAccessToken(env);
+  const lookup = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:lookup', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: [email] })
+  });
+  const konto = (await lookup.json().catch(() => ({}))).users?.[0];
+  if (!konto || !konto.disabled) return null;
+  if (!(await firestoreGetDoc(`users/${konto.localId}/profil/konto_archiv`, adminToken))) return null;
+  return { uid: konto.localId };
+}
+
+async function handleAdminExportListe(request, authHeader, env, cors = {}) {
+  const verified = await verifyFirebaseToken(authHeader, env);
+  if (!istAdmin(verified, env)) return konsoleJson({ error: 'forbidden' }, 403, cors);
+  const body = await request.json().catch(() => ({}));
+  const anfrageId = String(body.anfrage_id || '');
+  const grund = String(body.grund || '').trim();
+  if (!/^[A-Za-z0-9_-]{5,100}$/.test(anfrageId)) return konsoleJson({ error: 'anfrage' }, 400, cors);
+  if (grund.length < 5) return konsoleJson({ error: 'grund' }, 400, cors);
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const ziel = await archivKontoZuBestaetigterAnfrage(anfrageId, env, adminToken);
+    if (!ziel) return konsoleJson({ error: 'nicht-freigegeben' }, 400, cors);
+    const base = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${ziel.uid}`;
+    const sammlungen = {};
+    for (const coll of EXPORT_SAMMLUNGEN_OHNE_CHATS) {
+      sammlungen[coll] = await firestoreListAll(`${base}/${coll}`, adminToken);
+    }
+    // Dateiliste aus dem Speicher (nur Namen, die Dateien holt die Seite einzeln)
+    const storageToken = await getGoogleAccessToken(env, STORAGE_SCOPE);
+    const dateien = [];
+    let seite = '';
+    do {
+      const res = await fetch(`https://storage.googleapis.com/storage/v1/b/kontolux-ai.firebasestorage.app/o?prefix=${encodeURIComponent(`users/${ziel.uid}/`)}&maxResults=500${seite ? `&pageToken=${seite}` : ''}`, {
+        headers: { 'Authorization': `Bearer ${storageToken}` }
+      });
+      if (!res.ok) throw new Error(`Dateiliste fehlgeschlagen (${res.status})`);
+      const daten = await res.json();
+      for (const o of daten.items || []) dateien.push(o.name);
+      seite = daten.nextPageToken || '';
+    } while (seite);
+    await adminLogEintragen(env, verified.email, 'export_erstellt', ziel.uid, { grund, anfrage_id: anfrageId, dateien: dateien.length });
+    return konsoleJson({ uid: ziel.uid, sammlungen, dateien }, 200, cors);
+  } catch (e) {
+    console.error('admin/export-liste:', e.message);
+    return konsoleJson({ error: 'Export nicht erstellt' }, 500, cors);
+  }
+}
+
+// Eine Datei aus dem Speicher, nur innerhalb des Ordners des Kontos der bestätigten Anfrage
+async function handleAdminExportDatei(request, authHeader, env, cors = {}) {
+  const verified = await verifyFirebaseToken(authHeader, env);
+  if (!istAdmin(verified, env)) return konsoleJson({ error: 'forbidden' }, 403, cors);
+  const body = await request.json().catch(() => ({}));
+  const anfrageId = String(body.anfrage_id || '');
+  const pfad = String(body.pfad || '');
+  if (!/^[A-Za-z0-9_-]{5,100}$/.test(anfrageId) || !pfad || pfad.includes('..')) return konsoleJson({ error: 'eingabe' }, 400, cors);
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const ziel = await archivKontoZuBestaetigterAnfrage(anfrageId, env, adminToken);
+    if (!ziel || !pfad.startsWith(`users/${ziel.uid}/`)) return konsoleJson({ error: 'nicht-freigegeben' }, 400, cors);
+    const storageToken = await getGoogleAccessToken(env, STORAGE_SCOPE);
+    const res = await fetch(`https://firebasestorage.googleapis.com/v0/b/kontolux-ai.firebasestorage.app/o/${encodeURIComponent(pfad)}?alt=media`, {
+      headers: { 'Authorization': `Bearer ${storageToken}` }
+    });
+    if (!res.ok) return konsoleJson({ error: 'Datei nicht lesbar' }, res.status === 404 ? 404 : 500, cors);
+    return new Response(res.body, { status: 200, headers: { ...cors, 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store' } });
+  } catch (e) {
+    console.error('admin/export-datei:', e.message);
+    return konsoleJson({ error: 'Datei nicht lesbar' }, 500, cors);
   }
 }
 
