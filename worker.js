@@ -798,135 +798,89 @@ function validateDatei(Datei, { allowedTypes = DATEI_ERLAUBTE_TYPEN } = {}) {
   return { ok: true };
 }
 
-// ── Supabase REST Basis-URL normalisieren (SUPABASE_URL kann mit oder ohne /rest/v1 gesetzt sein) ──
-function supabaseRestBase(env) {
-  return (env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1$/, '');
+// ── Nachrichtenlimit (15 pro Tag) ───────────────────────────────────────
+// Der Zähler liegt in Firestore, Collection nachrichtenlimit, Dokument = userId. Er ersetzt die
+// frühere Supabase-Tabelle. Hochgezählt wird atomar: ein PATCH gilt nur, wenn das Dokument seit dem
+// Lesen unverändert ist (currentDocument.updateTime). Sonst liest der Worker neu und versucht es
+// erneut. Paralleler Requests können so nicht gemeinsam durchrutschen. Jeder durchgelassene Request
+// ist ein echter, kostenpflichtiger Anthropic-Call. Die Zähler sind pro Tag, alte Stände verfallen.
+const NACHRICHT_FS = 'https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents';
+const NACHRICHT_COLLECTION = 'nachrichtenlimit';
+
+async function nachrichtenDocLesen(key, token) {
+  const res = await fetch(`${NACHRICHT_FS}/${NACHRICHT_COLLECTION}/${encodeURIComponent(key)}`, {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Nachrichtenlimit lesen fehlgeschlagen (${res.status})`);
+  return res.json();
 }
 
-// ── Supabase: Nachrichtenlimit prüfen + hochzählen ────────
-// Muss das Hochzählen SYNCHRON (vor der Response) und ATOMAR machen — sonst können mehrere
-// parallele /chat-Requests denselben Zählerstand lesen und alle durchrutschen (jeder durchgelassene
-// Request ist ein echter, kostenpflichtiger Anthropic-Call). Atomar heißt hier: der UPDATE läuft als
-// Compare-and-Swap gegen genau die Werte, die wir gerade gelesen haben (nachrichten_heute+letztes_datum
-// im WHERE) — matcht die Zeile nach dem Schreiben 0 Treffer, hat ein paralleler Request dazwischen
-// geschrieben, und wir lesen+versuchen erneut statt den Request einfach durchzulassen.
 async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
   const key = userId || nutzername || 'anonym';
   const heute = berlinDatumAlsString();
   const LIMIT = 15;
-  const MAX_CAS_VERSUCHE = 6;
+  const MAX_VERSUCHE = 6;
+  const infra = { erlaubt: false, anzahl: 0, grund: 'infra' };
 
-  if (!env.SUPABASE_URL || !env.SUPABASE_KEY) {
-    console.error('checkNachrichtenLimit: SUPABASE_URL/SUPABASE_KEY fehlt in env!');
-    return { erlaubt: false, anzahl: 0, grund: 'infra' };
+  let token;
+  try {
+    token = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+  } catch (e) {
+    console.error('checkNachrichtenLimit: Token fehlgeschlagen:', e.message);
+    return infra;
   }
 
-  const base = supabaseRestBase(env);
-  const authHeaders = { 'apikey': env.SUPABASE_KEY, 'Authorization': `Bearer ${env.SUPABASE_KEY}` };
-
-  for (let versuch = 0; versuch < MAX_CAS_VERSUCHE; versuch++) {
-    // Erst nach userId suchen, dann nach nutzername als Fallback
-    let rows = [];
-    const resById = await fetch(`${base}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(key)}&select=*`, {
-      headers: authHeaders
-    });
-    if (!resById.ok) {
-      const errText = await resById.text();
-      console.error('checkNachrichtenLimit GET Error:', resById.status, errText, 'key=', kurz(key));
-      return { erlaubt: false, anzahl: 0, grund: 'infra' };
-    }
-    rows = await resById.json();
-    if (!Array.isArray(rows)) {
-      console.error('checkNachrichtenLimit: GET lieferte kein Array:', JSON.stringify(rows).slice(0, 200), 'key=', kurz(key));
-      rows = [];
+  for (let versuch = 0; versuch < MAX_VERSUCHE; versuch++) {
+    let doc;
+    try {
+      doc = await nachrichtenDocLesen(key, token);
+    } catch (e) {
+      console.error('checkNachrichtenLimit:', e.message, 'key=', kurz(key));
+      return infra; // fail-closed: ohne Zähler kein Anthropic-Call
     }
 
-    // Fallback: alter Eintrag mit nutzername
-    if (rows.length === 0 && nutzername && nutzername !== key) {
-      const resByName = await fetch(`${base}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(nutzername)}&select=*`, {
-        headers: authHeaders
-      });
-      const oldRows = resByName.ok ? await resByName.json() : [];
-      if (Array.isArray(oldRows) && oldRows.length > 0) {
-        // Alten Eintrag auf userId migrieren
-        await fetch(`${base}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(nutzername)}`, {
-          method: 'PATCH',
-          headers: { ...authHeaders, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
-          body: JSON.stringify({ nutzer_name: key })
-        });
-        rows = oldRows;
-      }
-    }
-
-    if (rows.length === 0) {
-      // Neuer Nutzer — Zeile anlegen. Schlägt der INSERT wegen eines parallelen Requests fehl,
-      // der gerade zuerst angelegt hat (Unique-Constraint-Konflikt), lesen wir im nächsten
-      // Schleifendurchlauf die jetzt existierende Zeile und zählen darauf per CAS hoch.
-      const insertRes = await fetch(`${base}/rest/v1/nutzer_limits`, {
+    // Neuer Nutzer: Dokument nur anlegen, wenn es nicht schon existiert (sonst 409, dann neu lesen)
+    if (!doc) {
+      const res = await fetch(`${NACHRICHT_FS}/${NACHRICHT_COLLECTION}?documentId=${encodeURIComponent(key)}`, {
         method: 'POST',
-        headers: { ...authHeaders, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
-        body: JSON.stringify({ nutzer_name: key, nachrichten_heute: 1, letztes_datum: heute })
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields: { nachrichten_heute: { integerValue: '1' }, letztes_datum: { stringValue: heute } } })
       });
-      if (insertRes.ok) {
-        return { erlaubt: true, anzahl: 1 };
-      }
-      if (insertRes.status !== 409) {
-        const errText = await insertRes.text();
-        console.error('checkNachrichtenLimit INSERT Error:', insertRes.status, errText, 'key=', kurz(key));
-        return { erlaubt: false, anzahl: 0, grund: 'infra' };
+      if (res.ok) return { erlaubt: true, anzahl: 1 };
+      if (res.status !== 409) {
+        console.error('checkNachrichtenLimit INSERT:', res.status, 'key=', kurz(key));
+        return infra;
       }
       continue;
     }
 
-    const row = rows[0];
-
-    if (!row || typeof row !== 'object') {
-      console.error('checkNachrichtenLimit: row ungültig für key=', key, JSON.stringify(row));
-      return { erlaubt: false, anzahl: 0, grund: 'infra' };
-    }
-
-    const istHeute = row.letztes_datum === heute;
-    const anzahl = istHeute ? (row.nachrichten_heute || 0) : 0;
-
-    if (anzahl >= LIMIT) {
-      return { erlaubt: false, anzahl };
-    }
+    const f = doc.fields || {};
+    const istHeute = (f.letztes_datum?.stringValue || null) === heute;
+    const anzahl = istHeute ? parseInt(f.nachrichten_heute?.integerValue || '0', 10) : 0;
+    if (anzahl >= LIMIT) return { erlaubt: false, anzahl };
 
     const neueAnzahl = anzahl + 1;
-    const datumFilter = row.letztes_datum
-      ? `letztes_datum=eq.${encodeURIComponent(row.letztes_datum)}`
-      : `letztes_datum=is.null`;
-    const casQuery = `nutzer_name=eq.${encodeURIComponent(key)}&nachrichten_heute=eq.${encodeURIComponent(row.nachrichten_heute ?? 0)}&${datumFilter}`;
-
-    const patchRes = await fetch(`${base}/rest/v1/nutzer_limits?${casQuery}`, {
+    // Nur schreiben, wenn das Dokument seit dem Lesen unverändert ist
+    const pfad = `${NACHRICHT_FS}/${NACHRICHT_COLLECTION}/${encodeURIComponent(key)}`
+      + `?updateMask.fieldPaths=nachrichten_heute&updateMask.fieldPaths=letztes_datum`
+      + `&currentDocument.updateTime=${encodeURIComponent(doc.updateTime)}`;
+    const res = await fetch(pfad, {
       method: 'PATCH',
-      headers: { ...authHeaders, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
-      body: JSON.stringify({ nachrichten_heute: neueAnzahl, letztes_datum: heute })
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields: { nachrichten_heute: { integerValue: String(neueAnzahl) }, letztes_datum: { stringValue: heute } } })
     });
-
-    if (!patchRes.ok) {
-      const errText = await patchRes.text();
-      console.error('Supabase PATCH Error:', patchRes.status, errText, 'key=', kurz(key));
-      // Infra-Fehler (nicht Wettlauf): fail-closed. Ohne Zähler würde jeder Request die Kosten
-      // ungebremst verursachen (Security-Audit 2026-10-16).
-      return { erlaubt: false, anzahl: 0, grund: 'infra' };
-    }
-
-    const updated = await patchRes.json().catch(() => null);
-    if (Array.isArray(updated) && updated.length > 0) {
-      return { erlaubt: true, anzahl: neueAnzahl };
-    }
-
-    // CAS fehlgeschlagen: ein paralleler Request hat die Zeile zwischen unserem GET und PATCH
-    // bereits verändert — neu lesen und erneut versuchen, statt einfach durchzulassen.
+    if (res.ok) return { erlaubt: true, anzahl: neueAnzahl };
+    // 400/409/412: ein paralleler Request hat den Zähler verändert, neu lesen
+    if (res.status === 400 || res.status === 409 || res.status === 412) continue;
+    console.error('checkNachrichtenLimit PATCH:', res.status, 'key=', kurz(key));
+    return infra;
   }
 
-  // Alle CAS-Versuche unter Wettlauf-Druck aufgebraucht — sicherheitshalber blocken statt
-  // ein unkontrolliertes Durchrutschen zu riskieren (kostet im schlimmsten Fall eine einzelne
-  // legitime Nachricht, schützt aber zuverlässig vor der Race-Condition).
-  console.error('checkNachrichtenLimit: CAS-Retries erschöpft, blockiere sicherheitshalber, key=', key);
+  console.error('checkNachrichtenLimit: Wettlauf-Versuche aufgebraucht, key=', kurz(key));
   return { erlaubt: false, anzahl: LIMIT, grund: 'infra' };
 }
+
 
 // ── Sachkonto-Mapping (SKR03/SKR04) ───────────────────────
 // Single Source of Truth für Kategorie → Sachkonto — wird sowohl in den System-Prompt
@@ -3571,18 +3525,16 @@ async function handleUsage(body, env, cors) {
     }
   } catch(e) { uploads = 0; }
 
-  // Nachrichten aus Supabase
+  // Nachrichten-Zähler aus Firestore (nur lesen)
   let nachrichten = 0;
   try {
-    const supabaseKey = userId || nutzername;
-    if (supabaseKey && env.SUPABASE_URL && env.SUPABASE_KEY) {
-      const res = await fetch(`${supabaseRestBase(env)}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(supabaseKey)}&select=*`, {
-        headers: { 'apikey': env.SUPABASE_KEY, 'Authorization': `Bearer ${env.SUPABASE_KEY}` }
-      });
-      const rows = await res.json();
-      const heute = berlinDatumAlsString();
-      if (Array.isArray(rows) && rows.length > 0 && rows[0].letztes_datum === heute) {
-        nachrichten = rows[0].nachrichten_heute || 0;
+    const key = userId || nutzername;
+    if (key) {
+      const token = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+      const doc = await nachrichtenDocLesen(key, token);
+      const f = doc?.fields || {};
+      if ((f.letztes_datum?.stringValue || null) === berlinDatumAlsString()) {
+        nachrichten = parseInt(f.nachrichten_heute?.integerValue || '0', 10);
       }
     }
   } catch(e) { nachrichten = 0; }
@@ -3672,7 +3624,7 @@ async function loescheUnterCollectionAlsAdmin(userId, collectionId, env) {
 
 // ── /delete-account-data Handler ───────────────────────────
 // Löscht bei Account-Löschung serverseitige Daten, die der Client nicht
-// direkt erreichen kann (Supabase-Zeile fürs Nachrichtenlimit, defensiv ein
+// direkt erreichen kann (Zähler fürs Nachrichtenlimit in Firestore, defensiv ein
 // evtl. noch vorhandener alter PROFIL_KV-Eintrag, sowie die per Firestore-
 // Regel client-seitig unlöschbare 'feedback'-Collection — siehe unten).
 // userId wurde vom Router bereits durch die tokenverifizierte UID überschrieben.
@@ -3686,14 +3638,12 @@ async function handleDeleteAccountData(body, env, cors = {}) {
   }
 
   try {
-    if (env.SUPABASE_URL && env.SUPABASE_KEY) {
-      const base = supabaseRestBase(env);
-      await fetch(`${base}/rest/v1/nutzer_limits?nutzer_name=eq.${encodeURIComponent(userId)}`, {
-        method: 'DELETE',
-        headers: { 'apikey': env.SUPABASE_KEY, 'Authorization': `Bearer ${env.SUPABASE_KEY}` }
-      });
-    }
-  } catch(e) { console.error('Account-Löschung: Supabase-Zeile:', e.message); }
+    const token = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    await fetch(`${NACHRICHT_FS}/${NACHRICHT_COLLECTION}/${encodeURIComponent(userId)}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+  } catch(e) { console.error('Account-Löschung: Nachrichtenzähler:', e.message); }
 
   try {
     if (env.PROFIL_KV) await env.PROFIL_KV.delete(userId);
