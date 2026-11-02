@@ -800,7 +800,7 @@ function validateDatei(Datei, { allowedTypes = DATEI_ERLAUBTE_TYPEN } = {}) {
 
 // ── Nachrichtenlimit (15 pro Tag) ───────────────────────────────────────
 // Der Zähler liegt in Firestore, Collection nachrichtenlimit, Dokument = userId. Er ersetzt die
-// frühere Supabase-Tabelle. Hochgezählt wird atomar: ein PATCH gilt nur, wenn das Dokument seit dem
+// Hochgezählt wird atomar: ein PATCH gilt nur, wenn das Dokument seit dem
 // Lesen unverändert ist (currentDocument.updateTime). Sonst liest der Worker neu und versucht es
 // erneut. Paralleler Requests können so nicht gemeinsam durchrutschen. Jeder durchgelassene Request
 // ist ein echter, kostenpflichtiger Anthropic-Call. Die Zähler sind pro Tag, alte Stände verfallen.
