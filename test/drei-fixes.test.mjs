@@ -31,9 +31,9 @@ test('/chat: Anhang zählt gegen das Upload-Limit', async () => {
   } finally { dienste.restore(); }
 });
 
-test('/chat: Supabase nicht erreichbar blockiert fail-closed mit neutralem Hinweis', async () => {
+test('/chat: Zähler (Firestore) nicht erreichbar blockiert fail-closed mit neutralem Hinweis', async () => {
   const env = await erzeugeTestEnv();
-  const dienste = mockExterneDienste({ users, supabaseStatus: 503 });
+  const dienste = mockExterneDienste({ users, firestoreStatus: 503 });
   try {
     const r = await anfrage(env, { path: '/chat', body: { Nachricht: 'Hallo', Nutzername: 'a', Profil: '', Datum: '2026-10-16' }, headers: { Authorization: 'Bearer tok-a' }, ip: '203.0.113.52' });
     const text = await r.text();
