@@ -587,6 +587,8 @@ export default {
       if (url.pathname === '/admin/uebersicht') return handleAdminUebersicht(authHeader, env, cors);
       if (url.pathname === '/admin/archiv-register') return handleAdminArchivRegister(authHeader, env, cors);
       if (url.pathname === '/admin/loeschlauf-jetzt') return handleAdminLoeschlaufJetzt(authHeader, env, cors);
+      if (url.pathname === '/admin/protokoll') return handleAdminProtokoll(request, authHeader, env, cors);
+      if (url.pathname === '/admin/protokoll-migrieren') return handleAdminProtokollMigrieren(authHeader, env, cors);
       if (url.pathname === '/admin/freigeben') return adminFreigeben(request, authHeader, env, cors);
       if (url.pathname === '/admin/ablehnen') return adminAblehnen(request, authHeader, env, cors);
       if (url.pathname === '/admin/entsperren') return adminEntsperren(request, authHeader, env, cors);
@@ -3946,7 +3948,7 @@ async function handlePrueferDaten(body, env, cors = {}, authHeader = null) {
     // Jeder Abruf eines Prüferlinks wird vermerkt (ohne IP-Adresse, nur Zeitpunkt, Konto und Herkunft)
     if (env.PROFIL_KV) {
       const jetzt = new Date().toISOString();
-      await env.PROFIL_KV.put(`pruefer-abruf:${jetzt}:${uid}`, JSON.stringify({ zeit: jetzt, uid, quelle: firestoreValue(zugangFields.quelle) || 'nutzer' }));
+      await protokollSchreiben(env, { admin: '-', aktion: 'pruefer_abruf', uid, details: { quelle: firestoreValue(zugangFields.quelle) || 'nutzer' }, zeit: jetzt });
     }
 
     const base = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${uid}`;
@@ -5027,10 +5029,109 @@ async function handleAdminUebersicht(authHeader, env, cors = {}) {
 // schreibt einen Eintrag ins Admin-Log (KV-Präfix admin-log:, wird nicht gelöscht).
 // Nutzer können ihre Konten nicht selbst entsperren. Das läuft nur über diese Routen.
 async function adminLogEintragen(env, admin, aktion, uid, details = {}) {
-  const zeit = new Date().toISOString();
-  const kennung = Math.random().toString(36).slice(2, 8);
-  await env.PROFIL_KV.put(`admin-log:${zeit}:${kennung}`, JSON.stringify({ zeit, admin, aktion, uid, ...details }));
+  await protokollSchreiben(env, { admin, aktion, uid, grund: details.grund || null, details });
 }
+
+// ── Protokoll (Option C) ─────────────────────────────────────────────────
+// Zwei Orte, beide in Firestore und nur vom Worker beschreibbar:
+//  - admin_protokoll: jeder Admin-Vorgang und jeder Prüferabruf, mit Betreiber-Kennung.
+//    Nur der Betreiber sieht es (Admin-Seite). Wird nie gelöscht.
+//  - users/{uid}/audit_log: die Vorgänge, die den Nutzer betreffen, mit einem Satz in Klartext.
+//    Der Nutzer sieht sie unter Einstellungen, Mein Konto. Löschen kann er sie nicht.
+// Die Einträge enthalten keine IP-Adressen.
+const PROTOKOLL_NUTZERTEXT = {
+  freigegeben: 'Konto freigegeben',
+  abgelehnt: 'Konto abgelehnt und gesperrt',
+  entsperrt: 'Konto entsperrt',
+  verfahren_markiert: 'Behördenverfahren vermerkt',
+  verfahren_aufgehoben: 'Vermerk zum Behördenverfahren aufgehoben',
+  aufbewahrung_verlaengert: 'Aufbewahrungsfrist verlängert',
+  zugriffslink_erstellt: 'Prüferzugang erstellt',
+  zugriffslink_widerrufen: 'Prüferzugang widerrufen',
+  export_erstellt: 'Datenexport erstellt',
+  anfrage_bestaetigt: 'Anfrage bestätigt',
+  anfrage_erledigt: 'Anfrage erledigt',
+  anfrage_abgelehnt: 'Anfrage abgelehnt',
+  pruefer_abruf: 'Prüferzugang abgerufen',
+};
+
+function protokollFelder(obj) {
+  const f = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'boolean') f[k] = { booleanValue: v };
+    else f[k] = { stringValue: typeof v === 'string' ? v.slice(0, 1000) : JSON.stringify(v).slice(0, 1000) };
+  }
+  return f;
+}
+
+async function protokollSchreiben(env, { admin, aktion, uid, grund = null, details = {}, zeit = null }) {
+  const jetzt = zeit || new Date().toISOString();
+  const token = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+  const kopf = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+  // 1. Betreiber-Protokoll (immer)
+  await fetch(`${NACHRICHT_FS}/admin_protokoll`, {
+    method: 'POST', headers: kopf,
+    body: JSON.stringify({ fields: protokollFelder({ zeit: jetzt, admin: admin || '-', aktion, uid: uid || '-', grund, details: JSON.stringify(details) }) })
+  }).then(r => { if (!r.ok) console.error('admin_protokoll:', r.status); });
+  // 2. Nutzer-Protokoll (nur wenn ein Konto betroffen ist)
+  if (uid && uid !== '-' && PROTOKOLL_NUTZERTEXT[aktion]) {
+    await fetch(`${NACHRICHT_FS}/users/${encodeURIComponent(uid)}/audit_log`, {
+      method: 'POST', headers: kopf,
+      body: JSON.stringify({ fields: { ...protokollFelder({ aktion, text: PROTOKOLL_NUTZERTEXT[aktion], rolle: 'Betreiber', grund }), zeitstempel: { timestampValue: jetzt } } })
+    }).then(r => { if (!r.ok) console.error('audit_log (Nutzer):', r.status); });
+  }
+}
+
+// Migration der bisherigen KV-Einträge (einmalig). Die KV-Einträge bleiben erhalten.
+async function handleAdminProtokollMigrieren(authHeader, env, cors = {}) {
+  const verified = await verifyFirebaseToken(authHeader, env);
+  if (!istAdmin(verified, env)) return konsoleJson({ error: 'forbidden' }, 403, cors);
+  if (await env.PROFIL_KV.get('protokoll-migriert')) return konsoleJson({ ok: true, hinweis: 'bereits migriert' }, 200, cors);
+  let anzahl = 0;
+  for (const praefix of ['admin-log:', 'pruefer-abruf:']) {
+    for (const name of await kvSchluesselMit(env, praefix)) {
+      const eintrag = JSON.parse((await env.PROFIL_KV.get(name)) || 'null');
+      if (!eintrag) continue;
+      const aktion = eintrag.aktion || 'pruefer_abruf';
+      const { zeit, admin, uid, grund, ...rest } = eintrag;
+      await protokollSchreiben(env, { admin: admin || 'Betreiber', aktion, uid: uid || '-', grund: grund || null, details: rest, zeit: zeit || new Date().toISOString() });
+      anzahl++;
+    }
+  }
+  await env.PROFIL_KV.put('protokoll-migriert', new Date().toISOString());
+  await protokollSchreiben(env, { admin: verified.email, aktion: 'protokoll_migriert', uid: '-', details: { anzahl } });
+  return konsoleJson({ ok: true, migriert: anzahl }, 200, cors);
+}
+
+// Betreiber-Protokoll lesen (neueste zuerst, optional nach Konto oder Vorgang gefiltert)
+async function handleAdminProtokoll(request, authHeader, env, cors = {}) {
+  const verified = await verifyFirebaseToken(authHeader, env);
+  if (!istAdmin(verified, env)) return konsoleJson({ error: 'forbidden' }, 403, cors);
+  const body = await request.json().catch(() => ({}));
+  const filterUid = body.uid ? String(body.uid) : null;
+  const filterAktion = body.aktion ? String(body.aktion) : null;
+  try {
+    const token = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const res = await fetch(`${NACHRICHT_FS}:runQuery`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'admin_protokoll' }], orderBy: [{ field: { fieldPath: 'zeit' }, direction: 'DESCENDING' }], limit: 300 } })
+    });
+    if (!res.ok) throw new Error(`Protokoll lesen fehlgeschlagen (${res.status})`);
+    const eintraege = (await res.json()).filter(z => z.document).map(z => {
+      const f = z.document.fields || {};
+      const feld = (k) => f[k]?.stringValue || '';
+      return { zeit: feld('zeit') || f.zeit?.timestampValue || '', admin: feld('admin'), aktion: feld('aktion'), uid: feld('uid'), grund: feld('grund'), details: feld('details') };
+    }).filter(e => (!filterUid || e.uid === filterUid) && (!filterAktion || e.aktion === filterAktion));
+    return konsoleJson({ eintraege }, 200, cors);
+  } catch (e) {
+    console.error('admin/protokoll:', e.message);
+    return konsoleJson({ error: 'Protokoll nicht verfügbar' }, 500, cors);
+  }
+}
+
+
 
 function adminAntwort(objekt, status, cors) {
   return new Response(JSON.stringify(objekt), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
