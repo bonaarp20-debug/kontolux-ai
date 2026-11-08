@@ -35,7 +35,13 @@ test('Freigabe: signierter Link gibt das Konto frei, danach funktioniert es', as
     const mail = dienste.log.mails.find(m => m.subject.startsWith('Konto zur Freigabe'));
     const link = mail.html.match(/href="([^"]+)"/)[1];
     const url = new URL(link);
-    const freigabe = await anfrage(env, { method: 'GET', path: url.pathname + url.search, ip: '10.71.0.2' });
+    // Der bloße Aufruf (z. B. durch einen Mail-Scanner) gibt das Konto NICHT frei
+    const vorschau = await anfrage(env, { method: 'GET', path: url.pathname + url.search, ip: '10.71.0.2' });
+    assert.equal(vorschau.status, 200);
+    assert.match(await vorschau.text(), /<form method="POST"/);
+    const vorher = await anfrage(env, { path: '/freigabe-status', body: {}, headers: { Authorization: 'Bearer tok-10' }, ip: '10.71.0.5' });
+    assert.equal((await vorher.json()).status, 'wartet');
+    const freigabe = await anfrage(env, { method: 'POST', path: url.pathname + url.search, body: undefined, ip: '10.71.0.2' });
     assert.equal(freigabe.status, 200);
     const status = await anfrage(env, { path: '/freigabe-status', body: {}, headers: { Authorization: 'Bearer tok-10' }, ip: '10.71.0.3' });
     assert.equal((await status.json()).status, 'frei');

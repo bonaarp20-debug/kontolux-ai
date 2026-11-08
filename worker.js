@@ -152,13 +152,18 @@ async function kontoEmailHolen(uid, env) {
   return data.users?.[0]?.email || null;
 }
 
-async function freigabeBestaetigen(url, env) {
+// Der Aufruf per Link (GET) ändert nichts: Mail-Scanner rufen Links vorab auf und würden sonst verdächtige
+// Konten selbst freigeben. Erst der Klick auf den Knopf (POST) gibt das Konto frei.
+async function freigabeBestaetigen(url, env, bestaetigt = false) {
   const uid = url.searchParams.get('uid') || '';
   const exp = Number(url.searchParams.get('exp') || 0);
   const sig = url.searchParams.get('sig') || '';
   if (!uid || !exp || Date.now() > exp) return new Response('Link abgelaufen oder ungültig.', { status: 400 });
   const erwartet = await freigabeSignatur(uid, exp, env);
   if (!(await istGleichesGeheimnis(sig, erwartet))) return new Response('Ungültiger Link.', { status: 400 });
+  if (!bestaetigt) {
+    return new Response(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><form method="POST" action="${escapeHtml(url.pathname + url.search)}" style="font-family:sans-serif"><p>Konto ${escapeHtml(kurz(uid))} freigeben?</p><button type="submit" style="padding:10px 18px;font-size:15px">Konto freigeben</button></form>`, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
+  }
   await env.PROFIL_KV.put(`status:${uid}`, 'frei');
   // Nach der Freigabe die Bestätigungsmail automatisch verschicken, damit der Nutzer nichts neu anfragen muss
   let mailHinweis = 'Die Bestätigungsmail wurde an den Nutzer geschickt.';
@@ -309,7 +314,9 @@ const ROUTEN_LIMITS = {
 // den In-Memory-Zähler pro Instanz umgehen. KV ist eventuell konsistent, deshalb ist das eine grobe Grenze.
 const GLOBALE_LIMITS = {
   '/kontakt':             { limit: 30,  windowSec: 600 },
-  '/send-password-reset': { limit: 30,  windowSec: 600 },
+  // Absichtlich großzügig: Wer dieses Limit ausschöpft, sperrt das Zurücksetzen für alle. Den Schutz vor
+  // Mail-Bombing übernehmen das Limit pro Adresse und pro IP.
+  '/send-password-reset': { limit: 300, windowSec: 600 },
   '/feedback':            { limit: 100, windowSec: 600 },
 };
 async function globalesLimit(env, schluessel, limit, windowSec) {
@@ -404,6 +411,9 @@ export default {
     // Freigabe-Link aus der Betreiber-Mail (GET, signiert, Gültigkeit 14 Tage)
     if (request.method === 'GET' && url.pathname === '/freigabe') {
       return freigabeBestaetigen(url, env);
+    }
+    if (request.method === 'POST' && url.pathname === '/freigabe') {
+      return freigabeBestaetigen(url, env, true);
     }
 
     // PDF Result
@@ -2598,6 +2608,15 @@ async function handleChat(body, env, cors = {}, ctx) {
 // potenziell die teuersten Aufrufe im ganzen Worker sind — Kosten-Untersuchung 2026-08-28 hätte
 // ohne dieses Logging diesen Pfad blind gelassen.
 async function streamTextResponse(claudeRes, userId, env, cors, model = 'claude-haiku-5-5', label = 'stream') {
+  // Antwortet die KI mit einem Fehler (z. B. 429 oder 529), gibt es keinen Stream. Ohne diese Prüfung
+  // bekäme der Nutzer eine leere Antwort ohne Hinweis.
+  if (!claudeRes.ok) {
+    const errText = await claudeRes.text().catch(() => '');
+    console.error(`Claude API Error (${label}):`, claudeRes.status, errText.substring(0, 200));
+    return new Response('Kontolux ist gerade nicht erreichbar. Bitte versuche es in ein paar Minuten noch einmal.', {
+      status: 502, headers: { ...cors, 'Content-Type': 'text/plain; charset=utf-8' }
+    });
+  }
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
   const encoder = new TextEncoder();
@@ -2676,7 +2695,6 @@ async function handleImage(body, env, cors = {}, ctx) {
       headers: { ...cors, 'Content-Type': 'text/plain' }
     });
   }
-  await incrementUploadLimit(userId, env);
 
   const limit = await checkNachrichtenLimit(Nutzername, env, userId, ctx);
   if (!limit.erlaubt) {
@@ -2684,6 +2702,8 @@ async function handleImage(body, env, cors = {}, ctx) {
       headers: { ...cors, 'Content-Type': 'text/plain' }
     });
   }
+  // Erst zählen, wenn die Anfrage tatsächlich bearbeitet wird (vorher kostete eine abgelehnte Anfrage ein Upload)
+  await incrementUploadLimit(userId, env);
 
   const dynamicContext = buildDynamicContext(Profil, Datum);
   const system = buildSystemBlocks(dynamicContext, await loadSteuerrechtContext(env));
@@ -2696,7 +2716,8 @@ async function handleImage(body, env, cors = {}, ctx) {
     ]
   }];
 
-  const imageModel = env.ANTHROPIC_MODEL || 'claude-haiku-5-5';
+  // Gleiches Modell wie Chat und Dokument (die Variable ANTHROPIC_MODEL in wrangler.toml zeigte auf ein älteres)
+  const imageModel = 'claude-haiku-5-5';
   const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -5707,8 +5728,12 @@ function nettoAusBrutto(brutto, mwst_satz) {
 async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
   // Zufallssuffix: der SumUp-Abruf schreibt mehrere Belege direkt hintereinander — reine
   // Date.now()-IDs könnten in derselben Millisekunde kollidieren und sich überschreiben.
-  const docId = `beleg_webhook_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
-  const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}`;
+  // Mit dedupKey (Ereignis-ID der Plattform) ist die Beleg-ID aus dem Schlüssel abgeleitet und das Anlegen
+  // gilt nur, wenn der Beleg noch nicht existiert (atomar). Kommt dasselbe Ereignis zweimal gleichzeitig an,
+  // entsteht trotzdem nur ein Beleg und nur eine Tagesbuchung.
+  const dedupHash = belegData.dedupKey ? (await sha256Hex(`${userId}|${belegData.dedupKey}`)).slice(0, 32) : null;
+  const docId = dedupHash ? `beleg_webhook_${dedupHash}` : `beleg_webhook_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
+  const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}${dedupHash ? '?currentDocument.exists=false' : ''}`;
 
   const name = belegData.name || (belegData.absender ? `Beleg von ${belegData.absender}` : 'Beleg');
   const metadata = {
@@ -5737,6 +5762,9 @@ async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
     headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(metadata)
   });
+  if (dedupHash && (firestoreRes.status === 409 || firestoreRes.status === 412)) {
+    return { success: true, docId, duplicate: true };
+  }
   if (!firestoreRes.ok) {
     const errText = await firestoreRes.text();
     throw new Error(`writeBelegAsAdmin: Firestore-Write fehlgeschlagen (${firestoreRes.status}): ${errText.slice(0, 200)}`);
@@ -6664,6 +6692,7 @@ async function handleStripeWebhook(request, url, env, cors) {
       }
     }
 
+    belegData.dedupKey = event.id;
     const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
     // Als verarbeitet markieren SOBALD der Beleg sicher gespeichert ist — auch wenn die
     // Tagesbewegung selbst noch fehlschlagen sollte (result.tagesbewegungWarnung). Ein Crash
@@ -6807,6 +6836,7 @@ async function mollieErstattungenBuchen(userId, payment, apiKey, env, adminToken
     const monatJahr = BERLIN_MONAT_JAHR_FORMATTER.format(gueltig);
     const beschreibung = payment.description || null;
     await writeBelegAsAdmin(userId, {
+      dedupKey: p.id,
       typ: 'rechnung_eingehend',
       betrag: p.betrag,
       absender: payment.metadata?.email || 'Mollie-Kunde',
@@ -6944,7 +6974,8 @@ async function handleMollieWebhook(request, url, env, cors) {
         }
       }
 
-      const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
+      belegData.dedupKey = payment.id;
+    const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
       // Als verarbeitet markieren SOBALD der Beleg sicher gespeichert ist — identische Abwägung
       // wie handleStripeWebhook.
       await markAsProcessed(userId, payment.id, adminToken);
@@ -7204,6 +7235,7 @@ async function handleDigistore24Webhook(request, url, env, cors) {
 
     if (!(belegData.betrag > 0)) return ipnOk(cors); // z.B. 0-€-Testbestellung: nichts zu buchen
 
+    belegData.dedupKey = dedupKey;
     const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
     await markAsProcessed(userId, dedupKey, adminToken);
     await incrementWebhookBelegCount(userId, env);
@@ -7378,6 +7410,7 @@ async function handleCopecartWebhook(request, url, env, cors) {
 
     if (!(belegData.betrag > 0)) return ipnOk(cors);
 
+    belegData.dedupKey = dedupKey;
     const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
     await markAsProcessed(userId, dedupKey, adminToken);
     await incrementWebhookBelegCount(userId, env);
@@ -7657,6 +7690,7 @@ async function handlePaypalWebhook(request, url, env, cors) {
       }
     }
 
+    belegData.dedupKey = event.id;
     const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
     // Als verarbeitet markieren SOBALD der Beleg sicher gespeichert ist — identische Abwägung wie
     // bei den anderen Plattformen (siehe handleStripeWebhook für die ausführliche Begründung).
@@ -7795,6 +7829,7 @@ async function syncSumupFuerNutzer(userId, env, adminToken) {
         belegData.kategorie = kategorie;
         if (sachkonto) belegData.sachkonto = sachkonto;
       }
+      belegData.dedupKey = dedupKey;
       await writeBelegAsAdmin(userId, belegData, env, adminToken);
       await markAsProcessed(userId, dedupKey, adminToken);
       await incrementWebhookBelegCount(userId, env);
@@ -8146,6 +8181,7 @@ async function handleAblefyWebhook(request, url, env, cors) {
       }
     }
 
+    belegData.dedupKey = eventKey;
     const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
     // Als verarbeitet markieren SOBALD der Beleg sicher gespeichert ist — identische Abwägung wie
     // bei den anderen Plattformen (siehe handleStripeWebhook für die ausführliche Begründung).
@@ -8345,6 +8381,7 @@ async function handleShopifyWebhook(request, url, env, cors) {
       }
     }
 
+    belegData.dedupKey = (fachSchluessel || zustellSchluessel);
     const result = await writeBelegAsAdmin(userId, belegData, env, adminToken);
     // Marker erst NACH dem sicheren Speichern — identische Abwägung wie bei handleStripeWebhook
     if (fachSchluessel) await markAsProcessed(userId, fachSchluessel, adminToken);
