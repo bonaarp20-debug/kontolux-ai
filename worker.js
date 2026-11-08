@@ -2729,6 +2729,26 @@ async function handleImage(body, env, cors = {}, ctx) {
 // wird von Firestore serverseitig atomar auf den zum Zeitpunkt des Commits aktuellen Wert
 // angewendet, unabhängig von parallelen Schreibvorgängen — legt das Feld/Dokument bei Bedarf
 // auch neu an (Firestore-Semantik: increment auf ein nicht existierendes Feld startet bei 0).
+// Ein Dokument je Buchung in users/{uid}/tagesbuchungen. Jede Buchung bekommt eine eigene ID und wird
+// nur neu angelegt (currentDocument exists=false), nie überschrieben. Damit geht keine Beschreibung
+// mehr verloren, wenn am selben Tag weitere Buchungen dazukommen. Das ältere Textfeld bleibt zur
+// Kompatibilität erhalten.
+export function tagesbuchungDokument(userId, richtung, betragAbs, beschreibung, datum, id) {
+  const name = `projects/kontolux-ai/databases/(default)/documents/users/${userId}/tagesbuchungen/${id}`;
+  return {
+    update: {
+      name,
+      fields: {
+        richtung: { stringValue: richtung },
+        betrag: { doubleValue: betragAbs },
+        beschreibung: { stringValue: beschreibung || '' },
+        datum: { stringValue: datum }
+      }
+    },
+    currentDocument: { exists: false }
+  };
+}
+
 async function buchTagesBewegung(userId, token, richtung, betragNum, beschreibung) {
   if (!userId || !token || !betragNum || isNaN(betragNum)) return;
   const heute = berlinDatumAlsString(); // YYYY-MM-DD, Europe/Berlin (siehe Kommentar oben)
@@ -2757,7 +2777,7 @@ async function buchTagesBewegung(userId, token, richtung, betragNum, beschreibun
           update: { name: docName, fields: { datum: { stringValue: heute }, beschreibung: { stringValue: beschreibung || '' } } },
           updateMask: { fieldPaths: ['datum', 'beschreibung'] },
           updateTransforms: [{ fieldPath: 'einnahmen', increment: { doubleValue: betragAbs } }]
-        }]
+        }, tagesbuchungDokument(userId, 'einnahme', betragAbs, beschreibung, heute, crypto.randomUUID())]
       })
     });
   } else {
@@ -2772,7 +2792,7 @@ async function buchTagesBewegung(userId, token, richtung, betragNum, beschreibun
           update: { name: docName, fields: { [beschreibungKey]: { stringValue: beschreibung || '' } } },
           updateMask: { fieldPaths: [beschreibungKey] },
           updateTransforms: [{ fieldPath: ausgabeKey, increment: { doubleValue: betragAbs } }]
-        }]
+        }, tagesbuchungDokument(userId, 'ausgabe', betragAbs, beschreibung, heute, crypto.randomUUID())]
       })
     });
   }

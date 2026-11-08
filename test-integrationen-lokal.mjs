@@ -80,10 +80,23 @@ globalThis.fetch = async (input, init = {}) => {
   throw new Error('Unerwarteter fetch im Test: ' + method + ' ' + url);
 };
 
+// Der Worker speichert das URL-Geheimnis seit der Verschlüsselung nur als url_secret_ct/url_secret_iv.
+// Dieselbe Verschlüsselung (AES-GCM, Schlüssel = SHA-256 über TOKEN_ENCRYPTION_KEY) wie im Worker.
+const TEST_TOKEN_KEY = 'test-token-encryption-key-0123456789';
+async function geheimnisVerschluesseln(klartext) {
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(TEST_TOKEN_KEY));
+  const key = await crypto.subtle.importKey('raw', hash, { name: 'AES-GCM' }, false, ['encrypt']);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(klartext)));
+  return { ct: Buffer.from(ct).toString('base64'), iv: Buffer.from(iv).toString('base64') };
+}
+const ENC_SECRET = await geheimnisVerschluesseln(URL_SECRET);
+
 const { privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
 const kv = new Map();
 const env = {
   FIREBASE_ADMIN_CLIENT_EMAIL: 'test@example.iam.gserviceaccount.com',
+  TOKEN_ENCRYPTION_KEY: TEST_TOKEN_KEY,
   FIREBASE_ADMIN_PRIVATE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }),
   PROFIL_KV: { get: async (k) => kv.get(k) ?? null, put: async (k, v) => { kv.set(k, v); }, delete: async (k) => { kv.delete(k); } },
   ABO_KV: { get: async () => null, put: async () => {} },
@@ -94,8 +107,32 @@ const worker = (await import('./worker.js')).default;
 
 // ── Helfer ────────────────────────────────────────────────────────────────────────────────
 const S = (v) => ({ stringValue: v });
+// Geheime Felder werden wie im Worker als <feld>_ct / <feld>_iv gespeichert (AES-GCM, synchron via node:crypto).
+function geheimnisLesen(doc, feld) {
+  const key = crypto.createHash('sha256').update(TEST_TOKEN_KEY).digest();
+  const ct = Buffer.from(w(doc, `${feld}_ct`), 'base64');
+  const iv = Buffer.from(w(doc, `${feld}_iv`), 'base64');
+  const d = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  d.setAuthTag(ct.subarray(ct.length - 16));
+  return Buffer.concat([d.update(ct.subarray(0, ct.length - 16)), d.final()]).toString('utf8');
+}
+const SECRET_FELDER = ['client_secret', 'passphrase', 'webhook_secret', 'api_key', 'stripe_signing_secret'];
+function verschluesselSync(klartext) {
+  const key = crypto.createHash('sha256').update(TEST_TOKEN_KEY).digest();
+  const iv = crypto.randomBytes(12);
+  const c = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const ct = Buffer.concat([c.update(klartext, 'utf8'), c.final(), c.getAuthTag()]);
+  return { ct: ct.toString('base64'), iv: iv.toString('base64') };
+}
 function config(plattform, felder, mwst = '19') {
-  docs.set(`users/${USER}/webhook_secrets/${plattform}`, { url_secret: S(URL_SECRET), enabled: { booleanValue: true }, mwst_setting: S(mwst), ...felder });
+  const out = {};
+  for (const [k, v] of Object.entries(felder)) {
+    if (SECRET_FELDER.includes(k) && v && v.stringValue !== undefined) {
+      const e = verschluesselSync(v.stringValue);
+      out[`${k}_ct`] = S(e.ct); out[`${k}_iv`] = S(e.iv);
+    } else out[k] = v;
+  }
+  docs.set(`users/${USER}/webhook_secrets/${plattform}`, { url_secret_ct: S(ENC_SECRET.ct), url_secret_iv: S(ENC_SECRET.iv), enabled: { booleanValue: true }, mwst_setting: S(mwst), ...out });
 }
 async function post(plattform, body, headers = {}, secret = URL_SECRET) {
   const res = await worker.fetch(new Request(`https://worker.test/webhook/${plattform}/${USER}/${secret}`, { method: 'POST', headers, body }), env, ctx);
@@ -293,7 +330,7 @@ abschnitt('SumUp (API-Abruf)');
   pruefe('Erstattung als Abfluss gebucht', sb.some(x => w(x, 'typ') === 'rechnung_eingehend' && w(x, 'betrag') === 23.8));
   await cron();
   pruefe('Zweiter Cron-Lauf bucht nichts doppelt', belege('sumup_webhook').length === 3, String(belege('sumup_webhook').length));
-  r = await post('sumup', JSON.stringify({ event_type: 'CHECKOUT_STATUS_CHANGED', id: 'erfunden' }), { 'Content-Type': 'application/json' }, w(docs.get(`users/${USER}/webhook_secrets/sumup`), 'url_secret'));
+  r = await post('sumup', JSON.stringify({ event_type: 'CHECKOUT_STATUS_CHANGED', id: 'erfunden' }), { 'Content-Type': 'application/json' }, geheimnisLesen(docs.get(`users/${USER}/webhook_secrets/sumup`), 'url_secret'));
   pruefe('Webhook-Aufruf löst nur Abruf aus, fremder Inhalt bucht nichts (204)', r.status === 204 && belege('sumup_webhook').length === 3, `${r.status}`);
   r = await post('sumup', '{}', { 'Content-Type': 'application/json' }, 'falsch');
   pruefe('Falsche Webhook-URL → 404', r.status === 404);

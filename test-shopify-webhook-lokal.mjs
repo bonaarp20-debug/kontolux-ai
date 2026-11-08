@@ -22,6 +22,15 @@ import crypto from 'node:crypto';
 
 const USER = 'testuser123';
 const URL_SECRET = 'urlsecret_shopify_abcdefgh';
+const TEST_TOKEN_KEY = 'test-token-encryption-key-0123456789';
+const geheimVerschl = (klartext) => {
+  const key = crypto.createHash('sha256').update(TEST_TOKEN_KEY).digest();
+  const iv = crypto.randomBytes(12);
+  const c = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const ct = Buffer.concat([c.update(klartext, 'utf8'), c.final(), c.getAuthTag()]);
+  return { ct: ct.toString('base64'), iv: iv.toString('base64') };
+};
+const geheimFelder = (feld, wert) => { const e = geheimVerschl(wert); return { [feld + '_ct']: { stringValue: e.ct }, [feld + '_iv']: { stringValue: e.iv } }; };
 const SECRET = 'shopify_signaturschluessel_1234567890';
 
 const docs = new Map();
@@ -57,6 +66,7 @@ const { privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 }
 const kv = new Map();
 const env = {
   FIREBASE_ADMIN_CLIENT_EMAIL: 'test@example.iam.gserviceaccount.com',
+  TOKEN_ENCRYPTION_KEY: TEST_TOKEN_KEY,
   FIREBASE_ADMIN_PRIVATE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }),
   PROFIL_KV: { get: async (k) => kv.get(k) ?? null, put: async (k, v) => { kv.set(k, v); } },
   ABO_KV: { get: async () => null, put: async () => {} },
@@ -67,8 +77,8 @@ const worker = (await import('./worker.js')).default;
 
 function setzeConfig() {
   docs.set(`users/${USER}/webhook_secrets/shopify`, {
-    url_secret: { stringValue: URL_SECRET },
-    webhook_secret: { stringValue: SECRET },
+    ...geheimFelder('url_secret', URL_SECRET),
+    ...geheimFelder('webhook_secret', SECRET),
     enabled: { booleanValue: true },
     mwst_setting: { stringValue: '19' },
   });
