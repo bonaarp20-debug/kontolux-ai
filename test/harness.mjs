@@ -31,6 +31,7 @@ export async function erzeugeTestEnv(overrides = {}) {
     FIREBASE_ADMIN_CLIENT_EMAIL: 'admin@test.invalid',
     FIREBASE_ADMIN_PRIVATE_KEY: pem,
     ADMIN_SEED_KEY: 'test-seed-key-0123456789',
+    TOKEN_ENCRYPTION_KEY: 'test-token-encryption-key-0123456789',
     SUPABASE_URL: 'https://supabase.test.invalid',
     SUPABASE_KEY: 'test-supabase',
     RESEND_API_KEY: 'test-resend',
