@@ -443,6 +443,9 @@ export default {
     // neu serialisiertes JSON könnte durch andere Key-Reihenfolge/Whitespace einen
     // abweichenden Hash ergeben. Details/Abwägungen: docs/webhook_implementierungsplan.md
     // (Kontolux-Frontend-Repo).
+    if (request.method === 'POST' && url.pathname.startsWith('/webhook/') && !/^[A-Za-z0-9]{6,128}$/.test(url.pathname.split('/')[3] || '')) {
+      return new Response('Not found', { status: 404, headers: cors });
+    }
     if (request.method === 'POST' && url.pathname.startsWith('/webhook/stripe/')) {
       return mitEmpfangsnachweis(handleStripeWebhook(request, url, env, cors), url, env);
     }
@@ -2342,6 +2345,8 @@ async function handleSendEmailChangeVerification(currentEmail, body, env, cors =
       status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
     });
   }
+  // Wegwerf-Adressen werden nicht beliefert (gleiche Antwort wie sonst, verrät nichts)
+  if (istWegwerfMail(newEmail)) return antwort();
   try {
     const link = await generateFirebaseActionLink('VERIFY_AND_CHANGE_EMAIL', currentEmail, env, newEmail);
     await sendEmail(newEmail, 'Bestätige deine neue E-Mail-Adresse — Kontolux AI', emailChangeEmailHtml(link, newEmail), env, 'Kontolux AI <jona@kontolux-ai.de>');
@@ -2402,6 +2407,13 @@ async function logAbTestFirestore(env, daten) {
 
 async function handleChat(body, env, cors = {}, ctx) {
   const { Nachricht, Verlauf, Nutzername, Profil, FristType, Datum, userId, ChatId, ErsteNachricht, Datei } = body;
+
+  // Obergrenzen gegen überlange Eingaben (jedes Token kostet echtes Geld, das Tageslimit zählt nur Nachrichten)
+  if (String(Nachricht ?? '').length > 8000 || String(Verlauf ?? '').length > 60000 || String(Profil ?? '').length > 80000) {
+    return new Response('Deine Nachricht ist zu lang. Bitte kürze sie und versuche es noch einmal.', {
+      status: 413, headers: { ...cors, 'Content-Type': 'text/plain; charset=utf-8' }
+    });
+  }
 
   try {
     // Nachrichtenlimit-Check und Steuerrecht parallel laden.
@@ -3075,8 +3087,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
       // (duplikatBestaetigt), wird dieser Backstop übersprungen — sonst gäbe es keine
       // Möglichkeit, eine bewusst bestätigte Dopplung tatsächlich zu speichern.
       if (!duplikatBestaetigt) try {
-        const dokBaseUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente`;
-        const existingDocs = await firestoreListAll(dokBaseUrl, token);
+        const existingDocs = await belegeSeit(userId, token, Date.now() - 10 * 60 * 1000);
         const windowStart = Date.now() - 10 * 60 * 1000;
         const isDuplicate = existingDocs.some(d => {
           const f = d.fields || {};
@@ -3094,7 +3105,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
       } catch(e) { console.warn('Duplikat-Check (BELEG_MANUELL):', e.message); }
 
       // Speichere DIREKT in Firestore (nur Metadaten, keine Datei)
-      const docId = `beleg_manual_${Date.now()}`;
+      const docId = `beleg_manual_${Date.now()}_${crypto.randomUUID().slice(0, 6)}`;
       const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}`;
 
       const metadata = {
@@ -3220,8 +3231,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
       // überspringt diesen Backstop, sonst könnte eine bewusst bestätigte Dopplung nie
       // tatsächlich gespeichert werden.
       if (!duplikatBestaetigt) try {
-        const dokBaseUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente`;
-        const existingDocs = await firestoreListAll(dokBaseUrl, token);
+        const existingDocs = await belegeSeit(userId, token, Date.now() - 10 * 60 * 1000);
         const windowStart = Date.now() - 10 * 60 * 1000;
         const isDuplicate = existingDocs.some(d => {
           const f = d.fields || {};
@@ -3246,7 +3256,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
         }
       } catch(e) { console.warn('Duplikat-Check (BELEG_SPEICHERN):', e.message); }
 
-      const docId = `beleg_${Date.now()}`;
+      const docId = `beleg_${Date.now()}_${crypto.randomUUID().slice(0, 6)}`;
       const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}`;
 
       const sizeBytes = size || 0;
@@ -4295,6 +4305,22 @@ function buSchluesselExport(mwstSatz, kleinunternehmer, istEinnahme, gegenkonto,
   return '';
 }
 
+
+// Nur Belege der letzten Minuten laden (für die Dublettenprüfung) statt das ganze Belegarchiv zu lesen.
+async function belegeSeit(userId, token, seitMs) {
+  const res = await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${encodeURIComponent(userId)}:runQuery`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ structuredQuery: {
+      from: [{ collectionId: 'dokumente' }],
+      where: { fieldFilter: { field: { fieldPath: 'createdAt' }, op: 'GREATER_THAN_OR_EQUAL', value: { timestampValue: new Date(seitMs).toISOString() } } },
+      limit: 200
+    } })
+  });
+  if (!res.ok) throw new Error(`Firestore-Abfrage fehlgeschlagen (${res.status})`);
+  const rows = await res.json();
+  return Array.isArray(rows) ? rows.filter(r => r.document).map(r => r.document) : [];
+}
 
 async function firestoreListAll(baseUrl, authHeader) {
   const allDocs = [];
