@@ -1429,7 +1429,19 @@ FORMAT (ganz am Ende): PROFIL_UPDATE:schluessel=wert,schluessel=wert`;
 // Abhängigkeiten: rechnungen → +euer; tools → +euer.
 // Feature-Flag KI_OPTIMIERUNG_AKTIV=true aktiviert alles (50/50 A/B-Split bleibt).
 
-function detectRequiredModules(nachricht, fristType, hatDatei) {
+// Kurze Antworten wie "j" oder "bitte erfasse ihn erneut" enthalten keine Stichwörter. Damit die Buchungsregeln
+// trotzdem geladen werden, fließen bei kurzen Nachrichten und nach einer (j/n)-Frage die letzten Beiträge
+// des Verlaufs in die Erkennung ein. Ohne das schrieb die KI "gespeichert", ohne den Befehl zu kennen.
+export function erkennungsText(nachricht, verlauf) {
+  const n = String(nachricht || '');
+  if (!verlauf) return n;
+  const teile = String(verlauf).split(' | ').filter(p => p.trim());
+  const letzte = teile.slice(-2).join(' ');
+  const nachFrage = /\(j\/n\)/i.test(teile[teile.length - 1] || '');
+  return (n.length <= 60 || nachFrage) ? `${n} ${letzte}` : n;
+}
+
+export function detectRequiredModules(nachricht, fristType, hatDatei) {
   const modules = ['core']; // immer
   const t = (nachricht || '').toLowerCase();
   if (hatDatei) { modules.push('steuer', 'euer', 'rechnungen', 'tools'); return modules; }
@@ -2409,7 +2421,7 @@ async function handleChat(body, env, cors = {}, ctx) {
     // Modulares System aktiv: nur benötigte Module laden, Profil filtern.
     // Steuerrecht bleibt immer drin (Block 1, bereits cached — kein Kostenvorteil beim Weglassen).
     const hatDatei = !!(Datei && Datei.base64);
-    const requiredModules = detectRequiredModules(Nachricht, FristType, hatDatei);
+    const requiredModules = detectRequiredModules(erkennungsText(Nachricht, Verlauf), FristType, hatDatei);
     const abGruppe = 'B';
     const kiOptimierungAktiv = true;
     const profilMitDashboard = Profil;
