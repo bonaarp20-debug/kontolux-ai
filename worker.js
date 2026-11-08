@@ -3481,7 +3481,9 @@ async function sendEmail(to, subject, html, env, from = 'Kontolux AI <jona@konto
   });
   if (!res.ok) {
     const errText = await res.text();
-    console.error('sendEmail Resend Error:', res.status, errText, 'to=', to);
+    // Empfängeradresse nicht ins Log: nur der Anfang und die Domain
+    const zielMaske = String(to ?? '').replace(/^(.{1,2}).*(@.*)$/, '$1…$2');
+    console.error('sendEmail Resend Error:', res.status, errText, 'to=', zielMaske);
   }
   return res.ok;
 }
@@ -7588,7 +7590,7 @@ async function handlePaypalWebhook(request, url, env, cors) {
 
     const verifyResult = await verifyPaypalWebhookSignature(request, event, { clientId, clientSecret, webhookId, testmodus: webhookTestmodus(env) });
     if (verifyResult.status === 'invalid') {
-      console.warn('PayPal-Webhook Signaturprüfung fehlgeschlagen: userId=', userId, 'eventId=', event.id);
+      console.warn('PayPal-Webhook Signaturprüfung fehlgeschlagen: userId=', kurz(userId), 'eventId=', event.id);
       return new Response(JSON.stringify({ error: 'Invalid signature' }), {
         status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
       });
@@ -7598,7 +7600,7 @@ async function handlePaypalWebhook(request, url, env, cors) {
       // zugestellt — war die Verifikations-API nur kurz gestört, ging die Zahlung dauerhaft
       // verloren. PayPal wiederholt nicht-2xx-Zustellungen begrenzt (bis zu 25× über 3 Tage),
       // ein "endloser" Retry-Sturm entsteht dadurch nicht.
-      console.error('PayPal-Webhook: Verifikation nicht verfügbar — Retry angefordert. userId=', userId, 'eventId=', event.id);
+      console.error('PayPal-Webhook: Verifikation nicht verfügbar — Retry angefordert. userId=', kurz(userId), 'eventId=', event.id);
       return new Response(JSON.stringify({ error: 'Verification unavailable, retry later' }), {
         status: 503, headers: { ...cors, 'Content-Type': 'application/json' }
       });
