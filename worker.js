@@ -489,6 +489,8 @@ export default {
       try {
         // clone(): die Admin-Handler lesen den Body selbst noch einmal
         body = await request.clone().json();
+        // Gültiges JSON, das kein Objekt ist (null, Zahl, Liste), wäre sonst ein 500 bei body.userId: wie ungültiges JSON ablehnen
+        if (body === null || typeof body !== 'object' || Array.isArray(body)) throw new Error('Body ist kein JSON-Objekt');
       } catch (parseErr) {
         console.error('JSON Parse Error:', parseErr.message);
         const errorCors = getCORS(origin);

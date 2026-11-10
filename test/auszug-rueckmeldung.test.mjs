@@ -74,3 +74,15 @@ test('/auszug-rueckmeldung: Limit pro Nutzer (5 pro 10 Minuten), nichts wird ges
     assert.equal(dienste.log.firestore.filter(f => f.method && f.method !== 'GET' && /feedback|auszug/.test(f.url)).length, 0, 'keine Schreibzugriffe auf Firestore');
   } finally { dienste.restore(); }
 });
+
+test('Router: JSON, das kein Objekt ist (null, Zahl, Liste), ergibt 400 statt 500', async () => {
+  const env = await erzeugeTestEnv();
+  const dienste = mockExterneDienste({ users });
+  try {
+    for (const roh of ['null', '42', '[1,2]', '"text"']) {
+      const r = await anfrage(env, { path: '/auszug-rueckmeldung', body: roh, headers: { ...kopf(5), 'Content-Type': 'application/json' }, ip: '10.97.0.1' });
+      assert.equal(r.status, 400, roh);
+    }
+    assert.equal(dienste.log.mails.length, 0);
+  } finally { dienste.restore(); }
+});
