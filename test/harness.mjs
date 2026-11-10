@@ -113,6 +113,10 @@ export function mockExterneDienste({ users = {}, firestoreStatus = 200, supabase
       }
       return json(rows[name] ? [rows[name]] : []);
     }
+    if (url.startsWith('https://storage.googleapis.com/storage/v1/b/')) {
+      log.firestore.push({ url, method: init.method || 'GET', auth: (init.headers || {}).Authorization });
+      return json({ items: [] });
+    }
     return json({ error: 'unmocked' }, 599);
   };
   return { log, restore: () => { globalThis.fetch = originalFetch; } };

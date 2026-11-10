@@ -215,19 +215,24 @@ async function gesperrteKontenLoeschen(env) {
       const uid = eintrag.name.slice('gesperrt:'.length);
       const zeit = Number(await env.PROFIL_KV.get(eintrag.name));
       if (!zeit || zeit > grenze) continue;
+      // Erst die Daten, dann das Login, zuletzt die Markierung: scheitert ein Schritt, bleibt die Markierung und der nächste Tageslauf versucht es erneut
+      try {
+        const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+        await archivDatenLoeschen(uid, env, adminToken);
+      } catch (e) {
+        console.error('Datenlöschung gesperrtes Konto fehlgeschlagen, uid=', kurz(uid), String(e.message).slice(0, 120));
+        continue;
+      }
       const accessToken = await getGoogleAccessToken(env);
       const res = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:delete', {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ localId: uid })
       });
-      if (res.ok) {
+      // 400 mit USER_NOT_FOUND heißt: das Login ist schon weg (früherer Lauf), also weitermachen
+      const schonWeg = !res.ok && res.status === 400 && /USER_NOT_FOUND/.test(await res.clone().text().catch(() => ''));
+      if (res.ok || schonWeg) {
         await handleDeleteAccountData({ userId: uid }, env, {});
-        // Auch die Konto-Unterdaten (Belege, Profil …) und Dateien: nach dem Löschen des Logins gäbe es sonst keinen Verantwortlichen mehr
-        try {
-          const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
-          await archivDatenLoeschen(uid, env, adminToken);
-        } catch (e) { console.error('Datenlöschung gesperrtes Konto fehlgeschlagen, uid=', kurz(uid), e.message); }
         await env.PROFIL_KV.delete(eintrag.name);
         geloescht++;
       } else {
@@ -389,7 +394,9 @@ export default {
     const istWebhook = request.method === 'POST' && url.pathname.startsWith('/webhook/');
     // Schlüssel nur aus IP und (bekannter) Plattform, nicht aus dem frei wählbaren Pfad: sonst erzeugt jede erfundene UID einen neuen Zähler.
     const webhookPlattform = url.pathname.split('/')[2] || '';
-    const limitSchluessel = istWebhook ? `${clientIP}|webhook|${/^[a-z0-9]{2,20}$/.test(webhookPlattform) ? webhookPlattform : 'x'}` : clientIP;
+    // Plus Nutzer-ID (nur wenn sie wie eine echte aussieht): Stripe, PayPal & Co. senden die Zustellungen aller Kunden von denselben IPs, ein Verkaufspeak eines Kunden darf andere nicht drosseln. Die LRU-Begrenzung hält den Speicher klein.
+    const webhookNutzer = url.pathname.split('/')[3] || '';
+    const limitSchluessel = istWebhook ? `${clientIP}|webhook|${/^[a-z0-9]{2,20}$/.test(webhookPlattform) ? webhookPlattform : 'x'}|${/^[A-Za-z0-9]{20,40}$/.test(webhookNutzer) ? webhookNutzer : 'x'}` : clientIP;
     if (!checkRateLimit(limitSchluessel, istWebhook ? 60 : 20)) {
       return new Response('Too Many Requests', { status: 429, headers: cors });
     }
@@ -3831,7 +3838,8 @@ async function loescheUnterCollectionAlsAdmin(userId, collectionId, env) {
 // Entfernt die KV-Spuren eines Kontos (Zähler, Status, Webhook-Zähler). Der Archiv-Marker bleibt, solange das Konto archiviert ist.
 async function loescheKvSpuren(uid, env, { archivMarkerAuch = false } = {}) {
   if (!env.PROFIL_KV) return;
-  const feste = [`gezaehlt:${uid}`, `status:${uid}`, `freigabe-grund:${uid}`, `gesperrt:${uid}`];
+  // gesperrt:{uid} bleibt bewusst stehen: der Löschlauf entfernt es erst, wenn alles andere gelungen ist (sonst wäre ein Neuversuch unmöglich)
+  const feste = [`gezaehlt:${uid}`, `status:${uid}`, `freigabe-grund:${uid}`];
   if (archivMarkerAuch) feste.push(`archiv:${uid}`, `archivlauf:${uid}`);
   for (const k of feste) { try { await env.PROFIL_KV.delete(k); } catch (e) { /* best effort */ } }
   try {
@@ -3902,8 +3910,8 @@ async function handleDeleteAccountData(body, env, cors = {}) {
       })
     });
     if (queryRes.ok) {
-      const rows = await queryRes.json();
-      for (const row of rows) {
+      const rowsRoh = await queryRes.json().catch(() => []);
+      for (const row of Array.isArray(rowsRoh) ? rowsRoh : []) {
         if (!row.document?.name) continue;
         await fetch(`https://firestore.googleapis.com/v1/${row.document.name}`, {
           method: 'DELETE',
@@ -5033,7 +5041,8 @@ async function archivStorage(uid, env, loeschen) {
 }
 
 async function archivKontoLoeschen(uid, env, adminToken) {
-  await archivDatenLoeschen(uid, env, adminToken);
+  // Die Archiv-Markierung (konto_archiv) bleibt, bis auch das Login gelöscht ist: sonst bliebe bei einem Fehler ein gesperrtes Konto ohne Eintrag zurück
+  await archivDatenLoeschen(uid, env, adminToken, { markerBehalten: true });
   const authToken = await getGoogleAccessToken(env);
   const del = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:delete', {
     method: 'POST',
@@ -5041,10 +5050,14 @@ async function archivKontoLoeschen(uid, env, adminToken) {
     body: JSON.stringify({ localId: uid })
   });
   if (!del.ok) throw new Error(`Konto löschen fehlgeschlagen (${del.status})`);
+  await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${uid}/profil/konto_archiv`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${adminToken}` } });
+  await loescheKvSpuren(uid, env, { archivMarkerAuch: true });
 }
 
 // Löscht alle Firestore-Sammlungen, Feedback, Dateien und KV-Spuren eines Kontos (ohne das Login selbst).
-async function archivDatenLoeschen(uid, env, adminToken) {
+async function archivDatenLoeschen(uid, env, adminToken, { markerBehalten = false } = {}) {
+  let marker = null;
+  if (markerBehalten) marker = await firestoreGetDoc(`users/${uid}/profil/konto_archiv`, adminToken);
   for (const coll of ARCHIV_SAMMLUNGEN) {
     await loescheAlleUnterPfad(`users/${uid}/${coll}`, adminToken, coll === 'chats' ? 'messages' : null);
   }
@@ -5055,13 +5068,19 @@ async function archivDatenLoeschen(uid, env, adminToken) {
     body: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'feedback' }], where: { fieldFilter: { field: { fieldPath: 'userId' }, op: 'EQUAL', value: { stringValue: uid } } } } })
   });
   if (fbRes.ok) {
-    for (const zeile of await fbRes.json()) {
+    const fbZeilen = await fbRes.json().catch(() => []);
+    for (const zeile of Array.isArray(fbZeilen) ? fbZeilen : []) {
       if (!zeile.document?.name) continue;
       await fetch(`https://firestore.googleapis.com/v1/${zeile.document.name}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${adminToken}` } });
     }
   }
   await archivStorage(uid, env, true);
-  await loescheKvSpuren(uid, env, { archivMarkerAuch: true });
+  if (markerBehalten) {
+    // Markierung wiederherstellen (sie lag im gelöschten Profil-Bereich); der Aufrufer entfernt sie nach dem Löschen des Logins
+    if (marker?.fields) await firestorePatchFields(`users/${uid}/profil/konto_archiv`, marker.fields, adminToken);
+  } else {
+    await loescheKvSpuren(uid, env, { archivMarkerAuch: true });
+  }
 }
 
 async function archivLoeschlauf(env) {
