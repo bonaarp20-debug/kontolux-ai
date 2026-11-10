@@ -11,15 +11,17 @@ const pruefe = (name, fn) => { fn(); ok++; console.log('✓', name); };
 const env = { ADMIN_EMAILS: 'johannkorn7@gmail.com, Admin@Example.de' };
 
 pruefe('Berechtigte Adresse mit verifizierter Mail', () =>
-  assert.equal(istAdmin({ email: 'johannkorn7@gmail.com', emailVerified: true }, env), true));
+  assert.equal(istAdmin({ email: 'johannkorn7@gmail.com', emailVerified: true, emailVerifiedRoh: true }, env), true));
 pruefe('Groß-/Kleinschreibung egal', () =>
-  assert.equal(istAdmin({ email: 'admin@example.de', emailVerified: true }, env), true));
+  assert.equal(istAdmin({ email: 'admin@example.de', emailVerified: true, emailVerifiedRoh: true }, env), true));
 pruefe('Unverifizierte Mail wird abgelehnt', () =>
   assert.equal(istAdmin({ email: 'johannkorn7@gmail.com', emailVerified: false }, env), false));
+pruefe('Google-Sonderregel allein reicht nicht für Admin (Firebase-Flag false)', () =>
+  assert.equal(istAdmin({ email: 'johannkorn7@gmail.com', emailVerified: true, emailVerifiedRoh: false }, env), false));
 pruefe('Fremde Adresse wird abgelehnt', () =>
-  assert.equal(istAdmin({ email: 'fremd@example.de', emailVerified: true }, env), false));
+  assert.equal(istAdmin({ email: 'fremd@example.de', emailVerified: true, emailVerifiedRoh: true }, env), false));
 pruefe('Kein Token wird abgelehnt', () => assert.equal(istAdmin(null, env), false));
 pruefe('Leere Allowlist lässt niemanden rein', () =>
-  assert.equal(istAdmin({ email: 'johannkorn7@gmail.com', emailVerified: true }, {}), false));
+  assert.equal(istAdmin({ email: 'johannkorn7@gmail.com', emailVerified: true, emailVerifiedRoh: true }, {}), false));
 
 console.log(`\n${ok} bestanden, 0 fehlgeschlagen`);

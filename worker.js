@@ -758,7 +758,7 @@ function pruefeBetragZeile(line) {
   // pruefeUndLegeKundeAn in index.html) statt eines LLM-Befehls, den Haiku unzuverlässig
   // ignoriert hat.
   if (/(RECHNUNG_ERSTELLEN|MAHNUNG_ERSTELLEN|ANGEBOT_ERSTELLEN):/i.test(line)) {
-    console.log('[Befehl erkannt]', line.trim().slice(0, 300));
+    console.log('[Befehl erkannt]', line.trim().split(/[\s:|]/)[0].slice(0, 40)); // nur die Befehlsart, keine Kundennamen oder Beträge
   }
   const rechnungMatch = line.match(/RECHNUNG_ERSTELLEN:(.*)$/i);
   if (rechnungMatch) {
@@ -2000,7 +2000,7 @@ async function verifyFirebaseToken(authHeader, env) {
   // falls dieser Cache je wieder ungefiltert genutzt wird.
   const cached = tokenCache.get(token);
   if (cached && Date.now() < cached.expiry && cached.emailVerified) {
-    return { uid: cached.uid, email: cached.email, emailVerified: cached.emailVerified, createdAt: cached.createdAt };
+    return { uid: cached.uid, email: cached.email, emailVerified: cached.emailVerified, emailVerifiedRoh: cached.emailVerifiedRoh, createdAt: cached.createdAt };
   }
 
   try {
@@ -2016,12 +2016,13 @@ async function verifyFirebaseToken(authHeader, env) {
     // Google-Login-Nutzer gelten wie im Frontend-Hard-Block (index.html handleAuthedUser)
     // immer als verifiziert, unabhängig vom rohen emailVerified-Flag.
     const isGoogleUser = (data.users?.[0]?.providerUserInfo || []).some(p => p.providerId === 'google.com');
-    const emailVerified = isGoogleUser || !!data.users?.[0]?.emailVerified;
+    const emailVerifiedRoh = !!data.users?.[0]?.emailVerified; // echtes Firebase-Flag, ohne Google-Sonderregel (für Admin)
+    const emailVerified = isGoogleUser || emailVerifiedRoh;
     if (uid) {
-      tokenCache.set(token, { uid, email, emailVerified, createdAt: Number(data.users?.[0]?.createdAt) || 0, expiry: Date.now() + 5 * 60 * 1000 });
+      tokenCache.set(token, { uid, email, emailVerified, emailVerifiedRoh, createdAt: Number(data.users?.[0]?.createdAt) || 0, expiry: Date.now() + 60 * 1000 });
       if (tokenCache.size > 1000) tokenCache.clear(); // Speicher begrenzen
     }
-    return uid ? { uid, email, emailVerified, createdAt: Number(data.users?.[0]?.createdAt) || 0 } : null;
+    return uid ? { uid, email, emailVerified, emailVerifiedRoh, createdAt: Number(data.users?.[0]?.createdAt) || 0 } : null;
   } catch(e) { return null; }
 }
 
@@ -2640,7 +2641,7 @@ async function handleChat(body, env, cors = {}, ctx) {
         await writer.write(encoder.encode(pruefeBetragZeile(textLineBuffer)));
       }
       const costCents = estimateCostCents(model, usageInfo);
-      console.log(`[chat-usage] model=${model} stop=${stopReason} ab=${abGruppe} intent=${requiredModules.join(',')} in=${usageInfo.input_tokens ?? '?'} cacheWrite=${usageInfo.cache_creation_input_tokens ?? 0} cacheRead=${usageInfo.cache_read_input_tokens ?? 0} out=${usageInfo.output_tokens ?? '?'} costCents=${costCents} erste=${ErsteNachricht} start=${JSON.stringify(fullText.substring(0, 80))}`);
+      console.log(`[chat-usage] model=${model} stop=${stopReason} ab=${abGruppe} intent=${requiredModules.join(',')} in=${usageInfo.input_tokens ?? '?'} cacheWrite=${usageInfo.cache_creation_input_tokens ?? 0} cacheRead=${usageInfo.cache_read_input_tokens ?? 0} out=${usageInfo.output_tokens ?? '?'} costCents=${costCents} erste=${ErsteNachricht}`);
 
       // A/B-Test-Log zu Firestore (nur wenn Feature-Flag aktiv)
       if (kiOptimierungAktiv && ctx) {
@@ -3088,6 +3089,9 @@ async function handleDocument(body, env, cors = {}, ctx) {
   // unverändert bleibt und die ggf. korrigierten Felder wie bisher entgegennimmt). Zählt nicht
   // gegen das Upload-Limit, da noch nichts gespeichert wird.
   if (Nachricht === 'PARSE_ERECHNUNG') {
+    if (typeof content === 'string' && content.length > 14 * 1024 * 1024) {
+      return new Response(JSON.stringify({ format: null, error: 'Datei zu groß' }), { status: 413, headers: { ...cors, 'Content-Type': 'application/json' } });
+    }
     if (!content || !userId) {
       return new Response(JSON.stringify({ format: null, error: 'Missing content or userId' }), {
         status: 400,
@@ -3624,7 +3628,9 @@ async function handleKontakt(body, env, cors) {
     <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0">${nachrichtSafe}</p>
   `);
 
-  await sendEmail('jona@kontolux-ai.de', sicherEinzeiler(betreff ? `${betreff} — von ${name}` : `Kontaktanfrage von ${name}`, 200), html, env);
+  const gesendet = await sendEmail('jona@kontolux-ai.de', sicherEinzeiler(betreff ? `${betreff} — von ${name}` : `Kontaktanfrage von ${name}`, 200), html, env);
+  // Früher meldete der Worker OK, auch wenn die Mail nicht rausging: die Anfrage ging still verloren.
+  if (!gesendet) return new Response('Die Nachricht konnte gerade nicht gesendet werden. Bitte versuche es später noch einmal oder schreibe an jona@kontolux-ai.de.', { status: 503, headers: { ...cors, 'Content-Type': 'text/plain; charset=utf-8' } });
   return new Response('OK', { headers: cors });
 }
 
@@ -4905,13 +4911,13 @@ async function fristErinnerungenSenden(env) {
     // users/{uid}/eigenefristen/{id}
     const pfad = zeile.document.name.split('/documents/')[1];
     const [, uid, , fristId] = pfad.split('/');
-    const titel = f.titel?.stringValue || 'Frist';
+    const titel = sicherEinzeiler(f.titel?.stringValue || 'Frist', 120) || 'Frist';
     try {
       const email = await mailAdresseFuerErinnerung(uid, env);
       if (!email) continue;
       const datumDe = datum.split('-').reverse().join('.');
       const wann = tage === 1 ? 'morgen' : 'in 7 Tagen';
-      const html = emailShell(`${titel} ist ${wann} fällig`, `
+      const html = emailShell(`${escapeHtml(titel)} ist ${wann} fällig`, `
         <h1 style="font-size:19px;color:#0f1f2e;margin:0 0 16px">Erinnerung an deine Frist</h1>
         <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 16px"><strong>${escapeHtml(titel)}</strong> ist ${wann} fällig, am ${datumDe}.</p>
         <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 24px">Du erhältst diese Mail, weil du bei dieser Frist die E-Mail-Erinnerung eingeschaltet hast. Zum Abbestellen in Kontolux AI den Haken bei der Frist entfernen und speichern.</p>
@@ -5110,7 +5116,8 @@ async function archivLoeschlauf(env) {
 // (kommaseparierte Liste in wrangler.toml). Die Prüfung läuft hier im Worker, nicht in der Oberfläche.
 // Ohne Berechtigung antwortet jede Admin-Route mit 403 ohne weitere Angaben.
 function istAdmin(verified, env) {
-  if (!verified || !verified.emailVerified || !verified.email) return false;
+  // Admin nur mit echt bestätigter E-Mail (Firebase-Flag), nicht über die Google-Anbieter-Sonderregel für normale Nutzer
+  if (!verified || !verified.emailVerifiedRoh || !verified.email) return false;
   const erlaubt = String(env.ADMIN_EMAILS || '').split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
   return erlaubt.includes(verified.email.toLowerCase());
 }
@@ -6405,7 +6412,8 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
     return new Response(JSON.stringify({ error: 'Unbekannte Aktion' }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
   } catch (e) {
     console.error('handleWebhookSettings Error:', e.message);
-    return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { ...cors, 'Content-Type': 'application/json' } });
+    console.error('Webhook-Einstellungen:', String(e.message).slice(0, 200));
+    return new Response(JSON.stringify({ error: 'Die Einstellung konnte nicht gespeichert werden. Bitte versuche es später noch einmal.' }), { status: 500, headers: { ...cors, 'Content-Type': 'application/json' } });
   }
 }
 
@@ -6520,6 +6528,10 @@ async function archiveInvoicePdf(userId, platformPrefix, fileNameSuffix, pdfUrl,
   // ein öffentlich erreichbares Test-PDF antwortete curl mit 200, demselben Cloudflare-Worker-
   // Fetch aber mit 403). Echte Stripe-invoice_pdf-URLs (pay.stripe.com/files.stripe.com) sind
   // davon nicht betroffen, aber die explizite UA schadet nicht und macht das robuster.
+  // Nur https, und nie eine lokale/interne Adresse (die URL stammt aus einem signierten, aber vom Nutzer selbst gesendeten Ereignis)
+  let pdfZiel;
+  try { pdfZiel = new URL(pdfUrl); } catch (e) { throw new Error('Invoice-PDF-URL ungültig'); }
+  if (pdfZiel.protocol !== 'https:' || /^(localhost|127\.|10\.|192\.168\.|169\.254\.|0\.)/i.test(pdfZiel.hostname) || !pdfZiel.hostname.includes('.')) throw new Error('Invoice-PDF-URL nicht erlaubt');
   const pdfRes = await fetch(pdfUrl, {
     redirect: 'follow',
     headers: { 'User-Agent': 'Kontolux-AI-Webhook/1.0 (+https://kontolux-ai.de)' }
@@ -6527,7 +6539,9 @@ async function archiveInvoicePdf(userId, platformPrefix, fileNameSuffix, pdfUrl,
   if (!pdfRes.ok) {
     throw new Error(`Invoice-PDF-Download fehlgeschlagen (${pdfRes.status}): ${pdfUrl}`);
   }
+  if (Number(pdfRes.headers.get('content-length') || 0) > 15 * 1024 * 1024) throw new Error('Invoice-PDF zu groß');
   const pdfBuffer = await pdfRes.arrayBuffer();
+  if (pdfBuffer.byteLength > 15 * 1024 * 1024) throw new Error('Invoice-PDF zu groß');
 
   // PDF-Dateien beginnen laut Spezifikation (ISO 32000) immer mit den Bytes "%PDF-" — billige,
   // zuverlässige Prüfung gegen genau das oben beschriebene Redirect-auf-HTML-Szenario, ohne
@@ -8125,10 +8139,10 @@ async function syncAlleSumupNutzer(env) {
     try {
       const r = await syncSumupFuerNutzer(uid, env, adminToken);
       if (r.uebersprungen !== 'nicht_aktiv') aktiv.push(uid);
-      if (r.gebucht) console.log('SumUp-Abruf:', r.gebucht, 'Beleg(e) für', uid);
+      if (r.gebucht) console.log('SumUp-Abruf:', r.gebucht, 'Beleg(e) für', kurz(uid));
     } catch (e) {
       aktiv.push(uid); // vorübergehender Fehler (z.B. SumUp nicht erreichbar) → beim nächsten Lauf erneut
-      console.error('SumUp-Abruf fehlgeschlagen für', uid, e.message);
+      console.error('SumUp-Abruf fehlgeschlagen für', kurz(uid), String(e.message).slice(0, 80));
       await merkeEmpfang(env, uid, 'sumup', 'abruf_fehler', e.message);
     }
   }
