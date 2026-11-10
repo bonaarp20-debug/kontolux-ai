@@ -318,6 +318,7 @@ const GLOBALE_LIMITS = {
   // Mail-Bombing übernehmen das Limit pro Adresse und pro IP.
   '/send-password-reset': { limit: 300, windowSec: 600 },
   '/feedback':            { limit: 100, windowSec: 600 },
+  '/auszug-rueckmeldung': { limit: 100, windowSec: 600 },
 };
 async function globalesLimit(env, schluessel, limit, windowSec) {
   if (!env.PROFIL_KV) return true;
@@ -331,6 +332,7 @@ async function globalesLimit(env, schluessel, limit, windowSec) {
 // Pro eingeloggtem Nutzer (nach Token-Prüfung) für mailversendende Routen.
 const UID_LIMITS = {
   '/feedback':                       { limit: 5, windowMs: 10 * 60 * 1000 },
+  '/auszug-rueckmeldung':            { limit: 5, windowMs: 10 * 60 * 1000 },
   '/send-verification-email':        { limit: 5, windowMs: 10 * 60 * 1000 },
   '/send-email-change-verification': { limit: 5, windowMs: 10 * 60 * 1000 },
 };
@@ -505,7 +507,7 @@ export default {
       // ✅ /send-verification-email geschützt — E-Mail kommt aus dem verifizierten
       // Token, nie vom Client, sonst könnte jeder Verifizierungsmails an beliebige
       // Adressen auslösen (Spam-Vektor).
-      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/stripe-gebuehren', '/usage', '/abo', '/delete-account-data', '/konto-archivieren', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/pruefer-zugang', '/freigabe-status'];
+      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/stripe-gebuehren', '/usage', '/abo', '/delete-account-data', '/konto-archivieren', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/auszug-rueckmeldung', '/pruefer-zugang', '/freigabe-status'];
 
       if (protectedPaths.includes(url.pathname)) {
         try {
@@ -587,6 +589,7 @@ export default {
       if (url.pathname === '/document') return handleDocument(body, env, cors, ctx);
       if (url.pathname === '/frist')    return handleFrist(body, env, cors);
       if (url.pathname === '/feedback') return handleFeedback(body, env, cors);
+      if (url.pathname === '/auszug-rueckmeldung') return handleAuszugRueckmeldung(body, env, cors);
       if (url.pathname === '/abo')      return handleAbo(body, env, cors);
       if (url.pathname === '/usage')    return handleUsage(body, env, cors);
       if (url.pathname === '/datev-export') return handleDatevExport(body, env, cors);
@@ -3646,6 +3649,53 @@ async function handleFeedback(body, env, cors = {}) {
     return new Response(JSON.stringify({ ok: false, fehler: 'Versand fehlgeschlagen' }), {
       status: 502, headers: { ...cors, 'Content-Type': 'application/json' }
     });
+  }
+  return new Response('OK', { headers: cors });
+}
+
+// ── /auszug-rueckmeldung Handler ──────────────────────────
+// Rückmeldung zum Kontoauszug-Abgleich: Hat es geklappt, bei welcher Bank, optional ein Struktur-Bericht. Der Bericht kommt
+// bereits maskiert aus dem Browser (Ziffern = 9, Buchstaben = a/A) und wird hier nur begrenzt und escaped. Es wird NICHTS
+// gespeichert, die Antwort ist nur eine Mail an den Betreiber. Alle Felder sind untrusted Input.
+const AUSZUG_ERGEBNISSE = { ja: 'Ja, alles gestimmt', teilweise: 'Teilweise', nein: 'Nein' };
+export async function handleAuszugRueckmeldung(body, env, cors = {}) {
+  const ergebnis = String(body.ergebnis || '');
+  if (!Object.prototype.hasOwnProperty.call(AUSZUG_ERGEBNISSE, ergebnis)) {
+    return new Response(JSON.stringify({ ok: false, fehler: 'Ungültiges Ergebnis' }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+  }
+  const bank = sicherEinzeiler(body.bank, 60);
+  if (!bank) return new Response(JSON.stringify({ ok: false, fehler: 'Bank fehlt' }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+  const bemerkung = sicherMehrzeilig(body.bemerkung, 500);
+  const bericht = sicherMehrzeilig(body.bericht, 8000);
+  const format = sicherEinzeiler(body.format, 30);
+  const profil = sicherEinzeiler(body.profil, 60);
+  const saldo = sicherEinzeiler(body.saldo, 20);
+  const anzahl = Number.isFinite(Number(body.anzahl)) ? Math.max(0, Math.min(100000, Math.round(Number(body.anzahl)))) : 0;
+  const meldungen = (Array.isArray(body.meldungen) ? body.meldungen : []).slice(0, 20).map(m => sicherEinzeiler(m, 40)).filter(Boolean);
+  const absender = sicherEinzeiler(body.userName || 'Nutzer', 100) || 'Nutzer';
+  const datum = sicherEinzeiler(body.datum, 30) || new Date().toISOString();
+  const zeile = (label, wert) => `<p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 6px"><strong>${label}:</strong> ${escapeHtml(wert)}</p>`;
+  const html = emailShell(`Kontoauszug-Rückmeldung von ${escapeHtml(absender)}`, `
+    <h1 style="font-size:19px;color:#0f1f2e;margin:0 0 16px">Kontoauszug-Rückmeldung von ${escapeHtml(absender)}</h1>
+    ${zeile('Hat es gestimmt', AUSZUG_ERGEBNISSE[ergebnis])}
+    ${zeile('Bank', bank)}
+    ${zeile('Format', format || '-')}
+    ${profil ? zeile('Erkannt als', profil) : ''}
+    ${zeile('Umsätze gelesen', String(anzahl))}
+    ${zeile('Saldoprüfung', saldo || '-')}
+    ${zeile('Meldungen', meldungen.join(', ') || '-')}
+    ${zeile('Datum', datum)}
+    ${bemerkung ? `<p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:12px 0 0;white-space:pre-wrap"><strong>Bemerkung:</strong> ${escapeHtml(bemerkung)}</p>` : ''}
+    ${bericht ? `<p style="font-size:13px;color:#0f1f2e;margin:16px 0 6px"><strong>Struktur-Bericht (maskiert):</strong></p><pre style="font-size:11px;line-height:1.4;background:#f4f6f8;border-radius:6px;padding:10px;white-space:pre-wrap;word-break:break-all">${escapeHtml(bericht)}</pre>` : ''}
+  `);
+  let versendet = false;
+  try {
+    versendet = await sendEmail('jona@kontolux-ai.de', sicherEinzeiler(`Kontoauszug: ${AUSZUG_ERGEBNISSE[ergebnis]} bei ${bank}`, 200), html, env);
+  } catch (e) {
+    console.error('handleAuszugRueckmeldung Versand-Exception:', e.message);
+  }
+  if (!versendet) {
+    return new Response(JSON.stringify({ ok: false, fehler: 'Versand fehlgeschlagen' }), { status: 502, headers: { ...cors, 'Content-Type': 'application/json' } });
   }
   return new Response('OK', { headers: cors });
 }
