@@ -595,7 +595,8 @@ export default {
       if (url.pathname === '/abo')      return handleAbo(body, env, cors);
       if (url.pathname === '/usage')    return handleUsage(body, env, cors);
       if (url.pathname === '/datev-export') return handleDatevExport(body, env, cors);
-      if (url.pathname === '/stripe-gebuehren') return handleStripeGebuehren(body, env, cors, verifiedUid);
+      // Abgeschaltet: Gebühren würden ohne Umsatzsteuer-Behandlung gebucht (Gebührenrechnung der Plattform fehlt). Kommt mit der Regelbesteuerung zurück.
+      if (url.pathname === '/stripe-gebuehren') return new Response(JSON.stringify({ error: 'Diese Funktion ist vorübergehend abgeschaltet.' }), { status: 410, headers: { ...cors, 'Content-Type': 'application/json' } });
       if (url.pathname === '/webhook-settings') return handleWebhookSettings(body, env, cors, verifiedUid, url.origin);
       if (url.pathname === '/pruefer-zugang') return handlePrueferZugang(body, env, cors, verifiedUid);
       if (url.pathname === '/kontakt')   return handleKontakt(body, env, cors);
@@ -6508,26 +6509,26 @@ function stripeEventToBeleg(event) {
   // oben als payment_intent.succeeded gebucht wird. Rechnungs-Events liefern nur noch
   // Rechnungsnummer + PDF nach (siehe handleStripeInvoiceEvent/verknuepfeStripeRechnung).
 
-  if (event.type === 'charge.refunded') {
-    const absender = obj.billing_details?.email || obj.receipt_email || 'Stripe-Kunde';
+  // refund.created: ein Ereignis je einzelner Erstattung, mit deren eigenem Betrag (obj.amount) und Datum.
+  // charge.refunded wird bewusst NICHT mehr gebucht: sein Feld amount_refunded ist die SUMME aller bisherigen
+  // Erstattungen der Zahlung — bei zwei Teil-Erstattungen (20 € und 30 €) wären 20 € + 50 € = 70 € gebucht worden.
+  if (event.type === 'refund.created') {
+    if (obj.status === 'failed' || obj.status === 'canceled') return null;
+    if (!(obj.amount > 0)) return null;
     return {
-      // rechnung_eingehend (nicht rechnung_ausgehend) — im Cash-Basis-Modell dieser App ist
-      // eine Rückerstattung ein Geldabfluss. Kein echtes Storno mit eigener fortlaufender
-      // Rechnungsnummer/Verweis auf den Original-Beleg (siehe Implementierungsplan Abschnitt 5
-      // "Bekannte Grenzen") — dafür bräuchte es einen Lookup des ursprünglichen Belegs über
-      // die Payment-Intent-/Charge-ID, das ist hier bewusst noch nicht gebaut.
       typ: 'rechnung_eingehend',
-      betrag: (obj.amount_refunded || 0) / 100,
-      absender,
+      betrag: obj.amount / 100,
+      absender: 'Stripe-Kunde',
       bezahlt: true,
       bezahlt_am: unixToDatumString(obj.created),
       mwst_satz: 'keine',
       quelle,
-      name: `Stripe-Rückerstattung an ${absender}`,
+      name: 'Stripe-Rückerstattung',
       buchungstext: obj.id || ''
     };
   }
 
+  // charge.refunded: absichtlich nicht gebucht (siehe oben), refund.created ist der Weg.
   return null;
 }
 
@@ -6732,6 +6733,14 @@ async function handleStripeWebhook(request, url, env, cors) {
 
     // Erst NACH erfolgreicher Signaturprüfung parsen — ungeprüfte Bytes werden nie interpretiert.
     const event = JSON.parse(rawBody);
+
+    // Testmodus-Ereignisse (livemode:false, z.B. "Testwebhook senden" im Dashboard oder Testkarten) nie buchen:
+    // sie wären sonst echte Einnahmen in der Buchhaltung. Nachweis "Testzahlung empfangen" bleibt.
+    if (event.livemode === false && !webhookTestmodus(env)) {
+      return new Response(JSON.stringify({ received: true, ignored: 'testmodus' }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json', [EMPFANG_HEADER]: 'testzahlung' }
+      });
+    }
 
     if (await isAlreadyProcessed(userId, event.id, adminToken)) {
       return new Response(JSON.stringify({ received: true, dedup: true }), {
@@ -7033,6 +7042,13 @@ async function handleMollieWebhook(request, url, env, cors) {
     }
     const payment = verifyResult.payment;
 
+    // Mollie-Testzahlungen (mode:'test', Test-API-Key) nie buchen — Nachweis bleibt.
+    if (payment.mode === 'test' && !webhookTestmodus(env)) {
+      return new Response(JSON.stringify({ received: true, ignored: 'testmodus' }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json', [EMPFANG_HEADER]: 'testzahlung' }
+      });
+    }
+
     // Mollie ruft den Webhook für DIESELBE Zahlungs-ID erneut auf, wenn eine Erstattung den Status
     // processing/refunded/failed erreicht oder eine Rückbuchung eingeht (docs.mollie.com/reference/
     // webhooks) — die Zahlung selbst bleibt dabei "paid". Früher endete jeder weitere Aufruf am
@@ -7225,7 +7241,7 @@ function digistore24EventToBeleg(fields, mwstSetting = '19', istErstattung = fal
   const productName = digistore24FieldValue(fields, 'product_name') || 'Digistore24-Produkt';
   const email = digistore24FieldValue(fields, 'email', 'buyer_email', 'customer_email');
   const orderId = digistore24FieldValue(fields, 'order_id') || '';
-  const zahlungsDatum = parseDigistore24Date(digistore24FieldValue(fields, 'transaction_date', 'order_date', 'payment_date'));
+  const zahlungsDatum = parseDigistore24Date(digistore24FieldValue(fields, 'transaction_date', 'transaction_processed_at', 'order_date', 'payment_date'));
   const monatJahr = BERLIN_MONAT_JAHR_FORMATTER.format(zahlungsDatum);
 
   // Wiederverkäufer-Modell (siehe plattformAnteilBrutto): gebucht wird der Verkäufer-Anteil
@@ -7729,6 +7745,19 @@ async function handlePaypalWebhook(request, url, env, cors) {
       return new Response(JSON.stringify({ received: true, dedup: true }), {
         status: 200, headers: { ...cors, 'Content-Type': 'application/json', [EMPFANG_HEADER]: 'duplikat' }
       });
+    }
+
+    // Sandbox-Ereignisse (Zertifikat von api.sandbox.paypal.com) sind Testdaten: nie buchen. Das Ignorieren braucht
+    // keine Signaturprüfung, weil nichts geschrieben wird — und die Live-Prüfung würde sie ohnehin ablehnen
+    // bzw. mit 503 endlos wiederholen lassen. Echte Live-Ereignisse tragen ein Zertifikat von api.paypal.com.
+    if (!webhookTestmodus(env)) {
+      let sandbox = false;
+      try { const c = new URL(request.headers.get('PAYPAL-CERT-URL') || ''); sandbox = c.protocol === 'https:' && c.hostname === 'api.sandbox.paypal.com'; } catch (e) { /* kein gültiger Link */ }
+      if (sandbox) {
+        return new Response(JSON.stringify({ received: true, ignored: 'testmodus' }), {
+          status: 200, headers: { ...cors, 'Content-Type': 'application/json', [EMPFANG_HEADER]: 'testzahlung' }
+        });
+      }
     }
 
     const verifyResult = await verifyPaypalWebhookSignature(request, event, { clientId, clientSecret, webhookId, testmodus: webhookTestmodus(env) });
@@ -8439,6 +8468,13 @@ async function handleShopifyWebhook(request, url, env, cors) {
 
     let payload;
     try { payload = JSON.parse(rawBody); } catch (e) { return json({ error: 'Invalid JSON' }, 400); }
+
+    // Shopify-Testbestellungen (test:true, Bogus Gateway) nie buchen — Nachweis bleibt.
+    if (payload && payload.test === true && !webhookTestmodus(env)) {
+      return new Response(JSON.stringify({ received: true, ignored: 'testmodus' }), {
+        status: 200, headers: { ...cors, 'Content-Type': 'application/json', [EMPFANG_HEADER]: 'testzahlung' }
+      });
+    }
 
     const topic = (request.headers.get('X-Shopify-Topic') || '').toLowerCase();
     const webhookId = request.headers.get('X-Shopify-Webhook-Id');

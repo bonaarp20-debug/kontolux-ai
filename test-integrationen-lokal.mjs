@@ -162,16 +162,33 @@ abschnitt('Stripe');
   pruefe('Alter Zeitstempel (Replay) → 400', r.status === 400);
   r = await post('stripe', pi, { 'Stripe-Signature': signiere(pi) }, 'falsches_url_secret');
   pruefe('Falsche Webhook-URL → 404', r.status === 404);
-  const refund = JSON.stringify({ id: 'evt_ref_1', type: 'charge.refunded', data: { object: { id: 'ch_1', amount_refunded: 5000, created: 1790000500, billing_details: { email: 'k@example.com' } } } });
+  const refund = JSON.stringify({ id: 'evt_ref_1', type: 'refund.created', livemode: true, data: { object: { id: 're_1', object: 'refund', amount: 5000, status: 'succeeded', charge: 'ch_1', created: 1790000500 } } });
   r = await post('stripe', refund, { 'Stripe-Signature': signiere(refund) });
   const erst = belege('stripe_webhook').find(b => w(b, 'typ') === 'rechnung_eingehend');
   pruefe('Rückerstattung wird als Abfluss gebucht (50 €)', w(erst, 'betrag') === 50);
+  // Teil-Erstattungen: jede mit eigenem Betrag, nicht die Summe; charge.refunded und Testmodus werden nicht gebucht
+  const vorher = belege('stripe_webhook').length;
+  const refund2 = JSON.stringify({ id: 'evt_ref_2', type: 'refund.created', livemode: true, data: { object: { id: 're_2', amount: 2000, status: 'succeeded', charge: 'ch_1', created: 1790000510 } } });
+  const refund3 = JSON.stringify({ id: 'evt_ref_3', type: 'refund.created', livemode: true, data: { object: { id: 're_3', amount: 3000, status: 'succeeded', charge: 'ch_1', created: 1790000520 } } });
+  await post('stripe', refund2, { 'Stripe-Signature': signiere(refund2) });
+  await post('stripe', refund3, { 'Stripe-Signature': signiere(refund3) });
+  const betraege = belege('stripe_webhook').filter(b => w(b, 'typ') === 'rechnung_eingehend').map(b => w(b, 'betrag')).sort((x, y) => x - y);
+  pruefe('Zwei Teil-Erstattungen (20 € + 30 €) einzeln gebucht, nicht kumuliert', belege('stripe_webhook').length === vorher + 2 && betraege.join() === '20,30,50', betraege.join());
+  const alt = JSON.stringify({ id: 'evt_ref_4', type: 'charge.refunded', livemode: true, data: { object: { id: 'ch_1', amount_refunded: 5000, created: 1790000530 } } });
+  r = await post('stripe', alt, { 'Stripe-Signature': signiere(alt) });
+  pruefe('charge.refunded wird nicht mehr gebucht (Summenfeld)', r.status === 200 && belege('stripe_webhook').length === vorher + 2);
+  const testEvt = JSON.stringify({ id: 'evt_test_1', type: 'payment_intent.succeeded', livemode: false, data: { object: { id: 'pi_test', amount_received: 9900, created: 1790000540 } } });
+  r = await post('stripe', testEvt, { 'Stripe-Signature': signiere(testEvt) });
+  pruefe('Stripe-Testmodus (livemode:false) → 200, nicht gebucht', r.status === 200 && /testmodus/.test(r.text) && belege('stripe_webhook').length === vorher + 2, r.text);
+  const fehl = JSON.stringify({ id: 'evt_ref_5', type: 'refund.created', livemode: true, data: { object: { id: 're_5', amount: 1000, status: 'failed', created: 1790000550 } } });
+  await post('stripe', fehl, { 'Stripe-Signature': signiere(fehl) });
+  pruefe('Fehlgeschlagene Erstattung wird nicht gebucht', belege('stripe_webhook').length === vorher + 2);
   // Secret-Rotation: Stripe schickt alte + neue Signatur, die passende steht nicht zwingend zuletzt
   const pi2 = JSON.stringify({ id: 'evt_pi_2', type: 'payment_intent.succeeded', data: { object: { id: 'pi_2', amount_received: 5000, created: 1790000600, description: 'Coaching 2' } } });
   const t = Math.floor(Date.now() / 1000);
   const rotiert = `t=${t},v1=${crypto.createHmac('sha256', SECRET).update(`${t}.${pi2}`).digest('hex')},v1=${crypto.createHmac('sha256', 'whsec_alt').update(`${t}.${pi2}`).digest('hex')}`;
   r = await post('stripe', pi2, { 'Stripe-Signature': rotiert });
-  pruefe('Mehrere v1-Signaturen (Secret-Rotation) → gebucht', r.status === 200 && belege('stripe_webhook').length === 3, `${r.status} ${r.text}`);
+  pruefe('Mehrere v1-Signaturen (Secret-Rotation) → gebucht', r.status === 200 && belege('stripe_webhook').length === vorher + 3, `${r.status} ${r.text}`);
 }
 
 // ═══ Mollie ═══════════════════════════════════════════════════════════════════════════════
@@ -192,6 +209,9 @@ abschnitt('Mollie');
   mollieZahlungen.set('tr_expired', { id: 'tr_expired', status: 'expired', amount: { value: '10.00' } });
   r = await post('mollie', form('tr_expired'), H);
   pruefe('Abgelaufene Zahlung → 200 ohne Beleg (keine Retry-Flut)', r.status === 200 && belege('mollie_webhook').length === 1, r.text);
+  mollieZahlungen.set('tr_modetest', { id: 'tr_modetest', status: 'paid', mode: 'test', amount: { value: '25.00', currency: 'EUR' }, description: 'Test', paidAt: '2026-09-20T10:00:00+02:00', metadata: {}, _links: {} });
+  r = await post('mollie', form('tr_modetest'), H);
+  pruefe('Mollie-Testzahlung (mode:test) → 200, nicht gebucht', r.status === 200 && /testmodus/.test(r.text) && belege('mollie_webhook').length === 1, r.text);
   // Erstattung: Mollie ruft den Webhook mit derselben Zahlungs-ID erneut auf, Zahlung bleibt "paid"
   mollieZahlungen.set('tr_live1', { ...mollieZahlungen.get('tr_live1'), amountRefunded: { value: '20.00', currency: 'EUR' } });
   mollieErstattungen.set('tr_live1', [{ id: 're_laeuft', status: 'processing', amount: { value: '5.00' }, createdAt: '2026-09-21T10:00:00+02:00' }]);
@@ -288,6 +308,12 @@ abschnitt('PayPal');
   paypalVerify = 'FAILURE';
   r = await post('paypal', JSON.stringify({ ...capture, id: 'WH-EVT-2' }), H);
   pruefe('Von PayPal abgelehnte Signatur → 400, kein Beleg', r.status === 400 && belege('paypal_webhook').length === 1);
+  paypalVerify = 'SUCCESS';
+  r = await post('paypal', JSON.stringify({ ...capture, id: 'WH-EVT-SB' }), { ...H, 'PAYPAL-CERT-URL': 'https://api.sandbox.paypal.com/v1/notifications/certs/CERT-1' });
+  pruefe('PayPal-Sandbox (Zertifikat sandbox) → 200, nicht gebucht', r.status === 200 && /testmodus/.test(r.text) && belege('paypal_webhook').length === 1, r.text);
+  paypalVerify = 'FAILURE';
+  r = await post('paypal', JSON.stringify({ ...capture, id: 'WH-EVT-SB2' }), { ...H, 'PAYPAL-CERT-URL': 'https://api.sandbox.paypal.com.evil.example/cert' });
+  pruefe('Gefälschte Sandbox-Domain wird nicht als Sandbox behandelt', !/testmodus/.test(r.text));
   paypalVerify = 'DOWN';
   r = await post('paypal', JSON.stringify({ ...capture, id: 'WH-EVT-3' }), H);
   pruefe('PayPal-Prüf-API gestört → 503 (PayPal stellt später erneut zu)', r.status === 503 && belege('paypal_webhook').length === 1, `${r.status}`);
@@ -395,6 +421,8 @@ abschnitt('Shopify');
   pruefe('Gleiche Bestellung erneut → kein zweiter Beleg', belege('shopify_webhook').length === 1);
   r = await sende('orders/paid', { ...order, id: 77002 }, 'falsch');
   pruefe('Falsche Signatur → 401', r.status === 401);
+  r = await sende('orders/paid', { ...order, id: 77003, test: true });
+  pruefe('Shopify-Testbestellung (test:true) → 200, nicht gebucht', r.status === 200 && /testmodus/.test(r.text) && belege('shopify_webhook').length === 1, r.text);
   r = await sende('refunds/create', { id: 88001, order_id: 77001, created_at: '2026-09-25T10:00:00+02:00', transactions: [{ kind: 'refund', status: 'success', amount: '19.90' }] });
   pruefe('Teil-Erstattung als Abfluss gebucht (19,90 €)', belege('shopify_webhook').some(x => w(x, 'typ') === 'rechnung_eingehend' && w(x, 'betrag') === 19.9), r.text);
 }

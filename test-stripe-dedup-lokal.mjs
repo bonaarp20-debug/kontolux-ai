@@ -10,7 +10,7 @@
 //   2. Abo-Rechnung, API basil+ (PI → invoice → invoice_payment.paid) → 1 Beleg, mit Rechnungsnr. + PDF
 //   3. Abo-Rechnung, umgekehrte Reihenfolge (invoice_payment.paid und invoice vor PI) → 1 Beleg, angereichert
 //   4. Abo-Rechnung, alte API (invoice.payment_intent im Payload, ohne invoice_payment.paid) → 1 Beleg, angereichert
-//   5. Erstattung (charge.refunded)                           → eigener Ausgaben-Beleg
+//   5. Erstattung (refund.created)                           → eigener Ausgaben-Beleg
 //   6. Wiederholtes Event (gleiche Event-ID)                  → dedup, kein weiterer Beleg
 //   7. Webhook-Settings 'prepare'                             → URL ohne Secret, Route bleibt inaktiv (404)
 //   8. Konto-Löschung                                          → webhook_secrets & Co. werden entfernt
@@ -176,7 +176,7 @@ pruefe('4 alte API: Rechnungsnummer ergänzt', wert(einnahmen()[0].f, 'rechnungs
 
 // 5. Erstattung
 reset();
-r = await sende(evt('charge.refunded', { id: 'ch_1', object: 'charge', amount_refunded: 2000, created: Math.floor(Date.now() / 1000), billing_details: { email: 'kunde@example.com' } }));
+r = await sende(evt('refund.created', { id: 're_1', object: 'refund', amount: 2000, status: 'succeeded', charge: 'ch_1', created: Math.floor(Date.now() / 1000) }));
 const erst = belege().filter(b => b.f.typ.stringValue === 'rechnung_eingehend');
 pruefe('5 Erstattung: eigener Ausgaben-Beleg über 20 €', erst.length === 1 && wert(erst[0].f, 'betrag') === 20, JSON.stringify(r.body));
 
