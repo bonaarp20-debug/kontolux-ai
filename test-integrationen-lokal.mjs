@@ -180,15 +180,21 @@ abschnitt('Stripe');
   const testEvt = JSON.stringify({ id: 'evt_test_1', type: 'payment_intent.succeeded', livemode: false, data: { object: { id: 'pi_test', amount_received: 9900, created: 1790000540 } } });
   r = await post('stripe', testEvt, { 'Stripe-Signature': signiere(testEvt) });
   pruefe('Stripe-Testmodus (livemode:false) → 200, nicht gebucht', r.status === 200 && /testmodus/.test(r.text) && belege('stripe_webhook').length === vorher + 2, r.text);
+  const wartend = JSON.stringify({ id: 'evt_ref_6', type: 'refund.created', livemode: true, data: { object: { id: 're_6', amount: 700, status: 'requires_action', created: 1790000560 } } });
+  await post('stripe', wartend, { 'Stripe-Signature': signiere(wartend) });
+  pruefe('Erstattung mit Status requires_action wird nicht gebucht', belege('stripe_webhook').length === vorher + 2);
+  const mitPi = JSON.stringify({ id: 'evt_ref_7', type: 'refund.created', livemode: true, data: { object: { id: 're_7', amount: 100, status: 'pending', payment_intent: 'pi_9', created: 1790000570 } } });
+  await post('stripe', mitPi, { 'Stripe-Signature': signiere(mitPi) });
+  pruefe('Pending-Erstattung gebucht, Buchungstext nennt Zahlung (pi_9)', belege('stripe_webhook').some(b2 => String(w(b2, 'buchungstext')) === 're_7 / pi_9'));
   const fehl = JSON.stringify({ id: 'evt_ref_5', type: 'refund.created', livemode: true, data: { object: { id: 're_5', amount: 1000, status: 'failed', created: 1790000550 } } });
   await post('stripe', fehl, { 'Stripe-Signature': signiere(fehl) });
-  pruefe('Fehlgeschlagene Erstattung wird nicht gebucht', belege('stripe_webhook').length === vorher + 2);
+  pruefe('Fehlgeschlagene Erstattung wird nicht gebucht', belege('stripe_webhook').length === vorher + 3);
   // Secret-Rotation: Stripe schickt alte + neue Signatur, die passende steht nicht zwingend zuletzt
   const pi2 = JSON.stringify({ id: 'evt_pi_2', type: 'payment_intent.succeeded', data: { object: { id: 'pi_2', amount_received: 5000, created: 1790000600, description: 'Coaching 2' } } });
   const t = Math.floor(Date.now() / 1000);
   const rotiert = `t=${t},v1=${crypto.createHmac('sha256', SECRET).update(`${t}.${pi2}`).digest('hex')},v1=${crypto.createHmac('sha256', 'whsec_alt').update(`${t}.${pi2}`).digest('hex')}`;
   r = await post('stripe', pi2, { 'Stripe-Signature': rotiert });
-  pruefe('Mehrere v1-Signaturen (Secret-Rotation) → gebucht', r.status === 200 && belege('stripe_webhook').length === vorher + 3, `${r.status} ${r.text}`);
+  pruefe('Mehrere v1-Signaturen (Secret-Rotation) → gebucht', r.status === 200 && belege('stripe_webhook').length === vorher + 4, `${r.status} ${r.text}`);
 }
 
 // ═══ Mollie ═══════════════════════════════════════════════════════════════════════════════
@@ -262,6 +268,8 @@ abschnitt('Digistore24');
   config('digistore24', { passphrase: S(PASS) }, 'keine');
   r = await sende({ ...zahlung, transaction_id: '4000004' });
   pruefe('Kleinunternehmer: Auszahlung netto (51 €)', w(belege('digistore24_webhook').find(x => w(x, 'betrag') === 51), 'betrag') === 51);
+  r = await sende({ ...zahlung, transaction_id: '3999939', order_id: 'SPAET1', transaction_date: '2026-12-31 23:30:00' });
+  pruefe('Digistore24-Zeit ohne Zeitzone (31.12. 23:30) bleibt am 31.12.', belege('digistore24_webhook').some(x => w(x, 'bezahlt_am') === '2026-12-31'), belege('digistore24_webhook').map(x => w(x, 'bezahlt_am')).join());
 }
 
 // ═══ CopeCart ═════════════════════════════════════════════════════════════════════════════
@@ -311,6 +319,7 @@ abschnitt('PayPal');
   paypalVerify = 'SUCCESS';
   r = await post('paypal', JSON.stringify({ ...capture, id: 'WH-EVT-SB' }), { ...H, 'PAYPAL-CERT-URL': 'https://api.sandbox.paypal.com/v1/notifications/certs/CERT-1' });
   pruefe('PayPal-Sandbox (Zertifikat sandbox) → 200, nicht gebucht', r.status === 200 && /testmodus/.test(r.text) && belege('paypal_webhook').length === 1, r.text);
+  pruefe('PayPal-Sandbox (unsigniert) schreibt keinen Empfangsnachweis', empfang('paypal') !== 'testzahlung', String(empfang('paypal')));
   paypalVerify = 'FAILURE';
   r = await post('paypal', JSON.stringify({ ...capture, id: 'WH-EVT-SB2' }), { ...H, 'PAYPAL-CERT-URL': 'https://api.sandbox.paypal.com.evil.example/cert' });
   pruefe('Gefälschte Sandbox-Domain wird nicht als Sandbox behandelt', !/testmodus/.test(r.text));
@@ -423,6 +432,8 @@ abschnitt('Shopify');
   pruefe('Falsche Signatur → 401', r.status === 401);
   r = await sende('orders/paid', { ...order, id: 77003, test: true });
   pruefe('Shopify-Testbestellung (test:true) → 200, nicht gebucht', r.status === 200 && /testmodus/.test(r.text) && belege('shopify_webhook').length === 1, r.text);
+  r = await sende('refunds/create', { id: 88099, order_id: 77003, created_at: '2026-09-25T11:00:00+02:00', transactions: [{ kind: 'refund', status: 'success', amount: '9.90', test: true }] });
+  pruefe('Shopify-Erstattung einer Testbestellung (transactions[].test) → nicht gebucht', r.status === 200 && /testmodus/.test(r.text) && !belege('shopify_webhook').some(x => w(x, 'betrag') === 9.9), r.text);
   r = await sende('refunds/create', { id: 88001, order_id: 77001, created_at: '2026-09-25T10:00:00+02:00', transactions: [{ kind: 'refund', status: 'success', amount: '19.90' }] });
   pruefe('Teil-Erstattung als Abfluss gebucht (19,90 €)', belege('shopify_webhook').some(x => w(x, 'typ') === 'rechnung_eingehend' && w(x, 'betrag') === 19.9), r.text);
 }

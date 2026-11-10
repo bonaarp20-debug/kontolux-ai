@@ -6513,7 +6513,8 @@ function stripeEventToBeleg(event) {
   // charge.refunded wird bewusst NICHT mehr gebucht: sein Feld amount_refunded ist die SUMME aller bisherigen
   // Erstattungen der Zahlung — bei zwei Teil-Erstattungen (20 € und 30 €) wären 20 € + 50 € = 70 € gebucht worden.
   if (event.type === 'refund.created') {
-    if (obj.status === 'failed' || obj.status === 'canceled') return null;
+    // Nur sichere Status: pending (läuft) und succeeded. Scheitert eine pending-Erstattung später (refund.failed), wird sie nicht zurückgebucht — bekannte Grenze.
+    if (obj.status !== 'succeeded' && obj.status !== 'pending') return null;
     if (!(obj.amount > 0)) return null;
     return {
       typ: 'rechnung_eingehend',
@@ -6524,7 +6525,7 @@ function stripeEventToBeleg(event) {
       mwst_satz: 'keine',
       quelle,
       name: 'Stripe-Rückerstattung',
-      buchungstext: obj.id || ''
+      buchungstext: [obj.id, obj.payment_intent || obj.charge].filter(Boolean).join(' / ')
     };
   }
 
@@ -7161,6 +7162,10 @@ function parseDigistore24Date(raw) {
   if (/^\d+$/.test(raw)) {
     return new Date(parseInt(raw, 10) * 1000);
   }
+  // Datum ohne Zeitzone (2026-09-21 oder 2026-09-21 23:30:00): der genannte Kalendertag gilt. Mittag UTC fällt in Berlin
+  // auf denselben Tag, sonst würde 23:30 als UTC gelesen und in Berlin auf den Folgetag (Monats-/Jahresgrenze) rutschen.
+  const ohneZone = /^(\d{4}-\d{2}-\d{2})(?:[ T]\d{2}:\d{2}(?::\d{2})?)?$/.exec(String(raw).trim());
+  if (ohneZone) return new Date(`${ohneZone[1]}T12:00:00Z`);
   const d = new Date(raw);
   return isNaN(d.getTime()) ? new Date() : d;
 }
@@ -7748,14 +7753,15 @@ async function handlePaypalWebhook(request, url, env, cors) {
     }
 
     // Sandbox-Ereignisse (Zertifikat von api.sandbox.paypal.com) sind Testdaten: nie buchen. Das Ignorieren braucht
-    // keine Signaturprüfung, weil nichts geschrieben wird — und die Live-Prüfung würde sie ohnehin ablehnen
+    // keine Signaturprüfung, weil weder Beleg noch Nachweis geschrieben wird — und die Live-Prüfung würde sie ohnehin ablehnen
     // bzw. mit 503 endlos wiederholen lassen. Echte Live-Ereignisse tragen ein Zertifikat von api.paypal.com.
     if (!webhookTestmodus(env)) {
       let sandbox = false;
       try { const c = new URL(request.headers.get('PAYPAL-CERT-URL') || ''); sandbox = c.protocol === 'https:' && c.hostname === 'api.sandbox.paypal.com'; } catch (e) { /* kein gültiger Link */ }
       if (sandbox) {
+        // Header 'intern': kein Empfangsnachweis, denn der Aufruf ist unsigniert und darf kein "Verbindung funktioniert" auslösen.
         return new Response(JSON.stringify({ received: true, ignored: 'testmodus' }), {
-          status: 200, headers: { ...cors, 'Content-Type': 'application/json', [EMPFANG_HEADER]: 'testzahlung' }
+          status: 200, headers: { ...cors, 'Content-Type': 'application/json', [EMPFANG_HEADER]: 'intern' }
         });
       }
     }
@@ -8470,7 +8476,8 @@ async function handleShopifyWebhook(request, url, env, cors) {
     try { payload = JSON.parse(rawBody); } catch (e) { return json({ error: 'Invalid JSON' }, 400); }
 
     // Shopify-Testbestellungen (test:true, Bogus Gateway) nie buchen — Nachweis bleibt.
-    if (payload && payload.test === true && !webhookTestmodus(env)) {
+    const istShopifyTest = payload && (payload.test === true || (Array.isArray(payload.transactions) && payload.transactions.some(t => t && t.test === true)));
+    if (istShopifyTest && !webhookTestmodus(env)) {
       return new Response(JSON.stringify({ received: true, ignored: 'testmodus' }), {
         status: 200, headers: { ...cors, 'Content-Type': 'application/json', [EMPFANG_HEADER]: 'testzahlung' }
       });
