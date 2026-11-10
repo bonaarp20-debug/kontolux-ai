@@ -219,7 +219,7 @@ const del = await worker.fetch(new Request('https://worker.test/delete-account-d
   body: JSON.stringify({ userId: USER }),
 }), env, ctx);
 const rest = [...docs.keys()].filter(k => k.startsWith(`users/${USER}/`));
-pruefe('8 Konto-Löschung: Webhook-Collections leer', del.status === 200 && rest.length === 0, rest.join(', '));
+pruefe('8 /delete-account-data ist kein öffentlicher Weg mehr (404), nichts wird gelöscht', del.status === 404 && rest.length === 6, `${del.status} ${rest.length}`);
 pruefe('8 Konto-Löschung: andere Nutzer unberührt', docs.has('users/anderer/webhook_secrets/stripe'));
 
 console.log(fehler ? `\n${fehler} Prüfung(en) fehlgeschlagen` : '\nAlle Prüfungen bestanden');

@@ -114,7 +114,8 @@ async function kontenZaehlen(uid, ip, email, env, verdaechtig = false) {
   if (!env.PROFIL_KV) return;
   if (await env.PROFIL_KV.get(`gezaehlt:${uid}`)) return;
   await env.PROFIL_KV.put(`gezaehlt:${uid}`, '1', { expirationTtl: FENSTER_SEKUNDEN });
-  const schluessel = `ip-konten:${ip}`;
+  // IP-Adresse nur als gekürzter Hash im Schlüssel (Datenminimierung)
+  const schluessel = `ip-konten:${(await sha256Hex(`ip|${ip}`)).slice(0, 32)}`;
   const anzahl = parseInt((await env.PROFIL_KV.get(schluessel)) || '0', 10) + 1;
   await env.PROFIL_KV.put(schluessel, String(anzahl), { expirationTtl: FENSTER_SEKUNDEN });
   if (verdaechtig || anzahl > KONTEN_PRO_IP) {
@@ -222,6 +223,11 @@ async function gesperrteKontenLoeschen(env) {
       });
       if (res.ok) {
         await handleDeleteAccountData({ userId: uid }, env, {});
+        // Auch die Konto-Unterdaten (Belege, Profil …) und Dateien: nach dem Löschen des Logins gäbe es sonst keinen Verantwortlichen mehr
+        try {
+          const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+          await archivDatenLoeschen(uid, env, adminToken);
+        } catch (e) { console.error('Datenlöschung gesperrtes Konto fehlgeschlagen, uid=', kurz(uid), e.message); }
         await env.PROFIL_KV.delete(eintrag.name);
         geloescht++;
       } else {
@@ -239,6 +245,7 @@ function getCORS(origin) {
     'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Origin',
     'Access-Control-Max-Age': '86400',
+    'Vary': 'Origin',
     // Ohne dieses Header sieht fetch() im Browser bei Cross-Origin-Requests NUR die "simple
     // response headers" (Content-Type etc.) — alle X-Datev-*-Header waren dadurch für den
     // Frontend-Code faktisch unsichtbar (res.headers.get(...) lieferte immer null), obwohl der
@@ -287,6 +294,7 @@ const rateLimitMap = new Map();
 function checkRateLimit(ip, limit = 20, windowMs = 10000) {
   const now = Date.now();
   const entry = rateLimitMap.get(ip) || { count: 0, start: now };
+  rateLimitMap.delete(ip); // erneut einfügen = jüngster Eintrag (Reihenfolge der Map dient als LRU)
   if (now - entry.start > windowMs) {
     entry.count = 1;
     entry.start = now;
@@ -294,8 +302,9 @@ function checkRateLimit(ip, limit = 20, windowMs = 10000) {
     entry.count++;
   }
   rateLimitMap.set(ip, entry);
-  // Map nicht zu groß werden lassen
-  if (rateLimitMap.size > 10000) rateLimitMap.clear();
+  // Map nicht zu groß werden lassen: nur die ältesten Einträge verwerfen. Früher leerte clear() alles — wer 10.000 Anfragen
+  // mit wechselnden Schlüsseln schickte, setzte damit auch die Zähler von /kontakt, Passwort-Reset usw. zurück.
+  while (rateLimitMap.size > 10000) rateLimitMap.delete(rateLimitMap.keys().next().value);
   return entry.count <= limit;
 }
 
@@ -323,9 +332,13 @@ const GLOBALE_LIMITS = {
 async function globalesLimit(env, schluessel, limit, windowSec) {
   if (!env.PROFIL_KV) return true;
   const key = `rl:${schluessel}`;
-  const anzahl = parseInt((await env.PROFIL_KV.get(key)) || '0', 10);
-  if (anzahl >= limit) return false;
-  await env.PROFIL_KV.put(key, String(anzahl + 1), { expirationTtl: Math.max(60, windowSec) });
+  // Fällt der Zähler aus (KV-Fehler, Schreibgrenze), geht die Anfrage durch: das Limit pro IP gilt weiter, und eine Störung
+  // des Zählers soll Nutzer nicht aussperren.
+  try {
+    const anzahl = parseInt((await env.PROFIL_KV.get(key)) || '0', 10);
+    if (anzahl >= limit) return false;
+    await env.PROFIL_KV.put(key, String(anzahl + 1), { expirationTtl: Math.max(60, windowSec) });
+  } catch (e) { console.warn('Globales Limit nicht prüfbar:', e.message); }
   return true;
 }
 
@@ -340,6 +353,17 @@ const UID_LIMITS = {
 // ── Haupt-Router ──────────────────────────────────────────
 export default {
   async fetch(request, env, ctx) {
+    try {
+      return await this.hauptRouter(request, env, ctx);
+    } catch (e) {
+      // Letzte Sicherung: nie eine rohe Plattform-Fehlerseite ohne CORS an den Browser geben, nie Interna.
+      console.error('Router-Fehler:', e && e.message);
+      return new Response(JSON.stringify({ error: 'Server Error' }), {
+        status: 500, headers: { ...getCORS(request.headers.get('Origin') || ''), 'Content-Type': 'application/json' }
+      });
+    }
+  },
+  async hauptRouter(request, env, ctx) {
     entwicklungsModus = env?.ENTWICKLUNG === '1';
     const url = new URL(request.url);
     const origin = request.headers.get('Origin') || request.headers.get('X-Origin') || '';
@@ -363,7 +387,9 @@ export default {
     // 20er-Limit pro IP hätte bei mehreren Kunden oder einem Verkaufs-Peak echte Zahlungen mit 429
     // abgewiesen. Deshalb eigenes, großzügigeres Kontingent pro IP + Plattform + Nutzer.
     const istWebhook = request.method === 'POST' && url.pathname.startsWith('/webhook/');
-    const limitSchluessel = istWebhook ? `${clientIP}|${url.pathname.split('/').slice(2, 4).join('/')}` : clientIP;
+    // Schlüssel nur aus IP und (bekannter) Plattform, nicht aus dem frei wählbaren Pfad: sonst erzeugt jede erfundene UID einen neuen Zähler.
+    const webhookPlattform = url.pathname.split('/')[2] || '';
+    const limitSchluessel = istWebhook ? `${clientIP}|webhook|${/^[a-z0-9]{2,20}$/.test(webhookPlattform) ? webhookPlattform : 'x'}` : clientIP;
     if (!checkRateLimit(limitSchluessel, istWebhook ? 60 : 20)) {
       return new Response('Too Many Requests', { status: 429, headers: cors });
     }
@@ -416,6 +442,9 @@ export default {
     }
     if (request.method === 'POST' && url.pathname === '/freigabe') {
       return freigabeBestaetigen(url, env, true);
+    }
+    if (url.pathname === '/abo-abmelden' && (request.method === 'GET' || request.method === 'POST')) {
+      return handleAboAbmelden(url, env, request.method === 'POST');
     }
 
     // PDF Result
@@ -509,7 +538,7 @@ export default {
       // ✅ /send-verification-email geschützt — E-Mail kommt aus dem verifizierten
       // Token, nie vom Client, sonst könnte jeder Verifizierungsmails an beliebige
       // Adressen auslösen (Spam-Vektor).
-      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/stripe-gebuehren', '/usage', '/abo', '/delete-account-data', '/konto-archivieren', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/auszug-rueckmeldung', '/pruefer-zugang', '/freigabe-status'];
+      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/stripe-gebuehren', '/usage', '/abo', '/konto-archivieren', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/auszug-rueckmeldung', '/pruefer-zugang', '/freigabe-status'];
 
       if (protectedPaths.includes(url.pathname)) {
         try {
@@ -589,7 +618,7 @@ export default {
       if (url.pathname === '/chat')     return handleChat(body, env, cors, ctx);
       if (url.pathname === '/image')    return handleImage(body, env, cors, ctx);
       if (url.pathname === '/document') return handleDocument(body, env, cors, ctx);
-      if (url.pathname === '/frist')    return handleFrist(body, env, cors);
+      if (url.pathname === '/frist')    return handleFrist(body, env, cors, ctx);
       if (url.pathname === '/feedback') return handleFeedback(body, env, cors);
       if (url.pathname === '/auszug-rueckmeldung') return handleAuszugRueckmeldung(body, env, cors);
       if (url.pathname === '/abo')      return handleAbo(body, env, cors);
@@ -600,8 +629,9 @@ export default {
       if (url.pathname === '/webhook-settings') return handleWebhookSettings(body, env, cors, verifiedUid, url.origin);
       if (url.pathname === '/pruefer-zugang') return handlePrueferZugang(body, env, cors, verifiedUid);
       if (url.pathname === '/kontakt')   return handleKontakt(body, env, cors);
-      if (url.pathname === '/delete-account-data') return handleDeleteAccountData(body, env, cors);
-      if (url.pathname === '/konto-archivieren') return handleKontoArchivieren(env, cors, verifiedUid);
+      // /delete-account-data ist kein öffentlicher Weg mehr: wer die Route mit dem eigenen Token aufrief, setzte damit das Tageslimit zurück.
+      // Die Löschfunktion läuft nur noch intern (Auto-Löschung gesperrter Konten).
+      if (url.pathname === '/konto-archivieren') return handleKontoArchivieren(env, cors, verifiedUid, verifiedEmail);
       // Admin-Routen prüfen die Berechtigung selbst (siehe istAdmin), nicht über protectedPaths
       if (url.pathname === '/admin/uebersicht') return handleAdminUebersicht(authHeader, env, cors);
       if (url.pathname === '/admin/archiv-register') return handleAdminArchivRegister(authHeader, env, cors);
@@ -2411,7 +2441,18 @@ async function logAbTestFirestore(env, daten) {
   }
 }
 
+// Texteingaben der KI-Routen müssen Texte sein. Ein Array oder Objekt als Nachricht umging bisher die Längenprüfung
+// (String([...]) ist kurz) und lief ungeprüft, auch mit Bild-/PDF-Blöcken, zur KI.
+function textEingabenUngueltig(body) {
+  return ['Nachricht', 'Verlauf', 'Profil', 'Nutzername', 'FristType', 'Datum', 'ChatId', 'ErsteNachricht']
+    .some(k => body && body[k] !== undefined && body[k] !== null && typeof body[k] !== 'string' && typeof body[k] !== 'boolean' && typeof body[k] !== 'number');
+}
+function ungueltigeEingabeAntwort(cors) {
+  return new Response('Ungültige Eingabe.', { status: 400, headers: { ...cors, 'Content-Type': 'text/plain; charset=utf-8' } });
+}
+
 async function handleChat(body, env, cors = {}, ctx) {
+  if (textEingabenUngueltig(body)) return ungueltigeEingabeAntwort(cors);
   const { Nachricht, Verlauf, Nutzername, Profil, FristType, Datum, userId, ChatId, ErsteNachricht, Datei } = body;
 
   // Obergrenzen gegen überlange Eingaben (jedes Token kostet echtes Geld, das Tageslimit zählt nur Nachrichten)
@@ -2711,6 +2752,7 @@ async function streamTextResponse(claudeRes, userId, env, cors, model = 'claude-
 
 // ── /image Handler ────────────────────────────────────────
 async function handleImage(body, env, cors = {}, ctx) {
+  if (textEingabenUngueltig(body)) return ungueltigeEingabeAntwort(cors);
   const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei } = body;
 
   const dateiCheck = validateDatei(Datei);
@@ -3028,6 +3070,7 @@ export async function detectAndParseERechnung(bytes, filename, mimeType, sellerN
 
 // ── /document Handler ─────────────────────────────────────
 async function handleDocument(body, env, cors = {}, ctx) {
+  if (textEingabenUngueltig(body)) return ungueltigeEingabeAntwort(cors);
   const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz, datum, content, sellerNameHint, e_rechnung_format, duplikatBestaetigt, kategorie, sachkonto, buchungstext, betrag_netto, bezahlt_am: bezahlt_am_client } = body;
   // Grenzen gegen überlange Eingaben und unrealistische Beträge (Security-Audit 2026-10-16).
   const MAX_BETRAG = 10000000;
@@ -3435,6 +3478,10 @@ async function handleDocument(body, env, cors = {}, ctx) {
   }
 
   // ── Normaler Dokument-Upload (Chat-Analyse) ──────────────
+  if (!Datei || !Datei.base64) {
+    // Keine Datei → wie normaler Chat behandeln. Vor den Limits, sonst zählt der Chat doppelt (Upload + zwei Nachrichten).
+    return handleChat(body, env, cors, ctx);
+  }
   const uploadLimit = await peekUploadLimit(userId, env);
   if (!uploadLimit.erlaubt) {
     return new Response('Du hast dein monatliches Upload-Limit erreicht. Du kannst Kontolux AI weiterhin vollständig nutzen — Chat, Finanzkalender und manuelle Monatsabschlüsse funktionieren wie gewohnt. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand. 📊', {
@@ -3448,11 +3495,6 @@ async function handleDocument(body, env, cors = {}, ctx) {
     return new Response(limit.grund === 'infra' ? 'Kontolux ist gerade nicht erreichbar. Bitte versuche es in ein paar Minuten noch einmal.' : 'Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
       headers: { ...cors, 'Content-Type': 'text/plain' }
     });
-  }
-
-  if (!Datei || !Datei.base64) {
-    // Keine Datei → wie normaler Chat behandeln
-    return handleChat(body, env, cors, ctx);
   }
 
   // Dieser Endpunkt akzeptiert zusätzlich XML (E-Rechnung/XRechnung, siehe istXml unten) —
@@ -3525,12 +3567,12 @@ async function handleDocument(body, env, cors = {}, ctx) {
 }
 
 // ── /frist Handler ────────────────────────────────────────
-async function handleFrist(body, env, cors = {}) {
-  return handleChat(body, env);
+async function handleFrist(body, env, cors = {}, ctx) {
+  return handleChat(body, env, cors, ctx);
 }
 
 // ── E-Mail senden via Resend ─────────────────────────────
-async function sendEmail(to, subject, html, env, from = 'Kontolux AI <jona@kontolux-ai.de>') {
+async function sendEmail(to, subject, html, env, from = 'Kontolux AI <jona@kontolux-ai.de>', headers = null) {
   if (!env.RESEND_API_KEY) {
     console.error('sendEmail: RESEND_API_KEY fehlt in env!');
     return false;
@@ -3545,7 +3587,8 @@ async function sendEmail(to, subject, html, env, from = 'Kontolux AI <jona@konto
       from,
       to: [to],
       subject,
-      html
+      html,
+      ...(headers ? { headers } : {})
     })
   });
   if (!res.ok) {
@@ -3704,6 +3747,31 @@ export async function handleAuszugRueckmeldung(body, env, cors = {}) {
 }
 
 // ── /abo Handler ──────────────────────────────────────────
+// ── Abmeldelink der Monats-Mail (ohne Anmeldung nutzbar, signiert) ──
+async function aboSignatur(email, env) {
+  const schluessel = await crypto.subtle.importKey('raw', await crypto.subtle.digest('SHA-256', new TextEncoder().encode('abo|' + env.TOKEN_ENCRYPTION_KEY)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', schluessel, new TextEncoder().encode(String(email).toLowerCase()));
+  return Array.from(new Uint8Array(sig), b => b.toString(16).padStart(2, '0')).join('');
+}
+async function aboAbmeldeLink(email, env) {
+  return `https://kontolux-main.jonadrews012.workers.dev/abo-abmelden?e=${encodeURIComponent(email)}&sig=${await aboSignatur(email, env)}`;
+}
+// GET zeigt nur eine Bestätigungsseite (Mail-Scanner rufen Links vorab auf), POST meldet ab. Das POST dient auch dem
+// Ein-Klick-Abmelden der Mailprogramme (List-Unsubscribe-Post).
+async function handleAboAbmelden(url, env, bestaetigt) {
+  const email = (url.searchParams.get('e') || '').slice(0, 254);
+  const sig = url.searchParams.get('sig') || '';
+  if (!email || !env.TOKEN_ENCRYPTION_KEY || !(await istGleichesGeheimnis(sig, await aboSignatur(email, env)))) {
+    return new Response('Ungültiger Link.', { status: 400, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+  }
+  if (!bestaetigt) {
+    return new Response(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><form method="POST" action="${escapeHtml(url.pathname + url.search)}" style="font-family:sans-serif"><p>Monatliche Erinnerung an ${escapeHtml(email)} abbestellen?</p><button type="submit" style="padding:10px 18px;font-size:15px">Abmelden</button></form>`, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
+  }
+  await env.ABO_KV.delete(email);
+  await env.ABO_KV.delete(email.toLowerCase());
+  return new Response('<!doctype html><meta charset="utf-8"><p style="font-family:sans-serif">Du bekommst keine monatliche Erinnerung mehr.</p>', { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+}
+
 async function handleAbo(body, env, cors = {}) {
   // Beide Formate: action/aktion, email direkt oder über userId
   const aktion = body.aktion || body.action;
@@ -3712,7 +3780,7 @@ async function handleAbo(body, env, cors = {}) {
   if (!email) return new Response('OK', { headers: cors });
 
   if (aktion === 'add') {
-    await env.ABO_KV.put(email, JSON.stringify({ email, name: body.name || '', datum: new Date().toISOString() }));
+    await env.ABO_KV.put(email, JSON.stringify({ email, name: String(body.name || '').slice(0, 100), datum: new Date().toISOString(), einwilligung: 'app-einstellung' }));
   } else if (aktion === 'remove') {
     await env.ABO_KV.delete(email);
   }
@@ -3748,6 +3816,22 @@ async function loescheUnterCollectionAlsAdmin(userId, collectionId, env) {
 // evtl. noch vorhandener alter PROFIL_KV-Eintrag, sowie die per Firestore-
 // Regel client-seitig unlöschbare 'feedback'-Collection — siehe unten).
 // userId wurde vom Router bereits durch die tokenverifizierte UID überschrieben.
+// Entfernt die KV-Spuren eines Kontos (Zähler, Status, Webhook-Zähler). Der Archiv-Marker bleibt, solange das Konto archiviert ist.
+async function loescheKvSpuren(uid, env, { archivMarkerAuch = false } = {}) {
+  if (!env.PROFIL_KV) return;
+  const feste = [`gezaehlt:${uid}`, `status:${uid}`, `freigabe-grund:${uid}`, `gesperrt:${uid}`];
+  if (archivMarkerAuch) feste.push(`archiv:${uid}`, `archivlauf:${uid}`);
+  for (const k of feste) { try { await env.PROFIL_KV.delete(k); } catch (e) { /* best effort */ } }
+  try {
+    let cursor;
+    do {
+      const liste = await env.PROFIL_KV.list({ prefix: `webhook_belege:${uid}:`, cursor });
+      for (const k of liste.keys) await env.PROFIL_KV.delete(k.name);
+      cursor = liste.list_complete ? undefined : liste.cursor;
+    } while (cursor);
+  } catch (e) { console.warn('KV-Aufräumen:', e.message); }
+}
+
 async function handleDeleteAccountData(body, env, cors = {}) {
   const userId = body.userId;
   if (!userId) {
@@ -3828,6 +3912,9 @@ async function handleDeleteAccountData(body, env, cors = {}) {
     } catch(e) { console.error(`Account-Löschung: ${collectionId}:`, e.message); }
   }
 
+  await loescheKvSpuren(userId, env, { archivMarkerAuch: true });
+  try { if (body.email && env.ABO_KV) await env.ABO_KV.delete(body.email); } catch (e) { /* best effort */ }
+
   return new Response(JSON.stringify({ success: true }), {
     status: 200,
     headers: { ...cors, 'Content-Type': 'application/json' }
@@ -3869,7 +3956,7 @@ async function loescheAlleUnterPfad(relPfad, adminToken, unterCollection = null)
   }
 }
 
-async function handleKontoArchivieren(env, cors = {}, verifiedUid) {
+async function handleKontoArchivieren(env, cors = {}, verifiedUid, verifiedEmail = null) {
   if (!verifiedUid) {
     return new Response(JSON.stringify({ error: 'Nicht angemeldet' }), {
       status: 401,
@@ -3887,6 +3974,9 @@ async function handleKontoArchivieren(env, cors = {}, verifiedUid) {
     for (const coll of ARCHIV_LOESCHEN_COLLECTIONS) {
       await loescheAlleUnterPfad(`users/${userId}/${coll}`, adminToken);
     }
+
+    // Newsletter/Erinnerung: Adresse aus der Abo-Liste nehmen, sonst bekäme ein gesperrtes Konto weiter Mails
+    try { if (verifiedEmail && env.ABO_KV) await env.ABO_KV.delete(verifiedEmail); } catch (e) { console.warn('Abo-Eintrag nicht entfernt:', e.message); }
 
     // Prüfer-Zugang beenden: der Lesezugriff endet mit der Sperre
     await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/profil/prueferZugang`, {
@@ -4931,6 +5021,18 @@ async function archivStorage(uid, env, loeschen) {
 }
 
 async function archivKontoLoeschen(uid, env, adminToken) {
+  await archivDatenLoeschen(uid, env, adminToken);
+  const authToken = await getGoogleAccessToken(env);
+  const del = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:delete', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${authToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ localId: uid })
+  });
+  if (!del.ok) throw new Error(`Konto löschen fehlgeschlagen (${del.status})`);
+}
+
+// Löscht alle Firestore-Sammlungen, Feedback, Dateien und KV-Spuren eines Kontos (ohne das Login selbst).
+async function archivDatenLoeschen(uid, env, adminToken) {
   for (const coll of ARCHIV_SAMMLUNGEN) {
     await loescheAlleUnterPfad(`users/${uid}/${coll}`, adminToken, coll === 'chats' ? 'messages' : null);
   }
@@ -4947,13 +5049,7 @@ async function archivKontoLoeschen(uid, env, adminToken) {
     }
   }
   await archivStorage(uid, env, true);
-  const authToken = await getGoogleAccessToken(env);
-  const del = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:delete', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${authToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ localId: uid })
-  });
-  if (!del.ok) throw new Error(`Konto löschen fehlgeschlagen (${del.status})`);
+  await loescheKvSpuren(uid, env, { archivMarkerAuch: true });
 }
 
 async function archivLoeschlauf(env) {
@@ -5736,21 +5832,58 @@ async function handleAdminExportDatei(request, authHeader, env, cors = {}) {
 }
 
 async function sendMonthlyReminders(env) {
-  const keys = await env.ABO_KV.list();
   const monat = new Date().toLocaleDateString('de-DE', { month: 'long', year: 'numeric' });
-
-  for (const key of keys.keys) {
-    const email = key.name;
-    const html = emailShell(`Dein monatlicher Kontolux-Reminder für ${monat}`, `
+  // Alle Adressen seitenweise holen (list liefert höchstens 1000 je Aufruf)
+  const adressen = [];
+  let cursor;
+  do {
+    const liste = await env.ABO_KV.list({ cursor });
+    for (const k of liste.keys) adressen.push(k.name);
+    cursor = liste.list_complete ? undefined : liste.cursor;
+  } while (cursor && adressen.length < 5000);
+  // Pro Adresse zwei Aufrufe (Kontoprüfung, Versand); Workers erlauben je Lauf nur eine begrenzte Zahl Unteranfragen.
+  const MAX_PRO_LAUF = 400;
+  let gesendet = 0, entfernt = 0, fehler = 0;
+  for (const email of adressen.slice(0, MAX_PRO_LAUF)) {
+    try {
+      // Nur an bestehende, aktive Konten schreiben; Adressen archivierter oder gelöschter Konten werden entfernt
+      const aktiv = await kontoAktivPerEmail(email, env);
+      if (aktiv === false) { await env.ABO_KV.delete(email); entfernt++; continue; }
+      const link = await aboAbmeldeLink(email, env);
+      const html = emailShell(`Dein monatlicher Kontolux-Reminder für ${monat}`, `
       <h1 style="font-size:19px;color:#0f1f2e;margin:0 0 16px">Dein monatlicher Kontolux-Reminder 📊</h1>
       <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 16px">Hallo,</p>
       <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 16px">der <strong>${monat}</strong> ist vorbei — hast du deinen Monatsabschluss schon erstellt?</p>
-      <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 24px">Öffne Kontolux AI, klick auf 📊 und erfasse deine Einnahmen und Ausgaben. Ich analysiere alles automatisch für dich.</p>
+      <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 24px">Öffne Kontolux AI, klick auf 📊 und erfasse deine Einnahmen und Ausgaben. Kontolux wertet sie dann für dich aus.</p>
       <a href="https://app.kontolux-ai.de" style="display:inline-block;background:#1d5d96;color:#ffffff;padding:13px 28px;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px">Zu Kontolux AI →</a>
-      <p style="font-size:12.5px;color:#5d6e7f;line-height:1.6;margin:24px 0 0">Du erhältst diese Mail, weil du Erinnerungen aktiviert hast. <a href="https://app.kontolux-ai.de" style="color:#1d5d96">Abmelden</a></p>
+      <p style="font-size:12.5px;color:#5d6e7f;line-height:1.6;margin:24px 0 0">Du erhältst diese Mail, weil du die monatliche Erinnerung in Kontolux aktiviert hast. <a href="${link}" style="color:#1d5d96">Erinnerung abbestellen</a></p>
     `);
-    await sendEmail(email, `Dein Monatsabschluss für ${monat} wartet`, html, env, 'Kontolux AI <jona@kontolux-ai.de>');
+      const ok = await sendEmail(email, `Dein Monatsabschluss für ${monat} wartet`, html, env, 'Kontolux AI <jona@kontolux-ai.de>', {
+        'List-Unsubscribe': `<${link}>`,
+        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click'
+      });
+      if (ok) gesendet++; else fehler++;
+    } catch (e) {
+      fehler++;
+      console.error('Monats-Erinnerung fehlgeschlagen:', e.message);
+    }
   }
+  console.log(`Monats-Erinnerung: ${gesendet} gesendet, ${entfernt} entfernt, ${fehler} Fehler, ${Math.max(0, adressen.length - MAX_PRO_LAUF)} nicht verarbeitet`);
+}
+
+// true = aktives Konto, false = kein Konto oder gesperrt, null = nicht feststellbar (dann nicht entfernen)
+async function kontoAktivPerEmail(email, env) {
+  try {
+    const accessToken = await getGoogleAccessToken(env);
+    const res = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:lookup', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: [email] })
+    });
+    if (!res.ok) return null;
+    const user = (await res.json().catch(() => ({}))).users?.[0];
+    return !!user && !user.disabled;
+  } catch (e) { return null; }
 }
 
 // ════════════════════════════════════════════════════════════════════════
