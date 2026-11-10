@@ -2560,6 +2560,7 @@ async function handleChat(body, env, cors = {}, ctx) {
   // Claude aufrufen und SSE parsen → reinen Text streamen
   const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
+    signal: AbortSignal.timeout(120000), // hängender Upstream darf die Anfrage nicht endlos offen halten
     headers: {
       'x-api-key': env.ANTHROPIC_API_KEY,
       'anthropic-version': '2023-06-01',
@@ -2793,6 +2794,7 @@ async function handleImage(body, env, cors = {}, ctx) {
   const imageModel = 'claude-haiku-5-5';
   const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
+    signal: AbortSignal.timeout(120000), // hängender Upstream darf die Anfrage nicht endlos offen halten
     headers: {
       'x-api-key': env.ANTHROPIC_API_KEY,
       'anthropic-version': '2023-06-01',
@@ -3172,7 +3174,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
           bezahlt: { booleanValue: !!bezahlt },
           mwst_satz: { stringValue: mwst_satz || 'keine' },
           createdAt: { timestampValue: new Date().toISOString() },
-          ...(datum ? { datum: { stringValue: datum } } : {}),
+          // Belegdatum: ohne Angabe des Clients der Tag der Erfassung (Berlin), sonst fehlt der Beleg in den Datums-Auswertungen (z. B. Vorsteuer unbezahlter Rechnungen)
+          datum: { stringValue: /^\d{4}-\d{2}-\d{2}$/.test(String(datum || '')) ? datum : berlinDatumAlsString() },
           ...(bezahlt ? { bezahlt_am: { stringValue: bezahlt_am_client || berlinDatumAlsString() } } : {}),
           ...(kategorie ? { kategorie: { stringValue: kategorie } } : {}),
           ...(sachkonto ? { sachkonto: { stringValue: sachkonto } } : {}),
@@ -3334,7 +3337,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
 
       if (betrag) metadata.fields.betrag = { doubleValue: parseFloat(betrag) };
       if (absender) metadata.fields.absender = { stringValue: absender };
-      if (datum) metadata.fields.datum = { stringValue: datum };
+      metadata.fields.datum = { stringValue: /^\d{4}-\d{2}-\d{2}$/.test(String(datum || '')) ? datum : berlinDatumAlsString() };
       if (mwst_satz) metadata.fields.mwst_satz = { stringValue: mwst_satz };
       if (rechnungsnr) metadata.fields.rechnungsnr = { stringValue: rechnungsnr };
       if (bezahlt) metadata.fields.bezahlt_am = { stringValue: bezahlt_am_client || berlinDatumAlsString() };
@@ -3448,6 +3451,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
       // Haiku für PDF-Extraktion (kostengünstiger)
       const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
+        signal: AbortSignal.timeout(120000), // hängender Upstream darf die Anfrage nicht endlos offen halten
         headers: {
           'x-api-key': env.ANTHROPIC_API_KEY,
           'anthropic-version': '2023-06-01',
@@ -3462,7 +3466,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
         })
       });
 
-    const data = await claudeRes.json();
+    const data = await claudeRes.json().catch(() => null);
+    if (!data) return new Response('Fehler bei der PDF-Extraktion', { status: 502, headers: cors });
     if (data.usage) {
       const costCents = estimateCostCents('claude-haiku-5-5', data.usage);
       console.log(`[chat-usage:monatsabschluss-pdf] model=claude-haiku-5-5 stop=${data.stop_reason} in=${data.usage.input_tokens ?? '?'} cacheWrite=${data.usage.cache_creation_input_tokens ?? 0} cacheRead=${data.usage.cache_read_input_tokens ?? 0} out=${data.usage.output_tokens ?? '?'} costCents=${costCents}`);
@@ -3552,6 +3557,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
 
   const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
+    signal: AbortSignal.timeout(120000), // hängender Upstream darf die Anfrage nicht endlos offen halten
     headers: {
       'x-api-key': env.ANTHROPIC_API_KEY,
       'anthropic-version': '2023-06-01',
