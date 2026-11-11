@@ -97,3 +97,44 @@ test('Route /delete-account-data ist geschlossen (setzt sonst das Tageslimit zur
     assert.equal(r.status, 404);
   } finally { dienste.restore(); }
 });
+
+test('Speicher-Umzug: nur Admin; Trockenlauf schreibt nichts, echter Lauf ersetzt den alten Bucket in Adressen (auch verschachtelt)', async () => {
+  const admin = { 'tok-admin': { uid: 'uid-admin', email: 'admin@example.invalid', emailVerified: true } };
+  const env = await erzeugeTestEnv({ ADMIN_EMAILS: 'admin@example.invalid' });
+  const dienste = mockExterneDienste({ users: { ...users, ...admin } });
+  const ALT = 'https://firebasestorage.googleapis.com/v0/b/kontolux-ai.firebasestorage.app/o/users%2Fu1%2Fx.pdf?alt=media&token=t';
+  const NEU = ALT.replace('kontolux-ai.firebasestorage.app', 'kontolux-ai');
+  const schreibaufrufe = [];
+  const basis = globalThis.fetch;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.endsWith(':runQuery')) {
+      const q = JSON.parse(init.body).structuredQuery.from[0].collectionId;
+      if (q !== 'dokumente') return new Response('[]', { status: 200 });
+      return new Response(JSON.stringify([
+        { document: { name: 'projects/kontolux-ai/databases/(default)/documents/users/u1/dokumente/d1', fields: { storage_url: { stringValue: ALT }, name: { stringValue: 'a' }, extra: { mapValue: { fields: { u: { stringValue: ALT } } } } } } },
+        { document: { name: 'projects/kontolux-ai/databases/(default)/documents/users/u1/dokumente/d2', fields: { storage_url: { stringValue: NEU } } } }
+      ]), { status: 200 });
+    }
+    if (url.endsWith(':batchWrite')) { schreibaufrufe.push(JSON.parse(init.body)); return new Response('{}', { status: 200 }); }
+    return basis(input, init);
+  };
+  try {
+    const kopf = { Authorization: 'Bearer tok-a' };
+    assert.equal((await anfrage(env, { path: '/admin/speicher-umzug', body: {}, headers: kopf, ip: '10.93.0.1' })).status, 403);
+    const adminKopf = { Authorization: 'Bearer tok-admin' };
+    const trocken = await (await anfrage(env, { path: '/admin/speicher-umzug', body: {}, headers: adminKopf, ip: '10.93.0.2' })).json();
+    assert.equal(trocken.trocken, true);
+    assert.equal(trocken.dokumente_geaendert, 1);
+    assert.equal(trocken.felder_geaendert, 2);
+    assert.equal(schreibaufrufe.length, 0, 'Trockenlauf schreibt nichts');
+    const echt = await (await anfrage(env, { path: '/admin/speicher-umzug', body: { trocken: false }, headers: adminKopf, ip: '10.93.0.3' })).json();
+    assert.equal(echt.trocken, false);
+    assert.equal(schreibaufrufe.length, 1);
+    const w = schreibaufrufe[0].writes[0];
+    assert.equal(w.update.fields.storage_url.stringValue, NEU);
+    assert.equal(w.update.fields.extra.mapValue.fields.u.stringValue, NEU);
+    assert.equal(w.update.fields.name, undefined, 'unveränderte Felder bleiben unberührt');
+    assert.deepEqual(w.updateMask.fieldPaths.sort(), ['extra', 'storage_url']);
+  } finally { globalThis.fetch = basis; dienste.restore(); }
+});

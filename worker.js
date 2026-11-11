@@ -643,6 +643,7 @@ export default {
       if (url.pathname === '/admin/uebersicht') return handleAdminUebersicht(authHeader, env, cors);
       if (url.pathname === '/admin/archiv-register') return handleAdminArchivRegister(authHeader, env, cors);
       if (url.pathname === '/admin/loeschlauf-jetzt') return handleAdminLoeschlaufJetzt(authHeader, env, cors);
+      if (url.pathname === '/admin/speicher-umzug') return handleAdminSpeicherUmzug(request, authHeader, env, cors);
       if (url.pathname === '/admin/protokoll') return handleAdminProtokoll(request, authHeader, env, cors);
       if (url.pathname === '/admin/protokoll-migrieren') return handleAdminProtokollMigrieren(authHeader, env, cors);
       if (url.pathname === '/admin/freigeben') return adminFreigeben(request, authHeader, env, cors);
@@ -5204,6 +5205,89 @@ async function handleAdminLoeschlaufJetzt(authHeader, env, cors = {}) {
   } catch (e) {
     console.error('admin/loeschlauf:', e.message);
     return konsoleJson({ error: 'Löschlauf fehlgeschlagen' }, 500, cors);
+  }
+}
+
+// Einmalige Verlagerung des Dateispeichers: ersetzt in allen Firestore-Dokumenten den alten Bucket-Namen in Download-Adressen durch den
+// neuen. Erst Trockenlauf (zählt nur), dann echt (trocken: false). Die Dateien selbst werden vorher per Cloud Shell kopiert.
+function adressenImWertUmschreiben(wert) {
+  const ALT = `/v0/b/${STORAGE_BUCKET_ALT}/o/`;
+  const NEU = `/v0/b/${STORAGE_BUCKET}/o/`;
+  if (!wert || typeof wert !== 'object') return { wert, geaendert: false };
+  if (typeof wert.stringValue === 'string' && wert.stringValue.includes(ALT)) {
+    return { wert: { stringValue: wert.stringValue.split(ALT).join(NEU) }, geaendert: true };
+  }
+  if (wert.mapValue?.fields) {
+    let geaendert = false;
+    const fields = {};
+    for (const [k, v] of Object.entries(wert.mapValue.fields)) {
+      const r = adressenImWertUmschreiben(v);
+      fields[k] = r.wert; geaendert = geaendert || r.geaendert;
+    }
+    return geaendert ? { wert: { mapValue: { fields } }, geaendert } : { wert, geaendert: false };
+  }
+  if (wert.arrayValue?.values) {
+    let geaendert = false;
+    const values = wert.arrayValue.values.map(v => { const r = adressenImWertUmschreiben(v); geaendert = geaendert || r.geaendert; return r.wert; });
+    return geaendert ? { wert: { arrayValue: { values } }, geaendert } : { wert, geaendert: false };
+  }
+  return { wert, geaendert: false };
+}
+
+async function handleAdminSpeicherUmzug(request, authHeader, env, cors = {}) {
+  const verified = await verifyFirebaseToken(authHeader, env);
+  if (!istAdmin(verified, env)) return konsoleJson({ error: 'forbidden' }, 403, cors);
+  const body = await request.json().catch(() => ({}));
+  const trocken = body.trocken !== false; // nur ein ausdrückliches false schreibt wirklich
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const sammlungen = [...new Set([...ARCHIV_SAMMLUNGEN, 'messages'])];
+    const bericht = { trocken, dokumente_geprueft: 0, dokumente_geaendert: 0, felder_geaendert: 0, je_sammlung: {} };
+    const schreibvorgaenge = [];
+    for (const coll of sammlungen) {
+      const res = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ structuredQuery: { from: [{ collectionId: coll, allDescendants: true }], limit: 20000 } })
+      });
+      if (!res.ok) throw new Error(`Abfrage ${coll} fehlgeschlagen (${res.status})`);
+      const zeilen = await res.json();
+      for (const z of Array.isArray(zeilen) ? zeilen : []) {
+        const d = z.document;
+        if (!d?.name || !d.fields) continue;
+        bericht.dokumente_geprueft++;
+        const neueFelder = {};
+        for (const [k, v] of Object.entries(d.fields)) {
+          const r = adressenImWertUmschreiben(v);
+          if (r.geaendert) neueFelder[k] = r.wert;
+        }
+        const namen = Object.keys(neueFelder);
+        if (!namen.length) continue;
+        bericht.dokumente_geaendert++;
+        bericht.felder_geaendert += namen.length;
+        bericht.je_sammlung[coll] = (bericht.je_sammlung[coll] || 0) + 1;
+        schreibvorgaenge.push({
+          update: { name: d.name, fields: neueFelder },
+          updateMask: { fieldPaths: namen.map(n => /^[A-Za-z_][A-Za-z0-9_]*$/.test(n) ? n : '`' + n.replace(/`/g, '\\`') + '`') },
+          currentDocument: { exists: true }
+        });
+      }
+    }
+    if (!trocken) {
+      for (let i = 0; i < schreibvorgaenge.length; i += 400) {
+        const res = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:batchWrite', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ writes: schreibvorgaenge.slice(i, i + 400) })
+        });
+        if (!res.ok) throw new Error(`Schreiben fehlgeschlagen (${res.status})`);
+      }
+    }
+    await adminLogEintragen(env, verified.email, 'speicher_umzug', '-', bericht);
+    return konsoleJson({ ok: true, ...bericht }, 200, cors);
+  } catch (e) {
+    console.error('admin/speicher-umzug:', String(e.message).slice(0, 200));
+    return konsoleJson({ error: 'Umzug fehlgeschlagen' }, 500, cors);
   }
 }
 
