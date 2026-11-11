@@ -3820,12 +3820,7 @@ async function loescheUnterCollectionAlsAdmin(userId, collectionId, env) {
     const data = await res.json();
     const dokumente = data.documents || [];
     if (!dokumente.length) return;
-    for (const d of dokumente) {
-      await fetch(`https://firestore.googleapis.com/v1/${d.name}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${adminToken}` }
-      });
-    }
+    await loescheDokumenteGebuendelt(dokumente.map(d => d.name), adminToken);
   }
 }
 
@@ -3953,6 +3948,20 @@ async function handleDeleteAccountData(body, env, cors = {}) {
 // Purge-Lauf muss je Beleg gegen das Belegdatum prüfen (Stichtag mit dem Steuerberater abstimmen).
 const ARCHIV_LOESCHEN_COLLECTIONS = ['eigenefristen', 'absender_kategorien', 'webhook_secrets', 'webhook_processed'];
 
+// Löscht viele Dokumente mit EINER Anfrage (batchWrite, bis 500 je Aufruf). Einzelne DELETE-Aufrufe zählen je als Unteranfrage;
+// auf dem Free-Plan von Cloudflare sind nur 50 je Aufruf erlaubt, ein Konto mit vielen Dokumenten ließ sich so nicht löschen.
+async function loescheDokumenteGebuendelt(namen, adminToken) {
+  for (let i = 0; i < namen.length; i += 400) {
+    const stueck = namen.slice(i, i + 400);
+    const res = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:batchWrite', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ writes: stueck.map(name => ({ delete: name })) })
+    });
+    if (!res.ok) throw new Error(`Bündel-Löschen fehlgeschlagen (${res.status})`);
+  }
+}
+
 // unterCollection: optional, wird vor jedem Dokument leergeräumt (z.B. 'messages' unter chats/{id}).
 async function loescheAlleUnterPfad(relPfad, adminToken, unterCollection = null) {
   const basis = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/${relPfad}`;
@@ -3967,12 +3976,8 @@ async function loescheAlleUnterPfad(relPfad, adminToken, unterCollection = null)
       if (unterCollection) {
         await loescheAlleUnterPfad(`${relPfad}/${d.name.split('/').pop()}/${unterCollection}`, adminToken);
       }
-      const del = await fetch(`https://firestore.googleapis.com/v1/${d.name}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${adminToken}` }
-      });
-      if (!del.ok) throw new Error(`Löschen fehlgeschlagen (${del.status})`);
     }
+    await loescheDokumenteGebuendelt(dokumente.map(d => d.name), adminToken);
   }
 }
 
@@ -5874,7 +5879,8 @@ async function sendMonthlyReminders(env) {
     cursor = liste.list_complete ? undefined : liste.cursor;
   } while (cursor && adressen.length < 5000);
   // Pro Adresse zwei Aufrufe (Kontoprüfung, Versand); Workers erlauben je Lauf nur eine begrenzte Zahl Unteranfragen.
-  const MAX_PRO_LAUF = 400;
+  // Free-Plan: 50 Unteranfragen je Lauf, also höchstens etwa 20 Adressen; mit Paid-Plan über MAX_MAILS_PRO_LAUF (Worker-Variable) erhöhen
+  const MAX_PRO_LAUF = Math.min(400, Number(env.MAX_MAILS_PRO_LAUF) || 20);
   let gesendet = 0, entfernt = 0, fehler = 0;
   for (const email of adressen.slice(0, MAX_PRO_LAUF)) {
     try {
