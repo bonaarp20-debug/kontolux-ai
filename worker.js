@@ -606,7 +606,12 @@ export default {
       // Security-Audit 2026-10-16: Firestore-Zugriffe in Handlern nutzen den Token aus dem
       // verifizierten Header, nie einen Token aus dem Body. Sonst könnte ein Aufrufer mit einem
       // fremden Token schreiben, solange die Regeln das zufällig zulassen.
-      if (verifiedUid) body.token = authHeader.slice(7);
+      // Firestore-Zugriffe der Handler laufen mit dem Dienstkonto, nicht mit dem Nutzer-Token: Server-Aufrufe tragen kein App-Check-Token,
+      // mit erzwungenem App Check würden sie sonst abgelehnt. Die Pfade entstehen ausschließlich aus der geprüften UID (body.userId, siehe oben);
+      // die Feldprüfungen, die vorher die Datenbank-Regeln übernahmen (Beträge, Datei-Adressen), stehen in den Handlern.
+      if (verifiedUid) body.token = (url.pathname === '/document' || url.pathname === '/datev-export')
+        ? await getGoogleAccessToken(env, FIRESTORE_SCOPE)
+        : authHeader.slice(7);
       const uidLimit = UID_LIMITS[url.pathname];
       if (verifiedUid && uidLimit && !checkRateLimit(`${url.pathname}|uid|${verifiedUid}`, uidLimit.limit, uidLimit.windowMs)) {
         return new Response(JSON.stringify({ error: 'Too Many Requests' }), { status: 429, headers: { ...getCORS(origin), 'Content-Type': 'application/json' } });
@@ -3080,6 +3085,14 @@ export async function detectAndParseERechnung(bytes, filename, mimeType, sellerN
 }
 
 // ── /document Handler ─────────────────────────────────────
+// Datei-Adressen von Belegen und Angeboten müssen aus dem eigenen Speicherpfad (users/{uid}/…) eines unserer Buckets stammen.
+// Früher prüften das die Firestore-Regeln (storageUrlOk); der Worker schreibt jetzt mit dem Dienstkonto und prüft selbst.
+function storageUrlGehoertDemNutzer(storageUrl, uid) {
+  if (storageUrl === undefined || storageUrl === null || storageUrl === '') return true;
+  if (typeof storageUrl !== 'string' || !/^[A-Za-z0-9]{10,40}$/.test(String(uid))) return false;
+  return STORAGE_BUCKETS.some(b => storageUrl.startsWith(`https://firebasestorage.googleapis.com/v0/b/${b}/o/users%2F${uid}%2F`));
+}
+
 async function handleDocument(body, env, cors = {}, ctx) {
   if (textEingabenUngueltig(body)) return ungueltigeEingabeAntwort(cors);
   const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz, datum, content, sellerNameHint, e_rechnung_format, duplikatBestaetigt, kategorie, sachkonto, buchungstext, betrag_netto, bezahlt_am: bezahlt_am_client } = body;
@@ -3271,6 +3284,9 @@ async function handleDocument(body, env, cors = {}, ctx) {
         status: 400,
         headers: { ...cors, 'Content-Type': 'application/json' }
       });
+    }
+    if (!storageUrlGehoertDemNutzer(storageUrl, userId)) {
+      return new Response(JSON.stringify({ error: 'Ungültige Datei-Adresse' }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
     }
     if (betrag !== undefined && betrag !== null && betrag !== '' && (!Number.isFinite(parseFloat(betrag)) || parseFloat(betrag) <= 0)) {
       return new Response(JSON.stringify({ error: 'Betrag muss größer als 0 sein' }), {

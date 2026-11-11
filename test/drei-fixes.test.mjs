@@ -43,7 +43,7 @@ test('/chat: Zähler (Firestore) nicht erreichbar blockiert fail-closed mit neut
   } finally { dienste.restore(); }
 });
 
-test('Firestore-Zugriff nutzt den verifizierten Header-Token, nicht den Body-Token', async () => {
+test('Firestore-Zugriff läuft mit dem Dienstkonto; weder Body-Token noch Nutzer-Token werden weitergereicht (App Check)', async () => {
   const env = await erzeugeTestEnv();
   const dienste = mockExterneDienste({ users });
   try {
@@ -56,7 +56,8 @@ test('Firestore-Zugriff nutzt den verifizierten Header-Token, nicht den Body-Tok
     assert.ok(r.status < 500, `kein Serverfehler, Status ${r.status}`);
     const firestoreRufe = dienste.log.firestore.filter(f => f.auth);
     assert.ok(firestoreRufe.length > 0, 'Firestore wurde mit Token aufgerufen');
-    for (const f of firestoreRufe) assert.equal(f.auth, 'Bearer tok-a', f.url);
+    for (const f of firestoreRufe) assert.equal(f.auth, 'Bearer test-access', f.url);
+    assert.ok(!firestoreRufe.some(f => /tok-[ab]/.test(f.auth)), 'kein Nutzer-Token im Firestore-Aufruf');
   } finally { dienste.restore(); }
 });
 

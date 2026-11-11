@@ -138,3 +138,23 @@ test('Speicher-Umzug: nur Admin; Trockenlauf schreibt nichts, echter Lauf ersetz
     assert.deepEqual(w.updateMask.fieldPaths.sort(), ['extra', 'storage_url']);
   } finally { globalThis.fetch = basis; dienste.restore(); }
 });
+
+test('BELEG_SPEICHERN: fremde Datei-Adresse wird abgewiesen, eigene (neuer oder alter Bucket) angenommen, Firestore-Zugriff mit Dienstkonto statt Nutzer-Token', async () => {
+  const env = await erzeugeTestEnv();
+  const dienste = mockExterneDienste({ users: { 'tok-b': { uid: 'abcdefghij1234567890ABCDEFGH', email: 'b@example.invalid', emailVerified: true } } });
+  const eigen = (bucket) => `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/users%2Fabcdefghij1234567890ABCDEFGH%2Fuploads%2Fx.pdf?alt=media&token=t`;
+  const fremd = 'https://firebasestorage.googleapis.com/v0/b/kontolux-ai/o/users%2FFREMDERNUTZER123456789%2Fuploads%2Fx.pdf?alt=media&token=t';
+  const kopf = { Authorization: 'Bearer tok-b' };
+  const senden = (storageUrl) => anfrage(env, { path: '/document', body: { Nachricht: 'BELEG_SPEICHERN', storageUrl, name: 'x.pdf', type: 'application/pdf', size: 10, typ: 'rechnung_eingehend', betrag: 12.5, absender: 'Lieferant', bezahlt: false }, headers: kopf, ip: '10.94.0.1' });
+  try {
+    assert.equal((await senden(fremd)).status, 400);
+    assert.equal((await senden('https://evil.example/o/users%2Fabcdefghij1234567890ABCDEFGH%2Fx.pdf')).status, 400);
+    assert.equal(dienste.log.firestore.filter(f => f.method !== 'GET').length, 0, 'bei ungültiger Adresse wird nichts geschrieben');
+    for (const bucket of ['kontolux-ai', 'kontolux-ai.firebasestorage.app']) {
+      const r = await senden(eigen(bucket));
+      assert.notEqual(r.status, 400, bucket);
+    }
+    const mitNutzerToken = dienste.log.firestore.filter(f => String(f.auth || '').includes('tok-b'));
+    assert.equal(mitNutzerToken.length, 0, 'Firestore wurde nicht mit dem Nutzer-Token angesprochen');
+  } finally { dienste.restore(); }
+});
