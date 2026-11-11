@@ -5018,30 +5018,39 @@ async function archivZaehlen(uid, adminToken) {
   return bericht;
 }
 
+// Dateispeicher: neuer Bucket in der EU (Mehrregion) und der alte in US-EAST1. Neue Dateien gehen in den neuen; bis zum Abschluss
+// der Verlagerung werden beim Lesen, Zählen und Löschen beide berücksichtigt.
+const STORAGE_BUCKET = 'kontolux-ai';
+const STORAGE_BUCKET_ALT = 'kontolux-ai.firebasestorage.app';
+const STORAGE_BUCKETS = [STORAGE_BUCKET, STORAGE_BUCKET_ALT];
+
 // Storage-Dateien unter users/{uid}/. Mit loeschen=false nur zählen.
 async function archivStorage(uid, env, loeschen) {
   const token = await getGoogleAccessToken(env, STORAGE_SCOPE);
-  const bucket = 'kontolux-ai.firebasestorage.app';
   const prefix = encodeURIComponent(`users/${uid}/`);
-  let seite = '';
   let anzahl = 0;
-  do {
-    const res = await fetch(`https://storage.googleapis.com/storage/v1/b/${bucket}/o?prefix=${prefix}&maxResults=500${seite ? `&pageToken=${seite}` : ''}`, {
-      headers: { 'Authorization': `Bearer ${token}` }
-    });
-    if (!res.ok) throw new Error(`Storage-Liste fehlgeschlagen (${res.status})`);
-    const data = await res.json();
-    for (const objekt of data.items || []) {
-      anzahl++;
-      if (!loeschen) continue;
-      const del = await fetch(`https://storage.googleapis.com/storage/v1/b/${bucket}/o/${encodeURIComponent(objekt.name)}`, {
-        method: 'DELETE',
+  for (const bucket of STORAGE_BUCKETS) {
+    let seite = '';
+    do {
+      const res = await fetch(`https://storage.googleapis.com/storage/v1/b/${bucket}/o?prefix=${prefix}&maxResults=500${seite ? `&pageToken=${seite}` : ''}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
-      if (!del.ok && del.status !== 404) throw new Error(`Storage-Löschen fehlgeschlagen (${del.status})`);
-    }
-    seite = data.nextPageToken || '';
-  } while (seite);
+      // 404: der Bucket existiert nicht (mehr), z. B. nach dem Löschen des alten Buckets
+      if (res.status === 404) break;
+      if (!res.ok) throw new Error(`Storage-Liste fehlgeschlagen (${res.status})`);
+      const data = await res.json();
+      for (const objekt of data.items || []) {
+        anzahl++;
+        if (!loeschen) continue;
+        const del = await fetch(`https://storage.googleapis.com/storage/v1/b/${bucket}/o/${encodeURIComponent(objekt.name)}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!del.ok && del.status !== 404) throw new Error(`Storage-Löschen fehlgeschlagen (${del.status})`);
+      }
+      seite = data.nextPageToken || '';
+    } while (seite);
+  }
   return anzahl;
 }
 
@@ -5798,16 +5807,19 @@ async function handleAdminExportListe(request, authHeader, env, cors = {}) {
     // Dateiliste aus dem Speicher (nur Namen, die Dateien holt die Seite einzeln)
     const storageToken = await getGoogleAccessToken(env, STORAGE_SCOPE);
     const dateien = [];
-    let seite = '';
-    do {
-      const res = await fetch(`https://storage.googleapis.com/storage/v1/b/kontolux-ai.firebasestorage.app/o?prefix=${encodeURIComponent(`users/${ziel.uid}/`)}&maxResults=500${seite ? `&pageToken=${seite}` : ''}`, {
-        headers: { 'Authorization': `Bearer ${storageToken}` }
-      });
-      if (!res.ok) throw new Error(`Dateiliste fehlgeschlagen (${res.status})`);
-      const daten = await res.json();
-      for (const o of daten.items || []) dateien.push(o.name);
-      seite = daten.nextPageToken || '';
-    } while (seite);
+    for (const bucket of STORAGE_BUCKETS) {
+      let seite = '';
+      do {
+        const res = await fetch(`https://storage.googleapis.com/storage/v1/b/${bucket}/o?prefix=${encodeURIComponent(`users/${ziel.uid}/`)}&maxResults=500${seite ? `&pageToken=${seite}` : ''}`, {
+          headers: { 'Authorization': `Bearer ${storageToken}` }
+        });
+        if (res.status === 404) break;
+        if (!res.ok) throw new Error(`Dateiliste fehlgeschlagen (${res.status})`);
+        const daten = await res.json();
+        for (const o of daten.items || []) if (!dateien.includes(o.name)) dateien.push(o.name);
+        seite = daten.nextPageToken || '';
+      } while (seite);
+    }
     // Geschäftsjahre aus den Belegdaten (für den DATEV-Export je Jahr)
     const jahre = new Set();
     for (const d of sammlungen.dokumente || []) {
@@ -5857,9 +5869,13 @@ async function handleAdminExportDatei(request, authHeader, env, cors = {}) {
     const ziel = await archivKontoZuBestaetigterAnfrage(anfrageId, env, adminToken);
     if (!ziel || !pfad.startsWith(`users/${ziel.uid}/`)) return konsoleJson({ error: 'nicht-freigegeben' }, 400, cors);
     const storageToken = await getGoogleAccessToken(env, STORAGE_SCOPE);
-    const res = await fetch(`https://firebasestorage.googleapis.com/v0/b/kontolux-ai.firebasestorage.app/o/${encodeURIComponent(pfad)}?alt=media`, {
-      headers: { 'Authorization': `Bearer ${storageToken}` }
-    });
+    let res = null;
+    for (const bucket of STORAGE_BUCKETS) {
+      res = await fetch(`https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodeURIComponent(pfad)}?alt=media`, {
+        headers: { 'Authorization': `Bearer ${storageToken}` }
+      });
+      if (res.ok) break;
+    }
     if (!res.ok) return konsoleJson({ error: 'Datei nicht lesbar' }, res.status === 404 ? 404 : 500, cors);
     return new Response(res.body, { status: 200, headers: { ...cors, 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store' } });
   } catch (e) {
@@ -6612,7 +6628,7 @@ async function archiveInvoicePdf(userId, platformPrefix, fileNameSuffix, pdfUrl,
 
   const storageToken = await getGoogleAccessToken(env, STORAGE_SCOPE);
   const uploadRes = await fetch(
-    'https://storage.googleapis.com/upload/storage/v1/b/kontolux-ai.firebasestorage.app/o?uploadType=multipart',
+    `https://storage.googleapis.com/upload/storage/v1/b/${STORAGE_BUCKET}/o?uploadType=multipart`,
     {
       method: 'POST',
       headers: {
@@ -6640,7 +6656,7 @@ async function archiveInvoicePdf(userId, platformPrefix, fileNameSuffix, pdfUrl,
   // scheiterte durchgehend an "Provided scope(s) are not authorized" — der Service-Account hat
   // für reine Metadata-PATCH-Operationen keine ausreichenden IAM-Rechte, obwohl derselbe Token
   // für den Multipart-Upload selbst funktioniert. Deshalb absichtlich NICHT hier eingebaut.)
-  return `https://firebasestorage.googleapis.com/v0/b/kontolux-ai.firebasestorage.app/o/${encodedPath}?alt=media&token=${downloadToken}`;
+  return `https://firebasestorage.googleapis.com/v0/b/${STORAGE_BUCKET}/o/${encodedPath}?alt=media&token=${downloadToken}`;
 }
 
 /**
