@@ -7,6 +7,7 @@ import { XMLParser } from 'fast-xml-parser';
 import { PDFDocument, PDFName, PDFDict, PDFStream, PDFRawStream, decodePDFRawStream } from 'pdf-lib';
 import { WEGWERF_DOMAINS } from './wegwerf-domains.js';
 import { VPN_NETZE } from './vpn-netze.js';
+import * as Steuerkern from './steuerkern/index.js';
 
 const ALLOWED_ORIGINS = [
   'https://app.kontolux-ai.de',
@@ -3227,6 +3228,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
 
       // Erst jetzt zählen — Beleg ist tatsächlich gespeichert
       await incrementUploadLimit(userId, env);
+      // Steuerkern-Warnmodus (AP1.8): nur zählen/loggen, ändert nichts (fail-open, bei 'aus' ohne Kernaufruf)
+      steuerkernWarnung(env, 'beleg_manuell', { typ, betrag, mwst_satz, datum, bezahlt, bezahlt_am: bezahlt_am_client });
 
       // Als bereits bezahlt markiert → direkt als Tageseinnahme/-ausgabe verbuchen, damit der
       // Betrag ohne Umweg über den Chat im Monatsabschluss auftaucht. Mahnungen sind rein
@@ -3397,6 +3400,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
 
       // Erst jetzt zählen — Beleg ist tatsächlich gespeichert
       await incrementUploadLimit(userId, env);
+      // Steuerkern-Warnmodus (AP1.8): nur zählen/loggen, ändert nichts (fail-open, bei 'aus' ohne Kernaufruf)
+      steuerkernWarnung(env, 'beleg_speichern', { typ, betrag, mwst_satz, datum, bezahlt, bezahlt_am: bezahlt_am_client });
 
       // Als bereits bezahlt markiert UND mit Betrag hochgeladen → direkt als Tageseinnahme/
       // -ausgabe verbuchen, damit der Betrag ohne Umweg über den Chat im Monatsabschluss auftaucht.
@@ -6078,6 +6083,73 @@ function generateWebhookSecret() {
   return base64UrlFromBytes(bytes);
 }
 
+// ── Steuerkern im WARNMODUS (Regelbesteuerung AP1.8, Konzept 2.3/2.5/2.6) ───────────────────────────
+// Schalter: env.STEUERKERN_MODUS = 'aus' (Standard, fehlt die Variable) | 'warnung' | 'an'.
+//   'aus':     kein Kernaufruf, Verhalten exakt wie vorher.
+//   'warnung': normalisiereEingabe + validiereBeleg (modus 'warn') laufen NACH dem erfolgreichen Schreiben und werden
+//              nur gezählt und geloggt. Das Ergebnis ändert nie das gespeicherte Dokument, die Antwort, den Statuscode
+//              oder irgendeine Ablehnung. Der Aufruf ist synchron, wirft nie und liest/schreibt nichts nach außen.
+//   'an':      derzeit wie 'warnung' (Erzwingung folgt in einem späteren Arbeitspaket, hier bewusst nicht aktiv).
+// Geloggt werden nur Weg (feste Kennung), Kern-Version und Codes (z. B. PF_LEISTUNG): keine Beträge, Namen, IDs, Texte.
+export function steuerkernModus(env) {
+  const m = String(env?.STEUERKERN_MODUS ?? 'aus').trim().toLowerCase();
+  return m === 'warnung' || m === 'an' ? m : 'aus';
+}
+
+// Zähler je Isolate (nur Diagnose, wird nirgends gespeichert)
+export const steuerkernZaehler = { laeufe: 0, mit_hinweisen: 0, fehler: 0, codes: {} };
+
+// Altfelder des Workers (Brutto-Betrag in EUR, mwst_satz-String) auf die Eingabe des Kerns abbilden. Nur Rohwerte, nichts erfunden:
+// unbekannter oder mehrdeutiger Satz ('keine', leer, sonstiges) wird zu 'weiss_nicht'; ein Leistungsdatum gibt es hier nicht.
+export function steuerkernEingabeAusBeleg(weg, b, stichtag) {
+  const typ = String(b?.typ || 'rechnung_eingehend');
+  const ausgang = typ === 'rechnung_ausgehend' || typ === 'mahnung_ausgehend';
+  const brutto = Steuerkern.euroZuCent(parseFloat(b?.betrag));
+  const satz = String(b?.mwst_satz ?? '');
+  const iso = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v ?? '')) ? String(v) : null);
+  const eingabe = {
+    weg,
+    richtung: ausgang ? 'ausgang' : 'eingang',
+    steuerwahl: satz === '19' ? 'inland_19' : satz === '7' ? 'inland_7' : 'weiss_nicht',
+    betrag: { cent: brutto, art: 'brutto' },
+    herkunft: b?.herkunft === 'plattform' ? 'plattform' : 'nutzer',
+    erfasst_am: stichtag
+  };
+  if (typ === 'mahnung_ausgehend') eingabe.beleg_art = 'sonstig';
+  if (iso(b?.datum)) eingabe.rechnungsdatum = iso(b.datum);
+  if (b?.bezahlt && brutto !== null) eingabe.zahlung = { datum: iso(b.bezahlt_am) || stichtag, betrag_cent: brutto };
+  return eingabe;
+}
+
+export function steuerkernWarnung(env, weg, belegRoh) {
+  let wegKennung = 'unbekannt';
+  try {
+    const modus = steuerkernModus(env);
+    if (modus === 'aus') return null;
+    wegKennung = String(weg || 'unbekannt').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 40) || 'unbekannt';
+    const stichtag = berlinDatumAlsString();
+    const r = Steuerkern.normalisiereEingabe(steuerkernEingabeAusBeleg(wegKennung, belegRoh, stichtag), { profil: null, stichtag });
+    const v = Steuerkern.validiereBeleg(r.beleg || r.entwurf, { modus: 'warn', stichtag });
+    const codes = [...new Set([
+      ...(r.unsicherheiten || []).map((x) => x && x.code),
+      ...(r.pflichtfeld_fehler || []).map((x) => x && x.code),
+      ...(v.codes || [])
+    ])].filter((c) => typeof c === 'string' && /^[A-Za-z0-9_]{1,48}$/.test(c)).sort().slice(0, 30);
+    steuerkernZaehler.laeufe++;
+    if (codes.length) steuerkernZaehler.mit_hinweisen++;
+    for (const c of codes) steuerkernZaehler.codes[c] = (steuerkernZaehler.codes[c] || 0) + 1;
+    console.log('steuerkern_warnung ' + JSON.stringify({ weg: wegKennung, modus, kern: Steuerkern.KERN_VERSION, codes }));
+    return { codes };
+  } catch (e) {
+    // fail-open: ein Fehler im Kern darf den Schreibweg nie berühren
+    try {
+      steuerkernZaehler.fehler++;
+      console.warn('steuerkern_warnung_fehler ' + JSON.stringify({ weg: wegKennung, fehlerart: String(e?.name || 'Error').replace(/[^A-Za-z0-9_]/g, '').slice(0, 40) }));
+    } catch { /* nichts */ }
+    return null;
+  }
+}
+
 /**
  * Legt einen Beleg OHNE aktive Nutzersession an (Aufrufer: Webhook-Handler). Nutzt einen
  * bereits geholten Admin-Token (getGoogleAccessToken(env, FIRESTORE_SCOPE)) statt eines
@@ -6103,7 +6175,7 @@ function nettoAusBrutto(brutto, mwst_satz) {
   return brutto;
 }
 
-async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
+export async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
   // Zufallssuffix: der SumUp-Abruf schreibt mehrere Belege direkt hintereinander — reine
   // Date.now()-IDs könnten in derselben Millisekunde kollidieren und sich überschreiben.
   // Mit dedupKey (Ereignis-ID der Plattform) ist die Beleg-ID aus dem Schlüssel abgeleitet und das Anlegen
@@ -6147,6 +6219,8 @@ async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
     const errText = await firestoreRes.text();
     throw new Error(`writeBelegAsAdmin: Firestore-Write fehlgeschlagen (${firestoreRes.status}): ${errText.slice(0, 200)}`);
   }
+  // Steuerkern-Warnmodus (AP1.8): deckt alle Plattform-Webhooks und den SumUp-Abruf ab; nur zählen/loggen
+  steuerkernWarnung(env, belegData.quelle || 'webhook', { ...belegData, herkunft: 'plattform' });
 
   // Nur bei bezahlten Belegen — und in einem eigenen try/catch, damit ein Fehler hier NICHT
   // den bereits erfolgreich gespeicherten Beleg rückwirkend als Fehler meldet. Exakt dasselbe
