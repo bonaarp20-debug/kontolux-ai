@@ -3,6 +3,7 @@
 // Voranmeldungen, EÜR und Dashboard-Kennzahlen, damit sie nicht auseinanderlaufen können.
 //   auswertungFuerJahr(belege, profil, jahr, optionen) -> { jahr, wirkungen, ustva[], euer, dashboard, nicht_berechnet, hinweise[], warnungen[] }
 //   pruefeKonsistenz(auswertungen[])                  -> { ok, verletzt[], invarianten{} } (Zusicherungen Q1 bis Q4, Q10, I1 bis I4)
+// dashboard_status { ust_zahllast, gewinn } und nicht_beruecksichtigt_anzahl: Zwischenwert-Kennzeichnung (Gegenprüfung M1).
 // Dashboard-Kennzahlen kommen aus euerFuer und ustvaFuer, nie aus einer eigenen Berechnung.
 
 import { alleWirkungen } from './wirkung.js';
@@ -11,9 +12,14 @@ import { euerFuer, EINNAHMEN_KZ } from './euer.js';
 
 function eindeutig(liste) { return [...new Set(liste)].sort(); }
 
+// Gegenprüfung M1: Die Auswertung listet standardmäßig auch Zeiträume, in denen nur ausgeschlossene oder unbekannte Belege liegen
+// (optionen.mitAusgeschlossenen !== false), damit die Quartalsliste keinen Zeitraum verschweigt. Die Warnung W_BELEGE_AUSGESCHLOSSEN
+// nennt die Zahl, das Dashboard kennzeichnet die Jahres-Zahllast als Zwischenwert. Der Golden-Runner (Fixtures T-S1-020, T-S4-010,
+// T-S4-015) rechnet mit mitAusgeschlossenen: false.
 export function auswertungFuerJahr(belege, profil, jahr, optionen) {
   const wirkungen = Array.isArray(optionen && optionen.wirkungen) ? optionen.wirkungen : alleWirkungen(belege, profil, optionen);
-  const perioden = ustvaPerioden(wirkungen, profil, jahr, optionen).filter((p) => Number(p.slice(0, 4)) === jahr);
+  const mitAusg = !(optionen !== null && typeof optionen === 'object' && optionen.mitAusgeschlossenen === false);
+  const perioden = ustvaPerioden(wirkungen, profil, jahr, { ...(optionen !== null && typeof optionen === 'object' ? optionen : {}), mitAusgeschlossenen: mitAusg }).filter((p) => Number(p.slice(0, 4)) === jahr);
   const ustva = perioden.map((p) => ustvaFuer(wirkungen, profil, p, optionen));
   const euer = euerFuer(wirkungen, profil, jahr, optionen);
   let zahllast = 0;
@@ -31,6 +37,14 @@ export function auswertungFuerJahr(belege, profil, jahr, optionen) {
     ausgaben_gesamt: euer.ausgaben_cent,
   };
   if (nicht > 0) dashboard.nicht_beruecksichtigte_belege = nicht;
+  // M1: ein Zwischenwert, sobald irgendein Beleg des Jahres nicht berücksichtigt ist (auch wenn sein Zeitraum nicht gelistet ist)
+  const ids = new Set();
+  for (const a of euer.ausgeschlossene) ids.add(String(a.beleg_id));
+  for (const u of ustva) for (const a of u.ausgeschlossene) ids.add(String(a.beleg_id));
+  const anzahlNicht = Math.max(nicht, ids.size);
+  const zwischen = anzahlNicht > 0 || ustva.some((u) => u.unvollstaendig || u.kz83.status !== 'ergebnis');
+  const warn = eindeutig(euer.warnungen.concat(...ustva.map((u) => u.warnungen)));
+  if (anzahlNicht > 0 && !warn.includes('W_BELEGE_AUSGESCHLOSSEN')) warn.push('W_BELEGE_AUSGESCHLOSSEN');
   return {
     jahr,
     wirkungen,
@@ -39,7 +53,10 @@ export function auswertungFuerJahr(belege, profil, jahr, optionen) {
     dashboard,
     nicht_berechnet: euer.ausgeschlossene,
     hinweise: eindeutig(euer.hinweise.concat(...ustva.map((u) => u.hinweise))),
-    warnungen: eindeutig(euer.warnungen.concat(...ustva.map((u) => u.warnungen))),
+    warnungen: warn.sort(),
+    nicht_beruecksichtigt_anzahl: anzahlNicht,
+    // Status der Jahreswerte (Zahlen im Dashboard bleiben reine Cent-Werte): Zahllast und Gewinn sind Zwischenwerte, solange Belege fehlen
+    dashboard_status: { ust_zahllast: zwischen ? 'zwischenwert' : 'ergebnis', gewinn: euer.status === 'zwischenwert' || anzahlNicht > 0 ? 'zwischenwert' : 'ergebnis' },
   };
 }
 

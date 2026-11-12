@@ -25,6 +25,7 @@ const SAETZE_ZULAESSIG = Object.freeze(STEUERSAETZE.map((x) => x.bp)); // 1900, 
 export const SATZ_ID = Object.freeze({ inland_19: 1900, inland_7: 700, inland_0_pv: 0 });
 export const KORREKTUR_ARTEN = Object.freeze(['korrektur', 'storno', 'gutschrift_erteilt', 'gutschrift_erhalten']);
 export const KLEINBETRAG_GRENZE_CENT = 25000; // § 33 UStDV: Gesamtbetrag bis 250 EUR (ustdv-33.md)
+export const BELEG_BETRAG_MAX_CENT = 1000000000; // 10 Mio EUR je Beleg (Konzept E1); die Firestore-Regeln lassen das Doppelte zu (Gegenprüfung M3, M6)
 
 // Kategorien, bei denen ein Altbeleg mit mwst_satz 'keine' im Regelstatus eindeutig ohne Vorsteuer ist (3.8.2).
 const KATEGORIEN_OHNE_VORSTEUER = Object.freeze(['Bankgebühren', 'Versicherungen', 'Versicherung', 'Reisekosten', 'Verpflegungsmehraufwand', 'Fahrtkosten (Kilometerpauschale)']);
@@ -69,8 +70,17 @@ export function tagVonZeit(x) {
   if (typeof x === 'string') {
     const t = x.slice(0, 10);
     if (!istDatum(t)) return null;
-    const m = /^\d{4}-\d{2}-\d{2}T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/.exec(x);
-    if (m) return berlinTag(tageSeitEpoche(t) * 86400 + Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]));
+    // Gegenprüfung N-c: auch Zeitstrings mit Versatz (+01:00, -0500, +00:00) werden über UTC in den Berliner Tag umgerechnet
+    const m = /^\d{4}-\d{2}-\d{2}T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})$/.exec(x);
+    if (m) {
+      let versatz = 0;
+      if (m[4] !== 'Z') {
+        const v = /^([+-])(\d{2}):?(\d{2})$/.exec(m[4]);
+        if (Number(v[2]) > 23 || Number(v[3]) > 59) return t;
+        versatz = (v[1] === '-' ? -1 : 1) * (Number(v[2]) * 3600 + Number(v[3]) * 60);
+      }
+      return berlinTag(tageSeitEpoche(t) * 86400 + Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) - versatz);
+    }
     return t;
   }
   if (typeof x === 'number' && Number.isFinite(x)) return berlinTag(Math.floor(x / 1000));
@@ -204,8 +214,14 @@ export function normalisiereEingabe(eingabe, kontext) {
   const richtungRoh = e.richtung === 'aus' ? 'ausgang' : e.richtung === 'ein' ? 'eingang' : e.richtung;
   const richtung = richtungRoh === 'ausgang' || richtungRoh === 'eingang' ? richtungRoh : null;
   if (!richtung) fehler.push(hin('PF_RICHTUNG', 'richtung', 'ausgang oder eingang'));
-  let belegArt = BELEG_ARTEN.includes(e.beleg_art) ? e.beleg_art : 'rechnung';
-  if (e.beleg_art !== undefined && !BELEG_ARTEN.includes(e.beleg_art)) unsicherheiten.push(hin('BELEG_ART_UNGUELTIG', 'beleg_art', String(e.beleg_art)));
+  // Gegenprüfung M8: Eine unbekannte beleg_art ist ein Pflichtfeldfehler, kein stiller Rückfall auf 'rechnung' (sonst lässt sich der
+  // Ausschluss von anzahlung/schlussrechnung per Tippfehler umgehen). Der Entwurf bleibt eine 'rechnung' mit Steuerfall UNBEKANNT.
+  const belegArtUnbekannt = e.beleg_art !== undefined && e.beleg_art !== null && !BELEG_ARTEN.includes(e.beleg_art);
+  let belegArt = belegArtUnbekannt || e.beleg_art === undefined || e.beleg_art === null ? 'rechnung' : e.beleg_art;
+  if (belegArtUnbekannt) {
+    unsicherheiten.push(hin('BELEG_ART_UNGUELTIG', 'beleg_art', String(e.beleg_art)));
+    fehler.push(hin('PF_BELEG_ART', 'beleg_art', String(e.beleg_art).slice(0, 60)));
+  }
 
   const istFa = belegArt === 'fa_zahlung';
   const istKorrektur = KORREKTUR_ARTEN.includes(belegArt);
@@ -222,6 +238,7 @@ export function normalisiereEingabe(eingabe, kontext) {
   const fruehesteZahlung = zahlungen0.filter((z) => istObjekt(z) && istDatum(z.datum)).map((z) => z.datum).sort()[0] || null;
   let unbekanntGrund = null;
   let unbekanntDetail = null;
+  if (belegArtUnbekannt) { unbekanntGrund = 'steuerfall_nicht_gewaehlt'; unbekanntDetail = 'beleg_art_unbekannt'; }
 
   if (!istFa && !istKorrektur && !istPrivat) {
     if (richtung === 'eingang') {
@@ -251,7 +268,7 @@ export function normalisiereEingabe(eingabe, kontext) {
   if (istKorrektur && !(istObjekt(e.bezug) && nichtLeer(e.bezug.storniert_beleg_id || e.bezug.korrigiert_beleg_id))) {
     fehler.push(hin('PF_BEZUG', 'bezug', 'Original der Korrektur fehlt'));
   }
-  if (istKorrektur && !KORREKTUR_GRUENDE.includes(e.korrektur_grund) && e.storno_grund === undefined && e.korrektur_grund === undefined) {
+  if (istKorrektur && !KORREKTUR_GRUENDE.includes(e.korrektur_grund)) {
     // Grund fehlt: Blocker nach 5.3, hier als Hinweis, weil die Prüfung in validiereBeleg läuft
     unsicherheiten.push(hin('KORREKTUR_GRUND_FEHLT', 'korrektur_grund', 'Grund der Korrektur wählen'));
   }
@@ -395,6 +412,8 @@ export function normalisiereEingabe(eingabe, kontext) {
     kennzeichen.push('geschenk');
     const art = istObjekt(e.geschenk) ? e.geschenk.art : e.geschenk;
     geschenk = { art: art === 'abziehbar' || art === 'nicht_abziehbar' ? art : null, empfaenger: istObjekt(e.geschenk) ? (e.geschenk.empfaenger || null) : (e.empfaenger || null) };
+    // Gegenprüfung M5: Die Freigrenze gilt je Kalenderjahr der Hingabe (UStAE 15.6 Abs. 4 S. 3, Abs. 5 S. 2); ohne hingabedatum gilt das Rechnungsdatum
+    if (istObjekt(e.geschenk) && istDatum(e.geschenk.hingabedatum)) geschenk.hingabedatum = e.geschenk.hingabedatum;
     if (geschenk.art === 'nicht_abziehbar') {
       ausschluss = { vorsteuer: 'nein', grund: 'geschenk_ueber_50' };
       unsicherheiten.push(hin('W_GESCHENK_UEBER_50', 'geschenk', 'über 50 EUR je Empfänger und Jahr'));
@@ -427,9 +446,19 @@ export function normalisiereEingabe(eingabe, kontext) {
   const keinSatz = steuerfall === 'UNBEKANNT' || steuerfall === 'SPERRE_STUFE4' || steuerfall === 'E_INLAND_OHNE_VORSTEUER'
     || steuerfall === 'A_KU' || steuerfall === 'FA_ZAHLUNG' || steuerfall === 'PRIVAT'
     || steuerfall === 'E_13B_EU_DL' || steuerfall === 'E_13B_DRITTLAND_DL' || steuerfall === 'A_NICHT_STEUERBAR_EU_B2B_DL' || steuerfall === 'A_NICHT_STEUERBAR_DRITTLAND_B2B_DL';
+  // Gegenprüfung M3: Beträge werden immer positiv eingegeben (Korrekturen und Stornos tragen das Vorzeichen erst im Beleg, vorz).
+  // Ein negativer Betrag ist ein Pflichtfeldfehler und wird im Entwurf als 0 geführt: sonst würde eine "Rechnung" mit negativem Betrag
+  // still als Gutschrift im Leistungsmonat gerechnet, und die Firestore-Regeln lehnen negative Summen außerhalb der Korrekturarten ab.
+  const negativ = (x) => istCent(x) && x < 0;
+  const meldeNegativ = (feld) => { fehler.push(hin('PF_BETRAG', feld, 'Betrag darf nicht negativ sein (Korrekturen positiv eingeben)')) };
   if (Array.isArray(e.positionen) && e.positionen.length) {
     e.positionen.forEach((p, i) => {
       if (!istObjekt(p)) return;
+      if (negativ(p.netto_cent) || negativ(p.brutto_cent) || negativ(p.ust_cent)) {
+        meldeNegativ(`positionen[${i}]`);
+        positionen.push({ bez: nichtLeer(p.bez) ? p.bez : `Position ${i + 1}`, netto_cent: 0, satz_bp: keinSatz || !satzGueltig(p.satz_bp) ? (keinSatz ? null : satzBp) : p.satz_bp, ust_cent: 0 });
+        return;
+      }
       if (p.satz_bp !== undefined && p.satz_bp !== null && !satzGueltig(p.satz_bp)) fehler.push(hin('PF_SATZ', `positionen[${i}].satz_bp`, 'Basispunkte 0 bis 10000 (ganze Zahl)'));
       const satz = satzGueltig(p.satz_bp) ? p.satz_bp : satzBp;
       const o = { bez: nichtLeer(p.bez) ? p.bez : `Position ${i + 1}`, netto_cent: 0, satz_bp: keinSatz ? null : satz, ust_cent: 0 };
@@ -445,16 +474,18 @@ export function normalisiereEingabe(eingabe, kontext) {
   } else if (istObjekt(e.betrag) && istCent(e.betrag.cent)) {
     const art = e.betrag.art;
     const o = { bez: nichtLeer(e.bezeichnung) ? e.bezeichnung : 'Gesamtbetrag', netto_cent: 0, satz_bp: keinSatz ? null : satzBp, ust_cent: 0 };
-    const c = vorz * e.betrag.cent;
+    const betragNegativ = negativ(e.betrag.cent) || (art === 'ust_ausgewiesen' && negativ(e.betrag.ust_cent));
+    if (betragNegativ) meldeNegativ('betrag');
+    const c = betragNegativ ? 0 : vorz * e.betrag.cent;
     if (keinSatz) {
       // ohne Steuerausweis ist der Betrag brutto = netto. Wurde der Beleg mit Satz erfasst, aber der Vorsteuerabzug entfällt
       // (eigener Kleinunternehmer-Status), zählt die Rechnung mit Steuer als Kosten (R-EUER-30).
       const ausStatus = steuerfall === 'E_INLAND_OHNE_VORSTEUER' && satzBp !== null;
       if (ausStatus && art === 'netto') o.netto_cent = c + ustAusNetto(c, satzBp);
-      else if (ausStatus && art === 'ust_ausgewiesen' && istCent(e.betrag.ust_cent)) o.netto_cent = c + vorz * e.betrag.ust_cent;
+      else if (ausStatus && art === 'ust_ausgewiesen' && istCent(e.betrag.ust_cent) && !betragNegativ) o.netto_cent = c + vorz * e.betrag.ust_cent;
       else o.netto_cent = c;
     } else if (art === 'brutto') { o.brutto_cent = c; o.brutto_basis = true; o.netto_cent = c; }
-    else if (art === 'ust_ausgewiesen') { o.netto_cent = c; if (istCent(e.betrag.ust_cent)) { o.ust_cent = vorz * e.betrag.ust_cent; o.ust_ausgewiesen = true; } else fehler.push(hin('PF_BETRAG', 'betrag.ust_cent', 'ausgewiesene Steuer fehlt')); }
+    else if (art === 'ust_ausgewiesen') { o.netto_cent = c; if (betragNegativ) { /* Fehler bereits gemeldet */ } else if (istCent(e.betrag.ust_cent)) { o.ust_cent = vorz * e.betrag.ust_cent; o.ust_ausgewiesen = true; } else fehler.push(hin('PF_BETRAG', 'betrag.ust_cent', 'ausgewiesene Steuer fehlt')); }
     else if (art === 'netto' || art === undefined) o.netto_cent = c;
     else fehler.push(hin('PF_BETRAG_ART', 'betrag.art', String(art)));
     if (!keinSatz && art === undefined) unsicherheiten.push(hin('BETRAG_ART_FEHLT', 'betrag.art', 'Netto oder Brutto ausdrücklich wählen (5.2)'));
@@ -485,9 +516,13 @@ export function normalisiereEingabe(eingabe, kontext) {
     summe = summiere(positionen);
   }
   if (istFa) {
-    const zbetrag = zahlungen0.filter((z) => istObjekt(z) && istCent(z.betrag_cent)).reduce((a, z) => a + z.betrag_cent, 0);
+    if (zahlungen0.some((z) => istObjekt(z) && negativ(z.betrag_cent))) meldeNegativ('zahlung.betrag_cent');
+    const zbetrag = zahlungen0.filter((z) => istObjekt(z) && istCent(z.betrag_cent) && z.betrag_cent >= 0).reduce((a, z) => a + z.betrag_cent, 0);
     summe = { netto_cent: zbetrag, ust_cent: 0, brutto_cent: zbetrag };
   }
+  // Gegenprüfung M3: Finanzamt-Zahlung, Privat und Sonstiges tragen nur eine Summe, keine Positionen (sonst weicht die Summe von den
+  // Positionen ab, was die Firestore-Regeln bei bis zu drei Positionen als Widerspruch ablehnen)
+  if (istFa || istPrivat) positionen = [];
 
   // --- Zahlungen (Schritt 7) ---
   const belegId = id || 'beleg';
@@ -517,7 +552,12 @@ export function normalisiereEingabe(eingabe, kontext) {
   }
   if (istKorrektur) {
     steuer.wirkdatum = wirkdatum;
-    steuer.korrektur_grund = KORREKTUR_GRUENDE.includes(e.korrektur_grund) ? e.korrektur_grund : (nichtLeer(e.storno_grund) ? e.storno_grund : null);
+    // Gegenprüfung M4: korrektur_grund ist immer ein Wert aus KORREKTUR_GRUENDE. Ein Freitext (zum Beispiel storno_grund "Kunde insolvent",
+    // fachlich Uneinbringlichkeit) wird nie als Grund übernommen, sondern nur als korrektur_notiz; ohne gültigen Grund ist PF_KORREKTUR_GRUND
+    // ein Blocker und die Auswertung schließt den Beleg aus.
+    steuer.korrektur_grund = KORREKTUR_GRUENDE.includes(e.korrektur_grund) ? e.korrektur_grund : null;
+    const freitext = nichtLeer(e.storno_grund) ? e.storno_grund : (nichtLeer(e.korrektur_grund) && !KORREKTUR_GRUENDE.includes(e.korrektur_grund) ? e.korrektur_grund : null);
+    if (freitext !== null) steuer.korrektur_notiz = String(freitext).slice(0, 500);
     if (istObjekt(e.rueckzahlung) && istDatum(e.rueckzahlung.datum) && istCent(e.rueckzahlung.betrag_cent)) steuer.rueckzahlung = { datum: e.rueckzahlung.datum, betrag_cent: e.rueckzahlung.betrag_cent };
   }
   if (istFa) {
@@ -589,6 +629,7 @@ export function validiereBeleg(beleg, optionen) {
   if (!istObjekt(sum) || !istCent(sum.netto_cent) || !istCent(sum.ust_cent) || !istCent(sum.brutto_cent)) b('PF_SUMME', 'steuer.summe', 'netto_cent, ust_cent, brutto_cent müssen ganze Cent sein');
   else {
     if (sum.brutto_cent !== sum.netto_cent + sum.ust_cent) b('PF_SUMME_BRUTTO', 'steuer.summe', 'brutto muss netto plus ust sein');
+    if ([sum.netto_cent, sum.ust_cent, sum.brutto_cent].some((x) => x > BELEG_BETRAG_MAX_CENT || x < 0 - BELEG_BETRAG_MAX_CENT)) b('PF_BETRAG_ZU_GROSS', 'steuer.summe', 'höchstens 10 Mio EUR je Beleg');
     if (!nurSumme && (sum.netto_cent !== sn || sum.ust_cent !== su)) b('PF_SUMME_POSITIONEN', 'steuer.summe', 'Summe weicht von den Positionen ab');
   }
   for (const [feld, wert] of [['rechnungsdatum', s.rechnungsdatum], ['rechnung_erhalt_am', s.rechnung_erhalt_am], ['wirkdatum', s.wirkdatum]]) {
@@ -611,7 +652,7 @@ export function validiereBeleg(beleg, optionen) {
   if (kor) {
     if (!istDatum(s.wirkdatum)) b('PF_WIRKDATUM', 'steuer.wirkdatum', 'Wirkdatum fehlt');
     if (!istObjekt(s.bezug) || !nichtLeer(s.bezug.storniert_beleg_id || s.bezug.korrigiert_beleg_id)) b('PF_BEZUG', 'steuer.bezug', 'Original fehlt');
-    if (!KORREKTUR_GRUENDE.includes(s.korrektur_grund) && !nichtLeer(s.korrektur_grund)) b('PF_KORREKTUR_GRUND', 'steuer.korrektur_grund', 'Grund fehlt');
+    if (!KORREKTUR_GRUENDE.includes(s.korrektur_grund)) b('PF_KORREKTUR_GRUND', 'steuer.korrektur_grund', 'Grund fehlt oder nicht aus der Liste (Freitext nur als korrektur_notiz)');
   }
   if (s.richtung === 'ausgang' && !kor && !nurSumme) {
     if (!istDatum(s.rechnungsdatum)) b('PF_RECHNUNGSDATUM', 'steuer.rechnungsdatum', 'Rechnungsdatum fehlt');
@@ -721,7 +762,11 @@ export function normalisiereAlt(alt, profil, optionen) {
     flags.push('datum_unsicher');
     hinweise.push('DATUM_UNSICHER');
   }
-  const brutto = euroZuCent(a.betrag);
+  let brutto = euroZuCent(a.betrag);
+  // Gegenprüfung M3: negativer Betrag im Altbestand ist ungültig (die Altfelder tragen positive Beträge, Stornos den Absolutwert):
+  // wie "Betrag fehlt" behandeln, nie als negative Summe einer Nicht-Korrekturart schreiben.
+  if (istCent(brutto) && brutto < 0) { brutto = null; hinweise.push('BETRAG_NEGATIV'); }
+  if (istCent(brutto) && brutto > BELEG_BETRAG_MAX_CENT) { brutto = null; hinweise.push('BETRAG_ZU_GROSS'); }
   const nettoAlt = euroZuCent(a.betrag_netto);
   const quelleText = typeof a.quelle === 'string' ? a.quelle.toLowerCase() : '';
   const istPlattform = PLATTFORM_QUELLEN.some((q) => quelleText.includes(q));
@@ -789,9 +834,8 @@ export function normalisiereAlt(alt, profil, optionen) {
       const ustRechn = ustAusBrutto(brutto, satzBp);
       let netto;
       if (istCent(nettoAlt)) {
-        const diff = brutto - nettoAlt;
-        const abw = diff - ustRechn;
-        if ((abw < 0 ? 0 - abw : abw) <= 2) netto = nettoAlt;
+        const abw = brutto - nettoAlt - ustRechn;
+        if ((abw < 0 ? 0 - abw : abw) <= 2 && nettoAlt >= 0 && nettoAlt <= brutto) netto = nettoAlt;
         else { netto = brutto - ustRechn; nettoBerechnet = true; hinweise.push('NETTO_BRUTTO_UNPLAUSIBEL'); }
       } else { netto = brutto - ustRechn; nettoBerechnet = true; }
       o.satz_bp = satzBp;
@@ -800,14 +844,19 @@ export function normalisiereAlt(alt, profil, optionen) {
     } else if (steuerfall === 'UNBEKANNT' && satzBp !== null) {
       o.satz_bp = satzBp;
       const ustRechn = ustAusBrutto(brutto, satzBp);
-      o.netto_cent = istCent(nettoAlt) ? nettoAlt : brutto - ustRechn;
+      // Gegenprüfung M3: auch im Zweig UNBEKANNT (zum Beispiel Satz bei Kleinunternehmer-Status) muss Netto plausibel sein, sonst ist die
+      // Steuer negativ (betrag 100, betrag_netto 500 ergab ust_cent -40000)
+      const abw = istCent(nettoAlt) ? brutto - nettoAlt - ustRechn : null;
+      if (abw !== null && (abw < 0 ? 0 - abw : abw) <= 2 && nettoAlt >= 0 && nettoAlt <= brutto) o.netto_cent = nettoAlt;
+      else { o.netto_cent = brutto - ustRechn; if (abw !== null) hinweise.push('NETTO_BRUTTO_UNPLAUSIBEL'); }
       o.ust_cent = brutto - o.netto_cent;
     }
     positionen.push(o);
   }
   if (nettoBerechnet) flags.push('netto_berechnet');
   const summe = positionen.length ? summiere(positionen) : { netto_cent: 0, ust_cent: 0, brutto_cent: 0 };
-  if (steuerfall === 'UNBEKANNT' && positionen.length && positionen[0].satz_bp === null) { summe.netto_cent = brutto; summe.ust_cent = 0; summe.brutto_cent = brutto; }
+  // Gegenprüfung M3: ohne gültigen Betrag nie null in die Summe schreiben (Regeln verlangen ganze Zahlen); Betrag fehlt steht in migration.hinweise
+  if (steuerfall === 'UNBEKANNT' && positionen.length && positionen[0].satz_bp === null && istCent(brutto)) { summe.netto_cent = brutto; summe.ust_cent = 0; summe.brutto_cent = brutto; }
   if (betragFehlt && !privat) { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'netto_fehlt'; hinweise.push('BETRAG_FEHLT'); }
 
   const steuer = {

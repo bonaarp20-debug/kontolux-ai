@@ -205,6 +205,8 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
   for (const h of profilHinweise(profil, jahr)) hinweise.push(h);
   const alle = eindeutig(hinweise);
   const angenommen = alle.includes('W_VORANMELDUNG_ANGENOMMEN');
+  // Gegenprüfung M2/M9: Anzahlung vor dem Überschreiten der Grenze (Zeitraum und Kz 65 nicht ausdrücklich in der Quelle) bleibt Zwischenwert
+  const wechselAnzahlung = alle.includes('W_WECHSEL_ANZAHLUNG_KZ65') || alle.includes('W_WECHSEL_VORJAHR_ZAHLUNG');
 
   let frist = null;
   try { const f = fristFuerPeriode(profil, periode); frist = { gesetzlich: f.gesetzlich, faellig: f.faellig, wochentag: f.wochentag, verschoben: f.verschoben, dauerfrist: f.dauerfrist, hinweise: f.hinweise }; } catch (e) { frist = null; }
@@ -236,9 +238,9 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
     summen_alternativ: alternativ,
     kz83: {
       betrag_cent: primaer.z50_cent,
-      status: unvollstaendig || angenommen ? 'zwischenwert' : 'ergebnis',
+      status: unvollstaendig || angenommen || wechselAnzahlung ? 'zwischenwert' : 'ergebnis',
       regel_id: 'R-KZ-50',
-      text: unvollstaendig ? `Zwischenwert (unvollständig): ${ausg.length} Beleg(e) nicht berücksichtigt` : (angenommen ? 'Zwischenwert: Voranmeldungszeitraum im Profil nicht bestätigt (Quartal angenommen)' : null),
+      text: unvollstaendig ? `Zwischenwert (unvollständig): ${ausg.length} Beleg(e) nicht berücksichtigt` : (angenommen ? 'Zwischenwert: Voranmeldungszeitraum im Profil nicht bestätigt (Quartal angenommen)' : (wechselAnzahlung ? 'Zwischenwert: Anzahlung oder Zahlung über das Überschreiten der Umsatzgrenze, Zeitraum und Kz 65 nicht amtlich entschieden (UStAE 19.7 Abs. 1 S. 4)' : null)),
     },
     unvollstaendig,
     ausgeschlossene: ausg,

@@ -21,7 +21,7 @@
 import { istCent, ustAusBrutto, teile, mulDivRund } from './geld.js';
 import { istDatum, jahrVon, periodenEnde, periodenArt, quartalVon, frist10Tag, zehnTageRegelVorjahr } from './daten.js';
 import { voranmeldungsperiodeFuer, voranmeldungAm, versteuerungAm, statusAm, statusFuerAusgangsumsatz } from './steuerprofil.js';
-import { regelNachId, KATEGORIEN, GRENZEN, USTVA_ZEILEN, EUER_ZEILEN, STEUERSAETZE, BELEG_ARTEN } from './tabellen.js';
+import { regelNachId, KATEGORIEN, GRENZEN, USTVA_ZEILEN, EUER_ZEILEN, STEUERSAETZE, BELEG_ARTEN, KORREKTUR_GRUENDE } from './tabellen.js';
 import { KORREKTUR_ARTEN } from './beleg.js';
 
 const istObjekt = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -197,6 +197,8 @@ const satzOk = (x) => x === null || x === undefined || (Number.isSafeInteger(x) 
 function datenFehler(s) {
   if (s.positionen !== undefined && !Array.isArray(s.positionen)) return 'positionen kein Array';
   const pos = Array.isArray(s.positionen) ? s.positionen : [];
+  // Gegenprüfung N-a: ein gerechneter Steuerfall ohne Position würde still ohne Wirkung bleiben
+  if (STEUERFAELLE_GERECHNET.includes(s.steuerfall) && pos.length === 0) return 'positionen leer';
   for (let i = 0; i < pos.length; i++) {
     const p = pos[i];
     if (!istObjekt(p)) return `positionen[${i}] kein Objekt`;
@@ -241,6 +243,9 @@ function nichtUnterstuetzt(s) {
   const korr = KORREKTUR_ARTEN.includes(art);
   const pos = Array.isArray(s.positionen) ? s.positionen : [];
   if (korr && KORREKTUR_GRUENDE_NICHT_UNTERSTUETZT.includes(s.korrektur_grund)) return { grund: `korrektur_grund_${s.korrektur_grund}`, hinweise: [] };
+  // Gegenprüfung M4: ohne gültigen Grund aus der Liste (leer, Freitext, unbekannt) wird nicht gerechnet: ein Freitext wie "Kunde insolvent"
+  // ist fachlich Uneinbringlichkeit und würde sonst als gewöhnliche Minderung gebucht
+  if (korr && !KORREKTUR_GRUENDE.includes(s.korrektur_grund)) return { grund: 'korrektur_grund_fehlt', hinweise: ['W_KORREKTUR_GRUND_FEHLT'] };
   const zs = (Array.isArray(s.zahlungen) ? s.zahlungen : []).filter((z) => z.status !== 'rueckgaengig');
   // F3: Skonto und Rabatt in der Zahlung (R-KOR-02) werden nicht gerechnet
   if (zs.some((z) => (istCent(z.skonto_cent) && z.skonto_cent !== 0) || (istCent(z.rabatt_cent) && z.rabatt_cent !== 0))) return { grund: 'skonto_rabatt_in_zahlung', hinweise: [] };
@@ -275,7 +280,7 @@ function nichtUnterstuetzt(s) {
 
 // ---------------------------------------------------------------------------------------------
 // belegWirkungen
-// optionen: { originale: Map id -> beleg (für Korrekturen), originalPerioden: Map id -> 'JJJJ-Qn'/'JJJJ-MM' }
+// optionen: { originale: Map id -> beleg (für Korrekturen), originalPerioden: Map id -> 'JJJJ-Qn'/'JJJJ-MM', stichtag: 'JJJJ-MM-TT' (heute, für W_ZAHLUNG_ZUKUNFT) }
 // ---------------------------------------------------------------------------------------------
 export function belegWirkungen(beleg, profil, optionen) {
   const opt = istObjekt(optionen) ? optionen : {};
@@ -290,6 +295,8 @@ export function belegWirkungen(beleg, profil, optionen) {
   const ctx = { id: typeof beleg.id === 'string' ? beleg.id : null, steuerfall: sf, beleg_status: 'ok', hinweise };
   if (sf === 'PRIVAT') return [];
   const out = [];
+  // Gegenprüfung N-b: Zahlung nach dem Stichtag (optionen.stichtag, ISO-Datum; der Kern hat keine Uhr) ist nur eine Warnung
+  if (istDatum(opt.stichtag) && Array.isArray(s.zahlungen) && s.zahlungen.some((zz) => istObjekt(zz) && zz.status !== 'rueckgaengig' && istDatum(zz.datum) && zz.datum > opt.stichtag)) hinweise.push('W_ZAHLUNG_ZUKUNFT');
   const df = datenFehler(s);
   if (df) {
     const c2 = { id: ctx.id, steuerfall: sf, beleg_status: 'unbekannt', hinweise: ['HN_KERN_FEHLER'] };
@@ -414,7 +421,7 @@ function ausgangWirkungen(s, profil, ctx, out) {
   }
   if (wechselAb !== null) {
     ctx.hinweise.push('HN_UMSATZ_ZAHLUNGSZEITRAUM_NACH_UEBERSCHREITEN');
-    if (zahlungen.some((z) => z.datum < wechselAb)) ctx.hinweise.push('W_WECHSEL_ANZAHLUNG_KZ65');
+    if (zahlungen.some((z) => z.datum < wechselAb)) { ctx.hinweise.push('W_WECHSEL_ANZAHLUNG_KZ65'); ctx.hinweise.push('HN_WECHSEL_ANZAHLUNG_VOLL_IN_KZ81'); }
   }
   for (const h of ver.hinweise || []) if (typeof h === 'string' && h.startsWith('W_') && !ctx.hinweise.includes(h)) ctx.hinweise.push(h);
   if (!ist && zahlungen.some((z) => jahrVon(z.datum) > jahrVon(l.bis))) ctx.hinweise.push('W_LIQUIDITAET_DEZEMBER');
@@ -428,12 +435,29 @@ function ausgangWirkungen(s, profil, ctx, out) {
   const vorLeistung = (z) => z.datum < l.bis;
   if (ist) {
     // R-ZP-05: Wirkung im Zeitraum der Vereinnahmung jeder Zahlung
+    // Gegenprüfung M2 (UStAE 19.7 Abs. 1 S. 4, K5-Antwort): Wurde vor dem Überschreiten eine Anzahlung vereinnahmt und die Restzahlung
+    // erst danach, wird "dieser Umsatz" ganz der Regelbesteuerung unterworfen (Standard: volles Entgelt in Kz 81, kein Kz 65, nie beide).
+    // Der Anzahlungsteil wird mit der ersten Zahlung ab dem Überschreitungsdatum gebucht (Zeitraum der Vereinnahmung, wie im Beispiel
+    // S. 5 und 6; die Quelle nennt für S. 4 keinen Zeitraum, darum bleibt W_WECHSEL_ANZAHLUNG_KZ65 und Kz 83 ein Zwischenwert).
+    const vorNetto = gruppen.map(() => 0);
+    const vorUst = gruppen.map(() => 0);
+    if (wechselAb !== null) {
+      zahlungen.forEach((z, zi) => {
+        if (z.datum >= wechselAb) return;
+        gruppen.forEach((g, gi) => { vorNetto[gi] += anteile[zi][gi].netto_cent; vorUst[gi] += anteile[zi][gi].ust_cent; });
+      });
+    }
+    let vorGebucht = false;
     zahlungen.forEach((z, zi) => {
-      if (wechselAb !== null && z.datum < wechselAb) return; // vor dem Überschreiten vereinnahmt: keine UStVA-Wirkung (Kz 65, Dialog)
+      if (wechselAb !== null && z.datum < wechselAb) return; // vor dem Überschreiten vereinnahmt: wird mit der ersten Zahlung danach gebucht
+      const mitVor = wechselAb !== null && !vorGebucht;
+      if (mitVor) vorGebucht = true;
       gruppen.forEach((g, gi) => {
         const a = anteile[zi][gi];
-        if (a.netto_cent === 0 && a.ust_cent === 0) return;
-        ustW(g, vorLeistung(z) ? 'anzahlung' : 'umsatz', z.datum, a.netto_cent, a.ust_cent, vorLeistung(z) ? 'R-ZP-04' : 'R-ZP-05', z.id);
+        const netto = a.netto_cent + (mitVor ? vorNetto[gi] : 0);
+        const ust = a.ust_cent + (mitVor ? vorUst[gi] : 0);
+        if (netto === 0 && ust === 0) return;
+        ustW(g, vorLeistung(z) ? 'anzahlung' : 'umsatz', z.datum, netto, ust, vorLeistung(z) ? 'R-ZP-04' : 'R-ZP-05', z.id);
       });
     });
   } else {
@@ -482,6 +506,20 @@ function kuWirkungen(s, profil, ctx, out) {
   const spaeterRegel = istObjekt(l) && verlauf.some((e) => e && e.status === 'regel' && istDatum(e.gueltig_ab) && e.gueltig_ab > l.bis);
   const zahlungNachWechsel = zahlungen.some((z) => statusAm(profil, z.datum).status === 'regel');
   if (zahlungNachWechsel || (spaeterRegel && zahlungen.length === 0)) ctx.hinweise.push('W_WECHSEL_DIALOG');
+  // Gegenprüfung M9 (UStAE 19.7 Abs. 1 S. 2, 3): Leistung in einem Vorjahr als Kleinunternehmer, Zahlung nach dem unterjährigen
+  // Überschreiten der Grenze im Zahlungsjahr. Der Wortlaut (S. 2: "im laufenden Jahr überschritten") und das Beispiel (gleiches Jahr)
+  // entscheiden nicht, ob der Umsatz regelbesteuert wird. Statt stiller Steuerfreiheit: Zwischenwert (Beleg unbekannt, Dialog) und Warnung.
+  if (istObjekt(l) && istDatum(l.bis)) {
+    for (const z of zahlungen) {
+      const zj = jahrVon(z.datum);
+      const w = verlauf.find((e) => e && e.status === 'regel' && (e.grund === 'laufend_ueber_100k' || e.grund === 'gruendung_ueber_25k') && istDatum(e.gueltig_ab) && e.gueltig_ab <= z.datum && jahrVon(e.gueltig_ab) === zj && zj > jahrVon(l.bis));
+      if (!w) continue;
+      if (!ctx.hinweise.includes('W_WECHSEL_VORJAHR_ZAHLUNG')) ctx.hinweise.push('W_WECHSEL_VORJAHR_ZAHLUNG');
+      ctx.beleg_status = 'dialog_erforderlich';
+      out.push(mk(ctx, { welt: 'ust', periode: ustPeriode(profil, z.datum, ctx.hinweise), datum_wirk: z.datum, rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-PR-02', hinweis_detail: 'wechsel_vorjahr_leistung_zahlung_nach_ueberschreiten', ereignis_id: z.id }));
+      break;
+    }
+  }
   zahlungen.forEach((z, zi) => {
     let b = 0;
     for (let gi = 0; gi < gruppen.length; gi++) b += anteile[zi][gi].netto_cent + anteile[zi][gi].ust_cent;
@@ -695,6 +733,20 @@ function geschenkeStichtag(s) {
   return erhalt !== null && erhalt > bis ? erhalt : bis;
 }
 
+// Gegenprüfung M5: Kalenderjahr und Zeitpunkt der Hingabe (UStAE 15.6 Abs. 4 S. 3: Freigrenze je Kalenderjahr; Abs. 5 S. 2: Vorsteuerkorrektur
+// "im Zeitpunkt der Hingabe"). geschenk.hingabedatum, ersatzweise das Rechnungsdatum (dann Hinweis W_GESCHENK_HINGABE_ANGENOMMEN, wenn es in den
+// 14 Tagen um den Jahreswechsel liegt: 18.12. bis 14.01.), zuletzt der Stichtag aus Leistung und Rechnungserhalt.
+function geschenkHingabe(s) {
+  if (istObjekt(s.geschenk) && istDatum(s.geschenk.hingabedatum)) return { datum: s.geschenk.hingabedatum, angenommen: false };
+  if (istDatum(s.rechnungsdatum)) return { datum: s.rechnungsdatum, angenommen: true };
+  return { datum: geschenkeStichtag(s), angenommen: true };
+}
+function nahJahreswechsel(datum) {
+  if (!istDatum(datum)) return false;
+  const md = datum.slice(5);
+  return md >= '12-18' || md <= '01-14';
+}
+
 function geschenkePruefen(belege) {
   const gruppen = new Map();
   belege.forEach((b, i) => {
@@ -702,11 +754,12 @@ function geschenkePruefen(belege) {
     if (!istObjekt(s) || s.wirkungslos === true) return;
     if (!(Array.isArray(s.kennzeichen) && s.kennzeichen.includes('geschenk')) || !istObjekt(s.geschenk)) return;
     if (s.geschenk.art === 'abziehbar' || s.geschenk.art === 'nicht_abziehbar') return; // vom Nutzer festgelegt
-    const jahr = istDatum(s.rechnungsdatum) ? jahrVon(s.rechnungsdatum) : null;
+    const h = geschenkHingabe(s);
+    const jahr = istDatum(h.datum) ? jahrVon(h.datum) : null;
     const empf = typeof s.geschenk.empfaenger === 'string' ? s.geschenk.empfaenger.trim().toLowerCase() : '';
     const key = empf === '' ? `#ohne#${i}` : `${empf}|${jahr}`;
     if (!gruppen.has(key)) gruppen.set(key, []);
-    gruppen.get(key).push({ i, datum: istDatum(s.rechnungsdatum) ? s.rechnungsdatum : '', id: typeof b.id === 'string' ? b.id : '', netto: istObjekt(s.summe) && istCent(s.summe.netto_cent) ? s.summe.netto_cent : 0, ohneEmpfaenger: empf === '' });
+    gruppen.get(key).push({ i, datum: istDatum(h.datum) ? h.datum : '', id: typeof b.id === 'string' ? b.id : '', netto: istObjekt(s.summe) && istCent(s.summe.netto_cent) ? s.summe.netto_cent : 0, ohneEmpfaenger: empf === '', hingabeAngenommen: h.angenommen && nahJahreswechsel(h.datum) });
   });
   if (!gruppen.size) return belege;
   const neu = belege.slice();
@@ -718,19 +771,23 @@ function geschenkePruefen(belege) {
     let kumul = 0;
     let kreuzung = -1;
     liste.forEach((g, n) => { kumul += g.netto; if (kreuzung < 0 && kumul > GRENZEN.GESCHENK_JE_EMPFAENGER.wert_cent) kreuzung = n; });
-    const kreuzungDatum = kreuzung >= 0 ? geschenkeStichtag(neu[liste[kreuzung].i].steuer) : null;
+    // Zeitraum der Rücknahme: Hingabe des Geschenks, das die Freigrenze überschreitet
+    const kreuzungDatum = kreuzung >= 0 ? (liste[kreuzung].datum || geschenkeStichtag(neu[liste[kreuzung].i].steuer)) : null;
     liste.forEach((g, n) => {
       const b = kopie(neu[g.i]);
       b.steuer.geschenk.art = ueber ? 'nicht_abziehbar' : 'abziehbar';
       if (ueber) {
         const frueher = n < kreuzung && kreuzungDatum !== null;
         if (frueher) {
-          // früheres Geschenk: Vorsteuer war zum Zeitpunkt abziehbar, Rücknahme im Zeitraum des Überschreitens
-          b.steuer.geschenk.ruecknahme_datum = kreuzungDatum;
+          // früheres Geschenk: Vorsteuer war zum Zeitpunkt abziehbar, Rücknahme im Zeitraum der Hingabe des überschreitenden Geschenks, nie vor dem
+          // Zeitraum des früheren Vorsteuerabzugs (N-f: sonst stünde die Rücknahme in einem früheren Zeitraum als der Abzug)
+          const eigener = geschenkeStichtag(b.steuer);
+          b.steuer.geschenk.ruecknahme_datum = eigener !== null && eigener > kreuzungDatum ? eigener : kreuzungDatum;
         } else b.steuer.ausschluss = { vorsteuer: 'nein', grund: 'geschenk_ueber_50' };
         if (frueher) b.steuer.status_hinweise = (Array.isArray(b.steuer.status_hinweise) ? b.steuer.status_hinweise : []).concat(['W_GESCHENK_UEBER_50']);
       }
       if (g.ohneEmpfaenger) b.steuer.status_hinweise = (Array.isArray(b.steuer.status_hinweise) ? b.steuer.status_hinweise : []).concat(['W_GESCHENK_EMPFAENGER_FEHLT']);
+      if (g.hingabeAngenommen) b.steuer.status_hinweise = (Array.isArray(b.steuer.status_hinweise) ? b.steuer.status_hinweise : []).concat(['W_GESCHENK_HINGABE_ANGENOMMEN']);
       neu[g.i] = b;
     });
   }
@@ -751,6 +808,61 @@ function vergleicheWirkungen(a, b) {
   const kb = [b.beleg_id || '', b.ereignis_id || '', b.welt, b.periode || '', b.kz === null ? -1 : b.kz, b.rolle, b.netto_cent, b.ust_cent, b.satz_bp === null ? -1 : b.satz_bp];
   for (let i = 0; i < ka.length; i++) if (ka[i] !== kb[i]) return ka[i] < kb[i] ? -1 : 1;
   return 0;
+}
+
+// Gegenprüfung M4: Plausibilität der Korrekturen je Original. Ohne vorhandenes Original (Beleg-ID, ersatzweise eindeutige Rechnungsnummer)
+// und bei Korrekturen, die zusammen mehr zurücknehmen als das Original (Summe netto oder USt über dem Original, auch zwei Vollstornos
+// auf dasselbe Original), wird der Beleg ausgeschlossen statt gerechnet. Die Reihenfolge der Prüfung ist Wirkdatum, Beleg-ID: die frühere
+// Korrektur gilt, die zusätzliche wird ausgeschlossen. Berichtigungen ohne USt-Wirkung (tippfehler_berichtigung) und Korrekturen mit
+// ungültigem oder nicht unterstütztem Grund zählen nicht mit (sie werden ohnehin nicht gerechnet).
+// Rückgabe: Map Beleg -> { grund, hinweis }.
+function korrekturPruefung(korrekturen, originale) {
+  const aus = new Map();
+  const nachRechnungsnr = new Map();
+  for (const [, o] of originale) {
+    const nr = istObjekt(o) && istObjekt(o.steuer) && typeof o.steuer.rechnungsnr === 'string' && o.steuer.rechnungsnr !== '' ? o.steuer.rechnungsnr : null;
+    if (nr === null) continue;
+    nachRechnungsnr.set(nr, nachRechnungsnr.has(nr) ? null : o);
+  }
+  const gruppen = new Map();
+  for (const b of korrekturen) {
+    const s = b.steuer;
+    if (!istObjekt(s) || s.wirkungslos === true || s.korrektur_grund === 'tippfehler_berichtigung') continue;
+    if (!KORREKTUR_GRUENDE.includes(s.korrektur_grund) || KORREKTUR_GRUENDE_NICHT_UNTERSTUETZT.includes(s.korrektur_grund)) continue;
+    const key = istObjekt(s.bezug) ? (s.bezug.storniert_beleg_id || s.bezug.korrigiert_beleg_id) : null;
+    if (typeof key !== 'string' || key === '') continue; // fehlender Bezug ist ein Pflichtfeldfehler (PF_BEZUG)
+    if (!gruppen.has(key)) gruppen.set(key, []);
+    gruppen.get(key).push(b);
+  }
+  for (const [key, liste] of gruppen) {
+    const orig = originale.get(key) || nachRechnungsnr.get(key) || null;
+    if (!istObjekt(orig) || !istObjekt(orig.steuer)) {
+      for (const b of liste) aus.set(b, { grund: 'korrektur_ohne_original', hinweis: 'W_KORREKTUR_OHNE_ORIGINAL' });
+      continue;
+    }
+    const os = orig.steuer.summe;
+    if (!istObjekt(os) || !istCent(os.netto_cent) || !istCent(os.ust_cent)) continue;
+    const oN = os.netto_cent < 0 ? 0 - os.netto_cent : os.netto_cent;
+    const oU = os.ust_cent < 0 ? 0 - os.ust_cent : os.ust_cent;
+    liste.sort((x, y) => {
+      const dx = istDatum(x.steuer.wirkdatum) ? x.steuer.wirkdatum : '';
+      const dy = istDatum(y.steuer.wirkdatum) ? y.steuer.wirkdatum : '';
+      return dx !== dy ? (dx < dy ? -1 : 1) : vergleicheBelege(x, y);
+    });
+    let cumN = 0;
+    let cumU = 0;
+    for (const b of liste) {
+      const ks = b.steuer.summe;
+      if (!istObjekt(ks) || !istCent(ks.netto_cent) || !istCent(ks.ust_cent)) continue;
+      const kN = ks.netto_cent < 0 ? 0 - ks.netto_cent : ks.netto_cent;
+      const kU = ks.ust_cent < 0 ? 0 - ks.ust_cent : ks.ust_cent;
+      if (kN > oN || kU > oU) { aus.set(b, { grund: 'korrektur_ueber_original', hinweis: 'W_KORREKTUR_UEBER_ORIGINAL' }); continue; }
+      if (cumN + kN > oN || cumU + kU > oU) { aus.set(b, { grund: 'korrektur_summe_ueber_original', hinweis: 'W_KORREKTUR_UEBER_ORIGINAL' }); continue; }
+      cumN += kN;
+      cumU += kU;
+    }
+  }
+  return aus;
 }
 
 export function alleWirkungen(belege, profil, optionen) {
@@ -785,9 +897,18 @@ export function alleWirkungen(belege, profil, optionen) {
       }
     }
   }
+  const korrAusschluss = korrekturPruefung(korrekturen.filter((b) => !doppelt(b)), originale);
   for (const b of korrekturen) {
     if (doppelt(b)) {
       wirk.push(mk({ id: b.id, steuerfall: b.steuer.steuerfall, beleg_status: 'ausgeschlossen', hinweise: ['HN_NOCH_NICHT_UNTERSTUETZT', 'HN_DOPPELTE_BELEG_ID'] }, { welt: 'ust', rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: 'doppelte_beleg_id' }));
+      continue;
+    }
+    const ka = korrAusschluss.get(b);
+    if (ka) {
+      const hin = ['HN_NOCH_NICHT_UNTERSTUETZT', ka.hinweis];
+      const datum = istDatum(b.steuer.wirkdatum) ? b.steuer.wirkdatum : null;
+      const per = datum ? ustPeriode(profil, datum, hin) : null;
+      wirk.push(mk({ id: typeof b.id === 'string' ? b.id : null, steuerfall: b.steuer.steuerfall, beleg_status: 'ausgeschlossen', hinweise: hin }, { welt: 'ust', periode: per, datum_wirk: datum, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-KOR-01', hinweis_detail: ka.grund }));
       continue;
     }
     for (const w of belegWirkungen(b, profil, { ...(optionen || {}), originale, originalPerioden })) wirk.push(w);
