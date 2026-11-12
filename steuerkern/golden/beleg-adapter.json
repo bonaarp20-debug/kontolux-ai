@@ -1,0 +1,363 @@
+{
+ "format": 1,
+ "art": "beleg_adapter",
+ "kern_version": "2026.11.12-9",
+ "quelle": "Worker steuerkernEingabeAusBeleg (worker.js), Eingabe von Hand, Ausgabe Kern",
+ "vektoren": [
+  {
+   "id": "adapter-eingang-19-bezahlt",
+   "beschreibung": "Eingangsrechnung 119,00 EUR brutto zu 19 %, bezahlt am 03.11.",
+   "art": "beleg_adapter",
+   "stichtag": "2026-11-12",
+   "weg": "beleg_manuell",
+   "roh": {
+    "typ": "rechnung_eingehend",
+    "betrag": "119.00",
+    "mwst_satz": "19",
+    "datum": "2026-11-01",
+    "bezahlt": true,
+    "bezahlt_am": "2026-11-03"
+   },
+   "eingabe": {
+    "eingabe": {
+     "weg": "beleg_manuell",
+     "richtung": "eingang",
+     "herkunft": "nutzer",
+     "erfasst_am": "2026-11-12",
+     "steuerwahl": "inland_19",
+     "betrag": {
+      "cent": 11900,
+      "art": "brutto"
+     },
+     "rechnungsdatum": "2026-11-01",
+     "zahlung": {
+      "datum": "2026-11-03",
+      "betrag_cent": 11900
+     }
+    },
+    "profil": null,
+    "stichtag": "2026-11-12"
+   },
+   "ausgabe": {
+    "ist_beleg": true,
+    "steuerfall": "UNBEKANNT",
+    "summe": {
+     "netto_cent": 11900,
+     "ust_cent": 0,
+     "brutto_cent": 11900
+    },
+    "codes": [
+     "HN_STEUERFALL_UNBEKANNT"
+    ]
+   }
+  },
+  {
+   "id": "adapter-ausgang-7-offen",
+   "beschreibung": "Ausgangsrechnung 107,00 EUR brutto zu 7 %, unbezahlt",
+   "art": "beleg_adapter",
+   "stichtag": "2026-11-12",
+   "weg": "beleg_manuell",
+   "roh": {
+    "typ": "rechnung_ausgehend",
+    "betrag": "107.00",
+    "mwst_satz": "7",
+    "datum": "2026-11-05",
+    "bezahlt": false
+   },
+   "eingabe": {
+    "eingabe": {
+     "weg": "beleg_manuell",
+     "richtung": "ausgang",
+     "herkunft": "nutzer",
+     "erfasst_am": "2026-11-12",
+     "steuerwahl": "inland_7",
+     "betrag": {
+      "cent": 10700,
+      "art": "brutto"
+     },
+     "rechnungsdatum": "2026-11-05"
+    },
+    "profil": null,
+    "stichtag": "2026-11-12"
+   },
+   "ausgabe": {
+    "ist_beleg": false,
+    "steuerfall": "UNBEKANNT",
+    "summe": {
+     "netto_cent": 10700,
+     "ust_cent": 0,
+     "brutto_cent": 10700
+    },
+    "codes": [
+     "PF_LEISTUNG",
+     "W_LEISTUNGSDATUM_FEHLT"
+    ]
+   }
+  },
+  {
+   "id": "adapter-satz-keine",
+   "beschreibung": "Satz \"keine\" (mehrdeutig): nie geraten, steuerwahl weiss_nicht",
+   "art": "beleg_adapter",
+   "stichtag": "2026-11-12",
+   "weg": "beleg_manuell",
+   "roh": {
+    "typ": "rechnung_eingehend",
+    "betrag": "50.00",
+    "mwst_satz": "keine",
+    "datum": "2026-11-02",
+    "bezahlt": false
+   },
+   "eingabe": {
+    "eingabe": {
+     "weg": "beleg_manuell",
+     "richtung": "eingang",
+     "herkunft": "nutzer",
+     "erfasst_am": "2026-11-12",
+     "steuerwahl": "weiss_nicht",
+     "betrag": {
+      "cent": 5000,
+      "art": "brutto"
+     },
+     "rechnungsdatum": "2026-11-02"
+    },
+    "profil": null,
+    "stichtag": "2026-11-12"
+   },
+   "ausgabe": {
+    "ist_beleg": true,
+    "steuerfall": "UNBEKANNT",
+    "summe": {
+     "netto_cent": 5000,
+     "ust_cent": 0,
+     "brutto_cent": 5000
+    },
+    "codes": [
+     "HN_STEUERFALL_UNBEKANNT"
+    ]
+   }
+  },
+  {
+   "id": "adapter-bezahlt-ohne-datum",
+   "beschreibung": "bezahlt ohne bezahlt_am: Zahlungsdatum = Stichtag",
+   "art": "beleg_adapter",
+   "stichtag": "2026-11-12",
+   "weg": "beleg_manuell",
+   "roh": {
+    "typ": "rechnung_eingehend",
+    "betrag": "23.80",
+    "mwst_satz": "19",
+    "datum": "2026-11-10",
+    "bezahlt": true
+   },
+   "eingabe": {
+    "eingabe": {
+     "weg": "beleg_manuell",
+     "richtung": "eingang",
+     "herkunft": "nutzer",
+     "erfasst_am": "2026-11-12",
+     "steuerwahl": "inland_19",
+     "betrag": {
+      "cent": 2380,
+      "art": "brutto"
+     },
+     "rechnungsdatum": "2026-11-10",
+     "zahlung": {
+      "datum": "2026-11-12",
+      "betrag_cent": 2380
+     }
+    },
+    "profil": null,
+    "stichtag": "2026-11-12"
+   },
+   "ausgabe": {
+    "ist_beleg": true,
+    "steuerfall": "UNBEKANNT",
+    "summe": {
+     "netto_cent": 2380,
+     "ust_cent": 0,
+     "brutto_cent": 2380
+    },
+    "codes": [
+     "HN_STEUERFALL_UNBEKANNT"
+    ]
+   }
+  },
+  {
+   "id": "adapter-mahnung",
+   "beschreibung": "Mahnung (ausgehend) ist beleg_art sonstig",
+   "art": "beleg_adapter",
+   "stichtag": "2026-11-12",
+   "weg": "beleg_manuell",
+   "roh": {
+    "typ": "mahnung_ausgehend",
+    "betrag": "119.00",
+    "mwst_satz": "19",
+    "datum": "2026-11-06",
+    "bezahlt": false
+   },
+   "eingabe": {
+    "eingabe": {
+     "weg": "beleg_manuell",
+     "richtung": "ausgang",
+     "herkunft": "nutzer",
+     "erfasst_am": "2026-11-12",
+     "beleg_art": "sonstig",
+     "steuerwahl": "inland_19",
+     "betrag": {
+      "cent": 11900,
+      "art": "brutto"
+     },
+     "rechnungsdatum": "2026-11-06"
+    },
+    "profil": null,
+    "stichtag": "2026-11-12"
+   },
+   "ausgabe": {
+    "ist_beleg": true,
+    "steuerfall": "PRIVAT",
+    "summe": {
+     "netto_cent": 11900,
+     "ust_cent": 0,
+     "brutto_cent": 11900
+    },
+    "codes": []
+   }
+  },
+  {
+   "id": "adapter-negativer-betrag",
+   "beschreibung": "Negativer Betrag (-119,00): der Adapter reicht ihn durch, der Kern lehnt ihn mit PF_BETRAG ab (Beträge positiv übergeben, Korrekturen über beleg_art)",
+   "art": "beleg_adapter",
+   "stichtag": "2026-11-12",
+   "weg": "beleg_manuell",
+   "roh": {
+    "typ": "rechnung_eingehend",
+    "betrag": "-119.00",
+    "mwst_satz": "19",
+    "datum": "2026-11-01",
+    "bezahlt": false
+   },
+   "eingabe": {
+    "eingabe": {
+     "weg": "beleg_manuell",
+     "richtung": "eingang",
+     "herkunft": "nutzer",
+     "erfasst_am": "2026-11-12",
+     "steuerwahl": "inland_19",
+     "betrag": {
+      "cent": -11900,
+      "art": "brutto"
+     },
+     "rechnungsdatum": "2026-11-01"
+    },
+    "profil": null,
+    "stichtag": "2026-11-12"
+   },
+   "ausgabe": {
+    "ist_beleg": false,
+    "steuerfall": "UNBEKANNT",
+    "summe": {
+     "netto_cent": 0,
+     "ust_cent": 0,
+     "brutto_cent": 0
+    },
+    "codes": [
+     "HN_STEUERFALL_UNBEKANNT",
+     "PF_BETRAG"
+    ]
+   }
+  },
+  {
+   "id": "adapter-betrag-fehlt",
+   "beschreibung": "Betrag nicht lesbar: betrag null, Pflichtfehler statt geratener Zahl",
+   "art": "beleg_adapter",
+   "stichtag": "2026-11-12",
+   "weg": "beleg_manuell",
+   "roh": {
+    "typ": "rechnung_eingehend",
+    "betrag": "abc",
+    "mwst_satz": "19",
+    "datum": "2026-11-01",
+    "bezahlt": false
+   },
+   "eingabe": {
+    "eingabe": {
+     "weg": "beleg_manuell",
+     "richtung": "eingang",
+     "herkunft": "nutzer",
+     "erfasst_am": "2026-11-12",
+     "steuerwahl": "inland_19",
+     "betrag": {
+      "cent": null,
+      "art": "brutto"
+     },
+     "rechnungsdatum": "2026-11-01"
+    },
+    "profil": null,
+    "stichtag": "2026-11-12"
+   },
+   "ausgabe": {
+    "ist_beleg": false,
+    "steuerfall": "UNBEKANNT",
+    "summe": {
+     "netto_cent": 0,
+     "ust_cent": 0,
+     "brutto_cent": 0
+    },
+    "codes": [
+     "HN_STEUERFALL_UNBEKANNT",
+     "PF_BETRAG",
+     "PF_POSITIONEN"
+    ]
+   }
+  },
+  {
+   "id": "adapter-plattform",
+   "beschreibung": "Plattformbeleg (herkunft plattform), 19 %, bezahlt",
+   "art": "beleg_adapter",
+   "stichtag": "2026-11-12",
+   "weg": "beleg_manuell",
+   "roh": {
+    "typ": "rechnung_ausgehend",
+    "betrag": "11.90",
+    "mwst_satz": "19",
+    "datum": "2026-11-07",
+    "bezahlt": true,
+    "bezahlt_am": "2026-11-07",
+    "herkunft": "plattform"
+   },
+   "eingabe": {
+    "eingabe": {
+     "weg": "beleg_manuell",
+     "richtung": "ausgang",
+     "herkunft": "plattform",
+     "erfasst_am": "2026-11-12",
+     "steuerwahl": "inland_19",
+     "betrag": {
+      "cent": 1190,
+      "art": "brutto"
+     },
+     "rechnungsdatum": "2026-11-07",
+     "zahlung": {
+      "datum": "2026-11-07",
+      "betrag_cent": 1190
+     }
+    },
+    "profil": null,
+    "stichtag": "2026-11-12"
+   },
+   "ausgabe": {
+    "ist_beleg": false,
+    "steuerfall": "UNBEKANNT",
+    "summe": {
+     "netto_cent": 1190,
+     "ust_cent": 0,
+     "brutto_cent": 1190
+    },
+    "codes": [
+     "PF_LEISTUNG",
+     "W_LEISTUNGSDATUM_FEHLT"
+    ]
+   }
+  }
+ ]
+}

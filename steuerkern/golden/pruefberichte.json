@@ -1,0 +1,2015 @@
+{
+ "format": 1,
+ "art": "pruefberichte",
+ "kern_version": "2026.11.12-9",
+ "quelle": "docs/regelbesteuerung/07-*.md und 08-gegenpruefung-phase1.md: Schlüsselzahlen von Hand, Rest Kern-Ausgabe",
+ "vektoren": [
+  {
+   "id": "M2-anzahlung-vor-ueberschreiten",
+   "bericht": "08 M2 (UStAE 19.7 Abs. 1 S. 4)",
+   "beschreibung": "Leistung 1.000,00 brutto am 01.03., Zahlung 400,00 am 01.04. und 600,00 am 01.09.; KU bis 14.06., Regel ab 15.06.: ganzer Umsatz in Kz 81 im 3. Quartal (Belegsteuer 159,66 = EÜR Kz 140; Voranmeldung rechnet aus der auf volle Euro gekürzten Basis 840 EUR: 159,60)",
+   "art": "auswertung",
+   "eingabe": {
+    "profil": {
+     "status_verlauf": [
+      {
+       "gueltig_ab": "2026-01-01",
+       "status": "ku",
+       "grund": "beginn"
+      },
+      {
+       "gueltig_ab": "2026-06-15",
+       "status": "regel",
+       "grund": "laufend_ueber_100k"
+      }
+     ],
+     "voranmeldung_verlauf": [
+      {
+       "gueltig_ab": "2026-01-01",
+       "zeitraum": "quartal",
+       "quelle": "elster_bestaetigt"
+      }
+     ]
+    },
+    "jahre": [
+     2026
+    ],
+    "belege_eingaben": [
+     {
+      "weg": "vektor",
+      "id": "M2",
+      "richtung": "ausgang",
+      "steuerwahl": "inland_19",
+      "betrag": {
+       "cent": 100000,
+       "art": "brutto"
+      },
+      "rechnungsdatum": "2026-03-01",
+      "leistungsdatum": "2026-03-01",
+      "zahlungen": [
+       {
+        "datum": "2026-04-01",
+        "betrag_cent": 40000
+       },
+       {
+        "datum": "2026-09-01",
+        "betrag_cent": 60000
+       }
+      ]
+     }
+    ]
+   },
+   "zahlen": [
+    {
+     "jahr": 2026,
+     "periode": "2026-Q3",
+     "feld": "kennzahlen.81",
+     "wert": 84034
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q3",
+     "feld": "kennzahlen.81_steuer",
+     "wert": 15960
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q3",
+     "feld": "kz83.status",
+     "wert": "zwischenwert"
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q3",
+     "feld": "kennzahlen.65",
+     "wert": 0
+    },
+    {
+     "jahr": 2026,
+     "bereich": "euer",
+     "feld": "kennzahlen.112",
+     "wert": 84034
+    },
+    {
+     "jahr": 2026,
+     "bereich": "euer",
+     "feld": "kennzahlen.140",
+     "wert": 15966
+    }
+   ],
+   "ausgabe": {
+    "belege": [
+     {
+      "id": "M2",
+      "ist_beleg": true,
+      "steuerfall": "A_INLAND_19",
+      "summe": {
+       "netto_cent": 84034,
+       "ust_cent": 15966,
+       "brutto_cent": 100000
+      },
+      "codes": []
+     }
+    ],
+    "jahre": {
+     "2026": {
+      "ustva": [
+       {
+        "periode": "2026-Q3",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 0,
+         "69": 0,
+         "81": 84034,
+         "83": 15960,
+         "86": 0,
+         "87": 0,
+         "81_steuer": 15960,
+         "86_steuer": 0,
+         "Z37": 15960,
+         "Z45": 15960,
+         "Z48": 15960
+        },
+        "kz83": {
+         "betrag_cent": 15960,
+         "status": "zwischenwert"
+        },
+        "unvollstaendig": false,
+        "warnungen": [
+         "W_KU_GRENZE_UEBERSCHRITTEN",
+         "W_WECHSEL_ANZAHLUNG_KZ65"
+        ],
+        "hinweise": [
+         "HN_RD_ELSTER",
+         "HN_UMSATZ_ZAHLUNGSZEITRAUM_NACH_UEBERSCHREITEN",
+         "HN_WECHSEL_ANZAHLUNG_VOLL_IN_KZ81",
+         "W_KU_GRENZE_UEBERSCHRITTEN",
+         "W_WECHSEL_ANZAHLUNG_KZ65"
+        ],
+        "ausgeschlossene": []
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "112": 84034,
+        "140": 15966,
+        "gewinn": 100000
+       },
+       "gewinn_cent": 100000,
+       "ausgeschlossene": []
+      },
+      "warnungen": [
+       "W_KU_GRENZE_UEBERSCHRITTEN",
+       "W_WECHSEL_ANZAHLUNG_KZ65"
+      ],
+      "nicht_beruecksichtigt_anzahl": 0,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 84034,
+       "vorsteuer_gezahlt": 0,
+       "ust_zahllast_summe_ustva": 15960,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 100000,
+       "einnahmen_gesamt": 100000,
+       "ausgaben_gesamt": 0
+      },
+      "dashboard_status": {
+       "ust_zahllast": "zwischenwert",
+       "gewinn": "ergebnis"
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "M5-geschenk-dezember-2026",
+   "bericht": "08 M5 (UStAE 15.6 Abs. 5)",
+   "beschreibung": "Uhr 25,00 netto Dezember 2025 gekauft, April 2026 verschenkt, Wein 50,00 netto Dezember 2026: im Dezember 2026 4,75 EUR Vorsteuer zurück (Kz 66 = -475)",
+   "art": "auswertung",
+   "eingabe": {
+    "profil": {
+     "status_verlauf": [
+      {
+       "gueltig_ab": "2025-01-01",
+       "status": "regel",
+       "grund": "beginn"
+      }
+     ],
+     "voranmeldung_verlauf": [
+      {
+       "gueltig_ab": "2025-01-01",
+       "zeitraum": "quartal",
+       "quelle": "elster_bestaetigt"
+      }
+     ]
+    },
+    "jahre": [
+     2025,
+     2026
+    ],
+    "belege_eingaben": [
+     {
+      "weg": "vektor",
+      "id": "UHR",
+      "richtung": "eingang",
+      "steuerwahl": "inland_19",
+      "betrag": {
+       "cent": 2500,
+       "art": "netto"
+      },
+      "rechnungsdatum": "2025-12-10",
+      "leistungsdatum": "2025-12-10",
+      "zahlungen": [
+       {
+        "datum": "2025-12-10",
+        "betrag_cent": 2975
+       }
+      ],
+      "geschenk": {
+       "empfaenger": "B",
+       "hingabedatum": "2026-04-15"
+      }
+     },
+     {
+      "weg": "vektor",
+      "id": "WEIN",
+      "richtung": "eingang",
+      "steuerwahl": "inland_19",
+      "betrag": {
+       "cent": 5000,
+       "art": "netto"
+      },
+      "rechnungsdatum": "2026-12-05",
+      "leistungsdatum": "2026-12-05",
+      "zahlungen": [
+       {
+        "datum": "2026-12-05",
+        "betrag_cent": 5950
+       }
+      ],
+      "geschenk": {
+       "empfaenger": "B",
+       "hingabedatum": "2026-12-05"
+      }
+     }
+    ]
+   },
+   "zahlen": [
+    {
+     "jahr": 2026,
+     "periode": "2026-Q4",
+     "feld": "kennzahlen.66",
+     "wert": -475
+    },
+    {
+     "jahr": 2025,
+     "periode": "2025-Q4",
+     "feld": "kennzahlen.66",
+     "wert": 475
+    }
+   ],
+   "ausgabe": {
+    "belege": [
+     {
+      "id": "UHR",
+      "ist_beleg": true,
+      "steuerfall": "E_INLAND_VORSTEUER",
+      "summe": {
+       "netto_cent": 2500,
+       "ust_cent": 475,
+       "brutto_cent": 2975
+      },
+      "codes": []
+     },
+     {
+      "id": "WEIN",
+      "ist_beleg": true,
+      "steuerfall": "E_INLAND_VORSTEUER",
+      "summe": {
+       "netto_cent": 5000,
+       "ust_cent": 950,
+       "brutto_cent": 5950
+      },
+      "codes": []
+     }
+    ],
+    "jahre": {
+     "2025": {
+      "ustva": [
+       {
+        "periode": "2025-Q4",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 475,
+         "69": 0,
+         "81": 0,
+         "83": -475,
+         "86": 0,
+         "87": 0,
+         "81_steuer": 0,
+         "86_steuer": 0,
+         "Z37": 0,
+         "Z45": -475,
+         "Z48": -475
+        },
+        "kz83": {
+         "betrag_cent": -475,
+         "status": "ergebnis"
+        },
+        "unvollstaendig": false,
+        "warnungen": [
+         "W_GESCHENK_UEBER_50"
+        ],
+        "hinweise": [
+         "HN_KZ_JAHR",
+         "W_GESCHENK_UEBER_50"
+        ],
+        "ausgeschlossene": []
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "164": 2975,
+        "gewinn": 0
+       },
+       "gewinn_cent": 0,
+       "ausgeschlossene": []
+      },
+      "warnungen": [
+       "W_GESCHENK_UEBER_50"
+      ],
+      "nicht_beruecksichtigt_anzahl": 0,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 0,
+       "vorsteuer_gezahlt": 0,
+       "ust_zahllast_summe_ustva": -475,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 0,
+       "einnahmen_gesamt": 0,
+       "ausgaben_gesamt": 0
+      },
+      "dashboard_status": {
+       "ust_zahllast": "ergebnis",
+       "gewinn": "ergebnis"
+      }
+     },
+     "2026": {
+      "ustva": [
+       {
+        "periode": "2026-Q4",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": -475,
+         "69": 0,
+         "81": 0,
+         "83": 475,
+         "86": 0,
+         "87": 0,
+         "81_steuer": 0,
+         "86_steuer": 0,
+         "Z37": 0,
+         "Z45": 475,
+         "Z48": 475
+        },
+        "kz83": {
+         "betrag_cent": 475,
+         "status": "ergebnis"
+        },
+        "unvollstaendig": false,
+        "warnungen": [
+         "W_GESCHENK_UEBER_50"
+        ],
+        "hinweise": [
+         "W_GESCHENK_UEBER_50"
+        ],
+        "ausgeschlossene": []
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "164": 5950,
+        "gewinn": 0
+       },
+       "gewinn_cent": 0,
+       "ausgeschlossene": []
+      },
+      "warnungen": [
+       "W_GESCHENK_UEBER_50"
+      ],
+      "nicht_beruecksichtigt_anzahl": 0,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 0,
+       "vorsteuer_gezahlt": 0,
+       "ust_zahllast_summe_ustva": 475,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 0,
+       "einnahmen_gesamt": 0,
+       "ausgaben_gesamt": 0
+      },
+      "dashboard_status": {
+       "ust_zahllast": "ergebnis",
+       "gewinn": "ergebnis"
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "M4-doppelstorno",
+   "bericht": "08 M4",
+   "beschreibung": "Zwei Vollstornos auf dasselbe Original (1.000,00 netto): das zweite wird ausgeschlossen, Kz 81 = -100000 statt -200000, Kz 83 = -19000 statt -38000, Zwischenwert",
+   "art": "auswertung",
+   "eingabe": {
+    "profil": {
+     "status_verlauf": [
+      {
+       "gueltig_ab": "2025-01-01",
+       "status": "regel",
+       "grund": "beginn"
+      }
+     ],
+     "voranmeldung_verlauf": [
+      {
+       "gueltig_ab": "2025-01-01",
+       "zeitraum": "quartal",
+       "quelle": "elster_bestaetigt"
+      }
+     ]
+    },
+    "jahre": [
+     2026
+    ],
+    "belege_eingaben": [
+     {
+      "weg": "vektor",
+      "id": "O",
+      "richtung": "ausgang",
+      "steuerwahl": "inland_19",
+      "betrag": {
+       "cent": 100000,
+       "art": "netto"
+      },
+      "rechnungsdatum": "2026-02-10",
+      "leistungsdatum": "2026-02-10",
+      "zahlungen": [
+       {
+        "datum": "2026-02-15",
+        "betrag_cent": 119000
+       }
+      ]
+     },
+     {
+      "weg": "vektor",
+      "id": "S1",
+      "richtung": "ausgang",
+      "beleg_art": "storno",
+      "steuerwahl": "inland_19",
+      "betrag": {
+       "cent": 100000,
+       "art": "netto"
+      },
+      "wirkdatum": "2026-08-10",
+      "bezug": {
+       "storniert_beleg_id": "O"
+      },
+      "korrektur_grund": "rueckabwicklung"
+     },
+     {
+      "weg": "vektor",
+      "id": "S2",
+      "richtung": "ausgang",
+      "beleg_art": "storno",
+      "steuerwahl": "inland_19",
+      "betrag": {
+       "cent": 100000,
+       "art": "netto"
+      },
+      "wirkdatum": "2026-08-11",
+      "bezug": {
+       "storniert_beleg_id": "O"
+      },
+      "korrektur_grund": "rueckabwicklung"
+     }
+    ]
+   },
+   "zahlen": [
+    {
+     "jahr": 2026,
+     "periode": "2026-Q3",
+     "feld": "kennzahlen.81",
+     "wert": -100000
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q3",
+     "feld": "kz83.betrag_cent",
+     "wert": -19000
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q3",
+     "feld": "kz83.status",
+     "wert": "zwischenwert"
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q3",
+     "feld": "ausgeschlossene",
+     "wert": [
+      {
+       "beleg_id": "S2",
+       "status": "ausgeschlossen",
+       "grund": "korrektur_summe_ueber_original"
+      }
+     ]
+    }
+   ],
+   "ausgabe": {
+    "belege": [
+     {
+      "id": "O",
+      "ist_beleg": true,
+      "steuerfall": "A_INLAND_19",
+      "summe": {
+       "netto_cent": 100000,
+       "ust_cent": 19000,
+       "brutto_cent": 119000
+      },
+      "codes": []
+     },
+     {
+      "id": "S1",
+      "ist_beleg": true,
+      "steuerfall": "A_INLAND_19",
+      "summe": {
+       "netto_cent": -100000,
+       "ust_cent": -19000,
+       "brutto_cent": -119000
+      },
+      "codes": []
+     },
+     {
+      "id": "S2",
+      "ist_beleg": true,
+      "steuerfall": "A_INLAND_19",
+      "summe": {
+       "netto_cent": -100000,
+       "ust_cent": -19000,
+       "brutto_cent": -119000
+      },
+      "codes": []
+     }
+    ],
+    "jahre": {
+     "2026": {
+      "ustva": [
+       {
+        "periode": "2026-Q1",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 0,
+         "69": 0,
+         "81": 100000,
+         "83": 19000,
+         "86": 0,
+         "87": 0,
+         "81_steuer": 19000,
+         "86_steuer": 0,
+         "Z37": 19000,
+         "Z45": 19000,
+         "Z48": 19000
+        },
+        "kz83": {
+         "betrag_cent": 19000,
+         "status": "ergebnis"
+        },
+        "unvollstaendig": false,
+        "warnungen": [],
+        "hinweise": [],
+        "ausgeschlossene": []
+       },
+       {
+        "periode": "2026-Q3",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 0,
+         "69": 0,
+         "81": -100000,
+         "83": -19000,
+         "86": 0,
+         "87": 0,
+         "81_steuer": -19000,
+         "86_steuer": 0,
+         "Z37": -19000,
+         "Z45": -19000,
+         "Z48": -19000
+        },
+        "kz83": {
+         "betrag_cent": -19000,
+         "status": "zwischenwert"
+        },
+        "unvollstaendig": true,
+        "warnungen": [
+         "W_KORREKTUR_UEBER_ORIGINAL",
+         "W_STORNO_ABGESCHLOSSENER_ZEITRAUM"
+        ],
+        "hinweise": [
+         "HN_NOCH_NICHT_UNTERSTUETZT",
+         "W_KORREKTUR_UEBER_ORIGINAL",
+         "W_STORNO_ABGESCHLOSSENER_ZEITRAUM"
+        ],
+        "ausgeschlossene": [
+         {
+          "beleg_id": "S2",
+          "status": "ausgeschlossen",
+          "grund": "korrektur_summe_ueber_original"
+         }
+        ]
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "112": 100000,
+        "140": 19000,
+        "gewinn": 119000
+       },
+       "gewinn_cent": 119000,
+       "ausgeschlossene": [
+        {
+         "beleg_id": "S2",
+         "status": "ausgeschlossen",
+         "grund": "korrektur_summe_ueber_original"
+        }
+       ]
+      },
+      "warnungen": [
+       "W_BELEGE_AUSGESCHLOSSEN",
+       "W_KORREKTUR_UEBER_ORIGINAL",
+       "W_STORNO_ABGESCHLOSSENER_ZEITRAUM"
+      ],
+      "nicht_beruecksichtigt_anzahl": 1,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 100000,
+       "vorsteuer_gezahlt": 0,
+       "ust_zahllast_summe_ustva": 0,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 119000,
+       "einnahmen_gesamt": 119000,
+       "ausgaben_gesamt": 0,
+       "nicht_beruecksichtigte_belege": 1
+      },
+      "dashboard_status": {
+       "ust_zahllast": "zwischenwert",
+       "gewinn": "zwischenwert"
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "F1-satz-1600",
+   "bericht": "07 F1",
+   "beschreibung": "Ausgangsposition 100,00 EUR netto mit Satz 16 %: verschwindet nicht still, Kz 83 wird Zwischenwert, Beleg steht in ausgeschlossene[]",
+   "art": "auswertung",
+   "eingabe": {
+    "profil": {
+     "status_verlauf": [
+      {
+       "gueltig_ab": "2025-01-01",
+       "status": "regel",
+       "grund": "beginn"
+      }
+     ],
+     "voranmeldung_verlauf": [
+      {
+       "gueltig_ab": "2025-01-01",
+       "zeitraum": "quartal",
+       "quelle": "elster_bestaetigt"
+      }
+     ]
+    },
+    "jahre": [
+     2026
+    ],
+    "belege_eingaben": [
+     {
+      "weg": "vektor",
+      "id": "S1600",
+      "richtung": "ausgang",
+      "steuerwahl": "inland_19",
+      "rechnungsdatum": "2026-02-10",
+      "leistungsdatum": "2026-02-10",
+      "zahlungen": [],
+      "positionen": [
+       {
+        "bez": "x",
+        "netto_cent": 10000,
+        "satz_bp": 1600
+       }
+      ]
+     }
+    ]
+   },
+   "zahlen": [
+    {
+     "jahr": 2026,
+     "periode": "2026-Q1",
+     "feld": "kz83.status",
+     "wert": "zwischenwert"
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q1",
+     "feld": "unvollstaendig",
+     "wert": true
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q1",
+     "feld": "kennzahlen.81",
+     "wert": 0
+    },
+    {
+     "jahr": 2026,
+     "bereich": "warnungen",
+     "feld": "0",
+     "wert": "W_BELEGE_AUSGESCHLOSSEN"
+    }
+   ],
+   "ausgabe": {
+    "belege": [
+     {
+      "id": "S1600",
+      "ist_beleg": true,
+      "steuerfall": "UNBEKANNT",
+      "summe": {
+       "netto_cent": 10000,
+       "ust_cent": 0,
+       "brutto_cent": 10000
+      },
+      "codes": [
+       "SATZ_NICHT_ZULAESSIG"
+      ]
+     }
+    ],
+    "jahre": {
+     "2026": {
+      "ustva": [
+       {
+        "periode": "2026-Q1",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 0,
+         "69": 0,
+         "81": 0,
+         "83": 0,
+         "86": 0,
+         "87": 0,
+         "81_steuer": 0,
+         "86_steuer": 0,
+         "Z37": 0,
+         "Z45": 0,
+         "Z48": 0
+        },
+        "kz83": {
+         "betrag_cent": 0,
+         "status": "zwischenwert"
+        },
+        "unvollstaendig": true,
+        "warnungen": [],
+        "hinweise": [],
+        "ausgeschlossene": [
+         {
+          "beleg_id": "S1600",
+          "status": "unbekannt",
+          "grund": "satz_fehlt"
+         }
+        ]
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "gewinn": 0
+       },
+       "gewinn_cent": 0,
+       "ausgeschlossene": [
+        {
+         "beleg_id": "S1600",
+         "status": "unbekannt",
+         "grund": "satz_fehlt"
+        }
+       ]
+      },
+      "warnungen": [
+       "W_BELEGE_AUSGESCHLOSSEN"
+      ],
+      "nicht_beruecksichtigt_anzahl": 1,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 0,
+       "vorsteuer_gezahlt": 0,
+       "ust_zahllast_summe_ustva": 0,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 0,
+       "einnahmen_gesamt": 0,
+       "ausgaben_gesamt": 0,
+       "nicht_beruecksichtigte_belege": 1
+      },
+      "dashboard_status": {
+       "ust_zahllast": "zwischenwert",
+       "gewinn": "zwischenwert"
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "F1-satz-2100",
+   "bericht": "07 F1",
+   "beschreibung": "Ausgangsposition 100,00 EUR netto mit Satz 21 %: verschwindet nicht still, Kz 83 wird Zwischenwert, Beleg steht in ausgeschlossene[]",
+   "art": "auswertung",
+   "eingabe": {
+    "profil": {
+     "status_verlauf": [
+      {
+       "gueltig_ab": "2025-01-01",
+       "status": "regel",
+       "grund": "beginn"
+      }
+     ],
+     "voranmeldung_verlauf": [
+      {
+       "gueltig_ab": "2025-01-01",
+       "zeitraum": "quartal",
+       "quelle": "elster_bestaetigt"
+      }
+     ]
+    },
+    "jahre": [
+     2026
+    ],
+    "belege_eingaben": [
+     {
+      "weg": "vektor",
+      "id": "S2100",
+      "richtung": "ausgang",
+      "steuerwahl": "inland_19",
+      "rechnungsdatum": "2026-02-10",
+      "leistungsdatum": "2026-02-10",
+      "zahlungen": [],
+      "positionen": [
+       {
+        "bez": "x",
+        "netto_cent": 10000,
+        "satz_bp": 2100
+       }
+      ]
+     }
+    ]
+   },
+   "zahlen": [
+    {
+     "jahr": 2026,
+     "periode": "2026-Q1",
+     "feld": "kz83.status",
+     "wert": "zwischenwert"
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q1",
+     "feld": "unvollstaendig",
+     "wert": true
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q1",
+     "feld": "kennzahlen.81",
+     "wert": 0
+    },
+    {
+     "jahr": 2026,
+     "bereich": "warnungen",
+     "feld": "0",
+     "wert": "W_BELEGE_AUSGESCHLOSSEN"
+    }
+   ],
+   "ausgabe": {
+    "belege": [
+     {
+      "id": "S2100",
+      "ist_beleg": true,
+      "steuerfall": "UNBEKANNT",
+      "summe": {
+       "netto_cent": 10000,
+       "ust_cent": 0,
+       "brutto_cent": 10000
+      },
+      "codes": [
+       "SATZ_NICHT_ZULAESSIG"
+      ]
+     }
+    ],
+    "jahre": {
+     "2026": {
+      "ustva": [
+       {
+        "periode": "2026-Q1",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 0,
+         "69": 0,
+         "81": 0,
+         "83": 0,
+         "86": 0,
+         "87": 0,
+         "81_steuer": 0,
+         "86_steuer": 0,
+         "Z37": 0,
+         "Z45": 0,
+         "Z48": 0
+        },
+        "kz83": {
+         "betrag_cent": 0,
+         "status": "zwischenwert"
+        },
+        "unvollstaendig": true,
+        "warnungen": [],
+        "hinweise": [],
+        "ausgeschlossene": [
+         {
+          "beleg_id": "S2100",
+          "status": "unbekannt",
+          "grund": "satz_fehlt"
+         }
+        ]
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "gewinn": 0
+       },
+       "gewinn_cent": 0,
+       "ausgeschlossene": [
+        {
+         "beleg_id": "S2100",
+         "status": "unbekannt",
+         "grund": "satz_fehlt"
+        }
+       ]
+      },
+      "warnungen": [
+       "W_BELEGE_AUSGESCHLOSSEN"
+      ],
+      "nicht_beruecksichtigt_anzahl": 1,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 0,
+       "vorsteuer_gezahlt": 0,
+       "ust_zahllast_summe_ustva": 0,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 0,
+       "einnahmen_gesamt": 0,
+       "ausgaben_gesamt": 0,
+       "nicht_beruecksichtigte_belege": 1
+      },
+      "dashboard_status": {
+       "ust_zahllast": "zwischenwert",
+       "gewinn": "zwischenwert"
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "F1-satz-500",
+   "bericht": "07 F1",
+   "beschreibung": "Ausgangsposition 100,00 EUR netto mit Satz 5 %: verschwindet nicht still, Kz 83 wird Zwischenwert, Beleg steht in ausgeschlossene[]",
+   "art": "auswertung",
+   "eingabe": {
+    "profil": {
+     "status_verlauf": [
+      {
+       "gueltig_ab": "2025-01-01",
+       "status": "regel",
+       "grund": "beginn"
+      }
+     ],
+     "voranmeldung_verlauf": [
+      {
+       "gueltig_ab": "2025-01-01",
+       "zeitraum": "quartal",
+       "quelle": "elster_bestaetigt"
+      }
+     ]
+    },
+    "jahre": [
+     2026
+    ],
+    "belege_eingaben": [
+     {
+      "weg": "vektor",
+      "id": "S500",
+      "richtung": "ausgang",
+      "steuerwahl": "inland_19",
+      "rechnungsdatum": "2026-02-10",
+      "leistungsdatum": "2026-02-10",
+      "zahlungen": [],
+      "positionen": [
+       {
+        "bez": "x",
+        "netto_cent": 10000,
+        "satz_bp": 500
+       }
+      ]
+     }
+    ]
+   },
+   "zahlen": [
+    {
+     "jahr": 2026,
+     "periode": "2026-Q1",
+     "feld": "kz83.status",
+     "wert": "zwischenwert"
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q1",
+     "feld": "unvollstaendig",
+     "wert": true
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q1",
+     "feld": "kennzahlen.81",
+     "wert": 0
+    },
+    {
+     "jahr": 2026,
+     "bereich": "warnungen",
+     "feld": "0",
+     "wert": "W_BELEGE_AUSGESCHLOSSEN"
+    }
+   ],
+   "ausgabe": {
+    "belege": [
+     {
+      "id": "S500",
+      "ist_beleg": true,
+      "steuerfall": "UNBEKANNT",
+      "summe": {
+       "netto_cent": 10000,
+       "ust_cent": 0,
+       "brutto_cent": 10000
+      },
+      "codes": [
+       "SATZ_NICHT_ZULAESSIG"
+      ]
+     }
+    ],
+    "jahre": {
+     "2026": {
+      "ustva": [
+       {
+        "periode": "2026-Q1",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 0,
+         "69": 0,
+         "81": 0,
+         "83": 0,
+         "86": 0,
+         "87": 0,
+         "81_steuer": 0,
+         "86_steuer": 0,
+         "Z37": 0,
+         "Z45": 0,
+         "Z48": 0
+        },
+        "kz83": {
+         "betrag_cent": 0,
+         "status": "zwischenwert"
+        },
+        "unvollstaendig": true,
+        "warnungen": [],
+        "hinweise": [],
+        "ausgeschlossene": [
+         {
+          "beleg_id": "S500",
+          "status": "unbekannt",
+          "grund": "satz_fehlt"
+         }
+        ]
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "gewinn": 0
+       },
+       "gewinn_cent": 0,
+       "ausgeschlossene": [
+        {
+         "beleg_id": "S500",
+         "status": "unbekannt",
+         "grund": "satz_fehlt"
+        }
+       ]
+      },
+      "warnungen": [
+       "W_BELEGE_AUSGESCHLOSSEN"
+      ],
+      "nicht_beruecksichtigt_anzahl": 1,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 0,
+       "vorsteuer_gezahlt": 0,
+       "ust_zahllast_summe_ustva": 0,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 0,
+       "einnahmen_gesamt": 0,
+       "ausgaben_gesamt": 0,
+       "nicht_beruecksichtigte_belege": 1
+      },
+      "dashboard_status": {
+       "ust_zahllast": "zwischenwert",
+       "gewinn": "zwischenwert"
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "F2-anzahlung-schlussrechnung-ausgeschlossen",
+   "bericht": "07 F2",
+   "beschreibung": "beleg_art anzahlung (500,00 netto) und schlussrechnung (1.000,00 netto) werden ausgeschlossen, keine Doppelzählung",
+   "art": "auswertung",
+   "eingabe": {
+    "profil": {
+     "status_verlauf": [
+      {
+       "gueltig_ab": "2025-01-01",
+       "status": "regel",
+       "grund": "beginn"
+      }
+     ],
+     "voranmeldung_verlauf": [
+      {
+       "gueltig_ab": "2025-01-01",
+       "zeitraum": "quartal",
+       "quelle": "elster_bestaetigt"
+      }
+     ]
+    },
+    "jahre": [
+     2026,
+     2027
+    ],
+    "belege_eingaben": [
+     {
+      "weg": "vektor",
+      "id": "AZ",
+      "richtung": "ausgang",
+      "steuerwahl": "inland_19",
+      "betrag": {
+       "cent": 50000,
+       "art": "netto"
+      },
+      "rechnungsdatum": "2026-11-15",
+      "leistungsdatum": "2026-11-15",
+      "zahlungen": [
+       {
+        "datum": "2026-11-15",
+        "betrag_cent": 59500
+       }
+      ],
+      "beleg_art": "anzahlung"
+     },
+     {
+      "weg": "vektor",
+      "id": "SR",
+      "richtung": "ausgang",
+      "steuerwahl": "inland_19",
+      "betrag": {
+       "cent": 100000,
+       "art": "netto"
+      },
+      "rechnungsdatum": "2027-02-10",
+      "leistungsdatum": "2027-02-10",
+      "zahlungen": [],
+      "beleg_art": "schlussrechnung"
+     }
+    ]
+   },
+   "zahlen": [
+    {
+     "jahr": 2026,
+     "periode": "2026-Q4",
+     "feld": "kennzahlen.81",
+     "wert": 0
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q4",
+     "feld": "kz83.status",
+     "wert": "zwischenwert"
+    },
+    {
+     "jahr": 2027,
+     "periode": "2027-Q1",
+     "feld": "kz83.status",
+     "wert": "zwischenwert"
+    }
+   ],
+   "ausgabe": {
+    "belege": [
+     {
+      "id": "AZ",
+      "ist_beleg": true,
+      "steuerfall": "A_INLAND_19",
+      "summe": {
+       "netto_cent": 50000,
+       "ust_cent": 9500,
+       "brutto_cent": 59500
+      },
+      "codes": []
+     },
+     {
+      "id": "SR",
+      "ist_beleg": true,
+      "steuerfall": "A_INLAND_19",
+      "summe": {
+       "netto_cent": 100000,
+       "ust_cent": 19000,
+       "brutto_cent": 119000
+      },
+      "codes": []
+     }
+    ],
+    "jahre": {
+     "2026": {
+      "ustva": [
+       {
+        "periode": "2026-Q4",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 0,
+         "69": 0,
+         "81": 0,
+         "83": 0,
+         "86": 0,
+         "87": 0,
+         "81_steuer": 0,
+         "86_steuer": 0,
+         "Z37": 0,
+         "Z45": 0,
+         "Z48": 0
+        },
+        "kz83": {
+         "betrag_cent": 0,
+         "status": "zwischenwert"
+        },
+        "unvollstaendig": true,
+        "warnungen": [],
+        "hinweise": [
+         "HN_NOCH_NICHT_UNTERSTUETZT"
+        ],
+        "ausgeschlossene": [
+         {
+          "beleg_id": "AZ",
+          "status": "ausgeschlossen",
+          "grund": "beleg_art_anzahlung"
+         }
+        ]
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "gewinn": 0
+       },
+       "gewinn_cent": 0,
+       "ausgeschlossene": [
+        {
+         "beleg_id": "AZ",
+         "status": "ausgeschlossen",
+         "grund": "beleg_art_anzahlung"
+        }
+       ]
+      },
+      "warnungen": [
+       "W_BELEGE_AUSGESCHLOSSEN"
+      ],
+      "nicht_beruecksichtigt_anzahl": 1,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 0,
+       "vorsteuer_gezahlt": 0,
+       "ust_zahllast_summe_ustva": 0,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 0,
+       "einnahmen_gesamt": 0,
+       "ausgaben_gesamt": 0,
+       "nicht_beruecksichtigte_belege": 1
+      },
+      "dashboard_status": {
+       "ust_zahllast": "zwischenwert",
+       "gewinn": "zwischenwert"
+      }
+     },
+     "2027": {
+      "ustva": [
+       {
+        "periode": "2027-Q1",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 0,
+         "69": 0,
+         "81": 0,
+         "83": 0,
+         "86": 0,
+         "87": 0,
+         "81_steuer": 0,
+         "86_steuer": 0,
+         "Z37": 0,
+         "Z45": 0,
+         "Z48": 0
+        },
+        "kz83": {
+         "betrag_cent": 0,
+         "status": "zwischenwert"
+        },
+        "unvollstaendig": true,
+        "warnungen": [],
+        "hinweise": [
+         "HN_KZ_JAHR",
+         "HN_NOCH_NICHT_UNTERSTUETZT"
+        ],
+        "ausgeschlossene": [
+         {
+          "beleg_id": "SR",
+          "status": "ausgeschlossen",
+          "grund": "beleg_art_schlussrechnung"
+         }
+        ]
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "gewinn": 0
+       },
+       "gewinn_cent": 0,
+       "ausgeschlossene": [
+        {
+         "beleg_id": "SR",
+         "status": "ausgeschlossen",
+         "grund": "beleg_art_schlussrechnung"
+        }
+       ]
+      },
+      "warnungen": [
+       "W_BELEGE_AUSGESCHLOSSEN"
+      ],
+      "nicht_beruecksichtigt_anzahl": 1,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 0,
+       "vorsteuer_gezahlt": 0,
+       "ust_zahllast_summe_ustva": 0,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 0,
+       "einnahmen_gesamt": 0,
+       "ausgaben_gesamt": 0,
+       "nicht_beruecksichtigte_belege": 1
+      },
+      "dashboard_status": {
+       "ust_zahllast": "zwischenwert",
+       "gewinn": "zwischenwert"
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "F2-anzahlung-ueber-zahlungen",
+   "bericht": "07 F2 (T-S2-003)",
+   "beschreibung": "Gerechnet wird die Anzahlung über zahlungen[] am Hauptbeleg: 500,00 netto im Quartal der Anzahlung, 500,00 im Quartal der Restzahlung",
+   "art": "auswertung",
+   "eingabe": {
+    "profil": {
+     "status_verlauf": [
+      {
+       "gueltig_ab": "2025-01-01",
+       "status": "regel",
+       "grund": "beginn"
+      }
+     ],
+     "voranmeldung_verlauf": [
+      {
+       "gueltig_ab": "2025-01-01",
+       "zeitraum": "quartal",
+       "quelle": "elster_bestaetigt"
+      }
+     ]
+    },
+    "jahre": [
+     2026,
+     2027
+    ],
+    "belege_eingaben": [
+     {
+      "weg": "vektor",
+      "id": "H",
+      "richtung": "ausgang",
+      "steuerwahl": "inland_19",
+      "betrag": {
+       "cent": 100000,
+       "art": "netto"
+      },
+      "rechnungsdatum": "2027-02-10",
+      "leistungsdatum": "2027-02-10",
+      "zahlungen": [
+       {
+        "datum": "2026-11-15",
+        "betrag_cent": 59500
+       },
+       {
+        "datum": "2027-02-20",
+        "betrag_cent": 59500
+       }
+      ]
+     }
+    ]
+   },
+   "zahlen": [
+    {
+     "jahr": 2026,
+     "periode": "2026-Q4",
+     "feld": "kennzahlen.81",
+     "wert": 50000
+    },
+    {
+     "jahr": 2027,
+     "periode": "2027-Q1",
+     "feld": "kennzahlen.81",
+     "wert": 50000
+    }
+   ],
+   "ausgabe": {
+    "belege": [
+     {
+      "id": "H",
+      "ist_beleg": true,
+      "steuerfall": "A_INLAND_19",
+      "summe": {
+       "netto_cent": 100000,
+       "ust_cent": 19000,
+       "brutto_cent": 119000
+      },
+      "codes": []
+     }
+    ],
+    "jahre": {
+     "2026": {
+      "ustva": [
+       {
+        "periode": "2026-Q4",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 0,
+         "69": 0,
+         "81": 50000,
+         "83": 9500,
+         "86": 0,
+         "87": 0,
+         "81_steuer": 9500,
+         "86_steuer": 0,
+         "Z37": 9500,
+         "Z45": 9500,
+         "Z48": 9500
+        },
+        "kz83": {
+         "betrag_cent": 9500,
+         "status": "ergebnis"
+        },
+        "unvollstaendig": false,
+        "warnungen": [],
+        "hinweise": [],
+        "ausgeschlossene": []
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "112": 50000,
+        "140": 9500,
+        "gewinn": 59500
+       },
+       "gewinn_cent": 59500,
+       "ausgeschlossene": []
+      },
+      "warnungen": [],
+      "nicht_beruecksichtigt_anzahl": 0,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 50000,
+       "vorsteuer_gezahlt": 0,
+       "ust_zahllast_summe_ustva": 9500,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 59500,
+       "einnahmen_gesamt": 59500,
+       "ausgaben_gesamt": 0
+      },
+      "dashboard_status": {
+       "ust_zahllast": "ergebnis",
+       "gewinn": "ergebnis"
+      }
+     },
+     "2027": {
+      "ustva": [
+       {
+        "periode": "2027-Q1",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 0,
+         "69": 0,
+         "81": 50000,
+         "83": 9500,
+         "86": 0,
+         "87": 0,
+         "81_steuer": 9500,
+         "86_steuer": 0,
+         "Z37": 9500,
+         "Z45": 9500,
+         "Z48": 9500
+        },
+        "kz83": {
+         "betrag_cent": 9500,
+         "status": "ergebnis"
+        },
+        "unvollstaendig": false,
+        "warnungen": [],
+        "hinweise": [
+         "HN_KZ_JAHR"
+        ],
+        "ausgeschlossene": []
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "112": 50000,
+        "140": 9500,
+        "gewinn": 59500
+       },
+       "gewinn_cent": 59500,
+       "ausgeschlossene": []
+      },
+      "warnungen": [],
+      "nicht_beruecksichtigt_anzahl": 0,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 50000,
+       "vorsteuer_gezahlt": 0,
+       "ust_zahllast_summe_ustva": 9500,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 59500,
+       "einnahmen_gesamt": 59500,
+       "ausgaben_gesamt": 0
+      },
+      "dashboard_status": {
+       "ust_zahllast": "ergebnis",
+       "gewinn": "ergebnis"
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "Rundung-2-50-netto",
+   "bericht": "T-S1-005 (K4, RUNDUNG_BASIS)",
+   "beschreibung": "2,50 EUR netto zu 19 % und zu 7 %: Steuer aus der gerundeten Basis 0,38 + 0,14 = 0,52 EUR (Standard)",
+   "art": "auswertung",
+   "eingabe": {
+    "profil": {
+     "status_verlauf": [
+      {
+       "gueltig_ab": "2025-01-01",
+       "status": "regel",
+       "grund": "beginn"
+      }
+     ],
+     "voranmeldung_verlauf": [
+      {
+       "gueltig_ab": "2025-01-01",
+       "zeitraum": "quartal",
+       "quelle": "elster_bestaetigt"
+      }
+     ]
+    },
+    "jahre": [
+     2026
+    ],
+    "belege_eingaben": [
+     {
+      "weg": "vektor",
+      "id": "R19",
+      "richtung": "ausgang",
+      "steuerwahl": "inland_19",
+      "betrag": {
+       "cent": 250,
+       "art": "netto"
+      },
+      "rechnungsdatum": "2026-02-03",
+      "leistungsdatum": "2026-02-03",
+      "zahlungen": []
+     },
+     {
+      "weg": "vektor",
+      "id": "R7",
+      "richtung": "ausgang",
+      "steuerwahl": "inland_7",
+      "betrag": {
+       "cent": 250,
+       "art": "netto"
+      },
+      "rechnungsdatum": "2026-02-03",
+      "leistungsdatum": "2026-02-03",
+      "zahlungen": []
+     }
+    ]
+   },
+   "zahlen": [
+    {
+     "jahr": 2026,
+     "periode": "2026-Q1",
+     "feld": "kennzahlen.81_steuer",
+     "wert": 38
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q1",
+     "feld": "kennzahlen.86_steuer",
+     "wert": 14
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q1",
+     "feld": "kennzahlen.83",
+     "wert": 52
+    }
+   ],
+   "ausgabe": {
+    "belege": [
+     {
+      "id": "R19",
+      "ist_beleg": true,
+      "steuerfall": "A_INLAND_19",
+      "summe": {
+       "netto_cent": 250,
+       "ust_cent": 48,
+       "brutto_cent": 298
+      },
+      "codes": []
+     },
+     {
+      "id": "R7",
+      "ist_beleg": true,
+      "steuerfall": "A_INLAND_7",
+      "summe": {
+       "netto_cent": 250,
+       "ust_cent": 18,
+       "brutto_cent": 268
+      },
+      "codes": []
+     }
+    ],
+    "jahre": {
+     "2026": {
+      "ustva": [
+       {
+        "periode": "2026-Q1",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 0,
+         "69": 0,
+         "81": 250,
+         "83": 52,
+         "86": 250,
+         "87": 0,
+         "81_steuer": 38,
+         "86_steuer": 14,
+         "Z37": 52,
+         "Z45": 52,
+         "Z48": 52
+        },
+        "kz83": {
+         "betrag_cent": 52,
+         "status": "ergebnis"
+        },
+        "unvollstaendig": false,
+        "warnungen": [],
+        "hinweise": [
+         "HN_RD_ELSTER"
+        ],
+        "ausgeschlossene": []
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "gewinn": 0
+       },
+       "gewinn_cent": 0,
+       "ausgeschlossene": []
+      },
+      "warnungen": [],
+      "nicht_beruecksichtigt_anzahl": 0,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 0,
+       "vorsteuer_gezahlt": 0,
+       "ust_zahllast_summe_ustva": 52,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 0,
+       "einnahmen_gesamt": 0,
+       "ausgaben_gesamt": 0
+      },
+      "dashboard_status": {
+       "ust_zahllast": "ergebnis",
+       "gewinn": "ergebnis"
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "Rundung-2-50-netto-buchungssumme",
+   "bericht": "T-S1-005 (K4, Alternative)",
+   "beschreibung": "Wie oben mit optionen.rundung.steuer_quelle = buchungssumme: 0,48 + 0,18 = 0,66 EUR",
+   "art": "auswertung",
+   "eingabe": {
+    "profil": {
+     "status_verlauf": [
+      {
+       "gueltig_ab": "2025-01-01",
+       "status": "regel",
+       "grund": "beginn"
+      }
+     ],
+     "voranmeldung_verlauf": [
+      {
+       "gueltig_ab": "2025-01-01",
+       "zeitraum": "quartal",
+       "quelle": "elster_bestaetigt"
+      }
+     ]
+    },
+    "jahre": [
+     2026
+    ],
+    "optionen": {
+     "rundung": {
+      "steuer_quelle": "buchungssumme"
+     }
+    },
+    "belege_eingaben": [
+     {
+      "weg": "vektor",
+      "id": "R19",
+      "richtung": "ausgang",
+      "steuerwahl": "inland_19",
+      "betrag": {
+       "cent": 250,
+       "art": "netto"
+      },
+      "rechnungsdatum": "2026-02-03",
+      "leistungsdatum": "2026-02-03",
+      "zahlungen": []
+     },
+     {
+      "weg": "vektor",
+      "id": "R7",
+      "richtung": "ausgang",
+      "steuerwahl": "inland_7",
+      "betrag": {
+       "cent": 250,
+       "art": "netto"
+      },
+      "rechnungsdatum": "2026-02-03",
+      "leistungsdatum": "2026-02-03",
+      "zahlungen": []
+     }
+    ]
+   },
+   "zahlen": [
+    {
+     "jahr": 2026,
+     "periode": "2026-Q1",
+     "feld": "kennzahlen.81_steuer",
+     "wert": 48
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q1",
+     "feld": "kennzahlen.86_steuer",
+     "wert": 18
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q1",
+     "feld": "kennzahlen.83",
+     "wert": 66
+    }
+   ],
+   "ausgabe": {
+    "belege": [
+     {
+      "id": "R19",
+      "ist_beleg": true,
+      "steuerfall": "A_INLAND_19",
+      "summe": {
+       "netto_cent": 250,
+       "ust_cent": 48,
+       "brutto_cent": 298
+      },
+      "codes": []
+     },
+     {
+      "id": "R7",
+      "ist_beleg": true,
+      "steuerfall": "A_INLAND_7",
+      "summe": {
+       "netto_cent": 250,
+       "ust_cent": 18,
+       "brutto_cent": 268
+      },
+      "codes": []
+     }
+    ],
+    "jahre": {
+     "2026": {
+      "ustva": [
+       {
+        "periode": "2026-Q1",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 0,
+         "69": 0,
+         "81": 250,
+         "83": 66,
+         "86": 250,
+         "87": 0,
+         "81_steuer": 48,
+         "86_steuer": 18,
+         "Z37": 66,
+         "Z45": 66,
+         "Z48": 66
+        },
+        "kz83": {
+         "betrag_cent": 66,
+         "status": "ergebnis"
+        },
+        "unvollstaendig": false,
+        "warnungen": [],
+        "hinweise": [
+         "HN_RD_ELSTER"
+        ],
+        "ausgeschlossene": []
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "gewinn": 0
+       },
+       "gewinn_cent": 0,
+       "ausgeschlossene": []
+      },
+      "warnungen": [],
+      "nicht_beruecksichtigt_anzahl": 0,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 0,
+       "vorsteuer_gezahlt": 0,
+       "ust_zahllast_summe_ustva": 66,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 0,
+       "einnahmen_gesamt": 0,
+       "ausgaben_gesamt": 0
+      },
+      "dashboard_status": {
+       "ust_zahllast": "ergebnis",
+       "gewinn": "ergebnis"
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "Statuswechsel-100000-ueberschritten",
+   "bericht": "T-S1-029, T-S1-033 (R-PR-06)",
+   "beschreibung": "80.000 EUR am 10.03. plus 40.000 EUR am 15.07.: § 19-Grenze (100.000 EUR) wird mit dem Umsatz vom 15.07. überschritten, Regelbesteuerung ab 15.07.",
+   "art": "ku_ueberschreitung",
+   "eingabe": {
+    "zahlungen": [
+     {
+      "datum": "2026-03-10",
+      "netto_cent": 8000000
+     },
+     {
+      "datum": "2026-07-15",
+      "netto_cent": 4000000
+     }
+    ]
+   },
+   "zahlen_funktion": {
+    "ueberschritten": true,
+    "datum": "2026-07-15",
+    "summe_nach_cent": 12000000
+   },
+   "ausgabe": {
+    "ueberschritten": true,
+    "datum": "2026-07-15",
+    "summe_nach_cent": 12000000,
+    "vorschlag": {
+     "gueltig_ab": "2026-07-15",
+     "status": "regel",
+     "grund": "laufend_ueber_100k"
+    },
+    "hinweise": [
+     "W_KU_GRENZE_UEBERSCHRITTEN"
+    ]
+   }
+  },
+  {
+   "id": "Statuswechsel-100000-genau",
+   "bericht": "T-S1-033 (R-PR-06)",
+   "beschreibung": "Startsumme 95.000 EUR plus 5.000,00 EUR: genau 100.000,00 EUR, noch steuerfrei",
+   "art": "ku_ueberschreitung",
+   "eingabe": {
+    "startsumme_cent": 9500000,
+    "zahlungen": [
+     {
+      "datum": "2026-08-12",
+      "netto_cent": 500000
+     }
+    ]
+   },
+   "zahlen_funktion": {
+    "ueberschritten": false
+   },
+   "ausgabe": {
+    "ueberschritten": false,
+    "datum": null,
+    "summe_nach_cent": null,
+    "vorschlag": null,
+    "hinweise": []
+   }
+  },
+  {
+   "id": "Statuswechsel-100000-ein-cent-drueber",
+   "bericht": "T-S1-033 (R-PR-06)",
+   "beschreibung": "Startsumme 95.000 EUR plus 5.000,01 EUR: überschritten am 12.08., Vorschlag Regelbesteuerung ab 12.08.",
+   "art": "ku_ueberschreitung",
+   "eingabe": {
+    "startsumme_cent": 9500000,
+    "zahlungen": [
+     {
+      "datum": "2026-08-12",
+      "netto_cent": 500001
+     }
+    ]
+   },
+   "zahlen_funktion": {
+    "ueberschritten": true,
+    "datum": "2026-08-12",
+    "summe_nach_cent": 10000001
+   },
+   "ausgabe": {
+    "ueberschritten": true,
+    "datum": "2026-08-12",
+    "summe_nach_cent": 10000001,
+    "vorschlag": {
+     "gueltig_ab": "2026-08-12",
+     "status": "regel",
+     "grund": "laufend_ueber_100k"
+    },
+    "hinweise": [
+     "W_KU_GRENZE_UEBERSCHRITTEN"
+    ]
+   }
+  }
+ ]
+}

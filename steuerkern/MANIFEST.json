@@ -12,9 +12,12 @@
     "steuerprofil.js": "90058894d233aec4d683a333aa0fc6783871301c04d1bb83c5609b8c7dfe5372",
     "tabellen.js": "423ad945b0263e3488f0406eff8a0923e57cacaaf50b7f75fa6352c170afd64a",
     "ustva.js": "1c6d6c122e5328e52ab6c81f675cef63c931126e21dee805fedd4f277c847d51",
-    "wirkung.js": "f237960a4b3020cff406a7a59b1f3b9efc607ec40ec34ad51c17b7f7a18383a3"
+    "wirkung.js": "f237960a4b3020cff406a7a59b1f3b9efc607ec40ec34ad51c17b7f7a18383a3",
+    "golden/beleg-adapter.json": "1521aef1708cec102c2afb6b44e25e2cb8e6343f7b29089e7a92d88c9c974a46",
+    "golden/pruefberichte.json": "994ba290743b2dd6f32c270bdd194b41f041a5fb49896297f6edcf61b6404791",
+    "golden/referenzfaelle.json": "dccaeede7eb059f7f7494b9b403ebc83d177a79643dfb749ea47a8c6d7bd854b"
   },
-  "erzeugt": "2026-11-12T15:04:28.632Z",
+  "erzeugt": "2026-11-12T18:36:37.652Z",
   "nur_app": [
     "schatten.js"
   ]
