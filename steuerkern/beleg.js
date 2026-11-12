@@ -9,15 +9,18 @@
 // Gesamtbeleg-Form (Ausgabe): { schema_version: 2, id, ...Altfelder (legacyFelder), steuer: {...} }.
 
 import { istCent, ustAusNetto, ustAusBrutto, teile } from './geld.js';
-import { istDatum, monatsende, monatsanfang, datumAusTagen } from './daten.js';
+import { istDatum, monatsende, monatsanfang, datumAusTagen, tageSeitEpoche, formatDatum, tageImMonat, wochentagNr } from './daten.js';
 import { statusAm, statusFuerAusgangsumsatz, vorsteuerAbziehbar } from './steuerprofil.js';
 import {
-  STEUERFAELLE, SPERRGRUENDE, BELEG_ARTEN, KORREKTUR_GRUENDE, FA_ARTEN, KATEGORIEN,
+  STEUERFAELLE, SPERRGRUENDE, BELEG_ARTEN, KORREKTUR_GRUENDE, FA_ARTEN, KATEGORIEN, STEUERSAETZE,
 } from './tabellen.js';
 
 const istObjekt = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 const nichtLeer = (s) => typeof s === 'string' && s.trim().length > 0;
 const hin = (code, feld, grund) => ({ code, feld: feld || null, grund: grund || null });
+// Basispunkte: ganze Zahl 0 bis 10000 (N1: größere Werte würden in geld.js eine Ausnahme auslösen)
+const satzGueltig = (x) => Number.isSafeInteger(x) && x >= 0 && x <= 10000;
+const SAETZE_ZULAESSIG = Object.freeze(STEUERSAETZE.map((x) => x.bp)); // 1900, 700, 0 (tabellen.js)
 
 export const SATZ_ID = Object.freeze({ inland_19: 1900, inland_7: 700, inland_0_pv: 0 });
 export const KORREKTUR_ARTEN = Object.freeze(['korrektur', 'storno', 'gutschrift_erteilt', 'gutschrift_erhalten']);
@@ -46,16 +49,34 @@ export function centZuEuro(cent) {
   return cent / 100;
 }
 
-// Zeitangabe des Altbestands -> Kalendertag (UTC): ISO-String, Millisekunden, {seconds}/{_seconds}, Objekt mit toDate().
+// Zeitangabe des Altbestands -> Kalendertag in Deutschland (Prüfbefund N4: nicht UTC, sonst rutscht ein Beleg von 00:30 Uhr am 01.01.
+// auf den 31.12.): Mitteleuropäische Zeit (UTC+1), Sommerzeit (UTC+2) vom letzten Sonntag im März 01:00 UTC bis zum letzten Sonntag
+// im Oktober 01:00 UTC. Eingabe: ISO-String (mit Z: umgerechnet; ohne Z: Datumsteil wie geschrieben), Millisekunden, {seconds}/{_seconds},
+// Objekt mit toDate().
+function letzterSonntag(jahr, monat) {
+  const ende = formatDatum(jahr, monat, tageImMonat(jahr, monat));
+  return datumAusTagen(tageSeitEpoche(ende) - (wochentagNr(ende) % 7));
+}
+function berlinTag(sekunden) {
+  const utcTag = datumAusTagen(Math.floor(sekunden / 86400));
+  const jahr = Number(utcTag.slice(0, 4));
+  const beginn = tageSeitEpoche(letzterSonntag(jahr, 3)) * 86400 + 3600;
+  const ende = tageSeitEpoche(letzterSonntag(jahr, 10)) * 86400 + 3600;
+  const versatz = sekunden >= beginn && sekunden < ende ? 7200 : 3600;
+  return datumAusTagen(Math.floor((sekunden + versatz) / 86400));
+}
 export function tagVonZeit(x) {
   if (typeof x === 'string') {
     const t = x.slice(0, 10);
-    return istDatum(t) ? t : null;
+    if (!istDatum(t)) return null;
+    const m = /^\d{4}-\d{2}-\d{2}T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/.exec(x);
+    if (m) return berlinTag(tageSeitEpoche(t) * 86400 + Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]));
+    return t;
   }
-  if (typeof x === 'number' && Number.isFinite(x)) return datumAusTagen(Math.floor(x / 86400000));
+  if (typeof x === 'number' && Number.isFinite(x)) return berlinTag(Math.floor(x / 1000));
   if (istObjekt(x)) {
     const s = Number.isFinite(x.seconds) ? x.seconds : Number.isFinite(x._seconds) ? x._seconds : null;
-    if (s !== null) return datumAusTagen(Math.floor(s / 86400));
+    if (s !== null) return berlinTag(Math.floor(s));
     if (typeof x.toDate === 'function') {
       try { return tagVonZeit(x.toDate().toISOString()); } catch (e) { return null; }
     }
@@ -75,11 +96,22 @@ function leistungAus(e) {
 }
 
 // Steuer je Gruppe (R-RD-02): Summe der Netto je (steuerfall, satz) runden, auf die Positionen verteilen.
-function verteileUst(positionen, richtung) {
+function verteileUst(positionen, richtung, abweichung) {
   const gruppen = new Map();
   positionen.forEach((p, i) => {
     if (p.satz_bp === null || p.satz_bp === undefined) return;
-    if (istCent(p.ust_cent) && p.ust_ausgewiesen === true) return; // ausgewiesene Steuer gilt (R-RD-04)
+    if (istCent(p.ust_cent) && p.ust_ausgewiesen === true) {
+      // ausgewiesene Steuer gilt (R-RD-04). Prüfbefund M5: weicht sie um mehr als 1 Cent vom Satz ab, wird das gemeldet; bei Eingang
+      // zählt als Vorsteuer höchstens der gesetzlich geschuldete Betrag (§ 15 Abs. 1 S. 1 Nr. 1 UStG: "gesetzlich geschuldete Steuer")
+      if (p.brutto_basis !== true) {
+        const legal = ustAusNetto(p.netto_cent, p.satz_bp);
+        if ((p.ust_cent > legal ? p.ust_cent - legal : legal - p.ust_cent) > 1) {
+          if (Array.isArray(abweichung)) abweichung.push(i);
+          if (richtung === 'eingang' && (p.ust_cent < 0 ? 0 - p.ust_cent : p.ust_cent) > (legal < 0 ? 0 - legal : legal)) p.vorsteuer_abziehbar_cent = legal;
+        }
+      }
+      return;
+    }
     const k = `${p.steuerfall || ''}|${p.satz_bp}`;
     if (!gruppen.has(k)) gruppen.set(k, []);
     gruppen.get(k).push(i);
@@ -238,7 +270,7 @@ export function normalisiereEingabe(eingabe, kontext) {
     if (richtung === 'ausgang') {
       // vorläufiger Bruttobetrag, nur um zu erkennen, ob der Umsatz vor dem Wechsel schon voll bezahlt ist
       const bc = istObjekt(e.betrag) && istCent(e.betrag.cent) ? e.betrag.cent : null;
-      const satzV = Number.isSafeInteger(e.satz_bp) ? e.satz_bp : (typeof e.steuerwahl === 'string' && e.steuerwahl in SATZ_ID ? SATZ_ID[e.steuerwahl] : null);
+      const satzV = satzGueltig(e.satz_bp) ? e.satz_bp : (typeof e.steuerwahl === 'string' && e.steuerwahl in SATZ_ID ? SATZ_ID[e.steuerwahl] : null);
       const bruttoV = bc === null ? null : (e.betrag.art === 'netto' && satzV !== null ? bc + ustAusNetto(bc, satzV) : bc);
       const gezahltV = zahlungen0.filter((z) => istObjekt(z) && istCent(z.betrag_cent)).reduce((a, z) => a + z.betrag_cent, 0);
       const s = statusFuerAusgangsumsatz(profil, { leistungsdatum: leistung.bis, zahlungsdaten: zahlDaten, offen: bruttoV === null ? true : gezahltV < bruttoV });
@@ -254,7 +286,8 @@ export function normalisiereEingabe(eingabe, kontext) {
   let steuerfall = null;
   let herkunft = e.steuerfall_herkunft || (e.herkunft === 'ki' ? 'ki' : e.herkunft === 'plattform' ? 'plattform_setting' : e.herkunft === 'import' ? 'import' : 'nutzer');
   let sperrgrund = null;
-  let satzBp = Number.isSafeInteger(e.satz_bp) ? e.satz_bp : (wahl && wahl in SATZ_ID ? SATZ_ID[wahl] : null);
+  if (e.satz_bp !== undefined && e.satz_bp !== null && !satzGueltig(e.satz_bp)) fehler.push(hin('PF_SATZ', 'satz_bp', 'Basispunkte 0 bis 10000 (ganze Zahl)'));
+  let satzBp = satzGueltig(e.satz_bp) ? e.satz_bp : (wahl && wahl in SATZ_ID ? SATZ_ID[wahl] : null);
   let ausschluss = null;
   let dialog = null;
 
@@ -269,6 +302,12 @@ export function normalisiereEingabe(eingabe, kontext) {
     steuerfall = 'SPERRE_STUFE4';
     sperrgrund = SPERRGRUENDE.includes(g) ? g : null;
     if (!sperrgrund) { unsicherheiten.push(hin('SPERRGRUND_UNBEKANNT', 'sperrgrund', String(g))); }
+    herkunft = herkunft === 'nutzer' ? 'beleg' : herkunft;
+  } else if (e.waehrung !== undefined && e.waehrung !== null && e.waehrung !== '' && !(nichtLeer(e.waehrung) && e.waehrung.trim().toUpperCase() === 'EUR')) {
+    // Prüfbefund M7: Beträge in Fremdwährung nie als Euro rechnen. Firestore-Regeln erlauben nur waehrung 'EUR', darum Sperre statt Feld.
+    steuerfall = 'SPERRE_STUFE4';
+    sperrgrund = 'nicht_eur';
+    unsicherheiten.push(hin('WAEHRUNG_NICHT_EUR', 'waehrung', String(e.waehrung)));
     herkunft = herkunft === 'nutzer' ? 'beleg' : herkunft;
   } else if (unbekanntGrund) {
     steuerfall = 'UNBEKANNT';
@@ -363,6 +402,25 @@ export function normalisiereEingabe(eingabe, kontext) {
   }
   if (e.kein_vorsteuerabzug === true && !ausschluss) ausschluss = { vorsteuer: 'nein', grund: 'nutzer' };
 
+  // --- Steuersatz-Whitelist (Prüfbefund F1): nur 19 %, 7 % und 0 % (§ 12 Abs. 3, bestätigt) sind rechenbar ---
+  if (steuerfall === 'A_INLAND_19' || steuerfall === 'A_INLAND_7' || steuerfall === 'A_INLAND_0_PV' || steuerfall === 'E_INLAND_VORSTEUER') {
+    const saetze = Array.isArray(e.positionen) && e.positionen.length
+      ? e.positionen.filter(istObjekt).map((p) => (satzGueltig(p.satz_bp) ? p.satz_bp : satzBp))
+      : [satzBp];
+    const fremd = saetze.find((x) => x !== null && !SAETZE_ZULAESSIG.includes(x));
+    if (fremd !== undefined) {
+      steuerfall = 'UNBEKANNT';
+      unbekanntGrund = 'satz_fehlt';
+      unbekanntDetail = 'satz_nicht_zulaessig';
+      unsicherheiten.push(hin('SATZ_NICHT_ZULAESSIG', 'satz_bp', `${fremd} Basispunkte: erlaubt sind 1900, 700 und 0 (§ 12 UStG)`));
+    } else if ((steuerfall === 'A_INLAND_19' || steuerfall === 'A_INLAND_7') && saetze.includes(0)) {
+      steuerfall = 'UNBEKANNT';
+      unbekanntGrund = 'satz_fehlt';
+      unbekanntDetail = 'satz_0_in_steuerpflichtigem_beleg';
+      unsicherheiten.push(hin('SATZ_NICHT_ZULAESSIG', 'satz_bp', '0 % ist nur mit bestätigter Steuerbefreiung nach § 12 Abs. 3 UStG rechenbar'));
+    }
+  }
+
   // --- Beträge (Schritt 5) ---
   let positionen = [];
   const vorz = istKorrektur ? -1 : 1;
@@ -372,7 +430,8 @@ export function normalisiereEingabe(eingabe, kontext) {
   if (Array.isArray(e.positionen) && e.positionen.length) {
     e.positionen.forEach((p, i) => {
       if (!istObjekt(p)) return;
-      const satz = Number.isSafeInteger(p.satz_bp) ? p.satz_bp : satzBp;
+      if (p.satz_bp !== undefined && p.satz_bp !== null && !satzGueltig(p.satz_bp)) fehler.push(hin('PF_SATZ', `positionen[${i}].satz_bp`, 'Basispunkte 0 bis 10000 (ganze Zahl)'));
+      const satz = satzGueltig(p.satz_bp) ? p.satz_bp : satzBp;
       const o = { bez: nichtLeer(p.bez) ? p.bez : `Position ${i + 1}`, netto_cent: 0, satz_bp: keinSatz ? null : satz, ust_cent: 0 };
       if (nichtLeer(p.kategorie)) o.kategorie = p.kategorie;
       if (istCent(p.brutto_cent) && !istCent(p.netto_cent)) { o.brutto_cent = vorz * p.brutto_cent; o.brutto_basis = true; o.netto_cent = o.brutto_cent; }
@@ -409,8 +468,22 @@ export function normalisiereEingabe(eingabe, kontext) {
     steuerfall = 'UNBEKANNT';
     unbekanntGrund = 'satz_fehlt';
   }
-  positionen = verteileUst(positionen, richtung);
+  const ustAbweichung = [];
+  positionen = verteileUst(positionen, richtung, ustAbweichung);
+  if (ustAbweichung.length) {
+    unsicherheiten.push(hin('W_UST_ABWEICHUNG', 'positionen', 'ausgewiesene Steuer weicht vom Steuersatz ab'));
+    hinweise.push('W_UST_ABWEICHUNG');
+  }
   let summe = summiere(positionen);
+  // Prüfbefund M1: Kleinbetragsrechnung über 250 EUR (§ 33 UStDV) auch bei Netto-Eingabe und bei Positionen: kein Vorsteuerabzug
+  if (kleinbetrag && summe.brutto_cent > KLEINBETRAG_GRENZE_CENT) {
+    for (const p of positionen) { p.netto_cent += p.ust_cent; p.ust_cent = 0; p.satz_bp = null; delete p.vorsteuer_abziehbar_cent; }
+    steuerfall = 'E_INLAND_OHNE_VORSTEUER';
+    ausschluss = { vorsteuer: 'nein', grund: 'kleinbetrag_ueber_250' };
+    unsicherheiten.push(hin('W_KLEINBETRAG_UEBER_250', 'betrag', 'Gesamtbetrag über 250 EUR'));
+    kleinbetrag = false;
+    summe = summiere(positionen);
+  }
   if (istFa) {
     const zbetrag = zahlungen0.filter((z) => istObjekt(z) && istCent(z.betrag_cent)).reduce((a, z) => a + z.betrag_cent, 0);
     summe = { netto_cent: zbetrag, ust_cent: 0, brutto_cent: zbetrag };
@@ -455,6 +528,18 @@ export function normalisiereEingabe(eingabe, kontext) {
   if (nichtLeer(e.kategorie)) steuer.kategorie = e.kategorie;
   if (nichtLeer(e.rechnungsnr)) steuer.rechnungsnr = e.rechnungsnr;
   for (const h of statusHinweise) if (!hinweise.includes(h)) hinweise.push(h);
+  // Prüfbefund N5: Leistungsdatum aus dem Rechnungsdatum angenommen und ein Statuswechsel liegt in den 92 Tagen davor: der Status am
+  // wahren Leistungstag kann ein anderer sein (Vorsteuerabzug hängt am Status am Leistungstag, UStAE 15.1 Abs. 5)
+  if (leistungFlags.includes('angenommen_gleich_rechnungsdatum') && rechnungsdatum && istObjekt(profil) && Array.isArray(profil.status_verlauf)) {
+    const t = tageSeitEpoche(rechnungsdatum);
+    if (profil.status_verlauf.some((x) => istObjekt(x) && istDatum(x.gueltig_ab) && tageSeitEpoche(x.gueltig_ab) <= t && t - tageSeitEpoche(x.gueltig_ab) <= 92 && x.grund !== 'beginn') && !hinweise.includes('W_LEISTUNGSDATUM_ANGENOMMEN')) hinweise.push('W_LEISTUNGSDATUM_ANGENOMMEN');
+  }
+  // Prüfbefund N6: Leistungszeitraum über einen Statuswechsel: Beurteilung am Leistungsende, keine Aufteilung in Teilleistungen
+  if (leistung && leistung.von !== leistung.bis && istObjekt(profil)) {
+    const sv = statusAm(profil, leistung.von).status;
+    const sb = statusAm(profil, leistung.bis).status;
+    if (sv !== 'unbekannt' && sb !== 'unbekannt' && sv !== sb && !hinweise.includes('W_LEISTUNGSZEITRAUM_STATUSWECHSEL')) hinweise.push('W_LEISTUNGSZEITRAUM_STATUSWECHSEL');
+  }
   if (hinweise.length) steuer.status_hinweise = hinweise;
 
   const entwurf = { schema_version: 2, id, steuer };

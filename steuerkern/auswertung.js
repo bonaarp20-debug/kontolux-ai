@@ -13,7 +13,7 @@ function eindeutig(liste) { return [...new Set(liste)].sort(); }
 
 export function auswertungFuerJahr(belege, profil, jahr, optionen) {
   const wirkungen = Array.isArray(optionen && optionen.wirkungen) ? optionen.wirkungen : alleWirkungen(belege, profil, optionen);
-  const perioden = ustvaPerioden(wirkungen).filter((p) => Number(p.slice(0, 4)) === jahr);
+  const perioden = ustvaPerioden(wirkungen, profil, jahr, optionen).filter((p) => Number(p.slice(0, 4)) === jahr);
   const ustva = perioden.map((p) => ustvaFuer(wirkungen, profil, p, optionen));
   const euer = euerFuer(wirkungen, profil, jahr, optionen);
   let zahllast = 0;

@@ -1,18 +1,18 @@
 {
-  "kern_version": "2026.11.12-7",
+  "kern_version": "2026.11.12-8",
   "dateien": {
-    "VERSION.js": "9d984c10a4392d1dab3ea2308aa95d497b1b9ba0493aa6fb7a76aa6c30a5daf2",
-    "auswertung.js": "c5357f354c0ef3ce26e451fd3cb5498e2f46734ab2d9dd218e02ec71dfe4e9aa",
-    "beleg.js": "96400240b30ac2054c132cda72d33eea6b034842e789a4844ea0cf2e08d12985",
+    "VERSION.js": "37956bad0348ea47175d07e86efc886bc98d9b7ebabe87849c20e66fe4a8d222",
+    "auswertung.js": "a62ddc3ad2ae5b47d7c54ff3efbf53cee24d91f54cc045a7acddaca61bf6cc4a",
+    "beleg.js": "d8bb03fa76b7b4eaf25e72d601aaaa9421bb55996f6a2aada3231154b4cce424",
     "daten.js": "d14896618c91f5007e42cb7face2cd08e89025798a264e7328343e050fc74661",
-    "euer.js": "e5a8d66e0c09c55c6207a4cce7b14200c7bbaf94802cac19dfe8006cc100f254",
+    "euer.js": "98720b4bc4034edf406a558259b393c0724ab99acc323f3734480a002e1ca0ee",
     "geld.js": "5088847eac9557f12b327656bf7625c450027045fd057eb9f00f5f95c9970f8c",
     "index.js": "1b71dc408fcc8b65f19c256dca4b6fd13a42d606a06489585846c031f45e6b61",
     "regeln-basis.js": "7d00a83387e05624861ec60c6f042fed429156c417bc9784f39dd9eb68f6b832",
     "steuerprofil.js": "90058894d233aec4d683a333aa0fc6783871301c04d1bb83c5609b8c7dfe5372",
     "tabellen.js": "423ad945b0263e3488f0406eff8a0923e57cacaaf50b7f75fa6352c170afd64a",
-    "ustva.js": "af97e470b4d3bb065dabaabb43298c55157c6b7a9e72b1c3425d289468cc7e77",
-    "wirkung.js": "b55adaeea959ea27cbfd60d267207840b0574b4c1af959144d344e146348b7a8"
+    "ustva.js": "17ca3806950ad869ac4bf57511e024c162a0012ffda618c979a3cab0c4d76bee",
+    "wirkung.js": "da1ce6d47c27ad5c66287599fe4d4582445e63fcd566daa3804d666e7edcd28e"
   },
-  "erzeugt": "2026-11-12T13:48:32.812Z"
+  "erzeugt": "2026-11-12T14:20:22.469Z"
 }

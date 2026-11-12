@@ -9,7 +9,7 @@
 
 import { ustAusBrutto } from './geld.js';
 import { EUER_ZEILEN } from './tabellen.js';
-import { profilHinweise } from './wirkung.js';
+import { profilHinweise, pruefeWirkungen } from './wirkung.js';
 
 // Kennzahlen der Einnahmen (R-EUER-31): Kz 111 gilt für Kleinunternehmer (brutto), Kz 119 ist ein Davon-Vermerk.
 export const EINNAHMEN_KZ = Object.freeze([111, 112, 103, 140, 141, 102, 106, 108]);
@@ -20,7 +20,8 @@ const NUR_VERMERK_KZ = Object.freeze([119, 159, 199]);
 function eindeutig(liste) { return [...new Set(liste)].sort(); }
 
 export function euerFuer(wirkungen, profil, jahr, optionen) {
-  const ws = Array.isArray(wirkungen) ? wirkungen : [];
+  const netz = pruefeWirkungen(wirkungen);
+  const ws = netz.ok;
   const J = String(jahr);
   const tabelle = EUER_ZEILEN[J] || null;
   const hinweise = [];
@@ -31,8 +32,11 @@ export function euerFuer(wirkungen, profil, jahr, optionen) {
   // Summen je Kennzahl (Cent). Kleinbetragsrechnungen: Vorsteuer je Satz aus der Summe der Bruttobeträge (UStAE 15.4)
   const summe = new Map();
   const belege = new Map();
+  let ueberlauf = false;
   const add = (kz, betrag, id) => {
-    summe.set(kz, (summe.get(kz) || 0) + betrag);
+    const neu = (summe.get(kz) || 0) + betrag;
+    if (!Number.isSafeInteger(neu)) { ueberlauf = true; return; } // N3
+    summe.set(kz, neu);
     if (!belege.has(kz)) belege.set(kz, new Set());
     if (typeof id === 'string') belege.get(kz).add(id);
   };
@@ -62,6 +66,7 @@ export function euerFuer(wirkungen, profil, jahr, optionen) {
     }
   }
 
+  if (ueberlauf) hinweise.push('HN_SUMME_UEBERLAUF');
   const zeilen = [];
   let einnahmen = 0;
   let ausgaben = 0;
@@ -104,6 +109,22 @@ export function euerFuer(wirkungen, profil, jahr, optionen) {
     ausg.push({ beleg_id: w.beleg_id, status: w.status, grund: w.hinweis_detail || null });
   }
 
+  // EÜR-Wirkungen, die der Kern ausdrücklich nicht rechnet (zum Beispiel Rückzahlung des Lieferanten), und kaputte Wirkungen
+  for (const w of ws) {
+    if (w.welt !== 'euer' || w.status !== 'ausgeschlossen' || w.periode !== J || gesehen.has(w.beleg_id)) continue;
+    gesehen.add(w.beleg_id);
+    ausg.push({ beleg_id: w.beleg_id, status: w.status, grund: w.hinweis_detail || null });
+  }
+  for (const v of netz.verworfen) {
+    const j = v.periode === null ? null : Number(String(v.periode).slice(0, 4));
+    if (j !== null && j !== jahr) continue;
+    const k = `${v.beleg_id}|v|${v.grund}`;
+    if (gesehen.has(k)) continue;
+    gesehen.add(k);
+    ausg.push({ beleg_id: v.beleg_id, status: 'ausgeschlossen', grund: v.grund });
+  }
+
+  if (ueberlauf) ausg.push({ beleg_id: null, status: 'unbekannt', grund: 'summe_ueberlauf' });
   for (const w of imJahr) for (const h of w.hinweise) hinweise.push(h);
   for (const h of profilHinweise(profil, jahr)) hinweise.push(h);
   const alle = eindeutig(hinweise);
@@ -118,6 +139,8 @@ export function euerFuer(wirkungen, profil, jahr, optionen) {
     ausgaben_cent: ausgaben,
     gewinn_cent: einnahmen - ausgaben,
     regel_id: 'R-EUER-31',
+    // Zwischenwert, solange Belege nicht berücksichtigt sind (Prüfbefund N10)
+    status: ausg.length > 0 ? 'zwischenwert' : 'ergebnis',
     unsicher: { einnahmen_cent: uEin, ausgaben_cent: uAus, belege: uBelege.size, gewinn_inkl_unsicher_cent: einnahmen - ausgaben + uEin - uAus },
     ausgeschlossene: ausg.sort((a, b) => (String(a.beleg_id) < String(b.beleg_id) ? -1 : 1)),
     hinweise: alle,
@@ -127,7 +150,9 @@ export function euerFuer(wirkungen, profil, jahr, optionen) {
 
 export function euerJahre(wirkungen) {
   const j = new Set();
-  for (const w of Array.isArray(wirkungen) ? wirkungen : []) if (w.welt === 'euer' && w.status === 'berechnet' && w.kz !== null && w.periode) j.add(Number(w.periode));
+  const { ok, verworfen } = pruefeWirkungen(wirkungen);
+  for (const w of ok) if (w.welt === 'euer' && w.periode && ((w.status === 'berechnet' && w.kz !== null) || w.status === 'ausgeschlossen')) j.add(Number(w.periode));
+  for (const v of verworfen) if (v.welt === 'euer' && v.periode) j.add(Number(v.periode));
   return [...j].sort((a, b) => a - b);
 }
 

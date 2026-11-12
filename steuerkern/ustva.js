@@ -12,17 +12,32 @@ import { ustAusNetto, ustAusBrutto, basisInEuro } from './geld.js';
 import { istDatum, periodenArt, periodenEnde, periodenStart } from './daten.js';
 import { voranmeldungAm, kz70Datum, fristFuerPeriode } from './steuerprofil.js';
 import { RUNDUNG_BASIS, USTVA_ZEILEN } from './tabellen.js';
-import { profilHinweise } from './wirkung.js';
+import { profilHinweise, pruefeWirkungen } from './wirkung.js';
 
 const istObjekt = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 const UMSATZ_ROLLEN = Object.freeze(['umsatz', 'anzahlung', 'minderung']);
 
 function eindeutig(liste) { return [...new Set(liste)].sort(); }
 
-export function ustvaPerioden(wirkungen) {
+
+// Zeiträume mit Umsatzsteuer-Wirkungen: berechnete und kaputte Wirkungen (Prüfbefund F1: eine kaputte Wirkung macht ihren Zeitraum
+// sichtbar). Zeiträume, in denen nur ausgeschlossene oder unbekannte Belege liegen, werden nur mit optionen.mitAusgeschlossenen
+// gelistet (Fixtures T-S1-020, T-S4-010, T-S4-015 erwarten dort keine Voranmeldung; der Hinweis steht in ausgeschlossene[] der
+// EÜR und im Dashboard). Mit profil und jahr (optional): Monatszahler
+// mit Dauerfrist und Sondervorauszahlung bekommen den Dezember immer, weil dort Kz 39 abgezogen wird (Prüfbefund M8).
+export function ustvaPerioden(wirkungen, profil, jahr, optionen) {
+  const mitAusg = istObjekt(optionen) && optionen.mitAusgeschlossenen === true;
   const p = new Set();
-  for (const w of Array.isArray(wirkungen) ? wirkungen : []) {
-    if (w.welt === 'ust' && w.status === 'berechnet' && w.kz !== null && w.periode) p.add(w.periode);
+  const { ok, verworfen } = pruefeWirkungen(wirkungen);
+  for (const w of ok) {
+    if (w.welt !== 'ust' || !w.periode) continue;
+    if (w.status === 'berechnet' ? w.kz !== null : (mitAusg && (w.status === 'ausgeschlossen' || w.status === 'unbekannt'))) p.add(w.periode);
+  }
+  for (const v of verworfen) if (v.welt === 'ust' && v.periode) p.add(v.periode);
+  if (Number.isSafeInteger(jahr) && istObjekt(profil)) {
+    const dez = `${String(jahr).padStart(4, '0')}-12`;
+    const va = voranmeldungAm(profil, periodenEnde(dez));
+    if (va.dauerfrist === true && va.zeitraum === 'monat' && Number.isSafeInteger(va.sondervorauszahlung_cent)) p.add(dez);
   }
   return [...p].sort();
 }
@@ -63,7 +78,12 @@ function summen(z13, z14, z15, z38, z41, z44, z46, z47, z49) {
 export function ustvaFuer(wirkungen, profil, periode, optionen) {
   const opt = istObjekt(optionen) ? optionen : {};
   const ein = istObjekt(opt.eingaben) ? opt.eingaben : {};
-  const ws = Array.isArray(wirkungen) ? wirkungen : [];
+  const netz = pruefeWirkungen(wirkungen);
+  const ws = netz.ok;
+  // N3: Summen nie über die sichere Ganzzahlgrenze hinaus (sonst stiller Genauigkeitsverlust oder Ausnahme in geld.js). Bei Überlauf
+  // bleibt die Summe 0 und der Zeitraum wird als unvollständig gekennzeichnet.
+  const ueberlauf = { an: false };
+  const addSicher = (a, b) => { const c = a + b; if (Number.isSafeInteger(c)) return c; ueberlauf.an = true; return 0; };
   const art = periodenArt(periode);
   const hinweise = [];
   if (art !== 'monat' && art !== 'quartal') {
@@ -88,7 +108,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
     const l = berechnet.filter((w) => UMSATZ_ROLLEN.includes(w.rolle) && w.kz === kz);
     let basis = 0;
     let steuerWirkungen = 0;
-    for (const w of l) { basis += w.netto_cent; steuerWirkungen += w.ust_cent; }
+    for (const w of l) { basis = addSicher(basis, w.netto_cent); steuerWirkungen = addSicher(steuerWirkungen, w.ust_cent); }
     const steuerExakt = ustAusNetto(basis, satz);
     const basisEuro = basisInEuro(basis, mod);
     const steuerElster = ustAusNetto(basisEuro * 100, satz);
@@ -111,7 +131,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
   const zeile14 = umsatzZeile(14, 86, 700);
   const l87 = berechnet.filter((w) => UMSATZ_ROLLEN.includes(w.rolle) && w.kz === 87);
   let b87 = 0;
-  for (const w of l87) b87 += w.netto_cent;
+  for (const w of l87) b87 = addSicher(b87, w.netto_cent);
   const zeile15 = zeile(tabelle, 15, { kz_basis: 87, basis_cent: b87, basis_euro: basisInEuro(b87, mod), steuer_cent: 0, steuer_elster_cent: 0, belege: belege(l87) });
 
   // --- Vorsteuer Z.38 (Kz 66): Einzelbelege plus Kleinbetragsrechnungen je Satz zusammengefasst (UStAE 15.4) ---
@@ -123,7 +143,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
     if (w.kleinbetrag === true && Number.isSafeInteger(w.satz_bp)) {
       kbBrutto.set(w.satz_bp, (kbBrutto.get(w.satz_bp) || 0) + w.brutto_cent);
       kbBeleg.set(w.satz_bp, (kbBeleg.get(w.satz_bp) || 0) + w.ust_cent);
-    } else z38 += w.ust_cent;
+    } else z38 = addSicher(z38, w.ust_cent);
   }
   let kbDiff = 0;
   for (const [satz, br] of kbBrutto) {
@@ -165,7 +185,15 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
     gesehen.add(k);
     ausg.push({ beleg_id: w.beleg_id, status: w.status, beleg_status: w.beleg_status, grund: w.hinweis_detail || null, zugeordnet: w.periode !== null });
   }
+  for (const v of netz.verworfen) {
+    if ((v.welt !== 'ust' && v.welt !== null) || (v.periode !== periode && v.periode !== null)) continue;
+    const k = `${v.beleg_id}|verworfen|${v.grund}`;
+    if (gesehen.has(k)) continue;
+    gesehen.add(k);
+    ausg.push({ beleg_id: v.beleg_id, status: 'ausgeschlossen', beleg_status: 'ausgeschlossen', grund: v.grund, zugeordnet: v.periode !== null });
+  }
   ausg.sort((a, b) => (a.beleg_id === b.beleg_id ? (a.status < b.status ? -1 : 1) : String(a.beleg_id) < String(b.beleg_id) ? -1 : 1));
+  if (ueberlauf.an) ausg.push({ beleg_id: null, status: 'unbekannt', beleg_status: 'unbekannt', grund: 'summe_ueberlauf', zugeordnet: true });
   const unvollstaendig = ausg.length > 0;
 
   // --- Z.12 (Kz 70): Datum des Wechsels in dem Zeitraum, in den es fällt ---
@@ -176,6 +204,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
   for (const w of imZeitraum.concat(ws.filter((x) => x.welt === 'ust' && x.periode === null))) for (const h of w.hinweise) hinweise.push(h);
   for (const h of profilHinweise(profil, jahr)) hinweise.push(h);
   const alle = eindeutig(hinweise);
+  const angenommen = alle.includes('W_VORANMELDUNG_ANGENOMMEN');
 
   let frist = null;
   try { const f = fristFuerPeriode(profil, periode); frist = { gesetzlich: f.gesetzlich, faellig: f.faellig, wochentag: f.wochentag, verschoben: f.verschoben, dauerfrist: f.dauerfrist, hinweise: f.hinweise }; } catch (e) { frist = null; }
@@ -207,9 +236,9 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
     summen_alternativ: alternativ,
     kz83: {
       betrag_cent: primaer.z50_cent,
-      status: unvollstaendig ? 'zwischenwert' : 'ergebnis',
+      status: unvollstaendig || angenommen ? 'zwischenwert' : 'ergebnis',
       regel_id: 'R-KZ-50',
-      text: unvollstaendig ? `Zwischenwert (unvollständig): ${ausg.length} Beleg(e) nicht berücksichtigt` : null,
+      text: unvollstaendig ? `Zwischenwert (unvollständig): ${ausg.length} Beleg(e) nicht berücksichtigt` : (angenommen ? 'Zwischenwert: Voranmeldungszeitraum im Profil nicht bestätigt (Quartal angenommen)' : null),
     },
     unvollstaendig,
     ausgeschlossene: ausg,
