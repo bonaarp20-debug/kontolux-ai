@@ -3095,9 +3095,54 @@ function storageUrlGehoertDemNutzer(storageUrl, uid) {
   return STORAGE_BUCKETS.some(b => storageUrl.startsWith(`https://firebasestorage.googleapis.com/v0/b/${b}/o/users%2F${uid}%2F`));
 }
 
+// ── Eingabeprüfung der Beleg-Schreibwege (TR-integration-003/-004/-005/-006) ─────────────────────────
+// Der Worker schreibt mit dem Dienstkonto, die Firestore-Regeln gelten dort nicht. Diese Prüfung ersetzt sie.
+const BELEG_TYPEN_ERLAUBT = ['rechnung_eingehend', 'rechnung_ausgehend', 'mahnung_ausgehend'];
+const BELEG_MAX_BETRAG = 10000000;
+
+// Echtes Kalenderdatum YYYY-MM-DD (kein 2026-02-30, kein 2026-13-45), Jahr 2000 bis 2100.
+export function istKalenderDatum(s) {
+  if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [j, m, t] = s.split('-').map(Number);
+  if (j < 2000 || j > 2100) return false;
+  const d = new Date(Date.UTC(j, m - 1, t));
+  return d.getUTCFullYear() === j && d.getUTCMonth() === m - 1 && d.getUTCDate() === t;
+}
+
+// Gibt den kanonischen Satz ('19', '7', '0', 'keine', 'reverse_charge'), '' (nicht angegeben) oder null (ungültig) zurück.
+function normalisiereMwstSatz(v) {
+  if (v === undefined || v === null || v === '') return '';
+  const t = String(v).trim().toLowerCase();
+  const m = t.match(/^(19|7|0)(?:[.,]0+)?\s*%?$/);
+  if (m) return m[1];
+  if (t === 'keine' || t === 'reverse_charge') return t;
+  return null;
+}
+
+// Prüft die gemeinsamen Felder von BELEG_MANUELL und BELEG_SPEICHERN; gibt eine Fehlermeldung oder null zurück.
+function belegEingabeFehler({ typ, mwst_satz, datum, bezahlt, bezahlt_am, betrag, betrag_netto }) {
+  if (typ !== undefined && typ !== null && typ !== '' && !BELEG_TYPEN_ERLAUBT.includes(typ)) return 'Ungültiger Belegtyp';
+  if (normalisiereMwstSatz(mwst_satz) === null) return 'Ungültiger Steuersatz';
+  if (datum !== undefined && datum !== null && datum !== '' && !istKalenderDatum(datum)) return 'Ungültiges Belegdatum';
+  if (bezahlt && bezahlt_am !== undefined && bezahlt_am !== null && bezahlt_am !== '' && !istKalenderDatum(bezahlt_am)) return 'Ungültiges Zahlungsdatum';
+  if (betrag_netto !== undefined && betrag_netto !== null && betrag_netto !== '') {
+    const n = parseFloat(betrag_netto);
+    if (!Number.isFinite(n) || n < 0 || n > BELEG_MAX_BETRAG) return 'Ungültiger Nettobetrag';
+    const b = parseFloat(betrag);
+    if (betrag !== undefined && betrag !== null && betrag !== '' && Number.isFinite(b) && n > b + 0.005) return 'Nettobetrag darf nicht größer als der Bruttobetrag sein';
+  }
+  return null;
+}
+
+// Fehlerklasse (z. B. INVALID_ARGUMENT) aus einer Firestore-Fehlerantwort, ohne Pfade und Feldinhalte.
+function firestoreFehlerKlasse(errText) {
+  try { const st = JSON.parse(errText)?.error?.status; if (typeof st === 'string' && /^[A-Z_]{3,40}$/.test(st)) return st; } catch { /* kein JSON */ }
+  return 'FEHLER';
+}
+
 async function handleDocument(body, env, cors = {}, ctx) {
   if (textEingabenUngueltig(body)) return ungueltigeEingabeAntwort(cors);
-  const { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz, datum, content, sellerNameHint, e_rechnung_format, duplikatBestaetigt, kategorie, sachkonto, buchungstext, betrag_netto, bezahlt_am: bezahlt_am_client } = body;
+  let { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz, datum, content, sellerNameHint, e_rechnung_format, duplikatBestaetigt, kategorie, sachkonto, buchungstext, betrag_netto, bezahlt_am: bezahlt_am_client } = body;
   // Grenzen gegen überlange Eingaben und unrealistische Beträge (Security-Audit 2026-10-16).
   const MAX_BETRAG = 10000000;
   if (betrag !== undefined && betrag !== null && betrag !== '' && Math.abs(parseFloat(betrag)) > MAX_BETRAG) {
@@ -3105,6 +3150,12 @@ async function handleDocument(body, env, cors = {}, ctx) {
   }
   if (String(name ?? '').length > 200 || String(absender ?? '').length > 200) {
     return new Response(JSON.stringify({ error: 'Name oder Absender sind zu lang (max. 200 Zeichen)' }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+  }
+
+  if (Nachricht === 'BELEG_MANUELL' || Nachricht === 'BELEG_SPEICHERN') {
+    const eingabeFehler = belegEingabeFehler({ typ, mwst_satz, datum, bezahlt, bezahlt_am: bezahlt_am_client, betrag, betrag_netto });
+    if (eingabeFehler) return new Response(JSON.stringify({ error: eingabeFehler }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+    mwst_satz = normalisiereMwstSatz(mwst_satz) || mwst_satz;
   }
 
   // ── E-RECHNUNG PARSEN (Vorschau vor dem Speichern, kein Firestore-Write) ────
@@ -3220,7 +3271,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
 
       if (!firestoreRes.ok) {
         const errText = await firestoreRes.text();
-        console.error('Firestore Error:', firestoreRes.status, errText);
+        // Nur Statuscode und Fehlerklasse loggen: der Fehlertext enthält Dokumentpfad (UID) und Feldinhalte (TR-integration-007)
+        console.error('Firestore Error:', firestoreRes.status, firestoreFehlerKlasse(errText));
         return new Response(JSON.stringify({ error: 'Speichern fehlgeschlagen' }), {
           status: 500,
           headers: { ...cors, 'Content-Type': 'application/json' }
@@ -3390,7 +3442,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
 
       if (!firestoreRes.ok) {
         const errText = await firestoreRes.text();
-        console.error('Firestore Error:', firestoreRes.status, errText);
+        console.error('Firestore Error:', firestoreRes.status, firestoreFehlerKlasse(errText));
         return new Response(JSON.stringify({
           error: `Firestore Error ${firestoreRes.status}`
         }), {
@@ -6177,6 +6229,10 @@ function nettoAusBrutto(brutto, mwst_satz) {
 }
 
 export async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
+  // Ersatz für die Regel 'Betrag >= 0 und begrenzt' (TR-integration-006): kein Beleg mit 0, negativem, nicht endlichem oder über 10 Mio EUR liegendem Betrag.
+  const bBetrag = belegData.betrag;
+  if (typeof bBetrag !== 'number' || !Number.isFinite(bBetrag) || bBetrag <= 0 || bBetrag > BELEG_MAX_BETRAG) throw new Error('writeBelegAsAdmin: Betrag ungültig, Beleg nicht geschrieben');
+  if (belegData.betrag_netto != null && (typeof belegData.betrag_netto !== 'number' || !Number.isFinite(belegData.betrag_netto) || belegData.betrag_netto < 0 || belegData.betrag_netto > bBetrag + 0.005)) throw new Error('writeBelegAsAdmin: Nettobetrag ungültig, Beleg nicht geschrieben');
   // Zufallssuffix: der SumUp-Abruf schreibt mehrere Belege direkt hintereinander — reine
   // Date.now()-IDs könnten in derselben Millisekunde kollidieren und sich überschreiben.
   // Mit dedupKey (Ereignis-ID der Plattform) ist die Beleg-ID aus dem Schlüssel abgeleitet und das Anlegen
@@ -6218,7 +6274,7 @@ export async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
   }
   if (!firestoreRes.ok) {
     const errText = await firestoreRes.text();
-    throw new Error(`writeBelegAsAdmin: Firestore-Write fehlgeschlagen (${firestoreRes.status}): ${errText.slice(0, 200)}`);
+    throw new Error(`writeBelegAsAdmin: Firestore-Write fehlgeschlagen (${firestoreRes.status} ${firestoreFehlerKlasse(errText)})`);
   }
   // Steuerkern-Warnmodus (AP1.8): deckt alle Plattform-Webhooks und den SumUp-Abruf ab; nur zählen/loggen
   steuerkernWarnung(env, belegData.quelle || 'webhook', { ...belegData, herkunft: 'plattform' });
