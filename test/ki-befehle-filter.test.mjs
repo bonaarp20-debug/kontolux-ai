@@ -19,7 +19,12 @@ test('AUSGABE_UPDATE und MAHNUNG_ERSTELLEN: Obergrenze 10 Mio', () => {
 });
 test('PROFIL_UPDATE: Schutzschlüssel und ungültige Werte werden entfernt, harmlose bleiben', () => {
   assert.equal(f('PROFIL_UPDATE:fixkosten=3000,kleinunternehmer=Ja,versteuerungsart=Ist'), 'PROFIL_UPDATE:fixkosten=3000');
-  assert.equal(f('PROFIL_UPDATE:steuerruecklage_prozent=250,gewerbesteuer_hebesatz=400'), 'PROFIL_UPDATE:gewerbesteuer_hebesatz=400');
+  assert.equal(f('PROFIL_UPDATE:steuerruecklage_prozent=250,fixkosten=10'), 'PROFIL_UPDATE:fixkosten=10');
+  assert.equal(f('PROFIL_UPDATE:steuerruecklage_prozent=61'), 'PROFIL_UPDATE:keine', 'Rücklage über 60 wie im Client abgelehnt');
+  assert.equal(f('PROFIL_UPDATE:steuerruecklage_prozent=60'), 'PROFIL_UPDATE:steuerruecklage_prozent=60');
+  assert.equal(f('PROFIL_UPDATE:steuerruecklage_prozent=25,5'), 'PROFIL_UPDATE:steuerruecklage_prozent=25');
+  // Zuruf APP 13.11.: im Chat nicht mehr schreibbar (Client sperrt ebenfalls)
+  assert.equal(f('PROFIL_UPDATE:kirchensteuer=9,gewerbesteuer_hebesatz=400,vorjahressteuer_est=5000,vorjahressteuer_gst=100,erstes_jahr=true'), 'PROFIL_UPDATE:keine');
   assert.equal(f('PROFIL_UPDATE:beruf=Banker,vorjahressteuer_est=99999999999'), 'PROFIL_UPDATE:keine');
   assert.equal(f('PROFIL_UPDATE:beruf=Freiberufler,erstes_jahr=true,iban=DE00'), 'PROFIL_UPDATE:beruf=Freiberufler');
   assert.equal(f('PROFIL_UPDATE:keine'), 'PROFIL_UPDATE:keine');

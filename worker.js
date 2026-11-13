@@ -773,15 +773,12 @@ const KI_DOKUMENT_TYPEN = ['rechnung_eingehend', 'rechnung_ausgehend'];
 function kiWert(rest, schluessel) { const m = rest.match(new RegExp('(?:^|,)\\s*' + schluessel + '=([^,]*)', 'i')); return m ? m[1].trim() : null; }
 function kiBetragOk(v) { const n = parseFloat(String(v).replace(',', '.')); return Number.isFinite(n) && n > 0 && n <= BELEG_MAX_BETRAG; }
 
-// PROFIL_UPDATE: nur harmlose Gedächtnis-Felder. Steuerwirksame Schlüssel nur mit gültigem Wertebereich, Schutzschlüssel nie.
-const KI_PROFIL_GESPERRT = /^(kleinunternehmer|versteuerungsart|erstes_jahr|steuernummer|ust_?id.*|iban.*|bank.*|absender_name|firmenname|eigene_adresse|telefon|rechnungs_email|datev_.*|steuerprofil.*|status.*|is_?admin.*|abo.*|plan.*)$/i;
+// PROFIL_UPDATE: nur harmlose Gedächtnis-Felder. Steuerwirksam über den Chat nur beruf und steuerruecklage_prozent (0..60, wie im Client, Zuruf APP 13.11.);
+// kirchensteuer, gewerbesteuer_hebesatz, vorjahressteuer_* und erstes_jahr sind gesperrt (Schutzschlüssel nie).
+const KI_PROFIL_GESPERRT = /^(kleinunternehmer|versteuerungsart|erstes_jahr|kirchensteuer|gewerbesteuer_hebesatz|vorjahressteuer_.*|steuernummer|ust_?id.*|iban.*|bank.*|absender_name|firmenname|eigene_adresse|telefon|rechnungs_email|datev_.*|steuerprofil.*|status.*|is_?admin.*|abo.*|plan.*)$/i;
 const KI_PROFIL_PRUEFER = {
-  steuerruecklage_prozent: (v) => /^\d{1,3}([.,]\d+)?$/.test(v) && parseFloat(v.replace(',', '.')) <= 100,
-  gewerbesteuer_hebesatz: (v) => /^\d{1,4}([.,]\d+)?$/.test(v) && parseFloat(v.replace(',', '.')) <= 1000,
-  vorjahressteuer_est: (v) => /^\d{1,8}([.,]\d+)?$/.test(v) && parseFloat(v.replace(',', '.')) <= BELEG_MAX_BETRAG,
-  vorjahressteuer_gst: (v) => /^\d{1,8}([.,]\d+)?$/.test(v) && parseFloat(v.replace(',', '.')) <= BELEG_MAX_BETRAG,
+  steuerruecklage_prozent: (v) => /^\d{1,2}([.,]\d+)?$/.test(v) && parseFloat(v.replace(',', '.')) <= 60,
   beruf: (v) => ['Freiberufler', 'Gewerbetreibender'].includes(v),
-  kirchensteuer: (v) => /^(nein|keine|0|8|9|8 ?%|9 ?%)$/i.test(v),
   standard_stundensatz: (v) => /^\d{1,5}([.,]\d+)?$/.test(v) && parseFloat(v.replace(',', '.')) <= 10000
 };
 function bereinigeProfilUpdate(rest) {
@@ -4777,6 +4774,7 @@ async function handleDatevExport(body, env, cors = {}) {
     let ohneSatzAusgelassen = 0;
     let ohneSatzMarkiert = 0;
     let kontoGewechselt = 0;
+    let automatikOhneSteuer = 0;
 
     for (const doc of dokDocs) {
       const fields = doc.fields || {};
@@ -4887,6 +4885,14 @@ async function handleDatevExport(body, env, cors = {}) {
         const tausch = DATEV_AUTOMATIK_SATZ_TAUSCH[skr === 'SKR04' ? 'SKR04' : 'SKR03'][String(gegenkonto)];
         if (tausch && tausch.satz !== mwstSatz) { gegenkonto = tausch.partner; kontoGewechselt++; }
       }
+      // Rest von TR-euer-007: Beleg ohne Umsatzsteuer (Satz keine/0 oder Reverse Charge) auf einem Automatikkonto. DATEV würde dort 19 bzw. 7 %
+      // rechnen. Einnahmen wechseln auf das Erlöskonto ohne USt bzw. das § 13b-Erlöskonto (beide im Kontenrahmen geprüft, siehe DATEV_ERLOESKONTEN);
+      // für Ausgaben liegt kein geprüftes Gegenkonto vor, sie bleiben stehen und tragen die Textmarke [Konto/Steuersatz prüfen] samt Warnung.
+      if (!importKontoGilt && !kleinunternehmer && (mwstSatz === 'keine' || mwstSatz === '0' || mwstSatz === 'reverse_charge')
+          && DATEV_AUTOMATIKKONTEN_EXPORT[skr === 'SKR04' ? 'SKR04' : 'SKR03'].has(String(gegenkonto))) {
+        if (istEinnahme) { gegenkonto = erloeskontoExport(mwstSatz, false, skr === 'SKR04' ? 'SKR04' : 'SKR03'); kontoGewechselt++; }
+        else { automatikOhneSteuer++; satzHinweis += ' [Konto/Steuersatz prüfen]'; }
+      }
       const ohneSchluessel = alleErloeskonten.has(String(gegenkonto)) && (!istEinnahme || kleinunternehmer);
       const bu = satzFehlt ? '' : buSchluesselExport(ohneSchluessel ? 'keine' : mwstSatz, kleinunternehmer, istEinnahme, gegenkonto, skr);
       const freitext = firestoreValue(fields.buchungstext) || '';
@@ -4947,6 +4953,9 @@ async function handleDatevExport(body, env, cors = {}) {
     }
     if (kontoGewechselt > 0) {
       datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${kontoGewechselt} Beleg(e): Das Konto der Kategorie passte nicht zum Steuersatz des Belegs (Automatikkonto) und wurde auf das Konto mit passendem Satz gesetzt.`;
+    }
+    if (automatikOhneSteuer > 0) {
+      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${automatikOhneSteuer} Ausgabe(n) ohne Umsatzsteuer stehen auf einem Automatikkonto (DATEV rechnet dort 19 bzw. 7 % Vorsteuer, Buchungstext mit [Konto/Steuersatz prüfen]). Bitte beim Berater auf ein Konto ohne Vorsteuer umbuchen.`;
     }
     if (plattformOhneNr > 0) {
       datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${plattformOhneNr} Plattform-Beleg(e) ohne Rechnungsnummer: Belegfeld 1 enthält dort das Belegdatum.`;
