@@ -42,6 +42,12 @@ import crypto from 'node:crypto';
 
 const [, , webhookUrlArg, signingSecretArg] = process.argv;
 
+// Live-Test: braucht eine echte Webhook-URL aus der App (und ein Secret) und sendet an den laufenden Worker.
+// Ohne Argumente (z. B. im Sammellauf offline) wird er mit klarer Meldung ÜBERSPRUNGEN (Exit 0), nicht als Fehler gewertet.
+if (!process.argv[2] && !process.env.KONTOLUX_LIVE_TEST) {
+  console.log('ÜBERSPRUNGEN: Live-Test gegen den laufenden Worker, braucht Webhook-URL und Signing-Secret als Argument.');
+  process.exit(0);
+}
 if (!webhookUrlArg || !signingSecretArg) {
   console.error(`
 Fehlende Argumente.

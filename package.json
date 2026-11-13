@@ -7,7 +7,7 @@
     "predeploy": "npm run deploy:check",
     "deploy:check": "node scripts/deploy-check.mjs",
     "dev": "wrangler dev",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs && node scripts/test-skripte.mjs"
   },
   "dependencies": {
     "fast-xml-parser": "^5.11.0",

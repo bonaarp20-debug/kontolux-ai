@@ -56,8 +56,13 @@ const pruefe = (name, bedingung, info = '') => { console.log(`${bedingung ? '✓
 const sortiert = (o) => Object.fromEntries(Object.keys(o).sort().map(k => [k, o[k]]));
 pruefe('SACHKONTO_MAPPING in Worker und App identisch (Konten und EÜR-Zeilen)', JSON.stringify(sortiert(worker)) === JSON.stringify(sortiert(app)),
   Object.keys({ ...worker, ...app }).filter(k => JSON.stringify(worker[k]) !== JSON.stringify(app[k])).map(k => `${k}: worker ${JSON.stringify(worker[k])} ≠ app ${JSON.stringify(app[k])}`).join(' | '));
-pruefe('Alle Mapping-Kategorien sind gegen DATEV 2026 geprüft', JSON.stringify(Object.keys(app).sort()) === JSON.stringify(Object.keys(DATEV_2026).sort()),
-  `ungeprüft: ${Object.keys(app).filter(k => !DATEV_2026[k]).join(', ')}`);
+// Die Kategorien der Steuerkonten und der AfA werden unten gegen die DATEV-Kontenrahmen-PDFs geprüft (SKR03_PDF/SKR04_PDF),
+// die übrigen gegen DATEV_2026; geprüft heißt: in einer der Tabellen enthalten.
+// 'Umsatzsteuer-Erstattung' nutzt dieselben Konten wie 'Gezahlte Umsatzsteuer' (1780/3820, siehe SKR03_PDF/SKR04_PDF).
+const KATEGORIEN_ANDERS_GEPRUEFT = ['Abschreibung (AfA)', 'Vereinnahmte Umsatzsteuer', 'Vorsteuer', 'Gezahlte Umsatzsteuer', 'Umsatzsteuer-Erstattung'];
+pruefe('Alle Mapping-Kategorien sind gegen DATEV 2026 geprüft', Object.keys(app).every(k => DATEV_2026[k] || KATEGORIEN_ANDERS_GEPRUEFT.includes(k)),
+  `ungeprüft: ${Object.keys(app).filter(k => !DATEV_2026[k] && !KATEGORIEN_ANDERS_GEPRUEFT.includes(k)).join(', ')}`);
+pruefe('Jede Kategorie aus DATEV_2026 steht im Mapping', Object.keys(DATEV_2026).every(k => app[k]), `fehlt: ${Object.keys(DATEV_2026).filter(k => !app[k]).join(', ')}`);
 for (const [kat, [k03, k04]] of Object.entries(DATEV_2026)) {
   pruefe(`${kat}: SKR03 ${k03[0]} (${k03[1]})`, app[kat]?.SKR03 === k03[0], `Mapping hat ${app[kat]?.SKR03}`);
   pruefe(`${kat}: SKR04 ${k04[0]} (${k04[1]})`, app[kat]?.SKR04 === k04[0], `Mapping hat ${app[kat]?.SKR04}`);
