@@ -186,7 +186,8 @@ test('writeBelegAsAdmin (Webhooks/SumUp): Warnmodus ändert weder Rückgabe noch
   const aus = await adminLauf('aus', { ...beleg });
   const warn = await adminLauf('warnung', { ...beleg });
   assert.deepEqual(warn.ergebnis, aus.ergebnis);
-  assert.deepEqual(warn.aufrufe, aus.aufrufe);
+  assert.deepEqual(warn.aufrufe.filter((x) => !/steuerprofil\/aktuell/.test(x.url)), aus.aufrufe);
+  assert.equal(warn.aufrufe.length - aus.aufrufe.length, 1, 'genau ein Lesezugriff auf das Steuerprofil (AP1.8b)');
   const kern = warn.zeilen.filter(z => z.startsWith('steuerkern_'));
   assert.equal(kern.length, 1);
   assert.match(kern[0], /"weg":"stripe_webhook"/);

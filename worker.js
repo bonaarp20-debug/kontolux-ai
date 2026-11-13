@@ -3282,7 +3282,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
       // Erst jetzt zählen — Beleg ist tatsächlich gespeichert
       await incrementUploadLimit(userId, env);
       // Steuerkern-Warnmodus (AP1.8): nur zählen/loggen, ändert nichts (fail-open, bei 'aus' ohne Kernaufruf)
-      steuerkernWarnung(env, 'beleg_manuell', { typ, betrag, mwst_satz, datum, bezahlt, bezahlt_am: bezahlt_am_client });
+      steuerkernWarnung(env, 'beleg_manuell', { typ, betrag, mwst_satz, datum, bezahlt, bezahlt_am: bezahlt_am_client }, await steuerkernProfilLaden(env, userId, token));
 
       // Als bereits bezahlt markiert → direkt als Tageseinnahme/-ausgabe verbuchen, damit der
       // Betrag ohne Umweg über den Chat im Monatsabschluss auftaucht. Mahnungen sind rein
@@ -3454,7 +3454,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
       // Erst jetzt zählen — Beleg ist tatsächlich gespeichert
       await incrementUploadLimit(userId, env);
       // Steuerkern-Warnmodus (AP1.8): nur zählen/loggen, ändert nichts (fail-open, bei 'aus' ohne Kernaufruf)
-      steuerkernWarnung(env, 'beleg_speichern', { typ, betrag, mwst_satz, datum, bezahlt, bezahlt_am: bezahlt_am_client });
+      steuerkernWarnung(env, 'beleg_speichern', { typ, betrag, mwst_satz, datum, bezahlt, bezahlt_am: bezahlt_am_client }, await steuerkernProfilLaden(env, userId, token));
 
       // Als bereits bezahlt markiert UND mit Betrag hochgeladen → direkt als Tageseinnahme/
       // -ausgabe verbuchen, damit der Betrag ohne Umweg über den Chat im Monatsabschluss auftaucht.
@@ -6195,6 +6195,8 @@ function generateWebhookSecret() {
 //   'warnung': normalisiereEingabe + validiereBeleg (modus 'warn') laufen NACH dem erfolgreichen Schreiben und werden
 //              nur gezählt und geloggt. Das Ergebnis ändert nie das gespeicherte Dokument, die Antwort, den Statuscode
 //              oder irgendeine Ablehnung. Der Aufruf ist synchron, wirft nie und liest/schreibt nichts nach außen.
+//   AP1.8b: Im Modus 'warnung'/'an' liest der Worker das Steuerprofil (users/{uid}/steuerprofil/aktuell, nur lesen, höchstens EIN zusätzlicher
+//              Lesezugriff je Schreibweg, fail-open: Fehler oder fehlendes Dokument ergeben profil null) und übergibt es dem Kern.
 //   'an':      derzeit wie 'warnung' (Erzwingung folgt in einem späteren Arbeitspaket, hier bewusst nicht aktiv).
 // Geloggt werden nur Weg (feste Kennung), Kern-Version und Codes (z. B. PF_LEISTUNG): keine Beträge, Namen, IDs, Texte.
 export function steuerkernModus(env) {
@@ -6227,16 +6229,37 @@ export function steuerkernEingabeAusBeleg(weg, b, stichtag) {
   return eingabe;
 }
 
-export function steuerkernWarnung(env, weg, belegRoh) {
+// Liest das Steuerprofil für den Warnmodus (AP1.8b, Fund M7). Bei 'aus' kein Zugriff. Wirft nie; null bei jedem Problem (fail-open).
+export async function steuerkernProfilLaden(env, userId, token) {
+  try {
+    if (steuerkernModus(env) === 'aus' || !userId || !token) return null;
+    const doc = await firestoreGetDoc(`users/${encodeURIComponent(userId)}/steuerprofil/aktuell`, token);
+    const p = doc && doc.fields ? firestoreFieldsToObject(doc.fields) : null;
+    return p && typeof p === 'object' && Array.isArray(p.status_verlauf) ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+// optionen.stichtag (YYYY-MM-DD) macht Läufe deterministisch (Tests); sonst heutiges Datum in Berlin.
+export function steuerkernWarnung(env, weg, belegRoh, profil = null, optionen = {}) {
   let wegKennung = 'unbekannt';
   try {
     const modus = steuerkernModus(env);
     if (modus === 'aus') return null;
     wegKennung = String(weg || 'unbekannt').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 40) || 'unbekannt';
-    const stichtag = berlinDatumAlsString();
-    const r = Steuerkern.normalisiereEingabe(steuerkernEingabeAusBeleg(wegKennung, belegRoh, stichtag), { profil: null, stichtag });
+    const stichtag = /^\d{4}-\d{2}-\d{2}$/.test(String(optionen?.stichtag ?? '')) ? optionen.stichtag : berlinDatumAlsString();
+    const eingabe = steuerkernEingabeAusBeleg(wegKennung, belegRoh, stichtag);
+    const r = Steuerkern.normalisiereEingabe(eingabe, { profil: profil && typeof profil === 'object' ? profil : null, stichtag });
+    // Gegenproben (M7): Kern-Brutto gleich Betrag des Belegs, Kern-Satz gleich mwst_satz; fehlen im Normalfall
+    const gegenproben = [];
+    const kb = r.beleg && r.beleg.steuer && r.beleg.steuer.summe ? r.beleg.steuer.summe.brutto_cent : null;
+    if (kb !== null && eingabe.betrag && eingabe.betrag.cent !== null && kb !== eingabe.betrag.cent) gegenproben.push('WK_BRUTTO_ABWEICHUNG');
+    const satzAlt = String(belegRoh?.mwst_satz ?? '');
+    if (r.beleg && (satzAlt === '19' || satzAlt === '7') && String(r.beleg.mwst_satz ?? '') !== satzAlt) gegenproben.push('WK_SATZ_ABWEICHUNG');
     const v = Steuerkern.validiereBeleg(r.beleg || r.entwurf, { modus: 'warn', stichtag });
     const codes = [...new Set([
+      ...gegenproben,
       ...(r.unsicherheiten || []).map((x) => x && x.code),
       ...(r.pflichtfeld_fehler || []).map((x) => x && x.code),
       ...(v.codes || [])
@@ -6330,7 +6353,7 @@ export async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
     throw new Error(`writeBelegAsAdmin: Firestore-Write fehlgeschlagen (${firestoreRes.status} ${firestoreFehlerKlasse(errText)})`);
   }
   // Steuerkern-Warnmodus (AP1.8): deckt alle Plattform-Webhooks und den SumUp-Abruf ab; nur zählen/loggen
-  steuerkernWarnung(env, belegData.quelle || 'webhook', { ...belegData, herkunft: 'plattform' });
+  steuerkernWarnung(env, belegData.quelle || 'webhook', { ...belegData, herkunft: 'plattform' }, await steuerkernProfilLaden(env, userId, adminToken));
 
   // Nur bei bezahlten Belegen — und in einem eigenen try/catch, damit ein Fehler hier NICHT
   // den bereits erfolgreich gespeicherten Beleg rückwirkend als Fehler meldet. Exakt dasselbe

@@ -70,7 +70,7 @@ test("Alle Schreibwege: Modus 'aus', 'warnung' und 'an' liefern Antwort, Status 
       assert.equal(r.status, aus.status, `Status ${name}, Fall ${i}: ${JSON.stringify(body)}`);
       assert.equal(r.text, aus.text, `Antwort ${name}, Fall ${i}`);
       assert.deepEqual(r.schreib, aus.schreib, `Schreibaufrufe ${name}, Fall ${i}`);
-      assert.equal(r.unterabfragen, aus.unterabfragen, `Unterabfragen ${name}, Fall ${i}`);
+      assert.ok(r.unterabfragen - aus.unterabfragen >= 0 && r.unterabfragen - aus.unterabfragen <= 1, `Unterabfragen ${name}, Fall ${i}: höchstens ein Profil-Lesezugriff zusätzlich (AP1.8b)`);
     }
   }
 });
@@ -99,7 +99,7 @@ test('Unterabfragen und Rechenzeit je Request (Cloudflare Free-Plan: 50 Unterabf
     const aus = await lauf('aus', body);
     const warn = await lauf('warnung', body);
     assert.ok(aus.unterabfragen < MAX_UNTERABFRAGEN / 2, `${name}: ${aus.unterabfragen} Unterabfragen (aus)`);
-    assert.equal(warn.unterabfragen, aus.unterabfragen, `${name}: der Kern darf keine Unterabfrage auslösen`);
+    assert.ok(warn.unterabfragen - aus.unterabfragen <= 1, `${name}: höchstens ein Profil-Lesezugriff (AP1.8b)`);
   }
   // reine Kernzeit je Aufruf (synchron, im Request-Pfad): deutlich unter 10 ms CPU des Free-Plans
   const env = { STEUERKERN_MODUS: 'warnung' };
@@ -127,8 +127,10 @@ test('Webhook-Schreibweg writeBelegAsAdmin: aus, warnung, an schreiben dasselbe 
         ergebnisse.push({ aufrufe, zeilen });
       } finally { globalThis.fetch = basis; }
     }
-    assert.deepEqual(ergebnisse[1].aufrufe, ergebnisse[0].aufrufe, `${quelle}: warnung`);
-    assert.deepEqual(ergebnisse[2].aufrufe, ergebnisse[0].aufrufe, `${quelle}: an`);
+    const ohneProfil = (a) => a.filter((x) => !/\/steuerprofil\/aktuell$/.test(x.url));
+    assert.deepEqual(ohneProfil(ergebnisse[1].aufrufe), ergebnisse[0].aufrufe, `${quelle}: warnung`);
+    assert.deepEqual(ohneProfil(ergebnisse[2].aufrufe), ergebnisse[0].aufrufe, `${quelle}: an`);
+    assert.ok(ergebnisse[1].aufrufe.length - ergebnisse[0].aufrufe.length <= 1, `${quelle}: höchstens ein Profil-Lesezugriff`);
     assert.ok(ergebnisse[0].aufrufe.length <= 6, `${quelle}: ${ergebnisse[0].aufrufe.length} Unterabfragen je Beleg`);
     assert.equal(ergebnisse[0].zeilen.filter((z) => z.startsWith('steuerkern_')).length, 0);
     assert.equal(ergebnisse[1].zeilen.filter((z) => z.startsWith('steuerkern_warnung ')).length, 1);
