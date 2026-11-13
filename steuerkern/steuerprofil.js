@@ -189,10 +189,14 @@ export function voranmeldungAm(profil, datum) {
   if (!ZEITRAUM_WERTE.includes(e.zeitraum)) return { ...basis, gueltig_ab: e.gueltig_ab, hinweise: ['VORANMELDUNG_ZEITRAUM_UNGUELTIG'] };
   const h = [];
   if (e.quelle !== 'elster_bestaetigt') h.push('VORANMELDUNG_NICHT_AUS_ELSTER_BESTAETIGT');
+  // TR-ustva-001 (§ 47 Abs. 1 S. 2 UStDV: ein Elftel der Summe, nie negativ; profilPruefen und pruefeWechsel lehnen negative Werte ab): auch die
+  // Auswertung übernimmt nur Beträge >= 0, sonst gilt keine Sondervorauszahlung (Hinweis SONDERVORAUSZAHLUNG_UNGUELTIG)
+  const svOk = istCent(e.sondervorauszahlung_cent) && e.sondervorauszahlung_cent >= 0;
+  if (e.sondervorauszahlung_cent !== undefined && e.sondervorauszahlung_cent !== null && !svOk) h.push('SONDERVORAUSZAHLUNG_UNGUELTIG');
   return {
     zeitraum: e.zeitraum,
     dauerfrist: e.dauerfrist === true,
-    sondervorauszahlung_cent: istCent(e.sondervorauszahlung_cent) ? e.sondervorauszahlung_cent : null,
+    sondervorauszahlung_cent: svOk ? e.sondervorauszahlung_cent : null,
     gueltig_ab: e.gueltig_ab,
     quelle: e.quelle || null,
     hinweise: h,
@@ -574,6 +578,10 @@ export function pruefeWechsel(profil, bereich, eintrag, optionen) {
       else if (!(eintrag.zeitraum === 'monat' && eintrag.dauerfrist === true)) f.push(fehler('SONDERVORAUSZAHLUNG_OHNE_DAUERFRIST_MONAT', 'Eine Sondervorauszahlung gibt es nur bei monatlicher Abgabe mit Dauerfristverlängerung.'));
     }
     if (eintrag.quelle !== 'elster_bestaetigt') w.push('VORANMELDUNG_NICHT_AUS_ELSTER_BESTAETIGT');
+    // TR-ustva-002 (§ 18 Abs. 2 S. 1, 2, Abs. 2a S. 3 UStG): Der Zeitraum folgt der Steuer des Vorjahres, das Wahlrecht bindet für das Kalenderjahr. Ein
+    // Wechsel mitten im Jahr ist nur bei Aufnahme der Tätigkeit (Gründer) oder auf Anordnung des Finanzamts vorgesehen: Warnung, kein Fehler.
+    const gruenderBeginn = istObjekt(p.gruendung) && p.gruendung.datum === eintrag.gueltig_ab;
+    if (verlauf.length > 0 && !ersterJanuar(eintrag.gueltig_ab) && !gruenderBeginn) w.push('W_VORANMELDUNG_UNTERJAEHRIG');
     const gh = gruenderHinweis(p, jahrVon(eintrag.gueltig_ab));
     if (gh.betroffen) w.push('W_GRUENDER_2027');
   }

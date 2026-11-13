@@ -1,7 +1,7 @@
 {
  "format": 1,
  "art": "pruefberichte",
- "kern_version": "2026.11.13-4",
+ "kern_version": "2026.11.13-5",
  "quelle": "docs/regelbesteuerung/07-*.md und 08-gegenpruefung-phase1.md: Schlüsselzahlen von Hand, Rest Kern-Ausgabe",
  "vektoren": [
   {
@@ -477,7 +477,11 @@
       "bezug": {
        "storniert_beleg_id": "O"
       },
-      "korrektur_grund": "rueckabwicklung"
+      "korrektur_grund": "rueckabwicklung",
+      "rueckzahlung": {
+       "datum": "2026-08-10",
+       "betrag_cent": 119000
+      }
      },
      {
       "weg": "vektor",
@@ -493,7 +497,11 @@
       "bezug": {
        "storniert_beleg_id": "O"
       },
-      "korrektur_grund": "rueckabwicklung"
+      "korrektur_grund": "rueckabwicklung",
+      "rueckzahlung": {
+       "datum": "2026-08-11",
+       "betrag_cent": 119000
+      }
      }
     ]
    },
@@ -640,9 +648,10 @@
        "kennzahlen": {
         "112": 100000,
         "140": 19000,
-        "gewinn": 119000
+        "183": 119000,
+        "gewinn": 0
        },
-       "gewinn_cent": 119000,
+       "gewinn_cent": 0,
        "ausgeschlossene": [
         {
          "beleg_id": "S2",
@@ -662,9 +671,9 @@
        "vorsteuer_gezahlt": 0,
        "ust_zahllast_summe_ustva": 0,
        "ust_an_finanzamt_gezahlt": 0,
-       "gewinn_eur": 119000,
+       "gewinn_eur": 0,
        "einnahmen_gesamt": 119000,
-       "ausgaben_gesamt": 0,
+       "ausgaben_gesamt": 119000,
        "nicht_beruecksichtigte_belege": 1
       },
       "dashboard_status": {

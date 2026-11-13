@@ -1,16 +1,12 @@
 {
  "format": 1,
  "art": "auswertung",
- "kern_version": "2026.11.13-4",
+ "kern_version": "2026.11.13-5",
  "quelle": "docs/regelbesteuerung/05-testfaelle.json (112 Referenzfälle, mit scripts/test-steuerkern-golden-korrekturen.json); Ausgabe = Kern, vom Golden-Runner gegen die Fixture geprüft",
  "ohne_vektor": {
   "gesamt_faelle": 112,
   "offen": [
    "T-S2-005",
-   "T-S2-008",
-   "T-S2-009",
-   "T-S2-010",
-   "T-S2-011",
    "T-S2-015",
    "T-S2-016",
    "T-S2-017",
@@ -6393,6 +6389,643 @@
        "ust_an_finanzamt_gezahlt": 0,
        "gewinn_eur": 79000,
        "einnahmen_gesamt": 79000,
+       "ausgaben_gesamt": 0
+      },
+      "dashboard_status": {
+       "ust_zahllast": "ergebnis",
+       "gewinn": "ergebnis"
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "T-S2-008",
+   "titel": "Skonto (Ausgang), Soll: Korrektur im Zahlungszeitraum",
+   "stufe": "2",
+   "fixture_status": "vorlaeufig",
+   "eingabe": {
+    "profil": {
+     "status_verlauf": [
+      {
+       "gueltig_ab": "2026-01-01",
+       "status": "regel",
+       "grund": "beginn"
+      }
+     ],
+     "versteuerung_verlauf": [
+      {
+       "gueltig_ab": "2026-01-01",
+       "art": "soll"
+      }
+     ],
+     "voranmeldung_verlauf": [
+      {
+       "gueltig_ab": "2026-01-01",
+       "zeitraum": "quartal",
+       "dauerfrist": false,
+       "quelle": "elster_bestaetigt"
+      }
+     ]
+    },
+    "belege_eingaben": [
+     {
+      "id": "A1",
+      "weg": "golden",
+      "richtung": "ausgang",
+      "erfasst_am": null,
+      "rechnungsdatum": "2026-02-10",
+      "leistungsdatum": "2026-02-10",
+      "steuerwahl": "inland_19",
+      "betrag": {
+       "cent": 100000,
+       "art": "netto"
+      },
+      "zahlung": {
+       "datum": "2026-05-08",
+       "betrag_cent": 116620,
+       "skonto_cent": 2380
+      }
+     }
+    ],
+    "jahre": [
+     2026
+    ]
+   },
+   "ausgabe": {
+    "belege": [
+     {
+      "id": "A1",
+      "ist_beleg": true,
+      "steuerfall": "A_INLAND_19",
+      "summe": {
+       "netto_cent": 100000,
+       "ust_cent": 19000,
+       "brutto_cent": 119000
+      },
+      "codes": []
+     }
+    ],
+    "jahre": {
+     "2026": {
+      "ustva": [
+       {
+        "periode": "2026-Q1",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 0,
+         "69": 0,
+         "81": 100000,
+         "83": 19000,
+         "86": 0,
+         "87": 0,
+         "81_steuer": 19000,
+         "86_steuer": 0,
+         "Z37": 19000,
+         "Z45": 19000,
+         "Z48": 19000
+        },
+        "kz83": {
+         "betrag_cent": 19000,
+         "status": "ergebnis"
+        },
+        "unvollstaendig": false,
+        "warnungen": [],
+        "hinweise": [],
+        "ausgeschlossene": []
+       },
+       {
+        "periode": "2026-Q2",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 0,
+         "69": 0,
+         "81": -2000,
+         "83": -380,
+         "86": 0,
+         "87": 0,
+         "81_steuer": -380,
+         "86_steuer": 0,
+         "Z37": -380,
+         "Z45": -380,
+         "Z48": -380
+        },
+        "kz83": {
+         "betrag_cent": -380,
+         "status": "ergebnis"
+        },
+        "unvollstaendig": false,
+        "warnungen": [],
+        "hinweise": [],
+        "ausgeschlossene": []
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "112": 98000,
+        "140": 18620,
+        "gewinn": 116620
+       },
+       "gewinn_cent": 116620,
+       "ausgeschlossene": []
+      },
+      "warnungen": [],
+      "nicht_beruecksichtigt_anzahl": 0,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 98000,
+       "vorsteuer_gezahlt": 0,
+       "ust_zahllast_summe_ustva": 18620,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 116620,
+       "einnahmen_gesamt": 116620,
+       "ausgaben_gesamt": 0
+      },
+      "dashboard_status": {
+       "ust_zahllast": "ergebnis",
+       "gewinn": "ergebnis"
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "T-S2-009",
+   "titel": "Skonto (Eingang): Vorsteuer-Berichtigung im Zahlungszeitraum",
+   "stufe": "2",
+   "fixture_status": "vorlaeufig",
+   "eingabe": {
+    "profil": {
+     "status_verlauf": [
+      {
+       "gueltig_ab": "2026-01-01",
+       "status": "regel",
+       "grund": "beginn"
+      }
+     ],
+     "versteuerung_verlauf": [
+      {
+       "gueltig_ab": "2026-01-01",
+       "art": "soll"
+      }
+     ],
+     "voranmeldung_verlauf": [
+      {
+       "gueltig_ab": "2026-01-01",
+       "zeitraum": "quartal",
+       "dauerfrist": false,
+       "quelle": "elster_bestaetigt"
+      }
+     ]
+    },
+    "belege_eingaben": [
+     {
+      "id": "E1",
+      "weg": "golden",
+      "richtung": "eingang",
+      "erfasst_am": null,
+      "rechnungsdatum": "2026-02-10",
+      "leistungsdatum": "2026-02-10",
+      "steuerwahl": "inland_19",
+      "betrag": {
+       "cent": 100000,
+       "art": "netto"
+      },
+      "zahlung": {
+       "datum": "2026-05-08",
+       "betrag_cent": 116620,
+       "skonto_cent": 2380
+      }
+     }
+    ],
+    "jahre": [
+     2026
+    ]
+   },
+   "ausgabe": {
+    "belege": [
+     {
+      "id": "E1",
+      "ist_beleg": true,
+      "steuerfall": "E_INLAND_VORSTEUER",
+      "summe": {
+       "netto_cent": 100000,
+       "ust_cent": 19000,
+       "brutto_cent": 119000
+      },
+      "codes": []
+     }
+    ],
+    "jahre": {
+     "2026": {
+      "ustva": [
+       {
+        "periode": "2026-Q1",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 19000,
+         "69": 0,
+         "81": 0,
+         "83": -19000,
+         "86": 0,
+         "87": 0,
+         "81_steuer": 0,
+         "86_steuer": 0,
+         "Z37": 0,
+         "Z45": -19000,
+         "Z48": -19000
+        },
+        "kz83": {
+         "betrag_cent": -19000,
+         "status": "ergebnis"
+        },
+        "unvollstaendig": false,
+        "warnungen": [],
+        "hinweise": [],
+        "ausgeschlossene": []
+       },
+       {
+        "periode": "2026-Q2",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": -380,
+         "69": 0,
+         "81": 0,
+         "83": 380,
+         "86": 0,
+         "87": 0,
+         "81_steuer": 0,
+         "86_steuer": 0,
+         "Z37": 0,
+         "Z45": 380,
+         "Z48": 380
+        },
+        "kz83": {
+         "betrag_cent": 380,
+         "status": "ergebnis"
+        },
+        "unvollstaendig": false,
+        "warnungen": [],
+        "hinweise": [],
+        "ausgeschlossene": []
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "183": 98000,
+        "185": 18620,
+        "gewinn": -116620
+       },
+       "gewinn_cent": -116620,
+       "ausgeschlossene": []
+      },
+      "warnungen": [],
+      "nicht_beruecksichtigt_anzahl": 0,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 0,
+       "vorsteuer_gezahlt": 18620,
+       "ust_zahllast_summe_ustva": -18620,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": -116620,
+       "einnahmen_gesamt": 0,
+       "ausgaben_gesamt": 116620
+      },
+      "dashboard_status": {
+       "ust_zahllast": "ergebnis",
+       "gewinn": "ergebnis"
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "T-S2-010",
+   "titel": "Skonto bei Ist-Versteuerung: Entgelt ist der tatsächlich gezahlte Betrag",
+   "stufe": "2",
+   "fixture_status": "vorlaeufig",
+   "eingabe": {
+    "profil": {
+     "status_verlauf": [
+      {
+       "gueltig_ab": "2026-01-01",
+       "status": "regel",
+       "grund": "beginn"
+      }
+     ],
+     "versteuerung_verlauf": [
+      {
+       "gueltig_ab": "2026-01-01",
+       "art": "ist",
+       "grundlage": "nr1",
+       "genehmigung": {
+        "datum": "2025-12-01",
+        "aktenzeichen": "TEST-AZ"
+       },
+       "bestaetigte_jahre": [
+        2024,
+        2025,
+        2026,
+        2027,
+        2028
+       ]
+      }
+     ],
+     "voranmeldung_verlauf": [
+      {
+       "gueltig_ab": "2026-01-01",
+       "zeitraum": "quartal",
+       "dauerfrist": false,
+       "quelle": "elster_bestaetigt"
+      }
+     ]
+    },
+    "belege_eingaben": [
+     {
+      "id": "A1",
+      "weg": "golden",
+      "richtung": "ausgang",
+      "erfasst_am": null,
+      "rechnungsdatum": "2026-02-10",
+      "leistungsdatum": "2026-02-10",
+      "steuerwahl": "inland_19",
+      "betrag": {
+       "cent": 100000,
+       "art": "netto"
+      },
+      "zahlung": {
+       "datum": "2026-05-08",
+       "betrag_cent": 116620,
+       "skonto_cent": 2380
+      }
+     }
+    ],
+    "jahre": [
+     2026
+    ]
+   },
+   "ausgabe": {
+    "belege": [
+     {
+      "id": "A1",
+      "ist_beleg": true,
+      "steuerfall": "A_INLAND_19",
+      "summe": {
+       "netto_cent": 100000,
+       "ust_cent": 19000,
+       "brutto_cent": 119000
+      },
+      "codes": []
+     }
+    ],
+    "jahre": {
+     "2026": {
+      "ustva": [
+       {
+        "periode": "2026-Q2",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 0,
+         "69": 0,
+         "81": 98000,
+         "83": 18620,
+         "86": 0,
+         "87": 0,
+         "81_steuer": 18620,
+         "86_steuer": 0,
+         "Z37": 18620,
+         "Z45": 18620,
+         "Z48": 18620
+        },
+        "kz83": {
+         "betrag_cent": 18620,
+         "status": "ergebnis"
+        },
+        "unvollstaendig": false,
+        "warnungen": [],
+        "hinweise": [],
+        "ausgeschlossene": []
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "112": 98000,
+        "140": 18620,
+        "gewinn": 116620
+       },
+       "gewinn_cent": 116620,
+       "ausgeschlossene": []
+      },
+      "warnungen": [],
+      "nicht_beruecksichtigt_anzahl": 0,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 98000,
+       "vorsteuer_gezahlt": 0,
+       "ust_zahllast_summe_ustva": 18620,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 116620,
+       "einnahmen_gesamt": 116620,
+       "ausgaben_gesamt": 0
+      },
+      "dashboard_status": {
+       "ust_zahllast": "ergebnis",
+       "gewinn": "ergebnis"
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "T-S2-011",
+   "titel": "Skonto im Folgejahr (Soll): Korrektur wirkt 2027, nicht rückwirkend",
+   "stufe": "2",
+   "fixture_status": "vorlaeufig",
+   "eingabe": {
+    "profil": {
+     "status_verlauf": [
+      {
+       "gueltig_ab": "2026-01-01",
+       "status": "regel",
+       "grund": "beginn"
+      }
+     ],
+     "versteuerung_verlauf": [
+      {
+       "gueltig_ab": "2026-01-01",
+       "art": "soll"
+      }
+     ],
+     "voranmeldung_verlauf": [
+      {
+       "gueltig_ab": "2026-01-01",
+       "zeitraum": "quartal",
+       "dauerfrist": false,
+       "quelle": "elster_bestaetigt"
+      }
+     ]
+    },
+    "belege_eingaben": [
+     {
+      "id": "A1",
+      "weg": "golden",
+      "richtung": "ausgang",
+      "erfasst_am": null,
+      "rechnungsdatum": "2026-12-10",
+      "leistungsdatum": "2026-12-10",
+      "steuerwahl": "inland_19",
+      "betrag": {
+       "cent": 100000,
+       "art": "netto"
+      },
+      "zahlung": {
+       "datum": "2027-01-20",
+       "betrag_cent": 116620,
+       "skonto_cent": 2380
+      }
+     }
+    ],
+    "jahre": [
+     2026,
+     2027
+    ]
+   },
+   "ausgabe": {
+    "belege": [
+     {
+      "id": "A1",
+      "ist_beleg": true,
+      "steuerfall": "A_INLAND_19",
+      "summe": {
+       "netto_cent": 100000,
+       "ust_cent": 19000,
+       "brutto_cent": 119000
+      },
+      "codes": []
+     }
+    ],
+    "jahre": {
+     "2026": {
+      "ustva": [
+       {
+        "periode": "2026-Q4",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 0,
+         "69": 0,
+         "81": 100000,
+         "83": 19000,
+         "86": 0,
+         "87": 0,
+         "81_steuer": 19000,
+         "86_steuer": 0,
+         "Z37": 19000,
+         "Z45": 19000,
+         "Z48": 19000
+        },
+        "kz83": {
+         "betrag_cent": 19000,
+         "status": "ergebnis"
+        },
+        "unvollstaendig": false,
+        "warnungen": [
+         "W_LIQUIDITAET_DEZEMBER"
+        ],
+        "hinweise": [
+         "W_LIQUIDITAET_DEZEMBER"
+        ],
+        "ausgeschlossene": []
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "gewinn": 0
+       },
+       "gewinn_cent": 0,
+       "ausgeschlossene": []
+      },
+      "warnungen": [
+       "W_LIQUIDITAET_DEZEMBER"
+      ],
+      "nicht_beruecksichtigt_anzahl": 0,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 0,
+       "vorsteuer_gezahlt": 0,
+       "ust_zahllast_summe_ustva": 19000,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 0,
+       "einnahmen_gesamt": 0,
+       "ausgaben_gesamt": 0
+      },
+      "dashboard_status": {
+       "ust_zahllast": "ergebnis",
+       "gewinn": "ergebnis"
+      }
+     },
+     "2027": {
+      "ustva": [
+       {
+        "periode": "2027-Q1",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 0,
+         "69": 0,
+         "81": -2000,
+         "83": -380,
+         "86": 0,
+         "87": 0,
+         "81_steuer": -380,
+         "86_steuer": 0,
+         "Z37": -380,
+         "Z45": -380,
+         "Z48": -380
+        },
+        "kz83": {
+         "betrag_cent": -380,
+         "status": "ergebnis"
+        },
+        "unvollstaendig": false,
+        "warnungen": [
+         "W_LIQUIDITAET_DEZEMBER"
+        ],
+        "hinweise": [
+         "HN_KZ_JAHR",
+         "W_LIQUIDITAET_DEZEMBER"
+        ],
+        "ausgeschlossene": []
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "112": 98000,
+        "140": 18620,
+        "gewinn": 116620
+       },
+       "gewinn_cent": 116620,
+       "ausgeschlossene": []
+      },
+      "warnungen": [
+       "W_LIQUIDITAET_DEZEMBER"
+      ],
+      "nicht_beruecksichtigt_anzahl": 0,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 98000,
+       "vorsteuer_gezahlt": 0,
+       "ust_zahllast_summe_ustva": -380,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 116620,
+       "einnahmen_gesamt": 116620,
        "ausgaben_gesamt": 0
       },
       "dashboard_status": {

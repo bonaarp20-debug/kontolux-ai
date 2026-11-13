@@ -287,7 +287,7 @@ export function normalisiereEingabe(eingabe, kontext) {
     if (richtung === 'ausgang') {
       // vorläufiger Bruttobetrag, nur um zu erkennen, ob der Umsatz vor dem Wechsel schon voll bezahlt ist
       const bc = istObjekt(e.betrag) && istCent(e.betrag.cent) ? e.betrag.cent : null;
-      const satzV = satzGueltig(e.satz_bp) ? e.satz_bp : (typeof e.steuerwahl === 'string' && e.steuerwahl in SATZ_ID ? SATZ_ID[e.steuerwahl] : null);
+      const satzV = satzGueltig(e.satz_bp) ? e.satz_bp : (typeof e.steuerwahl === 'string' && Object.hasOwn(SATZ_ID, e.steuerwahl) ? SATZ_ID[e.steuerwahl] : null);
       const bruttoV = bc === null ? null : (e.betrag.art === 'netto' && satzV !== null ? bc + ustAusNetto(bc, satzV) : bc);
       const gezahltV = zahlungen0.filter((z) => istObjekt(z) && istCent(z.betrag_cent)).reduce((a, z) => a + z.betrag_cent, 0);
       const s = statusFuerAusgangsumsatz(profil, { leistungsdatum: leistung.bis, zahlungsdaten: zahlDaten, offen: bruttoV === null ? true : gezahltV < bruttoV });
@@ -304,7 +304,7 @@ export function normalisiereEingabe(eingabe, kontext) {
   let herkunft = e.steuerfall_herkunft || (e.herkunft === 'ki' ? 'ki' : e.herkunft === 'plattform' ? 'plattform_setting' : e.herkunft === 'import' ? 'import' : 'nutzer');
   let sperrgrund = null;
   if (e.satz_bp !== undefined && e.satz_bp !== null && !satzGueltig(e.satz_bp)) fehler.push(hin('PF_SATZ', 'satz_bp', 'Basispunkte 0 bis 10000 (ganze Zahl)'));
-  let satzBp = satzGueltig(e.satz_bp) ? e.satz_bp : (wahl && wahl in SATZ_ID ? SATZ_ID[wahl] : null);
+  let satzBp = satzGueltig(e.satz_bp) ? e.satz_bp : (wahl && Object.hasOwn(SATZ_ID, wahl) ? SATZ_ID[wahl] : null);
   let ausschluss = null;
   let dialog = null;
 
@@ -328,6 +328,13 @@ export function normalisiereEingabe(eingabe, kontext) {
     herkunft = herkunft === 'nutzer' ? 'beleg' : herkunft;
   } else if (unbekanntGrund) {
     steuerfall = 'UNBEKANNT';
+  } else if (e.herkunft === 'ki' && e.bestaetigt !== true) {
+    // TR-integration-014 (Konzept 04 Z. 901, Standardentscheidung 2): Eine KI-Steuerwahl ist nur ein Vorschlag. Ohne Bestätigung durch den Nutzer
+    // (bestaetigt: true oder herkunft 'nutzer' nach dem (j/n)-Dialog) bleibt der Steuerfall UNBEKANNT, der Beleg steht nicht in den Summen.
+    steuerfall = 'UNBEKANNT';
+    unbekanntGrund = 'steuerfall_nicht_gewaehlt';
+    unbekanntDetail = 'ki_unbestaetigt';
+    unsicherheiten.push(hin('W_KI_UNBESTAETIGT', 'herkunft', 'KI-Vorschlag: Steuerwahl bestätigen'));
   } else if (!istKorrektur && status === 'unbekannt') {
     steuerfall = 'UNBEKANNT';
     unbekanntGrund = 'steuerfall_nicht_gewaehlt';
@@ -778,7 +785,9 @@ export function normalisiereAlt(alt, profil, optionen) {
   let zahlungsdatumUnsicher = false;
   if (a.bezahlt === true) {
     let zd = istDatum(a.bezahlt_am) ? a.bezahlt_am : null;
-    if (!zd) { zd = createdTag; zahlungsdatumUnsicher = true; flags.push('zahlungsdatum_unsicher'); hinweise.push('ZAHLUNGSDATUM_UNSICHER'); }
+    // TR-integration-001: Fehlt bezahlt_am und createdAt, bleibt die Zahlung nicht verloren (sonst gilt der Beleg als offen, bei Ist fehlt die Einnahme):
+    // Rückfall auf das Rechnungsdatum, gekennzeichnet als unsicher (ZAHLUNGSDATUM_UNSICHER, Flag zahlungsdatum_unsicher)
+    if (!zd) { zd = createdTag || (istDatum(rechnungsdatum) ? rechnungsdatum : null); zahlungsdatumUnsicher = true; flags.push('zahlungsdatum_unsicher'); hinweise.push('ZAHLUNGSDATUM_UNSICHER'); }
     if (zd && istCent(brutto)) zahlungen.push({ datum: zd, betrag_cent: brutto, art: 'zahlung', kanal: istPlattform ? 'plattform' : 'import' });
   } else if (a.bezahlt_am) {
     hinweise.push('BEZAHLT_AM_IGNORIERT'); // Audit B12: bezahlt_am bleibt stehen, bezahlt ist false

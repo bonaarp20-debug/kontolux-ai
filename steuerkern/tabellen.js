@@ -305,7 +305,7 @@ export const GRENZEN = frieren({
   VORANMELDUNG_MONAT_STEUER_VORJAHR: g('VORANMELDUNG_MONAT_STEUER_VORJAHR', 900000, 'Voranmeldungszeitraum Monat, wenn die Steuer des Vorjahres mehr als 9.000 EUR beträgt', 'UStG § 18 Abs. 2 S. 2 (docs/quellen/ustg-18.md Z. 16)', 'A', { vergleich: 'mehr_als' }),
   VORANMELDUNG_BEFREIUNG_STEUER_VORJAHR: g('VORANMELDUNG_BEFREIUNG_STEUER_VORJAHR', 200000, 'Befreiung von Voranmeldungen durch das Finanzamt möglich, wenn die Steuer des Vorjahres höchstens 2.000 EUR beträgt', 'UStG § 18 Abs. 2 S. 3 (docs/quellen/ustg-18.md Z. 16)', 'A', { vergleich: 'nicht_mehr_als', hinweis: 'nur durch das Finanzamt, nie automatisch; im Gründungs- und Folgejahr ausgeschlossen (belegt für Neugründer: UStAE 18.7 Abs. 5 S. 3 (docs/quellen/uStAE-18-7.md Z. 21), UStAE 18.2 Abs. 2 (docs/quellen/uStAE-18-7.md Z. 23))' }),
   VORANMELDUNG_WAHLRECHT_MONAT_UEBERSCHUSS: g('VORANMELDUNG_WAHLRECHT_MONAT_UEBERSCHUSS', 900000, 'Wahlrecht Monat bei Überschuss des Vorjahres über 9.000 EUR', 'UStG § 18 Abs. 2a S. 1 (docs/quellen/ustg-18.md Z. 23)', 'A', { vergleich: 'mehr_als' }),
-  GESCHENK_JE_EMPFAENGER: g('GESCHENK_JE_EMPFAENGER', 5000, 'Geschenke an Nicht-Arbeitnehmer: Abzug nur, wenn die Anschaffungs- oder Herstellungskosten im Wirtschaftsjahr insgesamt 50 EUR nicht übersteigen', 'EStG § 4 Abs. 5 S. 1 Nr. 1 (docs/quellen/estg-4.md Z. 27)', 'A', { vergleich: 'nicht_uebersteigt', hinweis: 'Basis netto bei Regelbesteuerten (EStR R 4.10 Abs. 3, UStAE 15.6 Abs. 4; Verwaltungsauffassung, K12 Einstufung B); Freigrenze je Empfänger und Kalenderjahr: bei 50,00 EUR netto noch abziehbar, bei 50,01 EUR entfällt der Abzug vollständig' }),
+  GESCHENK_JE_EMPFAENGER: g('GESCHENK_JE_EMPFAENGER', 5000, 'Geschenke an Nicht-Arbeitnehmer: Abzug nur, wenn die Anschaffungs- oder Herstellungskosten im Wirtschaftsjahr insgesamt 50 EUR nicht übersteigen', 'EStG § 4 Abs. 5 S. 1 Nr. 1 (docs/quellen/estg-4.md Z. 27)', 'A', { vergleich: 'nicht_uebersteigt', hinweis: 'Basis netto bei Regelbesteuerten (EStR R 4.10 Abs. 3, docs/quellen/estr-4-10-esth-2025-amtlich.md; UStAE 15.6 Abs. 4; Verwaltungsauffassung, K12 Einstufung B); Freigrenze je Empfänger und Kalenderjahr: bei 50,00 EUR netto noch abziehbar, bei 50,01 EUR entfällt der Abzug vollständig' }),
   BEWIRTUNG_ABZIEHBAR_BP: { id: 'BEWIRTUNG_ABZIEHBAR_BP', wert_bp: 7000, bez: 'Bewirtung: 70 % der Aufwendungen abziehbar', quelle: 'EStG § 4 Abs. 5 S. 1 Nr. 2 (docs/quellen/estg-4.md Z. 30)', abruf: D_GESETZ, gueltig_von: null, gueltig_bis: null, konfidenz: 'A' },
   GWG_NETTO: g('GWG_NETTO', 80000, 'Geringwertige Wirtschaftsgüter: Anschaffungskosten, vermindert um die Vorsteuer, höchstens 800 EUR', 'EStG § 6 Abs. 2 S. 1 (docs/quellen/estg-6.md Z. 128)', 'A', { abruf: D_AMTLICH, vergleich: 'nicht_uebersteigt' }),
   SAMMELPOSTEN_UNTEN: g('SAMMELPOSTEN_UNTEN', 25000, 'Sammelposten: Anschaffungskosten (netto) über 250 EUR', 'EStG § 6 Abs. 2a S. 1 (docs/quellen/estg-6.md Z. 129)', 'A', { abruf: D_AMTLICH, vergleich: 'ueber', hinweis: 'Gilt als Untergrenze des Sammelpostens; bis 250 EUR netto ist Sofortabzug möglich (§ 6 Abs. 2a S. 4). Wird der Sammelposten gebildet, gilt er einheitlich für alle Wirtschaftsgüter des Jahres (S. 5): GWG-Sofortabzug nach § 6 Abs. 2 nur bis 250 EUR (Anleitung Anlage EÜR Z.38).' }),
@@ -569,7 +569,7 @@ export const REGELN_KORREKTUREN = frieren([
     felder: {
       konfidenz: 'B',
       blockiert_durch: [],
-      quelle: '§ 17 Abs. 1 S. 1, 2, 8 (docs/quellen/ustg-17.md); UStAE 17.1 Abs. 2 S. 1, Abs. 3 S. 2 (docs/quellen/uStAE-17-1.md); K19 (docs/regelbesteuerung/fragen/gruppe1-anzahlung-korrekturen.md)',
+      quelle: '§ 17 Abs. 1 S. 1, 2, 8 (docs/quellen/ustg-17.md); UStAE 17.1 Abs. 2 S. 1, Abs. 3 S. 2 (docs/quellen/ustae-stand-2026-10-19-17-1.md, Stand 19.10.2026); K19 (docs/regelbesteuerung/fragen/gruppe1-anzahlung-korrekturen.md)',
     },
     begruendung: 'K19: Der Zeitraum der Berichtigung ist der Zeitraum, in dem die Änderung eintritt (§ 17 Abs. 1 S. 8, Wortlaut A); dass beim Skonto die Zahlung unter Abzug den Zeitpunkt bestimmt, ist B (Sekundärquelle). Berechnet der Kunde den Skonto vom Netto, gilt die Berichtigung trotzdem (UStAE 17.1 Abs. 3 S. 2).',
   },
@@ -616,12 +616,20 @@ export const REGELN_KORREKTUREN = frieren([
   {
     regel_id: 'R-ZP-23',
     felder: {
-      regel: 'Zahlung ans Finanzamt (USt, Zinsen, Zuschläge) und Erstattung: Datum der Zahlung/des Zuflusses; Kategorie aus fa_art. Zehn-Tage-Regel (§ 11 Abs. 1 S. 2, Abs. 2 S. 2 EStG): Der Kern wendet sie automatisch an, wenn der Zeitraum der Voranmeldung (fa.periode) bekannt ist. Eine Zahlung bis zum 10.01. für Dezember/Q4 zählt für das Vorjahr, wenn sie auch innerhalb dieser zehn Tage gesetzlich fällig war (gesetzliche Frist ohne Verschiebung nach § 108 AO: BFH X R 44/16 und VIII R 34/12, Wortlaut im Repo). Mit Dauerfristverlängerung (Fälligkeit 10.02.) und für andere Zeiträume (zum Beispiel Q3) zählt sie im Zahlungsjahr (BFH VIII R 25/20, X R 2/21: nur als Zitat in der Nachrecherche, nicht als Wortlaut im Repo). Das Ergebnis trägt HN_10TAGE_VORJAHR, jede USt-Zahlung oder Erstattung vom 01.01. bis 10.01. trägt W_10TAGE_HINWEIS. Ohne bekannte Periode keine Zuordnung zum Vorjahr. Vorschlag mit Nutzerbestätigung (Nachrecherche K8) und der Abflusstag bei Lastschrift (Anleitung EÜR 2025 Z.58) sind nicht umgesetzt.',
-      quelle: '§ 11 Abs. 1 S. 2, Abs. 2 S. 2 EStG (docs/quellen/estg-11.md); BFH VIII R 34/12 und X R 44/16 (docs/quellen/bfh-viii-r-34-12-und-x-r-44-16-zehn-tage-regel.md); BFH VIII R 25/20 und X R 2/21 (nur Zitat, docs/regelbesteuerung/fragen/nachrecherche/k2-k8-istversteuerung-fristen.md); K8; Anleitung Anlage EÜR 2026 Z.18, Z.59',
-      konfidenz: 'B',
+      regel: 'Zahlung ans Finanzamt (USt, Zinsen, Zuschläge) und Erstattung: Datum der Zahlung/des Zuflusses; Kategorie aus fa_art. Zehn-Tage-Regel (§ 11 Abs. 1 S. 2, Abs. 2 S. 2 EStG): Der Kern wendet sie automatisch an, wenn der Zeitraum der Voranmeldung (fa.periode) bekannt ist. Eine Zahlung bis zum 10.01. für Dezember/Q4 zählt für das Vorjahr, wenn sie auch innerhalb dieser zehn Tage gesetzlich fällig war (gesetzliche Frist ohne Verschiebung nach § 108 AO: BFH X R 44/16 und VIII R 34/12, Wortlaut im Repo). Mit Dauerfristverlängerung (Fälligkeit 10.02.) und für andere Zeiträume (zum Beispiel Q3) zählt sie im Zahlungsjahr (BFH VIII R 25/20, X R 2/21, Wortlaut im Repo). Das Ergebnis trägt HN_10TAGE_VORJAHR, jede USt-Zahlung oder Erstattung vom 01.01. bis 10.01. trägt W_10TAGE_HINWEIS. Ohne bekannte Periode keine Zuordnung zum Vorjahr. Vorschlag mit Nutzerbestätigung (Nachrecherche K8) und der Abflusstag bei Lastschrift (Anleitung EÜR 2025 Z.58) sind nicht umgesetzt.',
+      quelle: '§ 11 Abs. 1 S. 2, Abs. 2 S. 2 EStG (docs/quellen/estg-11.md); BFH VIII R 34/12 und X R 44/16 (docs/quellen/bfh-viii-r-34-12-und-x-r-44-16-zehn-tage-regel.md); BFH VIII R 25/20 und X R 2/21 (Wortlaut: docs/quellen/bfh-viii-r-25-20-2022-06-21.md, docs/quellen/bfh-x-r-2-21-2022-02-16.md); K8; Anleitung Anlage EÜR 2026 Z.18, Z.59',
+      konfidenz: 'A',
       blockiert_durch: [],
     },
-    begruendung: 'Gesamtprüfung 10 (M1): Text, Code und 06 stimmen jetzt überein (automatische Anwendung bei bekannter Periode, wie in ABWEICHUNGEN 5.3). Konfidenz B statt A: Die Fälligkeitsvoraussetzung stützt sich auf BFH X R 2/21 und VIII R 25/20, die nicht als Wortlaut in docs/quellen liegen; X R 44/16 lässt sie offen. Nutzerbestätigung statt Automatik: Entscheidung für Jona (06, Offen nach Gesamtprüfung).',
+    begruendung: 'Gesamtprüfung 10 (M1): Text, Code und 06 stimmen jetzt überein (automatische Anwendung bei bekannter Periode, wie in ABWEICHUNGEN 5.3). Testrunde 13.11.2026 (TR-quellen-004): Konfidenz A, weil die Fälligkeitsvoraussetzung jetzt im Wortlaut von BFH X R 2/21 (docs/quellen/bfh-x-r-2-21-2022-02-16.md, Leitsatz: nicht nur gezahlt, sondern auch fällig geworden) und VIII R 25/20 (docs/quellen/bfh-viii-r-25-20-2022-06-21.md, Dauerfristverlängerung: Fälligkeit nach dem Fenster) vorliegt; X R 44/16 lässt sie offen. Nutzerbestätigung statt Automatik: Entscheidung für Jona (06, Offen nach Gesamtprüfung).',
+  },
+  {
+    regel_id: 'R-KOR-04',
+    felder: {
+      regel: 'Korrekturbeleg korrektur_grund = preisnachlass oder bonus, Wirkdatum, negative Netto/USt je Satz. Die Berichtigungspflicht hängt nicht von einer Änderung des Steuerbetrags in der ursprünglichen Rechnung ab, auch bei einer E-Rechnung; die ursprüngliche Rechnung muss nicht berichtigt werden, zum Beispiel bei einer nachträglichen Zahlung wegen Rabatt- oder Bonusvereinbarungen auf Grundlage der Jahresabnahmemengen (UStAE 17.1 Abs. 3a S. 1, 2). Ein Belegaustausch ist nur für die Fälle des § 17 Abs. 4 UStG vorgeschrieben (Abs. 3a S. 4). Jahresbonus über verschieden besteuerte Umsätze (§ 17 Abs. 4): Stufe 4, Hinweis.',
+      quelle: '§ 17 Abs. 1, 4 UStG (docs/quellen/ustg-17.md); UStAE 17.1 Abs. 3a (docs/quellen/ustae-stand-2026-10-19-17-1.md, Stand 19.10.2026)',
+    },
+    begruendung: 'TR-quellen-002 (Testrunde 13.11.2026): UStAE 17.1 Abs. 3a (E-Rechnung, Bonus ohne Rechnungsberichtigung) steht nur im Stand 2026, nicht in der Handausgabe 2024; Beleg für Bonus und Preisnachlass ohne neue Ursprungsrechnung.',
   },
   {
     regel_id: 'R-KZ-51',
@@ -659,7 +667,7 @@ export const REGELN_KORREKTUREN = frieren([
       regel: 'Geschenke an Nicht-Arbeitnehmer: Summe je Empfänger und Kalenderjahr, Basis netto bei Regelbesteuerten. Über 50 EUR (Freigrenze: 50,00 EUR abziehbar, 50,01 EUR vollständig nicht abziehbar): gesamte Aufwendung nicht abziehbar (Kz 164, Bruttobetrag) und Vorsteuer nicht abziehbar; bereits abgezogene Vorsteuer wird im Zeitraum der Hingabe des überschreitenden Geschenks mit negativem Kz 66 zurückgenommen (UStAE 15.6 Abs. 5), nicht in Kz 37: Kz 37 und Kz 50 gelten nur für Änderungen nach § 17 Abs. 2 Nr. 1 S. 1 UStG (Uneinbringlichkeit, Anleitung USt 1 E Zeile 52). Empfänger erfassen (bei Streuartikeln nicht nötig).',
       quelle: '§ 4 Abs. 5 S. 1 Nr. 1 EStG (docs/quellen/estg-4.md Z. 27); § 15 Abs. 1a UStG (docs/quellen/ustg-15.md); UStAE 15.6 Abs. 4, 5 (docs/quellen/ustae-15-6.md, Sekundärquelle); Anleitung USt 1 E Zeile 52 (docs/quellen/bmf-2025-12-29-ust-voranmeldung-2026-vordruck-und-anleitung.md Z. 2354ff); K12',
     },
-    begruendung: 'K12: Basis netto (EStR R 4.10 Abs. 3, B). Gesamtprüfung 10 (M3): Die Rücknahme der Vorsteuer steht in Kz 66 (negativ), nicht in Kz 37; der Code macht es seit AP1.8b richtig, der Katalogtext nannte Kz 37.',
+    begruendung: 'K12: Basis netto (EStR R 4.10 Abs. 3, docs/quellen/estr-4-10-esth-2025-amtlich.md, B). Gesamtprüfung 10 (M3): Die Rücknahme der Vorsteuer steht in Kz 66 (negativ), nicht in Kz 37; der Code macht es seit AP1.8b richtig, der Katalogtext nannte Kz 37.',
   },
   {
     regel_id: 'R-FR-03',
@@ -695,17 +703,17 @@ export const REGELN_KORREKTUREN = frieren([
   {
     regel_id: 'R-KOR-05',
     felder: {
-      regel: 'Rückgängigmachung/Storno: Korrekturbeleg rueckabwicklung, Original unverändert (kein deleted). Zeitraum: Wirkdatum des Korrekturbelegs; ist die Rechnung bezahlt und wird zurückgezahlt, bucht die Berichtigung erst im Zeitraum der Rückgewähr und nur in Höhe der tatsächlichen Rückzahlung (anteilig mit Rest-Cent, HN_KORREKTUR_TEILRUECKZAHLUNG), bei Soll wie bei Ist, bei Ausgang wie bei Eingang (R-KOR-13). Ist ohne Rückzahlung: keine USt-Wirkung (HN_IST_KORREKTUR_OHNE_RUECKZAHLUNG).',
+      regel: 'Rückgängigmachung/Storno: Korrekturbeleg rueckabwicklung, Original unverändert (kein deleted). Zeitraum: Wirkdatum des Korrekturbelegs; ist die Rechnung bezahlt und wird zurückgezahlt, bucht die Berichtigung erst im Zeitraum der Rückgewähr und nur in Höhe der tatsächlichen Rückzahlung (anteilig mit Rest-Cent, HN_KORREKTUR_TEILRUECKZAHLUNG), bei Soll wie bei Ist, bei Ausgang wie bei Eingang (R-KOR-13). Der noch unbezahlte Teil der Rechnung mindert am Wirkdatum (Soll); ohne Rückzahlung bleibt der bezahlte Teil stehen (W_STORNO_BEZAHLT_OHNE_RUECKZAHLUNG). Ist ohne Rückzahlung: keine USt-Wirkung (HN_IST_KORREKTUR_OHNE_RUECKZAHLUNG). Storno vor der Leistung: kein Leistungsposten, die Leistung wird nie ausgeführt.',
     },
     begruendung: 'Gesamtprüfung 10 (F1): Der Regeltext sagte "bezahlt: Zeitraum der Rückgewähr" nur für Ist; der Code bucht jetzt bei jeder Korrektur mit Rückzahlung im Rückzahlungszeitraum und im Umfang der Rückzahlung.',
   },
   {
     regel_id: 'R-KOR-13',
     felder: {
-      regel: 'Rückzahlung einer bezahlten Rechnung: Die Berichtigung tritt im Zeitraum der Rückgewähr ein und nur soweit das Entgelt tatsächlich zurückgezahlt wird (UStAE 17.1 Abs. 2 S. 3, Abs. 7 S. 3, Abs. 8 S. 5). Der Kern bucht Netto und Steuer anteilig zur Rückzahlung (teile() mit Rest-Cent), Soll wie Ist, Ausgang wie Eingang; ohne Rückzahlung gilt das Wirkdatum (unbezahlte Rechnung).',
-      quelle: 'UStAE 17.1 Abs. 2 S. 3, Abs. 7 S. 3, Abs. 8 S. 5 (docs/quellen/uStAE-17-1.md; die UStAE-Stelle nennt BFH V R 56/06, das Zitat BFH XI R 5/23 liegt nicht im Repo)',
+      regel: 'Rückzahlung einer bezahlten Rechnung: Die Berichtigung tritt im Zeitraum der Rückgewähr ein und nur soweit das Entgelt tatsächlich zurückgezahlt wird (UStAE 17.1 Abs. 2 S. 3, Abs. 7 S. 3, Abs. 8 S. 5). Der Kern bucht Netto und Steuer anteilig zur Rückzahlung (teile() mit Rest-Cent), Soll wie Ist, Ausgang wie Eingang. Ohne Rückzahlung gilt das Wirkdatum nur für den unbezahlten Teil der Rechnung (nach Zahlungsstand des Originals, Soll und Ist); der bezahlte Teil bleibt bis zur erfassten Rückzahlung unverändert (Hinweis W_STORNO_BEZAHLT_OHNE_RUECKZAHLUNG, Standardentscheidung 1 der Testrunde).',
+      quelle: 'UStAE 17.1 Abs. 2 S. 3, Abs. 7 S. 3, Abs. 8 S. 5 (docs/quellen/ustae-stand-2026-10-19-17-1.md, Stand 19.10.2026); BFH XI R 5/23 (docs/quellen/bfh-xi-r-5-23-2024-11-13.md)',
     },
-    begruendung: 'Gesamtprüfung 10 (F1): umgesetzt in korrekturWirkungen; Quelle auf den im Repo vorhandenen Wortlaut gestützt, BFH XI R 5/23 nur als nicht belegtes Zitat.',
+    begruendung: 'Gesamtprüfung 10 (F1): umgesetzt in korrekturWirkungen. Testrunde 13.11.2026 (TR-quellen-002, -004; TR-korrektur-001, -006): Quelle jetzt der UStAE-Stand 19.10.2026 und der Wortlaut von BFH XI R 5/23 (docs/quellen/bfh-xi-r-5-23-2024-11-13.md). Zerlegung nach Zahlungsstand des Originals: Der unbezahlte Teil mindert am Wirkdatum, der bezahlte Teil nur mit der Rückzahlung (Standardentscheidung 1).',
   },
   {
     regel_id: 'R-KOR-11',
@@ -1071,6 +1079,18 @@ export const REGELN_NEU = frieren([
     quelle: 'UStAE 19.7 Abs. 1 S. 4 (docs/quellen/uStAE-19-7.md); K5',
     konfidenz: 'B', konfidenz_konzept: 'neu aus K5', blockiert_durch: ['K5'], blockiert_konzept: '',
   },
+  {
+    regel_id: 'R-KOR-14', abschnitt: '4.6', sachverhalt: 'Zahlung wegen vorzeitiger Beendigung eines Dienstleistungsvertrags (Stornogebühr, Kündigungsentschädigung)',
+    regel: 'Der Betrag, der vertraglich geschuldet wird, weil der Empfänger einen wirksam geschlossenen Dienstleistungsvertrag beendet hat, dessen Ausführung der Erbringer begonnen hatte und zu deren Fertigstellung er bereit war, ist Entgelt für eine sonstige Leistung (EuGH C-622/23, UStAE 1.3 Abs. 16d, BMF 12.11.2026): umsatzsteuerbar zum Satz der Leistung, nicht nicht steuerbarer Schadensersatz. Der Kern berechnet diesen Fall nicht eigens: Eine solche Zahlung wird als gewöhnliche Rechnung (Ausgang, Satz der ursprünglichen Leistung) erfasst; als Storno der ursprünglichen Rechnung darf sie nicht ohne Rechnung über die Stornogebühr stehen bleiben (Hinweistext in der Oberfläche).',
+    quelle: 'UStAE 1.3 Abs. 16d (docs/quellen/bmf-2026-11-12-ustae-1-3-abs-16d-vertragsbeendigung.md, BMF-Schreiben vom 12.11.2026, in allen offenen Fällen anzuwenden)',
+    konfidenz: 'B', konfidenz_konzept: 'neu aus Testrunde 13.11.2026 (TR-quellen-007)', blockiert_durch: [], blockiert_konzept: '',
+  },
+  {
+    regel_id: 'R-EUER-36', abschnitt: '4.5', sachverhalt: 'Barzahlungen über 10.000 EUR: Betriebsausgabenabzugsverbot (JStG 2026, noch nicht verkündet)',
+    regel: 'Vorschau, gilt erst nach Verkündung: Das Jahressteuergesetz 2026 (Bundestagsbeschluss 12.11.2026, Drucksache 21/9139) sieht ein Abzugsverbot für Betriebsausgaben vor, die durch Barzahlungen über 10.000 EUR veranlasst sind (§ 4 Abs. 5 S. 1 Nr. 14 EStG neu, Anknüpfung an Art. 80 Abs. 1 der Verordnung (EU) 2024/1624), anzuwenden auf Barzahlungen, die nach dem 9. Juli 2027 ausgeführt werden (gueltig_ab 2027-07-10, unter Vorbehalt der Verkündung im Bundesgesetzblatt). Der Kern ändert keine Berechnung; geplant ist ein Hinweis (Warncode) bei Barzahlung über 10.000 EUR, auch bei mehreren zusammenhängenden Zahlungen. Zeitpunkt und Umfang des Hinweises sind eine Produktentscheidung.',
+    quelle: 'JStG 2026, Drucksache 21/9139 (Beschlussempfehlung, Begründung zu § 4 Abs. 5 S. 1 Nr. 14 EStG neu; docs/quellen/jstg-2026-bundestag-drucksachen-auszug.md); gueltig_ab 2027-07-10 unter Vorbehalt',
+    konfidenz: 'C', konfidenz_konzept: 'neu aus Testrunde 13.11.2026 (TR-quellen-006)', blockiert_durch: ['JSTG_2026_NICHT_VERKUENDET'], blockiert_konzept: '',
+  },
 ]);
 
 // ---------------------------------------------------------------------------------------------
@@ -1112,7 +1132,8 @@ export const REGEL_UMSETZUNG = Object.freeze({
   'R-EUER-10': U('umgesetzt', 'GWG bis 800 EUR netto', 'wirkung.js:gwg_ueber_800'), 'R-EUER-13': U('umgesetzt', 'Kategorie Telefon/Internet auf Kz 280', 'wirkung.js:ausgabeKz'),
   'R-EUER-22': U('umgesetzt', 'Summe der Ausgabenzeilen', 'euer.js:gewinn_cent'), 'R-EUER-32': U('umgesetzt', 'Gewinn Kleinunternehmer', 'euer.js:gewinn_cent'),
   'R-EUER-33': U('teilweise', 'KATEGORIEN mit EÜR-Kz im Kern, SKR-Konten nur als Lücke U.'),
-  'R-KOR-02': U('teilweise', 'Skonto in Zahlung und als Korrekturgrund wird ausgeschlossen (skonto_rabatt_in_zahlung).'), 'R-KOR-03': U('nur_doku', 'Pflichtangabe auf der Rechnung, keine Kern-Logik.'),
+  'R-KOR-02': U('teilweise', 'Skonto in der Zahlung (skonto_cent) wird gerechnet: Minderung im Zahlungszeitraum (Soll, Eingang) bzw. Zahlbetrag als Entgelt (Ist); Rabatt in der Zahlung (rabatt_cent) und der Korrekturgrund skonto werden ausgeschlossen.', 'wirkung.js:skontoAufteilung'), 'R-KOR-03': U('nur_doku', 'Pflichtangabe auf der Rechnung, keine Kern-Logik.'), 'R-KOR-14': U('nur_doku', 'Hinweisregel (UStAE 1.3 Abs. 16d): keine Kern-Logik, die Zahlung wird als Rechnung erfasst.'),
+  'R-EUER-36': U('noch_nicht', 'Vorschau auf das JStG 2026 (gueltig_ab 2027-07-10 unter Vorbehalt der Verkündung); keine Berechnung, Hinweis noch nicht umgesetzt.'),
   'R-KOR-04': U('teilweise', 'Jahresbonus über gemischte Sätze (§ 17 Abs. 4) wird nicht erkannt.'), 'R-KOR-06': U('noch_nicht', 'Uneinbringlichkeit wird ausgeschlossen, Kz 50/37 nicht gerechnet.'),
   'R-KOR-07': U('umgesetzt', 'Berichtigung wegen Tippfehler ohne USt-Wirkung', 'wirkung.js:tippfehler_berichtigung'), 'R-KOR-08': U('noch_nicht', 'geschenk_nachtraeglich wird ausgeschlossen (die Rücknahme läuft über R-VS-02).'),
   'R-KOR-09': U('teilweise', 'Sperre und Warnung W_14C_STEUERAUSWEIS_KU, Kz 69 nur Eingabe.'), 'R-KOR-10': U('ui_oder_worker', 'Oberflächenregel; der Kern rechnet Teil-Rückabwicklungen.'),

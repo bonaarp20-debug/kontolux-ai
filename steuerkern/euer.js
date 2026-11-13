@@ -16,6 +16,9 @@ export const EINNAHMEN_KZ = Object.freeze([111, 112, 103, 140, 141, 102, 106, 10
 // Spalte "nicht abziehbar": in der Anlage EÜR nachrichtlich, nicht im Gewinn (Anleitung Z.63 bis 68)
 export const NICHT_ABZIEHBAR_KZ = Object.freeze([162, 164, 165, 168]);
 const NUR_VERMERK_KZ = Object.freeze([119, 159, 199]);
+// TR-euer-002: Zeilen, die der Vordruck 2026 mit "−" führt (Z.73 Kz 142 Wege Wohnung/Betriebsstätte, Z.75 Kz 139 nicht abziehbare Beträge): sie
+// werden von der Summe der Betriebsausgaben abgezogen (bmf-2026-09-01-anlage-euer-2026.md, Anleitung Z.1237 bis 1242, Z.1728). Kz 176 ("+") wird addiert.
+const ABZUG_KZ = Object.freeze([139, 142]);
 
 function eindeutig(liste) { return [...new Set(liste)].sort(); }
 
@@ -85,6 +88,7 @@ export function euerFuer(wirkungen, profil, jahr, optionen) {
       belege: [...(belege.get(kz) || [])].sort(),
     });
     if (istEinnahme) einnahmen += betrag;
+    else if (ABZUG_KZ.includes(kz)) ausgaben -= betrag;
     else if (!nichtAbz && !NUR_VERMERK_KZ.includes(kz)) ausgaben += betrag;
   }
 
