@@ -971,6 +971,85 @@ export const REGELN_KORREKTUREN = frieren([
     felder: { konfidenz: 'A' },
     begruendung: 'Gesamtprüfung 10 (Regeln-1): UStAE 19.1 Abs. 2 und 3 liegen im Wortlaut im Repo; B war untertrieben.',
   },
+  {
+    regel_id: 'R-RD-08',
+    felder: {
+      regel: 'Fremdwährung: v1 rechnet der Kern nicht um. Ein Beleg mit Währung ungleich EUR wird ausgeschlossen (Sperre nicht_eur, am Beleg v2 fremdwaehrung, HN_NOCH_NICHT_UNTERSTUETZT), nicht als UNBEKANNT; eine Eingabe des EUR-Werts mit Kurs (BMF-Monatsdurchschnitt des Leistungsmonats bei Soll, des Vereinnahmungsmonats bei Ist, § 16 Abs. 6 UStG) gibt es nicht.',
+    },
+    begruendung: 'Gesamtprüfung 10 (N12): Der Code schließt aus (Sperre), der Text sagte UNBEKANNT und eine EUR-Eingabe.',
+  },
+  {
+    regel_id: 'R-FR-02',
+    felder: {
+      regel: 'Voranmeldungszeitraum: Quartal; Monat bei Vorjahressteuer über 9.000 EUR; Wahlrecht Monat bei Überschuss über 9.000 EUR (Januar-Anmeldung bis 10.02.); Befreiung bis 2.000 EUR nur durch das Finanzamt und im Gründungs- und im Wechseljahr ausgeschlossen (UStAE 18.7 Abs. 5 S. 3, UStAE 18.2 Abs. 2, docs/quellen/uStAE-18-7.md). Nutzer bestätigt den ELSTER-Stand (voranmeldung_verlauf), Kontolux leitet nicht ab; der Ausschluss der Befreiung im Gründungs- und Wechseljahr wird nicht geprüft.',
+    },
+    begruendung: 'Gesamtprüfung 10 (Regeln-1, niedrig): UStAE 18.2 Abs. 2 liegt im Repo, der Ausschluss der Befreiung im Gründungs-/Wechseljahr fehlte im Text.',
+  },
+  {
+    regel_id: 'R-ZP-07',
+    felder: {
+      regel: 'Zahlungseingang vom Kunden: Datum = Gutschrift auf dem Konto (Kontoauszug-Datum); bei Barzahlung der Zahltag (nicht durch UStAE 13.6 Abs. 1 S. 1 bis 3 gedeckt, S. 4 bis 12 liegen nicht im Repo: B); bezahlt_am ist nicht "Tag des Markierens".',
+      quelle: 'UStAE 13.6 Abs. 1 S. 3 (docs/quellen/uStAE-13-6.md); S. 4 bis 12 nicht im Repo',
+    },
+    begruendung: 'Gesamtprüfung 10 (N15): "bei Barzahlung Zahltag" ist durch die abgelegten Sätze nicht gedeckt.',
+  },
+  {
+    regel_id: 'R-ZP-05',
+    felder: {
+      regel: 'Ausgang, Ist (nur mit Genehmigung, R-PR-04): Wirkung im Zeitraum der Vereinnahmung jeder Zahlung (Gutschrift auf dem Konto). Aufrechnung = Zahlung ist eine Auslegung und nicht im abgelegten Wortlaut belegt (UStAE 13.6 Abs. 1 S. 4 bis 12 fehlen).',
+    },
+    begruendung: 'Gesamtprüfung 10 (N15): "Aufrechnung = Zahlung" steht nicht im abgelegten Wortlaut.',
+  },
+  {
+    regel_id: 'R-VS-08',
+    felder: {
+      regel: 'Reise: Verpflegungs- und Kilometerpauschale haben keinen Rechnungsvorsteuerabzug (E_INLAND_OHNE_VORSTEUER; keine zitierte Norm, § 9 Abs. 4a EStG liegt nicht im Repo); Übernachtung mit Rechnung: Vorsteuer je Satz laut Rechnung (Logis 7 %, nicht unmittelbar der Vermietung dienende Leistungen wie Frühstück 19 %, § 12 Abs. 2 Nr. 11 UStG). Nur die Übernachtung ist durch den Wortlaut gedeckt.',
+      konfidenz: 'B',
+    },
+    begruendung: 'Gesamtprüfung 10 (N14): Nur die Übernachtung ist durch eine Norm im Repo gedeckt, der Pauschalen-Teil nicht (A war zu hoch).',
+  },
+  {
+    regel_id: 'R-EUER-20',
+    felder: {
+      regel: 'Arbeitszimmer, Pauschale (Kz 162/172, 163): Kategorie (gemietet, brutto); Eigentum: Stufe 4. Im Kern gibt es keine Kategorie dafür: Kz 162, 163, 168, 172, 177 sind nicht erreichbar (noch_nicht).',
+    },
+    begruendung: 'Gesamtprüfung 10 (Regeln-1, niedrig): Kz 162/172/163 haben keine Kategorie und sind nicht erreichbar.',
+  },
+  {
+    regel_id: 'R-EUER-21',
+    felder: {
+      regel: 'Kfz (Leasing, Steuern/Versicherung, sonstige) (Kz 144, 145, 146): Kategorie-Netto. Im Kern gibt es nur die Kategorie Kfz-Kosten auf Kz 146; Kz 144 und 145 sind nicht erreichbar (teilweise).',
+    },
+    begruendung: 'Gesamtprüfung 10 (Regeln-1, niedrig): Kz 144/145 haben keine Kategorie.',
+  },
+  {
+    regel_id: 'R-EUER-16',
+    felder: {
+      regel: 'Σ FA_ZAHLUNG ust (Abfluss, Kz 186). Die Wirkung trägt regel_id R-ZP-23, R-EUER-16 steht im hinweis_detail.',
+    },
+    begruendung: 'Gesamtprüfung 10 (Regeln-1, niedrig): Die Wirkung trägt regel_id R-ZP-23.',
+  },
+  {
+    regel_id: 'R-EUER-17',
+    felder: {
+      regel: 'Kategorie-Netto plus ust_zuschlag (Kz 183, Verspätungs- und Säumniszuschläge in Z.61). Die Wirkung trägt regel_id R-ZP-23, R-EUER-17 steht im hinweis_detail.',
+    },
+    begruendung: 'Gesamtprüfung 10 (Regeln-1, niedrig): Die Wirkung trägt regel_id R-ZP-23.',
+  },
+  {
+    regel_id: 'R-KZ-12',
+    felder: {
+      regel: 'Datum aus status_verlauf (Grund gruendung_ueber_25k, laufend_ueber_100k; option_19_3: 1. Januar, bei Option eines Gründers mitten im Jahr der Tätigkeitsbeginn, B); bei Grund vorjahr_ueber_25k leer. Angezeigt nur im Voranmeldungszeitraum, in den das Datum fällt (die Anleitung sagt dazu nichts).',
+    },
+    begruendung: 'Gesamtprüfung 10 (Regeln-1, niedrig, F9): Anzeige nur im Zeitraum des Datums und Gründer-Option ergänzt.',
+  },
+  {
+    regel_id: 'R-KZ-39',
+    felder: {
+      regel: 'Z.39 bis 43 Kz 61, 62, 63, 59 (Vorsteuer aus innergemeinschaftlichem Erwerb, Einfuhrumsatzsteuer, Durchschnittssätze, § 2a): nicht berechnet (Stufe 4); die Zeilen stehen in nicht_berechnet.',
+    },
+    begruendung: 'Gesamtprüfung 10 (F3): Die nicht berechneten Vorsteuerzeilen werden benannt.',
+  },
 ]);
 
 export const REGELN_NEU = frieren([
