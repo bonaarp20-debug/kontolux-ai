@@ -303,7 +303,7 @@ export const GRENZEN = frieren({
   PARAGRAPH_15A_ZEHN_PUNKTE_BP: { id: 'PARAGRAPH_15A_ZEHN_PUNKTE_BP', wert_bp: 1000, bez: 'Verhältnisänderung unter zehn Prozentpunkten: keine Berichtigung für das Jahr (Ausnahme: nicht, wenn der Berichtigungsbetrag für das Jahr 1.000 EUR übersteigt, § 44 Abs. 2 S. 2)', ausnahme_betrag_ueber_cent: 100000, quelle: 'UStDV § 44 Abs. 2 S. 1, 2 (docs/quellen/ustdv-44.md Z. 16)', abruf: D_GESETZ, gueltig_von: null, gueltig_bis: null, konfidenz: 'A' },
   PARAGRAPH_15A_JAHRE_BEWEGLICH: { id: 'PARAGRAPH_15A_JAHRE_BEWEGLICH', wert_jahre: 5, bez: 'Berichtigungszeitraum bewegliche Wirtschaftsgüter fünf Jahre, Grundstücke zehn Jahre', wert_jahre_grundstueck: 10, quelle: 'UStG § 15a Abs. 1 (docs/quellen/ustg-15a.md Z. 15)', abruf: D_GESETZ, gueltig_von: null, gueltig_bis: null, konfidenz: 'A' },
   VORANMELDUNG_MONAT_STEUER_VORJAHR: g('VORANMELDUNG_MONAT_STEUER_VORJAHR', 900000, 'Voranmeldungszeitraum Monat, wenn die Steuer des Vorjahres mehr als 9.000 EUR beträgt', 'UStG § 18 Abs. 2 S. 2 (docs/quellen/ustg-18.md Z. 16)', 'A', { vergleich: 'mehr_als' }),
-  VORANMELDUNG_BEFREIUNG_STEUER_VORJAHR: g('VORANMELDUNG_BEFREIUNG_STEUER_VORJAHR', 200000, 'Befreiung von Voranmeldungen durch das Finanzamt möglich, wenn die Steuer des Vorjahres höchstens 2.000 EUR beträgt', 'UStG § 18 Abs. 2 S. 3 (docs/quellen/ustg-18.md Z. 16)', 'A', { vergleich: 'nicht_mehr_als', hinweis: 'nur durch das Finanzamt, nie automatisch; im Gründungs- und Folgejahr ausgeschlossen (UStAE 18.2 Abs. 2, nicht im Repo gelesen)' }),
+  VORANMELDUNG_BEFREIUNG_STEUER_VORJAHR: g('VORANMELDUNG_BEFREIUNG_STEUER_VORJAHR', 200000, 'Befreiung von Voranmeldungen durch das Finanzamt möglich, wenn die Steuer des Vorjahres höchstens 2.000 EUR beträgt', 'UStG § 18 Abs. 2 S. 3 (docs/quellen/ustg-18.md Z. 16)', 'A', { vergleich: 'nicht_mehr_als', hinweis: 'nur durch das Finanzamt, nie automatisch; im Gründungs- und Folgejahr ausgeschlossen (belegt für Neugründer: UStAE 18.7 Abs. 5 S. 3 (docs/quellen/uStAE-18-7.md Z. 21), UStAE 18.2 Abs. 2 (docs/quellen/uStAE-18-7.md Z. 23))' }),
   VORANMELDUNG_WAHLRECHT_MONAT_UEBERSCHUSS: g('VORANMELDUNG_WAHLRECHT_MONAT_UEBERSCHUSS', 900000, 'Wahlrecht Monat bei Überschuss des Vorjahres über 9.000 EUR', 'UStG § 18 Abs. 2a S. 1 (docs/quellen/ustg-18.md Z. 23)', 'A', { vergleich: 'mehr_als' }),
   GESCHENK_JE_EMPFAENGER: g('GESCHENK_JE_EMPFAENGER', 5000, 'Geschenke an Nicht-Arbeitnehmer: Abzug nur, wenn die Anschaffungs- oder Herstellungskosten im Wirtschaftsjahr insgesamt 50 EUR nicht übersteigen', 'EStG § 4 Abs. 5 S. 1 Nr. 1 (docs/quellen/estg-4.md Z. 27)', 'A', { vergleich: 'nicht_uebersteigt', hinweis: 'Basis netto bei Regelbesteuerten (EStR R 4.10 Abs. 3, UStAE 15.6 Abs. 4; Verwaltungsauffassung, K12 Einstufung B); Freigrenze je Empfänger und Kalenderjahr: bei 50,00 EUR netto noch abziehbar, bei 50,01 EUR entfällt der Abzug vollständig' }),
   BEWIRTUNG_ABZIEHBAR_BP: { id: 'BEWIRTUNG_ABZIEHBAR_BP', wert_bp: 7000, bez: 'Bewirtung: 70 % der Aufwendungen abziehbar', quelle: 'EStG § 4 Abs. 5 S. 1 Nr. 2 (docs/quellen/estg-4.md Z. 30)', abruf: D_GESETZ, gueltig_von: null, gueltig_bis: null, konfidenz: 'A' },
@@ -315,9 +315,17 @@ export const GRENZEN = frieren({
   OPTION_19_3_BINDUNG_JAHRE: { id: 'OPTION_19_3_BINDUNG_JAHRE', wert_jahre: 5, bez: 'Verzicht auf die Kleinunternehmerregelung bindet mindestens fünf Kalenderjahre', quelle: 'UStG § 19 Abs. 3 S. 3 (docs/quellen/ustg-19.md Z. 23)', abruf: D_GESETZ, gueltig_von: null, gueltig_bis: null, konfidenz: 'A' },
   SONDERVORAUSZAHLUNG_TEILER: { id: 'SONDERVORAUSZAHLUNG_TEILER', wert: 11, bez: 'Sondervorauszahlung: ein Elftel der Summe der Vorauszahlungen des Vorjahres', quelle: 'UStDV § 47 Abs. 1 S. 2 (docs/quellen/ustdv-47.md Z. 15)', abruf: D_GESETZ, gueltig_von: null, gueltig_bis: null, konfidenz: 'A' },
   FRIST_VORANMELDUNG_TAGE: { id: 'FRIST_VORANMELDUNG_TAGE', wert: 10, bez: 'Voranmeldung und Zahlung bis zum zehnten Tag nach Ablauf des Voranmeldungszeitraums', quelle: 'UStG § 18 Abs. 1 S. 1 (docs/quellen/ustg-18.md Z. 15)', abruf: D_GESETZ, gueltig_von: null, gueltig_bis: null, konfidenz: 'A' },
-  FRIST_DAUERFRIST_MONATE: { id: 'FRIST_DAUERFRIST_MONATE', wert: 1, bez: 'Dauerfristverlängerung: Fristen um einen Monat verlängert', quelle: 'UStDV § 46 S. 1 (docs/quellen/ustdv-46.md)', abruf: D_GESETZ, gueltig_von: null, gueltig_bis: null, konfidenz: 'A' },
+  FRIST_DAUERFRIST_MONATE: { id: 'FRIST_DAUERFRIST_MONATE', wert: 1, bez: 'Dauerfristverlängerung: Fristen um einen Monat verlängert', quelle: 'UStDV § 46 S. 1 (docs/quellen/ustdv-46.md Z. 15)', abruf: D_GESETZ, gueltig_von: null, gueltig_bis: null, konfidenz: 'A' },
   ZEHN_TAGE_REGEL: { id: 'ZEHN_TAGE_REGEL', wert: 10, bez: 'Zehn-Tage-Regel: "kurze Zeit" im Sinne des § 11 EStG sind bis zu zehn Tage (Rechtsprechung, nicht Gesetzeswortlaut)', quelle: 'BFH VIII R 34/12 und X R 44/16 (docs/quellen/bfh-viii-r-34-12-und-x-r-44-16-zehn-tage-regel.md Z. 13)', abruf: D_AMTLICH, gueltig_von: null, gueltig_bis: null, konfidenz: 'A' },
 });
+
+// Einträge aus GRENZEN, die kein Kern-Modul liest (Audit 10, Tabellen Abschnitt 10): sie belegen Wortlaut oder dienen der späteren Verdrahtung
+// (Phase 2). Der Test in test-steuerkern-tabellen.mjs hält diese Liste ehrlich (jeder andere Eintrag wird im Code gelesen).
+export const GRENZEN_UNGENUTZT = Object.freeze([
+  'ERECHNUNG_UEBERGANG_NR1', 'ERECHNUNG_UEBERGANG_NR3', 'PARAGRAPH_15A_JAHRESERKLAERUNG', 'PARAGRAPH_15A_ZEHN_PUNKTE_BP', 'PARAGRAPH_15A_JAHRE_BEWEGLICH',
+  'VORANMELDUNG_MONAT_STEUER_VORJAHR', 'VORANMELDUNG_BEFREIUNG_STEUER_VORJAHR', 'VORANMELDUNG_WAHLRECHT_MONAT_UEBERSCHUSS',
+  'SAMMELPOSTEN_UNTEN', 'SAMMELPOSTEN_OBEN', 'SAMMELPOSTEN_SOFORT',
+]);
 
 export function grenze(id) {
   const e = GRENZEN[id];
@@ -947,6 +955,21 @@ export const REGELN_KORREKTUREN = frieren([
       regel: 'Wechsel der Versteuerungsart ändert nie die Behandlung bereits ausgeführter Umsätze (§ 20 S. 3: keine doppelte Erfassung, keine Nichterfassung). Der Kern leitet die Versteuerungsart aus dem Zeitstrahl am Leistungsdatum ab (versteuerungAm); das Feld versteuerung_beleg am Beleg wird noch nicht gesetzt (Festschreibung am Beleg folgt mit Phase 2, solange der Zeitstrahl nur nach hinten ergänzt wird, ist das Ergebnis gleich).',
     },
     begruendung: 'Gesamtprüfung 10 (N9): versteuerung_beleg wird nie gesetzt; Regeltext benennt das.',
+  },
+  {
+    regel_id: 'R-13B-04',
+    felder: { konfidenz: 'A' },
+    begruendung: 'Gesamtprüfung 10 (Regeln-1): Zeilen und Kz stehen im Wortlaut des Vordrucks (Z.38 bis 42, Anleitung); B war untertrieben.',
+  },
+  {
+    regel_id: 'R-EUER-30',
+    felder: { konfidenz: 'A' },
+    begruendung: 'Gesamtprüfung 10 (Regeln-1): Die Anleitung Anlage EÜR 2026 liegt im Repo, der Wortlaut trägt die Regel; B war untertrieben.',
+  },
+  {
+    regel_id: 'R-KU-01',
+    felder: { konfidenz: 'A' },
+    begruendung: 'Gesamtprüfung 10 (Regeln-1): UStAE 19.1 Abs. 2 und 3 liegen im Wortlaut im Repo; B war untertrieben.',
   },
 ]);
 
