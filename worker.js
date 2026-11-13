@@ -4527,6 +4527,17 @@ function erloeskontoExport(mwstSatz, kleinunternehmer, skr) {
   if (satz === 'keine' || satz === '0') return k.keine;
   return k['19'];
 }
+// Automatikkonten: Satz des Kontos und Partnerkonto mit dem anderen Satz (Kontenrahmen SKR03/SKR04, siehe DATEV_AUTOMATIKKONTEN_EXPORT).
+const DATEV_AUTOMATIK_SATZ_TAUSCH = {
+  SKR03: { '8400': { satz: '19', partner: '8300' }, '8300': { satz: '7', partner: '8400' }, '3400': { satz: '19', partner: '3300' }, '3300': { satz: '7', partner: '3400' } },
+  SKR04: { '4400': { satz: '19', partner: '4300' }, '4300': { satz: '7', partner: '4400' }, '5400': { satz: '19', partner: '5300' }, '5300': { satz: '7', partner: '5400' } }
+};
+// Bewirtung: abziehbarer Teil (70 %) und nicht abziehbarer Teil (30 %). Die Konten 4654/6644 sind nicht gegen den DATEV-Kontenrahmen
+// geprüft (Konzept 7.2, G11, Konfidenz U): vor dem Deploy mit dem Kontenrahmen abgleichen. Fallback laut Konzept: nichtAbziehbar = abziehbar.
+const DATEV_BEWIRTUNG_KONTEN = {
+  SKR03: { abziehbar: '4650', nichtAbziehbar: '4654' },
+  SKR04: { abziehbar: '6640', nichtAbziehbar: '6644' }
+};
 // Buchen die Integrationen als Einnahme (rechnung_ausgehend) bzw. Erstattung (rechnung_eingehend
 // ohne Kategorie, mwst_satz 'keine') — gleiche Liste wie UST_WEBHOOK_QUELLEN in index.html.
 const DATEV_WEBHOOK_QUELLEN = ['stripe_webhook', 'mollie_webhook', 'digistore24_webhook', 'copecart_webhook', 'paypal_webhook', 'sumup_webhook', 'ablefy_webhook', 'shopify_webhook'];
@@ -4715,6 +4726,9 @@ async function handleDatevExport(body, env, cors = {}) {
     const ohneRechnungsnr = [];
     let plattformOhneNr = 0;
     let skippedUnpaid = 0;
+    let ohneSatzAusgelassen = 0;
+    let ohneSatzMarkiert = 0;
+    let kontoGewechselt = 0;
 
     for (const doc of dokDocs) {
       const fields = doc.fields || {};
@@ -4734,12 +4748,10 @@ async function handleDatevExport(body, env, cors = {}) {
       if (typ === 'mahnung_ausgehend') continue;
       const istEinnahme = typ === 'rechnung_ausgehend';
 
-      // Belegdatum je nach Versteuerungsmethode: bei Istversteuerung (Standard) zählt der
-      // Zahlungseingang (bezahlt_am), bei Sollversteuerung das Rechnungsdatum (datum) — mit
-      // dem jeweils anderen Feld als Fallback, sonst createdAt als letzter Fallback.
-      const datumStr = istSollversteuerung
-        ? (firestoreValue(fields.datum) || firestoreValue(fields.bezahlt_am))
-        : (firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum));
+      // Belegdatum und Exportjahr nach Zahlungsdatum (Konzept 7.2, Spalte 10 'Belegdatum': Zahlungsdatum, EÜR-/Bank-Sicht, § 11 EStG),
+      // bei Soll- wie bei Istversteuerung. Das Rechnungsdatum (datum) dient nur als Rückfall, dann createdAt (TR-euer-006).
+      // Leistungsdatum und Steuerperiode für die Soll-USt kommen in die Spalten 115/116 (Phase 5, noch nicht gebaut).
+      const datumStr = firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum);
       let belegDatum;
       if (datumStr && /^\d{4}-\d{2}-\d{2}/.test(datumStr)) {
         belegDatum = new Date(datumStr + 'T00:00:00');
@@ -4812,19 +4824,51 @@ async function handleDatevExport(body, env, cors = {}) {
         gegenkonto = erloeskontoExport(satzErstattung, kleinunternehmer, skr);
       }
       // Erlöskonto ohne Umsatzsteuer (KU, steuerfrei, § 13b) bzw. Erstattung darauf: kein Steuerschlüssel.
+      const erstattungsKonto = !istEinnahme && !kategorie && !importKontoGilt && DATEV_WEBHOOK_QUELLEN.includes(quelle)
+        && (!mwstSatz || mwstSatz === 'keine') && !!satzErstattung;
+      // Fehlender Steuersatz bei Regelbesteuerten (Altbeleg): nicht als 19 % raten (TR-euer-005, Konzept 7.3, Kern: UNBEKANNT).
+      // Ausgaben gehen ohne Steuerschlüssel und mit Textmarke in den Stapel (die Betriebsausgabe hängt nicht am Satz), Einnahmen auf kein
+      // Erlöskonto mit unbekanntem Satz: sie bleiben draußen und stehen in der Warnung.
+      const satzFehlt = !kleinunternehmer && !mwstSatz && !importKontoGilt && !erstattungsKonto;
+      if (satzFehlt && istEinnahme) { ohneSatzAusgelassen++; continue; }
+      let satzHinweis = '';
+      if (satzFehlt) { ohneSatzMarkiert++; satzHinweis = ' [Steuersatz prüfen]'; }
+      // Automatikkonto und Satz des Belegs müssen zusammenpassen (TR-euer-007): DATEV rechnet auf 8400/3400 (SKR04 4400/5400) stets 19 %,
+      // auf 8300/3300 (4300/5300) stets 7 %. Passt der Satz des Belegs nicht, wechselt der Export auf das Konto mit passendem Satz.
+      if (!importKontoGilt && !kleinunternehmer && (mwstSatz === '19' || mwstSatz === '7')) {
+        const tausch = DATEV_AUTOMATIK_SATZ_TAUSCH[skr === 'SKR04' ? 'SKR04' : 'SKR03'][String(gegenkonto)];
+        if (tausch && tausch.satz !== mwstSatz) { gegenkonto = tausch.partner; kontoGewechselt++; }
+      }
       const ohneSchluessel = alleErloeskonten.has(String(gegenkonto)) && (!istEinnahme || kleinunternehmer);
-      const bu = buSchluesselExport(ohneSchluessel ? 'keine' : mwstSatz, kleinunternehmer, istEinnahme, gegenkonto, skr);
+      const bu = satzFehlt ? '' : buSchluesselExport(ohneSchluessel ? 'keine' : mwstSatz, kleinunternehmer, istEinnahme, gegenkonto, skr);
       const freitext = firestoreValue(fields.buchungstext) || '';
       const buchungstextBasis = istEinnahme
         ? `Rechnung ${absender}`.trim()
         : `Beleg ${absender}`.trim();
-      const buchungstext = freitext ? `${buchungstextBasis} ${freitext}`.trim() : buchungstextBasis;
+      const buchungstext = (freitext ? `${buchungstextBasis} ${freitext}`.trim() : buchungstextBasis) + satzHinweis;
       // Belegfeld 2 ist eine Belegnummer (max. 12 Stellen laut DATEV). Der freie Buchungstext gehört in den Buchungstext (max. 60).
       const belegfeld2 = '';
       // Debitorennummer nur bei Einnahmen (Rechnung an Kunde = Debitor) relevant — bei Ausgaben
       // wäre das Gegenstück eine Kreditorennummer des Lieferanten, die hier nicht geführt wird.
       const kundeId = firestoreValue(fields.kunde_id) || '';
       const diverseAdressnummer = istEinnahme ? (kundenNummerById[kundeId] || '') : '';
+
+      // Bewirtung (§ 4 Abs. 5 Nr. 2 EStG): 70 % abziehbar, 30 % nicht abziehbar, Vorsteuer voll (BU auf beiden Teilen, gleicher Satz).
+      // Cent-genau mit kaufmännischer Rundung wie der Kern (mulDivRund); der Rest geht auf das Konto für nicht abziehbare Bewirtung (TR-euer-004).
+      const bewirtungKonten = DATEV_BEWIRTUNG_KONTEN[skr === 'SKR04' ? 'SKR04' : 'SKR03'];
+      if (!istEinnahme && !importKontoGilt && kategorie === 'Bewirtung (70%)' && String(gegenkonto) === bewirtungKonten.abziehbar) {
+        const cent = Math.round(betrag * 100);
+        const abziehbarCent = Math.floor((2 * cent * 70 + 100) / 200);
+        const teile = [
+          { betrag: abziehbarCent / 100, konto: bewirtungKonten.abziehbar, text: buchungstext },
+          { betrag: (cent - abziehbarCent) / 100, konto: bewirtungKonten.nichtAbziehbar, text: `${buchungstext} davon nicht abziehbar 30 %` }
+        ];
+        for (const t of teile) {
+          if (t.betrag <= 0) continue;
+          buchungen.push({ betrag: t.betrag, sollHaben: 'H', konto: bankkonto, gegenkonto: t.konto, bu, belegDatum, belegfeld1: rechnungsnr, belegfeld2, buchungstext: t.text, diverseAdressnummer });
+        }
+        continue;
+      }
 
       buchungen.push({
         betrag,
@@ -4847,6 +4891,15 @@ async function handleDatevExport(body, env, cors = {}) {
       }), { status: 422, headers: { ...cors, 'Content-Type': 'application/json' } });
     }
 
+    if (ohneSatzAusgelassen > 0) {
+      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${ohneSatzAusgelassen} Einnahme(n) ohne Steuersatz wurden NICHT exportiert (der Satz wird nicht geraten). Bitte den Steuersatz in der App ergänzen und erneut exportieren.`;
+    }
+    if (ohneSatzMarkiert > 0) {
+      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${ohneSatzMarkiert} Ausgabe(n) ohne Steuersatz sind ohne Steuerschlüssel exportiert (Buchungstext mit [Steuersatz prüfen]). Bitte Steuersatz ergänzen oder beim Berater prüfen.`;
+    }
+    if (kontoGewechselt > 0) {
+      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${kontoGewechselt} Beleg(e): Das Konto der Kategorie passte nicht zum Steuersatz des Belegs (Automatikkonto) und wurde auf das Konto mit passendem Satz gesetzt.`;
+    }
     if (plattformOhneNr > 0) {
       datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${plattformOhneNr} Plattform-Beleg(e) ohne Rechnungsnummer: Belegfeld 1 enthält dort das Belegdatum.`;
     }
