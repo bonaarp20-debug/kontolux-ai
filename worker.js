@@ -765,7 +765,42 @@ const DATEI_ERLAUBTE_TYPEN = ['application/pdf', 'image/jpeg', 'image/jpg', 'ima
 // passieren, bevor die Befehlszeile den Client überhaupt erreicht (siehe emitStreamLine unten,
 // das den Stream zeilenweise puffert statt token-weise weiterzureichen — unsichtbar für den
 // Nutzer, da diese Befehlszeile ohnehin nie im Chat-Bubble angezeigt wird).
-function pruefeBetragZeile(line) {
+// ── Serverseitige Filter für KI-Befehle (TR-integration-012/-013/-018, Standardentscheidung 2) ─────────────
+// Die Befehlszeilen stammen aus dem Modelltext (der durch Belegtext beeinflusst sein kann). Hier stehen Whitelist und Obergrenzen;
+// das (j/n)-Gate vor dem Speichern liegt im Client.
+const KI_MWST_ERLAUBT = ['19', '7', '0', 'keine', 'reverse_charge'];
+const KI_DOKUMENT_TYPEN = ['rechnung_eingehend', 'rechnung_ausgehend'];
+function kiWert(rest, schluessel) { const m = rest.match(new RegExp('(?:^|,)\\s*' + schluessel + '=([^,]*)', 'i')); return m ? m[1].trim() : null; }
+function kiBetragOk(v) { const n = parseFloat(String(v).replace(',', '.')); return Number.isFinite(n) && n > 0 && n <= BELEG_MAX_BETRAG; }
+
+// PROFIL_UPDATE: nur harmlose Gedächtnis-Felder. Steuerwirksame Schlüssel nur mit gültigem Wertebereich, Schutzschlüssel nie.
+const KI_PROFIL_GESPERRT = /^(kleinunternehmer|versteuerungsart|erstes_jahr|steuernummer|ust_?id.*|iban.*|bank.*|absender_name|firmenname|eigene_adresse|telefon|rechnungs_email|datev_.*|steuerprofil.*|status.*|is_?admin.*|abo.*|plan.*)$/i;
+const KI_PROFIL_PRUEFER = {
+  steuerruecklage_prozent: (v) => /^\d{1,3}([.,]\d+)?$/.test(v) && parseFloat(v.replace(',', '.')) <= 100,
+  gewerbesteuer_hebesatz: (v) => /^\d{1,4}([.,]\d+)?$/.test(v) && parseFloat(v.replace(',', '.')) <= 1000,
+  vorjahressteuer_est: (v) => /^\d{1,8}([.,]\d+)?$/.test(v) && parseFloat(v.replace(',', '.')) <= BELEG_MAX_BETRAG,
+  vorjahressteuer_gst: (v) => /^\d{1,8}([.,]\d+)?$/.test(v) && parseFloat(v.replace(',', '.')) <= BELEG_MAX_BETRAG,
+  beruf: (v) => ['Freiberufler', 'Gewerbetreibender'].includes(v),
+  kirchensteuer: (v) => /^(nein|keine|0|8|9|8 ?%|9 ?%)$/i.test(v),
+  standard_stundensatz: (v) => /^\d{1,5}([.,]\d+)?$/.test(v) && parseFloat(v.replace(',', '.')) <= 10000
+};
+function bereinigeProfilUpdate(rest) {
+  const teile = rest.split(',').map((x) => x.trim()).filter(Boolean);
+  if (teile.length === 1 && /^keine$/i.test(teile[0])) return 'keine';
+  const ok = [];
+  for (const t of teile) {
+    const i = t.indexOf('=');
+    if (i < 1) continue;
+    const k = t.slice(0, i).trim(); const v = t.slice(i + 1).trim();
+    if (!/^[A-Za-z][A-Za-z0-9_]{1,39}$/.test(k) || KI_PROFIL_GESPERRT.test(k) || !v || v.length > 100 || /[<>{}\n]/.test(v)) continue;
+    const pruefer = KI_PROFIL_PRUEFER[k.toLowerCase()];
+    if (pruefer && !pruefer(v)) continue;
+    ok.push(`${k}=${v}`);
+  }
+  return ok.length ? ok.join(',') : 'keine';
+}
+
+export function pruefeBetragZeile(line) {
   // Diagnose-Logging: läuft für jede Zeile jeder Chat-Antwort, loggt aber nur bei einem Treffer —
   // sichtbar per `wrangler tail`. KUNDE_SPEICHERN bewusst NICHT mehr enthalten (2026-09-09):
   // Kunden-Anlegen ist inzwischen reine, deterministische Frontend-Logik (siehe
@@ -786,7 +821,7 @@ function pruefeBetragZeile(line) {
   if (mahnungMatch) {
     const m = mahnungMatch[1].match(/betrag=([^,]*)/i);
     const betrag = m ? parseFloat(m[1]) : NaN;
-    if (!Number.isFinite(betrag) || betrag <= 0) {
+    if (!Number.isFinite(betrag) || betrag <= 0 || betrag > BELEG_MAX_BETRAG) {
       return line.slice(0, mahnungMatch.index) + 'Ich kann diese Mahnung nicht erstellen — der Betrag muss größer als 0 sein. Bitte prüfe die zugrunde liegende Rechnung.';
     }
   }
@@ -809,6 +844,10 @@ function pruefeBetragZeile(line) {
   // sonst blind vertraut (siehe emitStreamLine-Kommentar oben).
   const ausgabeUpdateMatch = line.match(/AUSGABE_UPDATE:(.*)$/i);
   if (ausgabeUpdateMatch) {
+    const aBetrag = kiWert(ausgabeUpdateMatch[1], 'betrag');
+    if (aBetrag !== null && !kiBetragOk(aBetrag)) {
+      return line.slice(0, ausgabeUpdateMatch.index) + 'Ich kann diese Ausgabe nicht buchen: Der Betrag ist ungültig oder unplausibel. Bitte nenne mir einen gültigen Betrag.';
+    }
     const mKat = ausgabeUpdateMatch[1].match(/kategorie=([^,]*)/i);
     const kategorie = mKat ? mKat[1].trim() : '';
     if (!kategorie) {
@@ -821,10 +860,19 @@ function pruefeBetragZeile(line) {
   if (dokSpeichernMatch) {
     const mKat = dokSpeichernMatch[1].match(/kategorie=([^,]*)/i);
     const kategorie = mKat ? mKat[1].trim() : '';
+    // Whitelist und Obergrenzen (TR-integration-013): typ, Steuersatz, Betrag, Datum
+    const dTyp = kiWert(dokSpeichernMatch[1], 'typ'); const dSatz = kiWert(dokSpeichernMatch[1], 'mwst_satz');
+    const dBetrag = kiWert(dokSpeichernMatch[1], 'betrag'); const dDatum = kiWert(dokSpeichernMatch[1], 'datum');
+    if ((dTyp !== null && !KI_DOKUMENT_TYPEN.includes(dTyp)) || (dSatz !== null && !KI_MWST_ERLAUBT.includes(dSatz.toLowerCase()))
+        || (dBetrag !== null && !kiBetragOk(dBetrag)) || (dDatum !== null && !istKalenderDatum(dDatum))) {
+      return line.slice(0, dokSpeichernMatch.index) + 'Ich kann dieses Dokument nicht buchen: Typ, Steuersatz, Betrag oder Datum sind ungültig oder unplausibel. Bitte prüfe die Angaben im Beleg.';
+    }
     if (!kategorie) {
       return line.slice(0, dokSpeichernMatch.index) + 'Ich kann dieses Dokument noch nicht buchen — mir fehlt die Kategorie (z.B. Bürobedarf, Software/EDV/SaaS, Werbekosten, Reisekosten). Welche passt hier am besten?';
     }
   }
+  const profilUpdateMatch = line.match(/PROFIL_UPDATE:(.*)$/i);
+  if (profilUpdateMatch) return line.slice(0, profilUpdateMatch.index) + 'PROFIL_UPDATE:' + bereinigeProfilUpdate(profilUpdateMatch[1]);
   // ANGEBOT_ERSTELLEN ohne gültige Einzelpreise: analog zu RECHNUNG_ERSTELLEN — alle Positionen
   // müssen einen Einzelpreis > 0 haben, sonst wird ein Angebot mit Nullbeträgen erstellt.
   const angebotMatch = line.match(/ANGEBOT_ERSTELLEN:(.*)$/i);
