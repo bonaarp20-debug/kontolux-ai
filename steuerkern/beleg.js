@@ -23,6 +23,8 @@ const satzGueltig = (x) => Number.isSafeInteger(x) && x >= 0 && x <= 10000;
 const SAETZE_ZULAESSIG = Object.freeze(STEUERSAETZE.map((x) => x.bp)); // 1900, 700, 0 (tabellen.js)
 
 export const SATZ_ID = Object.freeze({ inland_19: SATZ_REGEL_BP, inland_7: SATZ_ERMAESSIGT_BP, inland_0_pv: SATZ_NULL_BP });
+const AUSLANDS_STEUERFAELLE = Object.freeze(['E_13B_EU_DL', 'E_13B_DRITTLAND_DL', 'A_NICHT_STEUERBAR_EU_B2B_DL', 'A_NICHT_STEUERBAR_DRITTLAND_B2B_DL']);
+const EU_PRAEFIXE_HILFSLISTE = Object.freeze(['AT', 'BE', 'BG', 'CY', 'CZ', 'DK', 'EE', 'EL', 'GR', 'ES', 'FI', 'FR', 'HR', 'HU', 'IE', 'IT', 'LT', 'LU', 'LV', 'MT', 'NL', 'PL', 'PT', 'RO', 'SE', 'SI', 'SK']);
 export const KORREKTUR_ARTEN = Object.freeze(['korrektur', 'storno', 'gutschrift_erteilt', 'gutschrift_erhalten']);
 export const KLEINBETRAG_GRENZE_CENT = GRENZEN.KLEINBETRAG.wert_cent; // § 33 UStDV: Gesamtbetrag bis 250 EUR (ustdv-33.md), Wert aus tabellen.js
 export const BELEG_BETRAG_MAX_CENT = 1000000000; // 10 Mio EUR je Beleg (Konzept E1); die Firestore-Regeln lassen das Doppelte zu (Gegenprüfung M3, M6)
@@ -299,7 +301,12 @@ export function normalisiereEingabe(eingabe, kontext) {
       statusHinweise = (v.hinweise || []).filter((h) => h !== 'W_15A_HINWEIS'); // § 15a: nur für Anlagegüter über 1.000 EUR Vorsteuer (nicht berechnet)
     }
   }
-  const wahl = typeof e.steuerwahl === 'string' ? e.steuerwahl : null;
+  // TR-ausland-007: positionsweise steuerwahl. Der Beleg trägt genau einen Steuerfall; verschiedene Wahlen je Position werden nicht still
+  // vereinheitlicht, sondern der Beleg bleibt UNBEKANNT (W_POSITION_STEUERWAHL_ABWEICHEND). Haben alle Positionen dieselbe Wahl, gilt sie.
+  const belegWahl = typeof e.steuerwahl === 'string' ? e.steuerwahl : null;
+  const posWahlen = Array.isArray(e.positionen) ? e.positionen.filter(istObjekt).map((p) => (nichtLeer(p.steuerwahl) ? p.steuerwahl : belegWahl)) : [];
+  const positionsWahlAbweichend = new Set(posWahlen).size > 1;
+  const wahl = belegWahl !== null ? belegWahl : (posWahlen.length && !positionsWahlAbweichend && posWahlen[0] !== null ? posWahlen[0] : null);
   let steuerfall = null;
   let herkunft = e.steuerfall_herkunft || (e.herkunft === 'ki' ? 'ki' : e.herkunft === 'plattform' ? 'plattform_setting' : e.herkunft === 'import' ? 'import' : 'nutzer');
   let sperrgrund = null;
@@ -328,6 +335,11 @@ export function normalisiereEingabe(eingabe, kontext) {
     herkunft = herkunft === 'nutzer' ? 'beleg' : herkunft;
   } else if (unbekanntGrund) {
     steuerfall = 'UNBEKANNT';
+  } else if (positionsWahlAbweichend) {
+    steuerfall = 'UNBEKANNT';
+    unbekanntGrund = 'steuerfall_nicht_gewaehlt';
+    unbekanntDetail = 'positionsweise_steuerwahl';
+    unsicherheiten.push(hin('W_POSITION_STEUERWAHL_ABWEICHEND', 'positionen', 'Positionen mit verschiedener Steuerwahl: Beleg aufteilen oder eine Wahl treffen'));
   } else if (e.herkunft === 'ki' && e.bestaetigt !== true) {
     // TR-integration-014 (Konzept 04 Z. 901, Standardentscheidung 2): Eine KI-Steuerwahl ist nur ein Vorschlag. Ohne Bestätigung durch den Nutzer
     // (bestaetigt: true oder herkunft 'nutzer' nach dem (j/n)-Dialog) bleibt der Steuerfall UNBEKANNT, der Beleg steht nicht in den Summen.
@@ -381,6 +393,38 @@ export function normalisiereEingabe(eingabe, kontext) {
     if (richtung === 'ausgang') steuerfall = satzBp === SATZ_ERMAESSIGT_BP ? 'A_INLAND_7' : satzBp === SATZ_REGEL_BP ? 'A_INLAND_19' : 'UNBEKANNT';
     else steuerfall = satzBp === SATZ_ERMAESSIGT_BP || satzBp === SATZ_REGEL_BP ? 'E_INLAND_VORSTEUER' : 'UNBEKANNT';
     if (steuerfall === 'UNBEKANNT') { unbekanntGrund = 'satz_fehlt'; }
+  }
+  // --- Auslandsbezug (TR-ausland-001, -006, -009, -013) ---
+  // Hilfsliste der EU-Präfixe (Konfidenz C, übernommen aus der USt-IdNr.-Erkennung der App; keine amtliche Liste im Repo, siehe EU_LAENDER).
+  // Sie dient nur der Kennzeichnung eines Widerspruchs, nie der Berechnung.
+  const gp = istObjekt(e.gegenpartei) ? e.gegenpartei : null;
+  const gpLand = gp && nichtLeer(gp.land) ? gp.land.trim().toUpperCase() : null;
+  const gpUstId = gp && nichtLeer(gp.ust_id) ? gp.ust_id.replace(/[\s.\-]/g, '').toUpperCase() : null;
+  const hatUstAusweis = (istObjekt(e.betrag) && e.betrag.art === 'ust_ausgewiesen' && istCent(e.betrag.ust_cent) && e.betrag.ust_cent > 0)
+    || (Array.isArray(e.positionen) && e.positionen.some((p) => istObjekt(p) && istCent(p.ust_cent) && p.ust_cent > 0));
+  if (!istKorrektur && steuerfall === 'E_INLAND_VORSTEUER' && gpLand && gpLand !== 'DE' && !(gpUstId && /^DE\d{9}$/.test(gpUstId))) {
+    // Vorsteuer nach § 15 Abs. 1 Nr. 1 UStG nur aus gesetzlich geschuldeter deutscher Steuer: ein Beleg mit Gegenpartei im Ausland ohne
+    // deutsche USt-IdNr. und ausgewiesene Steuer wird nie als Inlandsvorsteuer gerechnet (Kz 66), der Nutzer wählt Reverse Charge oder bestätigt.
+    steuerfall = 'UNBEKANNT';
+    unbekanntGrund = 'reverse_charge_herkunft';
+    unbekanntDetail = 'ausland_mit_inlandssteuer';
+    unsicherheiten.push(hin('W_AUSLAND_OHNE_UST', 'gegenpartei.land', `Gegenpartei im Ausland (${gpLand}): Inlandssteuer nicht gerechnet, Reverse Charge oder Steuerausweis klären`));
+    herkunft = herkunft === 'nutzer' ? 'beleg' : herkunft;
+  }
+  if (AUSLANDS_STEUERFAELLE.includes(steuerfall)) {
+    const euFall = steuerfall === 'E_13B_EU_DL' || steuerfall === 'A_NICHT_STEUERBAR_EU_B2B_DL';
+    if (!gpLand) unsicherheiten.push(hin('W_GEGENPARTEI_LAND_FEHLT', 'gegenpartei.land', 'Land der Gegenpartei fehlt (Pflichtfeld des Steuerfalls)'));
+    else if (gpLand === 'DE') unsicherheiten.push(hin('W_GEGENPARTEI_LAND_WIDERSPRUCH', 'gegenpartei.land', 'Land DE passt nicht zu einem Auslands-Steuerfall'));
+    else if (gpLand === 'XI') unsicherheiten.push(hin('W_NORDIRLAND_UNGEKLAERT', 'gegenpartei.land', 'Nordirland (XI): Waren Mitgliedstaat-ähnlich, Leistungen Drittland; Konfidenz C, die App erstellt dort keine Rechnung ohne USt'));
+    else if (euFall !== EU_PRAEFIXE_HILFSLISTE.includes(gpLand)) unsicherheiten.push(hin('W_GEGENPARTEI_LAND_WIDERSPRUCH', 'gegenpartei.land', `Land ${gpLand} passt nicht zur gewählten ${euFall ? 'EU' : 'Drittland'}-Behandlung (Konfidenz C)`));
+    if (hatUstAusweis) unsicherheiten.push(hin('W_UST_AUSGEWIESEN_14C', 'betrag', 'USt auf der Rechnung ausgewiesen: § 14c Abs. 1 UStG prüfen, die Steuer wird bei diesem Steuerfall nicht gerechnet'));
+    // K10 (06): EU-Kunde ohne USt-IdNr. ist Stufe 4 (gesperrt)
+    if (steuerfall === 'A_NICHT_STEUERBAR_EU_B2B_DL' && !gpUstId) {
+      steuerfall = 'SPERRE_STUFE4';
+      sperrgrund = 'leistungsort_sonderregeln';
+      unsicherheiten.push(hin('W_EU_KUNDE_OHNE_UST_ID', 'gegenpartei.ust_id', 'EU-Kunde ohne USt-IdNr.: Leistungsort nicht nach § 3a Abs. 2 bestimmbar (Standard K10)'));
+      herkunft = herkunft === 'nutzer' ? 'beleg' : herkunft;
+    }
   }
   if (steuerfall === 'E_INLAND_OHNE_VORSTEUER') {
     const g = e.ohne_ust_grund || e.grund || (status === 'ku' ? 'eigener_kleinunternehmer_status' : null);
@@ -666,13 +710,14 @@ export function validiereBeleg(beleg, optionen) {
   if (s.richtung === 'ausgang' && !kor && !nurSumme) {
     if (!istDatum(s.rechnungsdatum)) b('PF_RECHNUNGSDATUM', 'steuer.rechnungsdatum', 'Rechnungsdatum fehlt');
     if (!istObjekt(s.leistung)) b('PF_LEISTUNG', 'steuer.leistung', 'Leistungszeitpunkt fehlt');
-    if (s.steuerfall !== 'UNBEKANNT' && s.steuerfall !== 'SPERRE_STUFE4' && s.steuerfall !== 'A_KU' && pos.some((p) => p.satz_bp === null || p.satz_bp === undefined)) b('PF_SATZ', 'steuer.positionen', 'mindestens eine Position ohne Satz');
+    if (s.steuerfall !== 'UNBEKANNT' && s.steuerfall !== 'SPERRE_STUFE4' && s.steuerfall !== 'A_KU' && s.steuerfall !== 'A_NICHT_STEUERBAR_EU_B2B_DL' && s.steuerfall !== 'A_NICHT_STEUERBAR_DRITTLAND_B2B_DL' && pos.some((p) => istObjekt(p) && (p.satz_bp === null || p.satz_bp === undefined))) b('PF_SATZ', 'steuer.positionen', 'mindestens eine Position ohne Satz');
   }
   if (s.richtung === 'eingang' && !kor && !nurSumme) {
     if (!istDatum(s.rechnungsdatum)) w('W_RECHNUNGSDATUM_FEHLT', 'steuer.rechnungsdatum', 'Rechnungsdatum fehlt');
     if (istObjekt(sum) && istCent(sum.brutto_cent) && sum.brutto_cent <= 0 && s.unbekannt_grund !== 'netto_fehlt') b('PF_BETRAG', 'steuer.summe', 'Betrag muss größer 0 sein');
     if (s.steuerfall === 'UNBEKANNT') w('HN_STEUERFALL_UNBEKANNT', 'steuer.steuerfall', String(s.unbekannt_grund || ''));
   }
+  if (s.steuerfall !== 'SPERRE_STUFE4' && nichtLeer(s.sperrgrund)) w('W_SPERRGRUND_BEI_STEUERFALL', 'steuer.sperrgrund', 'Sperrgrund an einem gerechneten Steuerfall: Beleg wird nicht gerechnet (TR-ausland-014)');
   if (s.steuerfall === 'SPERRE_STUFE4' && !SPERRGRUENDE.includes(s.sperrgrund)) b('PF_SPERRGRUND', 'steuer.sperrgrund', 'Sperrgrund fehlt oder unbekannt');
   if (s.steuerfall === 'UNBEKANNT' && !nichtLeer(s.unbekannt_grund)) b('PF_UNBEKANNT_GRUND', 'steuer.unbekannt_grund', 'Grund fehlt');
   if (s.beleg_art === 'fa_zahlung' && !(istObjekt(s.fa) && FA_ARTEN.includes(s.fa.fa_art))) w('FA_ART_FEHLT', 'steuer.fa.fa_art', 'Art der Finanzamt-Zahlung wählen (K16)');
@@ -701,9 +746,10 @@ export function legacyFelder(beleg) {
   const sum = istObjekt(s.summe) ? s.summe : { netto_cent: 0, brutto_cent: 0 };
   const sf = s.steuerfall;
   let mwst = 'keine';
-  const ersterSatz = Array.isArray(s.positionen) && s.positionen.length ? s.positionen[0].satz_bp : null;
+  const posn = (Array.isArray(s.positionen) ? s.positionen : []).filter(istObjekt); // Härtung: null als Element
+  const ersterSatz = posn.length ? posn[0].satz_bp : null;
   if (sf === 'A_INLAND_19' || sf === 'E_INLAND_VORSTEUER' || sf === 'A_INLAND_7') {
-    const alle = (s.positionen || []).map((p) => p.satz_bp);
+    const alle = posn.map((p) => p.satz_bp);
     const gleich = alle.every((x) => x === ersterSatz);
     mwst = gleich ? (ersterSatz === SATZ_ERMAESSIGT_BP ? '7' : ersterSatz === SATZ_REGEL_BP ? '19' : 'keine') : '19';
   } else if (sf === 'A_INLAND_0_PV') mwst = '0';
@@ -716,7 +762,7 @@ export function legacyFelder(beleg) {
     else if (art === 'sonstig') typ = s.richtung === 'ausgang' ? 'mahnung_ausgehend' : 'rechnung_eingehend';
     else typ = s.richtung === 'ausgang' ? 'rechnung_ausgehend' : 'rechnung_eingehend';
   }
-  const zahlungen = (Array.isArray(s.zahlungen) ? s.zahlungen : []).filter((z) => z.status !== 'rueckgaengig' && istDatum(z.datum) && istCent(z.betrag_cent));
+  const zahlungen = (Array.isArray(s.zahlungen) ? s.zahlungen : []).filter((z) => istObjekt(z) && z.status !== 'rueckgaengig' && istDatum(z.datum) && istCent(z.betrag_cent));
   let gezahlt = 0;
   let letzte = null;
   for (const z of zahlungen) { gezahlt += z.betrag_cent + (istCent(z.skonto_cent) ? z.skonto_cent : 0) + (istCent(z.rabatt_cent) ? z.rabatt_cent : 0); if (!letzte || z.datum > letzte) letzte = z.datum; }
@@ -824,6 +870,10 @@ export function normalisiereAlt(alt, profil, optionen) {
   } else if (mwst === 'keine') {
     if (status === 'ku') steuerfall = richtung === 'ausgang' ? 'A_KU' : 'E_INLAND_OHNE_VORSTEUER';
     else if (status === 'regel' && richtung === 'eingang' && kategorie && KATEGORIEN_FINANZAMT.includes(kategorie)) { steuerfall = 'FA_ZAHLUNG'; fa = { fa_art: null, periode: null }; hinweise.push('FA_ART_FEHLT'); }
+    else if (status === 'regel' && richtung === 'eingang' && istPlattform && kategorie && KATEGORIEN_OHNE_VORSTEUER.includes(kategorie)) {
+      // TR-ausland-015 (Standard K11): Gebühren von Plattformen (Stripe, PayPal, Shopify ...) nach Rechnungsinhalt, nicht als steuerfrei geraten
+      steuerfall = 'UNBEKANNT'; unbekanntGrund = 'mwst_keine_mehrdeutig'; unbekanntDetail = 'plattformgebuehr';
+    }
     else if (status === 'regel' && richtung === 'eingang' && kategorie && KATEGORIEN_OHNE_VORSTEUER.includes(kategorie)) steuerfall = 'E_INLAND_OHNE_VORSTEUER';
     else { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'mwst_keine_mehrdeutig'; unbekanntDetail = status === null ? 'ohne_profil' : 'keine_regel'; }
   } else if (mwst === '0') { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'mwst_keine_mehrdeutig'; unbekanntDetail = 'mwst_0'; }
@@ -849,6 +899,13 @@ export function normalisiereAlt(alt, profil, optionen) {
         if ((abw < 0 ? 0 - abw : abw) <= 2 && nettoAlt >= 0 && nettoAlt <= brutto) netto = nettoAlt;
         else { netto = brutto - ustRechn; nettoBerechnet = true; hinweise.push('NETTO_BRUTTO_UNPLAUSIBEL'); }
       } else { netto = brutto - ustRechn; nettoBerechnet = true; }
+      // TR-ausland-002: Netto gleich Brutto bei Satz 19 oder 7 (keine Steuer auf der Rechnung, zum Beispiel Auslandsrechnung) widerspricht dem
+      // Satz: keine erfundene Vorsteuer, der Beleg bleibt UNBEKANNT (Nutzer klärt)
+      if (istCent(nettoAlt) && nettoAlt === brutto && brutto > 0 && ustRechn > 0 && steuerfall === 'E_INLAND_VORSTEUER') {
+        steuerfall = 'UNBEKANNT'; unbekanntGrund = 'mwst_keine_mehrdeutig'; unbekanntDetail = 'netto_gleich_brutto_mit_satz'; satzBp = null;
+        nettoBerechnet = false;
+        netto = brutto;
+      }
       o.satz_bp = satzBp;
       o.netto_cent = netto;
       o.ust_cent = brutto - netto;
@@ -901,6 +958,12 @@ export function normalisiereAlt(alt, profil, optionen) {
 
   const beleg = { schema_version: 2, id, steuer };
   Object.assign(beleg, legacyFelder(beleg));
+  // TR-integration-002: Bei UNBEKANNT bleiben die gültigen Altwerte (mwst_satz, betrag_netto) in den Legacy-Feldern stehen, sonst würde ein
+  // späteres Rückschreiben (Konzept 3.8) 7, 0 oder reverse_charge zu 'keine' und das Netto zum Brutto verfälschen.
+  if (steuerfall === 'UNBEKANNT' && !privat) {
+    if (mwst !== null && ['19', '7', '0', 'keine', 'reverse_charge'].includes(mwst)) beleg.mwst_satz = mwst;
+    if (istCent(nettoAlt) && istCent(brutto) && nettoAlt >= 0 && nettoAlt <= brutto) beleg.betrag_netto = nettoAlt / 100;
+  }
   if (belegArt === 'storno' && steuer.wirkungslos !== true) beleg.typ = 'storno';
   if (kategorie) beleg.kategorie = kategorie;
   return beleg;

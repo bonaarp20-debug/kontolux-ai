@@ -19,7 +19,7 @@
 // alles andere wird mit Hinweis HN_NOCH_NICHT_UNTERSTUETZT ausgeschlossen, nie stillschweigend falsch gerechnet.
 
 import { istCent, ustAusBrutto, teile, mulDivRund } from './geld.js';
-import { istDatum, jahrVon, periodenEnde, periodenArt, quartalVon, frist10Tag, zehnTageRegelVorjahr } from './daten.js';
+import { istDatum, jahrVon, addiereMonate, monatsende, periodenEnde, periodenArt, quartalVon, frist10Tag, zehnTageRegelVorjahr } from './daten.js';
 import { voranmeldungsperiodeFuer, voranmeldungAm, versteuerungAm, statusAm, statusFuerAusgangsumsatz } from './steuerprofil.js';
 import { regelNachId, KATEGORIEN, GRENZEN, USTVA_ZEILEN, EUER_ZEILEN, STEUERSAETZE, BELEG_ARTEN, KORREKTUR_GRUENDE, basisKzFuerSatz } from './tabellen.js';
 import { KORREKTUR_ARTEN } from './beleg.js';
@@ -368,6 +368,34 @@ function nichtUnterstuetzt(s) {
   return null;
 }
 
+// § 13b UStG: Entstehung der Steuer beim Leistungsempfänger (ustg-13b.md). Liefert die Tage, an denen Steuer entsteht (ein Tag je Anlass):
+//  Abs. 1 (EU-Dienstleister): mit Ablauf des Voranmeldungszeitraums der Leistung (Tag leistung.bis).
+//  Abs. 2 Nr. 1 (Drittland): mit Ausstellung der Rechnung, spätestens mit Ablauf des der Leistung folgenden Kalendermonats.
+//  Abs. 3: Dauerleistung über mehr als ein Jahr: spätestens mit Ablauf jedes Kalenderjahres, in dem sie erbracht wird.
+//  Abs. 4 S. 2: Entgelt vor der Leistung: im Voranmeldungszeitraum der Vereinnahmung, soweit gezahlt.
+function b13bEntstehung(s, sf) {
+  if (!istObjekt(s.leistung) || !istDatum(s.leistung.bis)) return [];
+  const bis = s.leistung.bis;
+  const von = istDatum(s.leistung.von) && s.leistung.von <= bis ? s.leistung.von : bis;
+  const daten = [];
+  const netto = istObjekt(s.summe) && istCent(s.summe.netto_cent) ? s.summe.netto_cent : 0;
+  let vorab = 0;
+  for (const z of aktiveZahlungen(s)) {
+    if (z.datum < bis) { daten.push(z.datum); vorab += z.betrag_cent; }
+  }
+  const rest = netto <= 0 || vorab < netto;
+  if (rest) {
+    let d0 = bis;
+    if (sf === 'E_13B_DRITTLAND_DL') {
+      const spaet = monatsende(addiereMonate(bis, 1));
+      d0 = istDatum(s.rechnungsdatum) && s.rechnungsdatum < spaet ? s.rechnungsdatum : spaet;
+    }
+    daten.push(d0);
+    if (bis >= addiereMonate(von, 12)) for (let j = jahrVon(von); j < jahrVon(bis); j++) daten.push(`${String(j).padStart(4, '0')}-12-31`);
+  }
+  return daten.sort();
+}
+
 // ---------------------------------------------------------------------------------------------
 // belegWirkungen
 // optionen: { originale: Map id -> beleg (für Korrekturen), originalPerioden: Map id -> 'JJJJ-Qn'/'JJJJ-MM', stichtag: 'JJJJ-MM-TT' (heute, für W_ZAHLUNG_ZUKUNFT) }
@@ -401,7 +429,9 @@ export function belegWirkungen(beleg, profil, optionen) {
     return [mk(ctx, { welt: 'ust', periode: datum ? ustPeriode(profil, datum, hinweise) : null, datum_wirk: datum, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: nu.grund })];
   }
   try {
-    if (sf === 'SPERRE_STUFE4') {
+    if (sf === 'SPERRE_STUFE4' || (typeof s.sperrgrund === 'string' && s.sperrgrund !== '' && sf !== 'FA_ZAHLUNG')) {
+      // TR-ausland-014: ein gesetzter Sperrgrund sperrt den Beleg auch an einem sonst gerechneten Steuerfall (W_SPERRGRUND_BEI_STEUERFALL)
+      if (sf !== 'SPERRE_STUFE4' && !hinweise.includes('W_SPERRGRUND_BEI_STEUERFALL')) hinweise.push('W_SPERRGRUND_BEI_STEUERFALL');
       ctx.beleg_status = 'ausgeschlossen';
       const per = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? ustPeriode(profil, s.leistung.bis, hinweise) : null;
       out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: s.leistung ? s.leistung.bis : null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: s.sperrgrund || null }));
@@ -422,7 +452,22 @@ export function belegWirkungen(beleg, profil, optionen) {
       ctx.beleg_status = 'ausgeschlossen';
       hinweise.push('HN_NOCH_NICHT_UNTERSTUETZT');
       const datum = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null;
-      out.push(mk(ctx, { welt: 'ust', periode: datum ? ustPeriode(profil, datum, hinweise) : null, datum_wirk: datum, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: sf }));
+      // TR-ausland-008: Entstehungszeitpunkt der Steuer des Leistungsempfängers (§ 13b Abs. 1 bis 4 UStG), sonst Leistungsende
+      const daten = sf === 'E_13B_EU_DL' || sf === 'E_13B_DRITTLAND_DL' ? b13bEntstehung(s, sf) : [];
+      if (daten.length) {
+        const gesehen = new Set();
+        for (const d of daten) {
+          const per = ustPeriode(profil, d, hinweise);
+          if (gesehen.has(per)) continue;
+          gesehen.add(per);
+          out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: d, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: sf }));
+        }
+      } else out.push(mk(ctx, { welt: 'ust', periode: datum ? ustPeriode(profil, datum, hinweise) : null, datum_wirk: datum, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: sf }));
+      // TR-ausland-012: Die Betriebsausgabe bzw. Einnahme hängt nicht an der USt-Einordnung (Anleitung Anlage EÜR): bezahlte Beträge stehen in der EÜR
+      // als unsicherer Betrag (wie UNBEKANNT, R-EUER-35), nicht gar nicht
+      for (const z of aktiveZahlungen(s)) {
+        out.push(mk(ctx, { welt: 'euer', periode: String(jahrVon(z.datum)), datum_wirk: z.datum, kz: null, betrag_cent: z.betrag_cent, netto_cent: z.betrag_cent, rolle: s.richtung === 'ausgang' ? 'einnahme' : 'ausgabe', spalte: s.richtung === 'ausgang' ? 'einnahme' : 'ausgabe', status: 'unbekannt', regel_id: 'R-EUER-35', unsicher: true, ereignis_id: z.id }));
+      }
     } else if (sf === 'FA_ZAHLUNG') {
       faWirkungen(s, profil, ctx, out);
     } else if (KORREKTUR_ARTEN.includes(s.beleg_art)) {
@@ -837,6 +882,7 @@ function faWirkungen(s, profil, ctx, out) {
     let regel = 'R-EUER-16';
     if (art === 'ust') { kz = 186; regel = 'R-EUER-16'; }
     else if (art === 'erstattung_ust') { kz = 141; rolle = 'fa_erstattung'; spalte = 'einnahme'; regel = 'R-EUER-05'; }
+    else if (art === 'erstattung_nebenleistung') { kz = 103; rolle = 'fa_erstattung'; spalte = 'einnahme'; regel = 'R-EUER-05'; } // TR-euer-010: erstattete Zinsen/Verspätungs-/Säumniszuschläge: Betriebseinnahme Zeile 16 (Kz 103), Anleitung Anlage EÜR 2026
     else if (art === 'ust_zinsen') { kz = 234; regel = 'R-EUER-14'; }
     else if (art === 'ust_zuschlag') { kz = 183; regel = 'R-EUER-17'; }
     else if (art === 'est_nicht_abziehbar') continue; // Privatentnahme, nicht in der EÜR

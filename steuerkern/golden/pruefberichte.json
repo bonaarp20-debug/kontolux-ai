@@ -1,7 +1,7 @@
 {
  "format": 1,
  "art": "pruefberichte",
- "kern_version": "2026.11.13-5",
+ "kern_version": "2026.11.13-6",
  "quelle": "docs/regelbesteuerung/07-*.md und 08-gegenpruefung-phase1.md: Schlüsselzahlen von Hand, Rest Kern-Ausgabe",
  "vektoren": [
   {
@@ -1363,7 +1363,6 @@
         "unvollstaendig": true,
         "warnungen": [],
         "hinweise": [
-         "HN_KZ_JAHR",
          "HN_NOCH_NICHT_UNTERSTUETZT"
         ],
         "ausgeschlossene": [
@@ -1571,9 +1570,7 @@
         },
         "unvollstaendig": false,
         "warnungen": [],
-        "hinweise": [
-         "HN_KZ_JAHR"
-        ],
+        "hinweise": [],
         "ausgeschlossene": []
        }
       ],

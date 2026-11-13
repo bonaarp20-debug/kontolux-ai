@@ -145,6 +145,28 @@ export const USTVA_ZEILEN = frieren({
       rundungsrichtung: luecke('Die Richtung der Rundung der Bemessungsgrundlage steht in keiner amtlichen Quelle (K4, Messung L11). Standard laut 06: abschneiden Richtung Null.'),
     },
   },
+  // VORLÄUFIG (13.11.2026, auf Wunsch von Jona): Übernahme der Zeilen und Kennzahlen 2026 als Platzhalter für 2027, damit der Kern ab
+  // 01.01.2027 rechnen kann. NICHT amtlich: der Vordruck USt 1 A 2027 liegt nicht vor (BMF veröffentlicht üblicherweise im Dezember).
+  // Wenn sich Zeilen oder Kennzahlen ändern, wären Zahlenliste und Zeilenangaben falsch. Ersetzen, sobald die amtliche Quelle da ist
+  // (docs/regelbesteuerung/13-testrunde/vorlage-tabellen-2027.md). Die Oberfläche muss 'vorlaeufig' sichtbar machen (Hinweis, kein "amtlich").
+  '2027': {
+    jahr: 2027,
+    zeilen: USTVA_2026,
+    dauerfrist_antrag: USTVA_1H_2026,
+    quelle: 'VORLÄUFIG, nicht amtlich: Übernahme der Zeilen und Kennzahlen aus dem Vordruck USt 1 A 2026 (BMF 29.12.2025). Der Vordruck 2027 liegt nicht vor.',
+    abruf: null,
+    gueltig_von: '2027-01-01',
+    gueltig_bis: '2027-12-31',
+    konfidenz: 'E',
+    vorlaeufig: true,
+    hinweis: 'Platzhalter aus 2026; vor Nutzung gegen den amtlichen Vordruck 2027 prüfen.',
+    format: {
+      bemessungsgrundlage: 'nur volle Euro (wie 2026, nicht für 2027 bestätigt)',
+      steuer_und_vorsteuer: 'stets auch Centbeträge (wie 2026, nicht für 2027 bestätigt)',
+      negative_betraege: 'mit Minuszeichen kennzeichnen (wie 2026, nicht für 2027 bestätigt)',
+      rundungsrichtung: luecke('Die Richtung der Rundung der Bemessungsgrundlage steht in keiner amtlichen Quelle (K4). Standard laut 06: abschneiden Richtung Null.'),
+    },
+  },
   '2025': luecke('Vordruck USt 1 A 2025 (BMF 09.12.2024) liegt nicht im Repo (INDEX L6); nur ELSTER-Hilfetext elster-hilfe-ustva-2025.md. Für berichtigte Anmeldungen 2025 vor Nutzung beschaffen.'),
 });
 
@@ -244,6 +266,19 @@ export const EUER_ZEILEN = frieren({
     gueltig_von: '2026-01-01',
     gueltig_bis: '2026-12-31',
     konfidenz: 'A',
+  },
+  // VORLÄUFIG (13.11.2026, auf Wunsch von Jona): Übernahme der Zeilen 2026 als Platzhalter für 2027. Die Anlage EÜR 2027 liegt nicht vor
+  // (üblich: August/September des Jahres). Nicht amtlich; ersetzen, sobald die Quelle da ist (vorlage-tabellen-2027.md).
+  '2027': {
+    jahr: 2027,
+    zeilen: EUER_ZEILEN_LISTE.map((r) => ({ kz: r.kz, zeile: r.zeile_2026, bez: r.bez, quelle: 'VORLÄUFIG: Zeile aus Anlage EÜR 2026 übernommen, 2027 nicht bestätigt', konfidenz: 'E', spalte: r.spalte || null, hinweis: r.hinweis || null, stufe: r.stufe || null })),
+    quelle: 'VORLÄUFIG, nicht amtlich: Übernahme der Zeilen aus der Anlage EÜR 2026 (BMF 01.09.2026). Die Anlage EÜR 2027 liegt nicht vor.',
+    abruf: null,
+    gueltig_von: '2027-01-01',
+    gueltig_bis: '2027-12-31',
+    konfidenz: 'E',
+    vorlaeufig: true,
+    hinweis: 'Platzhalter aus 2026; vor Nutzung gegen die amtliche Anlage EÜR 2027 prüfen.',
   },
   '2025': {
     jahr: 2025,
@@ -388,7 +423,7 @@ export const BELEG_ARTEN = Object.freeze(['rechnung', 'kleinbetrag', 'anzahlung'
 
 export const KORREKTUR_GRUENDE = Object.freeze(['rueckabwicklung', 'leistung_nicht_erbracht', 'preisnachlass', 'skonto', 'bonus', 'uneinbringlich', 'geschenk_nachtraeglich', 'tippfehler_berichtigung', 'ust_falsch_ausgewiesen']);
 
-export const FA_ARTEN = Object.freeze(['ust', 'ust_zinsen', 'ust_zuschlag', 'est_nicht_abziehbar', 'erstattung_ust']);
+export const FA_ARTEN = Object.freeze(['ust', 'ust_zinsen', 'ust_zuschlag', 'est_nicht_abziehbar', 'erstattung_ust', 'erstattung_nebenleistung']);
 
 // Gründe für einen Statuswechsel im Zeitstrahl (Konzept 3.4).
 export const STATUS_GRUENDE = Object.freeze(['beginn', 'vorjahr_ueber_25k', 'laufend_ueber_100k', 'gruendung_ueber_25k', 'option_19_3', 'widerruf_option', 'freiwillig_wechsel', 'rueckwechsel_unter_grenze']);
@@ -1108,7 +1143,7 @@ export const REGEL_UMSETZUNG = Object.freeze({
   'R-13B-05': U('noch_nicht', NN3A), 'R-13B-06': U('noch_nicht', NN3A + ' EU_LAENDER ist leer, istEuLand liefert null.'), 'R-13B-07': U('noch_nicht', NN3A),
   'R-13B-08': U('teilweise', 'Sperrgrund ig_erwerb/einfuhr nur per Nutzerwahl (UI), keine Erkennung im Kern.'),
   'R-13B-09': U('teilweise', 'Sperrgrund 13b_inland (SPERRE_STUFE4) nur per Nutzerwahl, keine Stichwort-Erkennung im Kern.'), 'R-13B-10': U('noch_nicht', NN3A),
-  'R-ZP-12': U('noch_nicht', NN3A), 'R-ZP-13': U('noch_nicht', NN3A), 'R-ZP-14': U('noch_nicht', NN3A), 'R-ZP-15': U('noch_nicht', NN3A + ' Hinweis HN-13B-DAUER existiert nicht.'),
+  'R-ZP-12': U('noch_nicht', NN3A + ' Der Entstehungszeitraum der ausgeschlossenen Belege folgt bereits § 13b Abs. 1 bis 4 (Anzeige, TR-ausland-008).'), 'R-ZP-13': U('noch_nicht', NN3A), 'R-ZP-14': U('noch_nicht', NN3A), 'R-ZP-15': U('noch_nicht', NN3A + ' Hinweis HN-13B-DAUER existiert nicht; Anzeige der Dauerleistung zum Ende jedes Kalenderjahres (§ 13b Abs. 3).'),
   'R-KZ-30': U('noch_nicht', NN3A), 'R-KZ-32': U('noch_nicht', NN3A), 'R-KZ-41': U('noch_nicht', NN3A), 'R-KZ-35': U('noch_nicht', NN3B), 'R-KZ-36': U('noch_nicht', NN3B),
   'R-KZ-51': U('noch_nicht', 'Stufe 2: Kz 50 (Uneinbringlichkeit) wird nicht berechnet, Korrekturen mit Grund uneinbringlich werden ausgeschlossen; noch nicht umgesetzt.'),
   'R-KZ-52': U('noch_nicht', 'Stufe 2: Kz 37 (Uneinbringlichkeit) wird nicht berechnet; noch nicht umgesetzt.'),

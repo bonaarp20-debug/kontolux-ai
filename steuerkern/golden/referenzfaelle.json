@@ -1,7 +1,7 @@
 {
  "format": 1,
  "art": "auswertung",
- "kern_version": "2026.11.13-5",
+ "kern_version": "2026.11.13-6",
  "quelle": "docs/regelbesteuerung/05-testfaelle.json (112 Referenzfälle, mit scripts/test-steuerkern-golden-korrekturen.json); Ausgabe = Kern, vom Golden-Runner gegen die Fixture geprüft",
  "ohne_vektor": {
   "gesamt_faelle": 112,
@@ -2175,9 +2175,7 @@
         },
         "unvollstaendig": false,
         "warnungen": [],
-        "hinweise": [
-         "HN_KZ_JAHR"
-        ],
+        "hinweise": [],
         "ausgeschlossene": []
        }
       ],
@@ -4625,9 +4623,7 @@
         },
         "unvollstaendig": false,
         "warnungen": [],
-        "hinweise": [
-         "HN_KZ_JAHR"
-        ],
+        "hinweise": [],
         "ausgeschlossene": []
        }
       ],
@@ -5500,9 +5496,7 @@
         },
         "unvollstaendig": false,
         "warnungen": [],
-        "hinweise": [
-         "HN_KZ_JAHR"
-        ],
+        "hinweise": [],
         "ausgeschlossene": []
        }
       ],
@@ -5861,9 +5855,7 @@
         },
         "unvollstaendig": false,
         "warnungen": [],
-        "hinweise": [
-         "HN_KZ_JAHR"
-        ],
+        "hinweise": [],
         "ausgeschlossene": []
        }
       ],
@@ -6364,7 +6356,6 @@
         "unvollstaendig": false,
         "warnungen": [],
         "hinweise": [
-         "HN_KZ_JAHR",
          "HN_RD_ELSTER",
          "HN_RD_SUMME"
         ],
@@ -7000,7 +6991,6 @@
          "W_LIQUIDITAET_DEZEMBER"
         ],
         "hinweise": [
-         "HN_KZ_JAHR",
          "W_LIQUIDITAET_DEZEMBER"
         ],
         "ausgeschlossene": []
@@ -7596,7 +7586,6 @@
          "W_STORNO_ABGESCHLOSSENER_ZEITRAUM"
         ],
         "hinweise": [
-         "HN_KZ_JAHR",
          "W_STORNO_ABGESCHLOSSENER_ZEITRAUM"
         ],
         "ausgeschlossene": []
@@ -8544,9 +8533,7 @@
         },
         "unvollstaendig": false,
         "warnungen": [],
-        "hinweise": [
-         "HN_KZ_JAHR"
-        ],
+        "hinweise": [],
         "ausgeschlossene": []
        }
       ],
@@ -12333,9 +12320,7 @@
         },
         "unvollstaendig": false,
         "warnungen": [],
-        "hinweise": [
-         "HN_KZ_JAHR"
-        ],
+        "hinweise": [],
         "ausgeschlossene": []
        }
       ],

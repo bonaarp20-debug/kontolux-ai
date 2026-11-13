@@ -12,3 +12,4 @@ export * from './wirkung.js';
 export * from './ustva.js';
 export * from './euer.js';
 export * from './auswertung.js';
+export * from './migration.js';

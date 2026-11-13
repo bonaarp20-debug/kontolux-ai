@@ -418,8 +418,13 @@ export function grenzpruefung(profil, werte, stichtag) {
     const sl = lf === null ? null : stufeFuer(lf, g, wa, null);
     const rang = { ok: 0, warnung: 1, ueberschritten: 2 };
     const stufen = [sv, sl].filter(Boolean);
-    const stufe = stufen.length ? stufen.reduce((a, c) => (rang[c] > rang[a] ? c : a), 'ok') : 'unbekannt';
+    // TR-ausland-010: § 3a Abs. 5 S. 3 verlangt beide Jahre. Fehlt ein Wert oder ist er ungültig (kein Cent-Wert), ist die Stufe unbekannt,
+    // außer ein bekannter Wert zeigt schon Warnung oder Überschreitung.
+    const luecke = vj === null || lf === null;
+    const hoechste = stufen.length ? stufen.reduce((a, c) => (rang[c] > rang[a] ? c : a), 'ok') : null;
+    const stufe = hoechste === 'ueberschritten' ? 'ueberschritten' : (luecke ? (hoechste === 'warnung' ? 'warnung' : 'unbekannt') : hoechste);
     const h = [];
+    if (luecke && stufe !== 'ueberschritten') h.push(w.oss_b2c_vorjahr_cent === undefined && w.oss_b2c_laufend_cent === undefined ? 'W_OSS_WERT_FEHLT' : 'W_OSS_WERT_FEHLT_ODER_UNGUELTIG');
     if (stufe === 'warnung') h.push('W_OSS_8000');
     if (stufe === 'ueberschritten') h.push('W_OSS_SPERRE');
     befunde.push({ id: 'L8', regel_id: 'R-LIM-04', stufe, vorjahr_cent: vj, laufend_cent: lf, grenze_cent: g, sperre: stufe === 'ueberschritten', hinweise: h });

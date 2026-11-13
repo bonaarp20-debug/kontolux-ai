@@ -85,14 +85,19 @@ const NICHT_BERECHNET_FEST = Object.freeze([
   { z: '30', kz: [46, 47] }, { z: '31', kz: [73, 74] }, { z: '32', kz: [84, 85] }, { z: '33', kz: [42] }, { z: '34', kz: [60] }, { z: '35', kz: [21] }, { z: '36', kz: [45] },
   { z: '39', kz: [61] }, { z: '40', kz: [62] }, { z: '41', kz: [67] }, { z: '42', kz: [63] }, { z: '43', kz: [59] }, { z: '51', kz: [50] }, { z: '52', kz: [37] },
 ]);
-function nichtBerechnet(tabelle, anzahlBelege, wechseljahr) {
+// TR-ausland-011: anzahl_belege je Zeile zählt nur die ausgeschlossenen Belege, die die Zeile betreffen können. Auslands-Steuerfälle mit
+// bekannten Kennzahlen betreffen nur ihre Zeilen; alle anderen (unbekannt, Sperre, Stufe 2) können jede Zeile betreffen.
+const KZ_JE_STEUERFALL = Object.freeze({
+  E_13B_EU_DL: [46, 47, 67], E_13B_DRITTLAND_DL: [84, 85, 67], A_NICHT_STEUERBAR_EU_B2B_DL: [21], A_NICHT_STEUERBAR_DRITTLAND_B2B_DL: [45],
+});
+function nichtBerechnet(tabelle, steuerfaelle, wechseljahr) {
   const basis = tabelle
     ? tabelle.zeilen.filter((r) => !ZEILEN_BERECHNET.includes(r.z) && (r.kz_basis !== null || r.kz_steuer !== null)).map((r) => ({ z: String(r.z), kz: [r.kz_basis, r.kz_steuer].filter((x) => x !== null), stufe: r.stufe || null }))
     : NICHT_BERECHNET_FEST.map((r) => ({ ...r, stufe: null }));
   return basis.map((r) => ({
     ...r,
     hinweis: 'wird von Kontolux nicht berechnet',
-    anzahl_belege: anzahlBelege,
+    anzahl_belege: steuerfaelle.filter((sf) => !Object.hasOwn(KZ_JE_STEUERFALL, sf) || KZ_JE_STEUERFALL[sf].some((k) => r.kz.includes(k))).length,
     ...(r.z === '23' ? { wechseljahr: wechseljahr === true, bez: wechseljahr === true ? 'Steuerfreie Kleinunternehmer-Umsätze bis zum Überschreiten der Grenze (Kz 48) sind nicht berechnet, bitte selbst eintragen' : 'Steuerfreie Umsätze ohne Vorsteuerabzug (Kz 48) sind nicht berechnet' } : {}),
   }));
 }
@@ -198,6 +203,8 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
 
   // --- Ausgeschlossene und unbekannte Belege (Stufe 4, nicht unterstützt, Unbekannt) ---
   const ausg = [];
+  const steuerfallVon = new Map();
+  for (const w of ws) if (w && w.beleg_id !== undefined && w.beleg_id !== null && !steuerfallVon.has(w.beleg_id)) steuerfallVon.set(w.beleg_id, w.steuerfall);
   const gesehen = new Set();
   for (const w of ws) {
     if (w.welt !== 'ust' || (w.status !== 'ausgeschlossen' && w.status !== 'unbekannt')) continue;
@@ -266,7 +273,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
     },
     unvollstaendig,
     ausgeschlossene: ausg,
-    nicht_berechnet: nichtBerechnet(tabelle, ausg.length, alle.includes('W_KU_GRENZE_UEBERSCHRITTEN')),
+    nicht_berechnet: nichtBerechnet(tabelle, ausg.map((a) => (a.beleg_id === null || a.beleg_id === undefined ? null : (steuerfallVon.get(a.beleg_id) || null))), alle.includes('W_KU_GRENZE_UEBERSCHRITTEN')),
     hinweise: alle,
     warnungen: alle.filter((c) => c.startsWith('W_')),
     frist,
