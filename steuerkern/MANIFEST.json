@@ -1,24 +1,24 @@
 {
-  "kern_version": "2026.11.13-7",
+  "kern_version": "2026.11.13-8",
   "dateien": {
-    "VERSION.js": "9069995c98ac322bafc32b046ed37f6d4ef6a5f0ccf16c68d2bdf0c77f59200a",
+    "VERSION.js": "7c782c57bf461da8fb9e8bdd598b7fc5f42616d97551cf03d7a7068f31349472",
     "auswertung.js": "573629de17a947e14c96bd328512c457eeeae3b140b4c91f8f19b20f9e9fb865",
     "beleg.js": "357e1d003ebed5d2f2a529efddfdeaf999230a789eb27b16d72ee5f9f2eb15eb",
     "daten.js": "d8d5dfbb4a9e26154e6186188f702bd6883a7beeed421a4f8822c10e19b47261",
     "euer.js": "b72e01f6d859610ff37b1483368a5e63ab0623d817b2826d1f2c2a063187eb98",
     "geld.js": "5088847eac9557f12b327656bf7625c450027045fd057eb9f00f5f95c9970f8c",
     "index.js": "baaeadce039f9a0a56dfb2abbc836e96de25a2f77d24ea76066c6b33e2750a06",
-    "migration.js": "ccbbe2e8dcee71c8a52745c95ece4d2385f7faa94af9295dc3089fbcac395cc6",
+    "migration.js": "bc4956f2c70f509b7ab8abf149387dbbb6cadb20d1ffc95bd2384aa18c987efd",
     "regeln-basis.js": "7d00a83387e05624861ec60c6f042fed429156c417bc9784f39dd9eb68f6b832",
     "steuerprofil.js": "f041ad687409ef0b7b3749a90b0f75460487ce625f3e90585f7ec8c387e8ae12",
     "tabellen.js": "9f5b7acc50a2ef9b8793b8102652bc1ff006f941c1401c965dd951648538665d",
     "ustva.js": "7939044bfe215d6d32f7618cd0c7565d795463c8cc9311fd83be5854ca56efb3",
     "wirkung.js": "5c889bc73a51ecf91cbecddc840a397afafac2a29d78b447b76759859cfaf096",
-    "golden/beleg-adapter.json": "3c9def66579f1ba683b4a785fd018b447eca96d33da975280c4ae61d0739e111",
-    "golden/pruefberichte.json": "fa63dee55138235d3a995534772628ee69d079d5986a71955460e3caf077e58d",
-    "golden/referenzfaelle.json": "9e5eb0b96a85e05dc3ec2443073f9ef765808cab967809dcd92287e79d3aa728"
+    "golden/beleg-adapter.json": "e7f25349187633c7a063d788035a5b94e721a6e5567c088925f18e92485252f7",
+    "golden/pruefberichte.json": "f86d816c75508737200fac5f506667e36b878ae56bcd9ba203d11fa3b7722520",
+    "golden/referenzfaelle.json": "2563518a3805cae9b0b9b154fe8d054d6903a8e83f2e0f3c45cb9aee5f507106"
   },
-  "erzeugt": "2026-11-13T18:40:30.924Z",
+  "erzeugt": "2026-11-13T20:15:00.992Z",
   "nur_app": [
     "schatten.js"
   ]

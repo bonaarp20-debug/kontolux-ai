@@ -12,7 +12,7 @@
 //   altbestand_grenze    Voranmeldungszeitraum ('JJJJ-Qn' oder 'JJJJ-MM'), ab dem Kontolux rechnet (3.8.4); davor Altbestand
 //   altwerte             { [Zeitraum]: Zahllast-Schätzwert v1 in Cent }; ohne Angabe keine Differenzliste
 //   altwerte_belege      { [Zeitraum]: { [beleg_id]: Cent } }: v1-Anteil je Beleg für die Liste der größten Abweichungen
-//   ku_angaben           { settings, kalender, erstes_jahr, vorher_ku, wechsel_datum, wechsel_grund, bestaetigt } (3.8.3)
+//   ku_angaben           { settings (Text oder Boolean), kalender (Boolean), lokal (localStorage, optional), erstes_jahr (Boolean oder Jahr), gruendungsjahr (optional), vorher_ku, wechsel_datum, wechsel_grund, bestaetigt } (3.8.3)
 //   kern_version         Text, wird im Plan und im Bericht vermerkt
 // Bericht ohne Namen und Texte: nur Zahlen, Codes und laufende Nummern (laufnr = Position in docsV1 ab 1).
 
@@ -44,14 +44,24 @@ function istPlattform(a) {
 // ---------------------------------------------------------------------------------------------
 // 3.8.3 Kleinunternehmer-Historie
 // ---------------------------------------------------------------------------------------------
+// Altformen (Bestand): profil/settings.kleinunternehmer ist Text wie 'Ja — ich zahle keine Umsatzsteuer' / 'Nein — ich weise Umsatzsteuer aus'
+// (Onboarding index.html 11500; resolveIstKleinunternehmer prüft startsWith('Ja') / startsWith('Nein') sowie 'ja', 'nein', 'true', 'false'),
+// profil/kalender.kleinunternehmer ist Boolean. Das Wort 'Ja'/'Nein' gilt nur als ganzes Wort am Anfang ('Jahr' ist keine Antwort).
 function kuWert(x) {
   if (x === true) return 'ku';
   if (x === false) return 'regel';
   if (typeof x !== 'string') return null;
   const t = x.trim().toLowerCase();
-  if (['ku', 'ja', 'true', '1', 'kleinunternehmer'].includes(t)) return 'ku';
-  if (['regel', 'nein', 'false', '0', 'regelbesteuert', 'regelbesteuerung'].includes(t)) return 'regel';
+  if (['ku', 'true', '1', 'kleinunternehmer'].includes(t) || /^ja(?![a-zäöüß0-9])/.test(t)) return 'ku';
+  if (['regel', 'false', '0', 'regelbesteuert', 'regelbesteuerung'].includes(t) || /^nein(?![a-zäöüß0-9])/.test(t)) return 'regel';
   return null;
+}
+
+// erstes_jahr ist im Bestand ein Boolean ('Ist das dein erstes Geschäftsjahr?'), kein Jahr (index.html 11543). Eine Jahreszahl (auch als Ziffern-Text)
+// gilt direkt. Bei Boolean zählt nur ein ausdrücklich genanntes gruendungsjahr (aus dem Steuerstatus-Dialog); sonst wird nie ein Jahr geraten.
+function jahrOk(v) {
+  const n = typeof v === 'string' && /^\d{4}$/.test(v.trim()) ? Number(v.trim()) : v;
+  return Number.isSafeInteger(n) && n >= 1990 && n <= 2100 ? n : null;
 }
 
 export function kuHistorieVorschlag(angaben) {
@@ -59,13 +69,15 @@ export function kuHistorieVorschlag(angaben) {
   const hinweise = [];
   const s = kuWert(a.settings);
   const k = kuWert(a.kalender);
+  const l = kuWert(a.lokal);
   const bestaetigt = a.bestaetigt === true;
   const aus = (verlauf, ok) => ({ status_verlauf: verlauf, bestaetigt, aktivierbar: ok && bestaetigt, modus: ok && bestaetigt ? 'bestaetigt' : 'schatten', vorjahre_unbestaetigt: !bestaetigt, hinweise });
-  if (s !== null && k !== null && s !== k) { hinweise.push('KU_WIDERSPRUCH_SPEICHERORTE'); return aus([], false); } // Audit F4: Auswahl erzwingen
-  const wert = s !== null ? s : k;
+  if (new Set([s, k, l].filter((x) => x !== null)).size > 1) { hinweise.push('KU_WIDERSPRUCH_SPEICHERORTE'); return aus([], false); } // Audit F4: Auswahl erzwingen
+  const wert = s !== null ? s : (k !== null ? k : l);
   if (wert === null) { hinweise.push('KU_ANGABE_FEHLT'); return aus([], false); }
-  const j = Number.isSafeInteger(a.erstes_jahr) && a.erstes_jahr >= 1990 && a.erstes_jahr <= 2100 ? a.erstes_jahr : null;
-  if (j === null) { hinweise.push('ERSTES_JAHR_FEHLT'); return aus([], false); }
+  const nurBoolean = typeof a.erstes_jahr === 'boolean';
+  const j = nurBoolean ? jahrOk(a.gruendungsjahr) : (a.erstes_jahr === undefined || a.erstes_jahr === null ? jahrOk(a.gruendungsjahr) : jahrOk(a.erstes_jahr));
+  if (j === null) { hinweise.push(nurBoolean ? 'ERSTES_JAHR_NUR_BOOLEAN' : 'ERSTES_JAHR_FEHLT'); return aus([], false); }
   const beginn = formatDatum(j, 1, 1);
   if (wert === 'ku') return aus([{ gueltig_ab: beginn, status: 'ku', grund: 'beginn' }], true);
   if (a.vorher_ku === true) {

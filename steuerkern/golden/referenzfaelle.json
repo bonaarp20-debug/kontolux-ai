@@ -1,7 +1,7 @@
 {
  "format": 1,
  "art": "auswertung",
- "kern_version": "2026.11.13-7",
+ "kern_version": "2026.11.13-8",
  "quelle": "docs/regelbesteuerung/05-testfaelle.json (112 Referenzfälle, mit scripts/test-steuerkern-golden-korrekturen.json); Ausgabe = Kern, vom Golden-Runner gegen die Fixture geprüft",
  "ohne_vektor": {
   "gesamt_faelle": 112,
