@@ -8,7 +8,9 @@
 //
 // Perioden: 'JJJJ-MM' (Monat), 'JJJJ-Qn' (Quartal), 'JJJJ' (Jahr).
 
-export const WOCHENTAGE = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So']; // ISO: Montag = 1
+import { GRENZEN } from './tabellen.js';
+
+export const WOCHENTAGE = Object.freeze(['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So']); // ISO: Montag = 1
 
 const RE_DATUM = /^(\d{4})-(\d{2})-(\d{2})$/;
 const RE_MONAT = /^(\d{4})-(0[1-9]|1[0-2])$/;
@@ -242,8 +244,8 @@ export function naechsterWerktag(datum, optionen) {
 export function frist10Tag(periode, dauerfrist, optionen) {
   const art = periodenArt(periode);
   if (art !== 'monat' && art !== 'quartal') throw new TypeError('periode muss ein Monat oder Quartal sein');
-  let gesetzlich = addiereTage(periodenEnde(periode), 10);
-  if (dauerfrist === true) gesetzlich = addiereMonate(gesetzlich, 1);
+  let gesetzlich = addiereTage(periodenEnde(periode), GRENZEN.FRIST_VORANMELDUNG_TAGE.wert); // § 18 Abs. 1 S. 1, 4 UStG
+  if (dauerfrist === true) gesetzlich = addiereMonate(gesetzlich, GRENZEN.FRIST_DAUERFRIST_MONATE.wert); // § 46 UStDV
   const faellig = naechsterWerktag(gesetzlich, optionen);
   const hinweise = [];
   const hatKalender = !!(optionen && typeof optionen.istFeiertag === 'function');
@@ -270,8 +272,9 @@ export function frist10Tag(periode, dauerfrist, optionen) {
 export function zehnTageRegelVorjahr(zahlungsdatum, faelligGesetzlich) {
   const [j, m, t] = pruefeDatum(zahlungsdatum, 'zahlungsdatum');
   const f = pruefeDatum(faelligGesetzlich, 'faelligGesetzlich');
-  const imFenster = m === 1 && t <= 10;
-  const faelligImFenster = f[0] === j && f[1] === 1 && f[2] <= 10;
+  const fenster = GRENZEN.ZEHN_TAGE_REGEL.wert; // BFH: kurze Zeit = bis zu zehn Tage (tabellen.js)
+  const imFenster = m === 1 && t <= fenster;
+  const faelligImFenster = f[0] === j && f[1] === 1 && f[2] <= fenster;
   return {
     vorjahr: imFenster && faelligImFenster,
     zahlung_im_fenster: imFenster,

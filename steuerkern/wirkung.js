@@ -21,7 +21,7 @@
 import { istCent, ustAusBrutto, teile, mulDivRund } from './geld.js';
 import { istDatum, jahrVon, periodenEnde, periodenArt, quartalVon, frist10Tag, zehnTageRegelVorjahr } from './daten.js';
 import { voranmeldungsperiodeFuer, voranmeldungAm, versteuerungAm, statusAm, statusFuerAusgangsumsatz } from './steuerprofil.js';
-import { regelNachId, KATEGORIEN, GRENZEN, USTVA_ZEILEN, EUER_ZEILEN, STEUERSAETZE, BELEG_ARTEN, KORREKTUR_GRUENDE } from './tabellen.js';
+import { regelNachId, KATEGORIEN, GRENZEN, USTVA_ZEILEN, EUER_ZEILEN, STEUERSAETZE, BELEG_ARTEN, KORREKTUR_GRUENDE, basisKzFuerSatz } from './tabellen.js';
 import { KORREKTUR_ARTEN } from './beleg.js';
 
 const istObjekt = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -165,7 +165,7 @@ function aktiveZahlungen(s) {
     .map((x) => x.z);
 }
 
-function basisKz(satzBp) { return satzBp === 1900 ? 81 : satzBp === 700 ? 86 : satzBp === 0 ? 87 : null; }
+const basisKz = basisKzFuerSatz; // Kz der Bemessungsgrundlage je Satz aus STEUERSAETZE (tabellen.js)
 
 // ---------------------------------------------------------------------------------------------
 // Beleg-Hinweise aus dem Inhalt des Belegs (Codes aus 05-testfaelle.md, Abschnitt 2)
@@ -699,7 +699,7 @@ function faWirkungen(s, profil, ctx, out) {
     else if (art === 'est_nicht_abziehbar') continue; // Privatentnahme, nicht in der EÜR
     let jahr = jahrVon(z.datum);
     const h = [];
-    if ((art === 'ust' || art === 'erstattung_ust') && (z.datum.slice(5, 7) === '01' && Number(z.datum.slice(8, 10)) <= 10)) h.push('W_10TAGE_HINWEIS');
+    if ((art === 'ust' || art === 'erstattung_ust') && (z.datum.slice(5, 7) === '01' && Number(z.datum.slice(8, 10)) <= GRENZEN.ZEHN_TAGE_REGEL.wert)) h.push('W_10TAGE_HINWEIS');
     if ((art === 'ust' || art === 'erstattung_ust') && typeof fa.periode === 'string' && (periodenArt(fa.periode) === 'monat' || periodenArt(fa.periode) === 'quartal')) {
       const dauer = voranmeldungAm(profil, periodenEnde(fa.periode)).dauerfrist === true;
       const fr = frist10Tag(fa.periode, dauer);

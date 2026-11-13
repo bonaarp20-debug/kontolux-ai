@@ -12,7 +12,7 @@ import { istCent, ustAusNetto, ustAusBrutto, teile } from './geld.js';
 import { istDatum, monatsende, monatsanfang, datumAusTagen, tageSeitEpoche, formatDatum, tageImMonat, wochentagNr } from './daten.js';
 import { statusAm, statusFuerAusgangsumsatz, vorsteuerAbziehbar } from './steuerprofil.js';
 import {
-  STEUERFAELLE, SPERRGRUENDE, BELEG_ARTEN, KORREKTUR_GRUENDE, FA_ARTEN, KATEGORIEN, STEUERSAETZE,
+  STEUERFAELLE, SPERRGRUENDE, BELEG_ARTEN, KORREKTUR_GRUENDE, FA_ARTEN, KATEGORIEN, STEUERSAETZE, GRENZEN, SATZ_REGEL_BP, SATZ_ERMAESSIGT_BP, SATZ_NULL_BP,
 } from './tabellen.js';
 
 const istObjekt = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -22,9 +22,9 @@ const hin = (code, feld, grund) => ({ code, feld: feld || null, grund: grund || 
 const satzGueltig = (x) => Number.isSafeInteger(x) && x >= 0 && x <= 10000;
 const SAETZE_ZULAESSIG = Object.freeze(STEUERSAETZE.map((x) => x.bp)); // 1900, 700, 0 (tabellen.js)
 
-export const SATZ_ID = Object.freeze({ inland_19: 1900, inland_7: 700, inland_0_pv: 0 });
+export const SATZ_ID = Object.freeze({ inland_19: SATZ_REGEL_BP, inland_7: SATZ_ERMAESSIGT_BP, inland_0_pv: SATZ_NULL_BP });
 export const KORREKTUR_ARTEN = Object.freeze(['korrektur', 'storno', 'gutschrift_erteilt', 'gutschrift_erhalten']);
-export const KLEINBETRAG_GRENZE_CENT = 25000; // § 33 UStDV: Gesamtbetrag bis 250 EUR (ustdv-33.md)
+export const KLEINBETRAG_GRENZE_CENT = GRENZEN.KLEINBETRAG.wert_cent; // § 33 UStDV: Gesamtbetrag bis 250 EUR (ustdv-33.md), Wert aus tabellen.js
 export const BELEG_BETRAG_MAX_CENT = 1000000000; // 10 Mio EUR je Beleg (Konzept E1); die Firestore-Regeln lassen das Doppelte zu (Gegenprüfung M3, M6)
 
 // Kategorien, bei denen ein Altbeleg mit mwst_satz 'keine' im Regelstatus eindeutig ohne Vorsteuer ist (3.8.2).
@@ -341,7 +341,7 @@ export function normalisiereEingabe(eingabe, kontext) {
   }
   if (!steuerfall) {
     const ausgangRegel = richtung === 'ausgang' && status !== 'ku';
-    const w = wahl || (satzBp === 1900 ? 'inland_19' : satzBp === 700 ? 'inland_7' : satzBp === 0 ? 'inland_0_pv' : null);
+    const w = wahl || (satzBp === SATZ_REGEL_BP ? 'inland_19' : satzBp === SATZ_ERMAESSIGT_BP ? 'inland_7' : satzBp === SATZ_NULL_BP ? 'inland_0_pv' : null);
     if (wahl === 'reverse_charge_eu' || wahl === 'reverse_charge_drittland' || wahl === 'nicht_steuerbar_eu_b2b' || wahl === 'nicht_steuerbar_drittland_b2b') {
       const map = { reverse_charge_eu: 'E_13B_EU_DL', reverse_charge_drittland: 'E_13B_DRITTLAND_DL', nicht_steuerbar_eu_b2b: 'A_NICHT_STEUERBAR_EU_B2B_DL', nicht_steuerbar_drittland_b2b: 'A_NICHT_STEUERBAR_DRITTLAND_B2B_DL' };
       steuerfall = map[wahl];
@@ -371,8 +371,8 @@ export function normalisiereEingabe(eingabe, kontext) {
   }
   // Korrektur ohne eigene Wahl: Steuerfall aus Richtung und Satz
   if (!steuerfall && istKorrektur) {
-    if (richtung === 'ausgang') steuerfall = satzBp === 700 ? 'A_INLAND_7' : satzBp === 1900 ? 'A_INLAND_19' : 'UNBEKANNT';
-    else steuerfall = satzBp === 700 || satzBp === 1900 ? 'E_INLAND_VORSTEUER' : 'UNBEKANNT';
+    if (richtung === 'ausgang') steuerfall = satzBp === SATZ_ERMAESSIGT_BP ? 'A_INLAND_7' : satzBp === SATZ_REGEL_BP ? 'A_INLAND_19' : 'UNBEKANNT';
+    else steuerfall = satzBp === SATZ_ERMAESSIGT_BP || satzBp === SATZ_REGEL_BP ? 'E_INLAND_VORSTEUER' : 'UNBEKANNT';
     if (steuerfall === 'UNBEKANNT') { unbekanntGrund = 'satz_fehlt'; }
   }
   if (steuerfall === 'E_INLAND_OHNE_VORSTEUER') {
@@ -382,7 +382,7 @@ export function normalisiereEingabe(eingabe, kontext) {
     kennzeichen.push('ohne_steuerausweis');
     if (g === 'kleinbetrag_ueber_250_ohne_pflichtangaben') unsicherheiten.push(hin('W_KLEINBETRAG_UEBER_250', 'betrag', 'Beleg über 250 EUR mit nur Kleinbetrags-Angaben (§ 33, § 35 UStDV)'));
   }
-  if (satzBp === null && (steuerfall === 'A_INLAND_19' || steuerfall === 'E_INLAND_VORSTEUER')) satzBp = 1900;
+  if (satzBp === null && (steuerfall === 'A_INLAND_19' || steuerfall === 'E_INLAND_VORSTEUER')) satzBp = SATZ_REGEL_BP;
 
   // --- Kleinbetrag (R-ZP-10) ---
   let kleinbetrag = false;
@@ -698,7 +698,7 @@ export function legacyFelder(beleg) {
   if (sf === 'A_INLAND_19' || sf === 'E_INLAND_VORSTEUER' || sf === 'A_INLAND_7') {
     const alle = (s.positionen || []).map((p) => p.satz_bp);
     const gleich = alle.every((x) => x === ersterSatz);
-    mwst = gleich ? (ersterSatz === 700 ? '7' : ersterSatz === 1900 ? '19' : 'keine') : '19';
+    mwst = gleich ? (ersterSatz === SATZ_ERMAESSIGT_BP ? '7' : ersterSatz === SATZ_REGEL_BP ? '19' : 'keine') : '19';
   } else if (sf === 'A_INLAND_0_PV') mwst = '0';
   else if (sf === 'E_13B_EU_DL' || sf === 'E_13B_DRITTLAND_DL') mwst = 'reverse_charge';
   const ohneSatz = mwst === 'keine';
@@ -808,10 +808,10 @@ export function normalisiereAlt(alt, profil, optionen) {
   else if (belegArt === 'sonstig') { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'steuerfall_nicht_gewaehlt'; unbekanntDetail = 'mahnung'; }
   else if (a.ust_unklar === true) { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'steuerfall_nicht_gewaehlt'; unbekanntDetail = 'ust_unklar_datev'; }
   else if (mwst === '19' || mwst === '7') {
-    satzBp = mwst === '19' ? 1900 : 700;
+    satzBp = mwst === '19' ? SATZ_REGEL_BP : SATZ_ERMAESSIGT_BP;
     if (status === 'ku') { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'mwst_keine_mehrdeutig'; unbekanntDetail = 'satz_bei_kleinunternehmer_status'; hinweise.push('STATUS_WIDERSPRUCH'); }
     else if (status === null && istObjekt(profil)) { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'steuerfall_nicht_gewaehlt'; unbekanntDetail = 'status_unbekannt'; }
-    else steuerfall = richtung === 'ausgang' ? (satzBp === 1900 ? 'A_INLAND_19' : 'A_INLAND_7') : 'E_INLAND_VORSTEUER';
+    else steuerfall = richtung === 'ausgang' ? (satzBp === SATZ_REGEL_BP ? 'A_INLAND_19' : 'A_INLAND_7') : 'E_INLAND_VORSTEUER';
   } else if (mwst === 'keine') {
     if (status === 'ku') steuerfall = richtung === 'ausgang' ? 'A_KU' : 'E_INLAND_OHNE_VORSTEUER';
     else if (status === 'regel' && richtung === 'eingang' && kategorie && KATEGORIEN_FINANZAMT.includes(kategorie)) { steuerfall = 'FA_ZAHLUNG'; fa = { fa_art: null, periode: null }; hinweise.push('FA_ART_FEHLT'); }

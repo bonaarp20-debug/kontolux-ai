@@ -128,7 +128,13 @@ export function kz70Datum(profil, jahr) {
   for (const e of sortiert(profil.status_verlauf)) {
     if (e.status !== 'regel' || jahrVon(e.gueltig_ab) !== jahr) continue;
     if (UNTERJAEHRIG.includes(e.grund)) return { datum: e.gueltig_ab, grund: e.grund, regel_id: 'R-KZ-12' };
-    if (e.grund === 'option_19_3') return { datum: `${String(jahr).padStart(4, '0')}-01-01`, grund: e.grund, regel_id: 'R-KZ-12' };
+    // Option eines Gründers mitten im Jahr: die Erklärung gilt ab Tätigkeitsbeginn (UStAE 19.3 Abs. 1 Nr. 1 S. 2); die Anleitung nennt dafür kein
+    // Kz-70-Datum, der Kern schlägt den Tätigkeitsbeginn vor (Konfidenz B). Sonst der 1. Januar (Anleitung Zeile 12).
+    if (e.grund === 'option_19_3') {
+      const gd = profil.gruendung && profil.gruendung.datum;
+      if (istDatum(gd) && gd === e.gueltig_ab && jahrVon(gd) === jahr) return { datum: gd, grund: e.grund, regel_id: 'R-KZ-12' };
+      return { datum: `${String(jahr).padStart(4, '0')}-01-01`, grund: e.grund, regel_id: 'R-KZ-12' };
+    }
   }
   return null;
 }
@@ -214,7 +220,7 @@ export function gruenderHinweis(profil, jahr) {
   const n = { betroffen: false, hinweise: [], regel_id: 'R-FR-03' };
   if (!istObjekt(profil) || !istObjekt(profil.gruendung) || !istDatum(profil.gruendung.datum) || !Number.isSafeInteger(jahr)) return n;
   const gj = jahrVon(profil.gruendung.datum);
-  if (jahr < 2027) return n;
+  if (jahr < GRENZEN.GRUENDER_MONATLICH_AB_JAHR.wert_jahr) return n; // § 18 Abs. 2 S. 6: ausgesetzt für 2021 bis 2026
   if (jahr !== gj && jahr !== gj + 1) return n;
   if (statusAm(profil, `${String(jahr).padStart(4, '0')}-12-31`).status === 'ku') return n;
   return { betroffen: true, gruendungsjahr: gj, hinweise: ['W_GRUENDER_2027'], regel_id: 'R-FR-03' };
@@ -359,7 +365,7 @@ export function grenzpruefung(profil, werte, stichtag) {
       const g = istCent(w.gewinn_jahr_cent) ? w.gewinn_jahr_cent : null;
       const gu = GRENZEN.BUCHFUEHRUNG_UMSATZ.wert_cent;
       const gg = GRENZEN.BUCHFUEHRUNG_GEWINN.wert_cent;
-      const su = u === null ? null : stufeFuer(u, gu, rundeHalbAuf(gu * warnBp, 10000), null);
+      const su = u === null ? null : stufeFuer(u, gu, rundeHalbAuf(gu * warnBp, 10000) /* 10000 = 100 % in Basispunkten */, null);
       const sg = g === null ? null : stufeFuer(g, gg, rundeHalbAuf(gg * warnBp, 10000), null);
       b.umsatz = { wert_cent: u, grenze_cent: gu, stufe: su || 'unbekannt' };
       b.gewinn = { wert_cent: g, grenze_cent: gg, stufe: sg || 'unbekannt' };
@@ -384,7 +390,7 @@ export function grenzpruefung(profil, werte, stichtag) {
     if (vj !== null && vj > g) {
       const ist = istDatum(stichtag) && versteuerungAm(profil, stichtag).art === 'ist';
       if (ist) b.hinweise.push('W_IST_UEBER_800K');
-      if (istDatum(stichtag) && stichtag >= '2027-01-01') b.hinweise.push('W_ERECHNUNG_UEBERGANG_ENDET');
+      if (istDatum(stichtag) && stichtag >= GRENZEN.ERECHNUNG_VORJAHR.gueltig_von) b.hinweise.push('W_ERECHNUNG_UEBERGANG_ENDET'); // § 27 Abs. 38 Nr. 2: Erleichterung nur für Umsätze 2027 und nur bis 800.000 EUR Vorjahr (tabellen.js)
     }
     befunde.push(b);
   }
@@ -531,7 +537,12 @@ export function pruefeWechsel(profil, bereich, eintrag, optionen) {
         if (istCent(o.laufendUmsatzCent) && o.laufendUmsatzCent <= g) f.push(fehler('GRENZE_NICHT_UEBERSCHRITTEN', 'Die Umsatzsumme des laufenden Jahres liegt nicht über der Grenze.'));
         w.push('W_WECHSEL_DIALOG', 'W_KU_GRENZE_UEBERSCHRITTEN');
       } else if (eintrag.grund === 'option_19_3') {
-        if (!ersterJanuar(eintrag.gueltig_ab)) f.push(fehler('OPTION_NUR_ZU_JAHRESBEGINN', 'Der Verzicht wirkt von Beginn des Besteuerungszeitraums an (1. Januar).'));
+        // Audit 10 F9 (R-KU-05, UStAE 19.3 Abs. 1 Nr. 1 S. 2): Beginnt der Unternehmer seine Tätigkeit während des Kalenderjahres, gilt die Erklärung
+        // vom Beginn dieser Tätigkeit an. Ein unterjähriger Eintrag ist daher nur am Tätigkeitsbeginn (profil.gruendung.datum) zulässig.
+        const gruenderOption = istObjekt(p.gruendung) && p.gruendung.datum === eintrag.gueltig_ab;
+        if (!ersterJanuar(eintrag.gueltig_ab) && !gruenderOption) f.push(fehler('OPTION_NUR_ZU_JAHRESBEGINN', 'Der Verzicht wirkt von Beginn des Besteuerungszeitraums an (1. Januar), bei Aufnahme der Tätigkeit im Jahr vom Tätigkeitsbeginn an (UStAE 19.3 Abs. 1 Nr. 1).'));
+        if (gruenderOption && !ersterJanuar(eintrag.gueltig_ab)) w.push('W_OPTION_GRUENDER_TAETIGKEITSBEGINN');
+        // Frist: Ende Februar des übernächsten Kalenderjahres (§ 19 Abs. 3 S. 1, UStAE 19.3 Abs. 1 S. 4), daher jahr + 2
         const frist = monatsende(`${String(jahr + 2).padStart(4, '0')}-02-01`);
         if (o.erklaerungsdatum !== undefined && !istDatum(o.erklaerungsdatum)) f.push(fehler('ERKLAERUNGSDATUM_UNGUELTIG', 'Das Datum der Erklärung ist kein gültiges Datum.'));
         if (istDatum(o.erklaerungsdatum) && o.erklaerungsdatum > frist) f.push(fehler('OPTION_FRIST_ABGELAUFEN', `Der Verzicht muss bis ${frist} erklärt werden (§ 19 Abs. 3 S. 1).`));

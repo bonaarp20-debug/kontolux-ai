@@ -11,7 +11,7 @@
 import { ustAusNetto, ustAusBrutto, basisInEuro } from './geld.js';
 import { istDatum, periodenArt, periodenEnde, periodenStart } from './daten.js';
 import { voranmeldungAm, kz70Datum, fristFuerPeriode } from './steuerprofil.js';
-import { RUNDUNG_BASIS, USTVA_ZEILEN } from './tabellen.js';
+import { RUNDUNG_BASIS, USTVA_ZEILEN, SATZ_REGEL_BP, SATZ_ERMAESSIGT_BP, basisKzFuerSatz } from './tabellen.js';
 import { profilHinweise, pruefeWirkungen } from './wirkung.js';
 
 const istObjekt = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -149,8 +149,8 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
       belege: belege(l),
     });
   };
-  const zeile13 = umsatzZeile(13, 81, 1900);
-  const zeile14 = umsatzZeile(14, 86, 700);
+  const zeile13 = umsatzZeile(13, basisKzFuerSatz(SATZ_REGEL_BP), SATZ_REGEL_BP);
+  const zeile14 = umsatzZeile(14, basisKzFuerSatz(SATZ_ERMAESSIGT_BP), SATZ_ERMAESSIGT_BP);
   const l87 = berechnet.filter((w) => UMSATZ_ROLLEN.includes(w.rolle) && w.kz === 87);
   let b87 = 0;
   for (const w of l87) b87 = addSicher(b87, w.netto_cent);
