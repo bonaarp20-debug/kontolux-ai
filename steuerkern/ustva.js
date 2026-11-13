@@ -75,6 +75,28 @@ function summen(z13, z14, z15, z38, z41, z44, z46, z47, z49) {
   return { z37_cent: z37, z38_cent: z38, z45_cent: z45, z48_cent: z48, z49_cent: z49, z50_cent: z50 };
 }
 
+// Audit 10 (R-KZ-23, F3): Jede Zeile des Vordrucks, die der Kern nicht rechnet (Kz-Zeilen mit Betrag außer 12 bis 15, 37, 38, 44 bis 50),
+// steht hier einzeln mit ihren Kz, statt still zu fehlen. Z.23 (Kz 48, steuerfreie Umsätze, im Wechseljahr die Kleinunternehmer-Umsätze bis zum
+// Überschreiten der Grenze) trägt im Wechseljahr wechseljahr: true. Ohne hinterlegten Vordruck (andere Jahre) liefert eine feste Liste.
+const ZEILEN_BERECHNET = Object.freeze([10, 11, 12, 13, 14, 15, 37, 38, 44, 45, 46, 47, 48, 49, 50, 53, 54, 55]);
+const NICHT_BERECHNET_FEST = Object.freeze([
+  { z: '16', kz: [35, 36] }, { z: '17', kz: [77] }, { z: '18', kz: [76, 80] }, { z: '19', kz: [41] }, { z: '20', kz: [44] }, { z: '21', kz: [49] }, { z: '22', kz: [43] },
+  { z: '23', kz: [48] }, { z: '24', kz: [91] }, { z: '25', kz: [89] }, { z: '26', kz: [93] }, { z: '27', kz: [90] }, { z: '28', kz: [95, 98] }, { z: '29', kz: [94, 96] },
+  { z: '30', kz: [46, 47] }, { z: '31', kz: [73, 74] }, { z: '32', kz: [84, 85] }, { z: '33', kz: [42] }, { z: '34', kz: [60] }, { z: '35', kz: [21] }, { z: '36', kz: [45] },
+  { z: '39', kz: [61] }, { z: '40', kz: [62] }, { z: '41', kz: [67] }, { z: '42', kz: [63] }, { z: '43', kz: [59] }, { z: '51', kz: [50] }, { z: '52', kz: [37] },
+]);
+function nichtBerechnet(tabelle, anzahlBelege, wechseljahr) {
+  const basis = tabelle
+    ? tabelle.zeilen.filter((r) => !ZEILEN_BERECHNET.includes(r.z) && (r.kz_basis !== null || r.kz_steuer !== null)).map((r) => ({ z: String(r.z), kz: [r.kz_basis, r.kz_steuer].filter((x) => x !== null), stufe: r.stufe || null }))
+    : NICHT_BERECHNET_FEST.map((r) => ({ ...r, stufe: null }));
+  return basis.map((r) => ({
+    ...r,
+    hinweis: 'wird von Kontolux nicht berechnet',
+    anzahl_belege: anzahlBelege,
+    ...(r.z === '23' ? { wechseljahr: wechseljahr === true, bez: wechseljahr === true ? 'Steuerfreie Kleinunternehmer-Umsätze bis zum Überschreiten der Grenze (Kz 48) sind nicht berechnet, bitte selbst eintragen' : 'Steuerfreie Umsätze ohne Vorsteuerabzug (Kz 48) sind nicht berechnet' } : {}),
+  }));
+}
+
 export function ustvaFuer(wirkungen, profil, periode, optionen) {
   const opt = istObjekt(optionen) ? optionen : {};
   const ein = istObjekt(opt.eingaben) ? opt.eingaben : {};
@@ -244,7 +266,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
     },
     unvollstaendig,
     ausgeschlossene: ausg,
-    nicht_berechnet: [{ z: '16, 19-22, 24-29, 31, 33-36', stufe: '3b/4', hinweis: 'wird von Kontolux nicht berechnet', anzahl_belege: ausg.length }],
+    nicht_berechnet: nichtBerechnet(tabelle, ausg.length, alle.includes('W_KU_GRENZE_UEBERSCHRITTEN')),
     hinweise: alle,
     warnungen: alle.filter((c) => c.startsWith('W_')),
     frist,

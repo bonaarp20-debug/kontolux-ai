@@ -1,23 +1,23 @@
 {
-  "kern_version": "2026.11.12-9",
+  "kern_version": "2026.11.13-1",
   "dateien": {
-    "VERSION.js": "681ae68096a2c630c4d6f2d8afefde8a16ec3d70363697226af36cb9799bed45",
+    "VERSION.js": "1e770070a9fee3b65415fd2a1b1be44f3e8b5c801d5d7f193e436fd969e58e9f",
     "auswertung.js": "573629de17a947e14c96bd328512c457eeeae3b140b4c91f8f19b20f9e9fb865",
-    "beleg.js": "1787746bd94bbe35e66b7ada4a5fd1f7eb60b3498f9aefcbc92fbd20d7c253c2",
+    "beleg.js": "11512667ffab209bb6e40af2bf2e36f96006bfeaeaaf44d25dae5b2a1a0449a6",
     "daten.js": "d14896618c91f5007e42cb7face2cd08e89025798a264e7328343e050fc74661",
     "euer.js": "98720b4bc4034edf406a558259b393c0724ab99acc323f3734480a002e1ca0ee",
     "geld.js": "5088847eac9557f12b327656bf7625c450027045fd057eb9f00f5f95c9970f8c",
     "index.js": "1b71dc408fcc8b65f19c256dca4b6fd13a42d606a06489585846c031f45e6b61",
     "regeln-basis.js": "7d00a83387e05624861ec60c6f042fed429156c417bc9784f39dd9eb68f6b832",
-    "steuerprofil.js": "90058894d233aec4d683a333aa0fc6783871301c04d1bb83c5609b8c7dfe5372",
+    "steuerprofil.js": "aa5e133ba1edc0441e5bf3e733a6e17a18acd4fdd557667fc398228eac374ab0",
     "tabellen.js": "423ad945b0263e3488f0406eff8a0923e57cacaaf50b7f75fa6352c170afd64a",
-    "ustva.js": "1c6d6c122e5328e52ab6c81f675cef63c931126e21dee805fedd4f277c847d51",
-    "wirkung.js": "f237960a4b3020cff406a7a59b1f3b9efc607ec40ec34ad51c17b7f7a18383a3",
-    "golden/beleg-adapter.json": "1521aef1708cec102c2afb6b44e25e2cb8e6343f7b29089e7a92d88c9c974a46",
-    "golden/pruefberichte.json": "994ba290743b2dd6f32c270bdd194b41f041a5fb49896297f6edcf61b6404791",
-    "golden/referenzfaelle.json": "dccaeede7eb059f7f7494b9b403ebc83d177a79643dfb749ea47a8c6d7bd854b"
+    "ustva.js": "6c374c822f0c422ee544d1d46e80b5f010cee9ff21bbdf576f9eaa811399bfc6",
+    "wirkung.js": "3fb1ecb3db5dc0d9f1298a424d656aeb0a29613136d20943a66427d2aa61f0a6",
+    "golden/beleg-adapter.json": "b399ebc08f77b6a29e3ea1bd3dc5eb9fcc0cc4833faaee45f366c5dac500cbc8",
+    "golden/pruefberichte.json": "34f61ce0698ca5752b397d75dcb23215e546ced5f6370aceef86e71c6dbd250f",
+    "golden/referenzfaelle.json": "7af974659f9a2e5d3a55dca6d072b7e112b3e9effd637f5897e528912de7a422"
   },
-  "erzeugt": "2026-11-12T18:36:37.652Z",
+  "erzeugt": "2026-11-13T05:46:48.041Z",
   "nur_app": [
     "schatten.js"
   ]

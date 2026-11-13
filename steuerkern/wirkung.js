@@ -133,17 +133,28 @@ export function zahlungsAnteile(gruppen, zahlungen) {
   return out;
 }
 
-function gruppiere(s) {
+// Audit 10 (R-ZP-01, R-ZP-03): Teilleistung = mindestens eine Position hat ein eigenes leistung.bis, das vom Beleg abweicht.
+function positionBis(s, p) {
+  if (istObjekt(p.leistung) && istDatum(p.leistung.bis)) return p.leistung.bis;
+  return istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null;
+}
+function istTeilleistung(s) {
+  const bis = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null;
+  return Array.isArray(s.positionen) && s.positionen.some((p) => istObjekt(p) && istObjekt(p.leistung) && istDatum(p.leistung.bis) && p.leistung.bis !== bis);
+}
+
+function gruppiere(s, mitBis) {
   const map = new Map();
   for (const p of s.positionen) {
-    const k = p.satz_bp === null || p.satz_bp === undefined ? 'null' : String(p.satz_bp);
-    if (!map.has(k)) map.set(k, { satz_bp: p.satz_bp === undefined ? null : p.satz_bp, netto_cent: 0, ust_cent: 0, abziehbar_cent: 0, kategorie: p.kategorie || null });
+    const bis = mitBis ? positionBis(s, p) : null;
+    const k = (p.satz_bp === null || p.satz_bp === undefined ? 'null' : String(p.satz_bp)) + (mitBis ? `|${bis}` : '');
+    if (!map.has(k)) map.set(k, { satz_bp: p.satz_bp === undefined ? null : p.satz_bp, netto_cent: 0, ust_cent: 0, abziehbar_cent: 0, kategorie: p.kategorie || null, bis });
     const g = map.get(k);
     g.netto_cent += p.netto_cent;
     g.ust_cent += p.ust_cent;
     g.abziehbar_cent += istCent(p.vorsteuer_abziehbar_cent) ? p.vorsteuer_abziehbar_cent : p.ust_cent;
   }
-  return [...map.values()].sort((a, b) => (a.satz_bp === b.satz_bp ? 0 : a.satz_bp === null ? -1 : b.satz_bp === null ? 1 : b.satz_bp - a.satz_bp));
+  return [...map.values()].sort((a, b) => (a.satz_bp === b.satz_bp ? (a.bis === b.bis ? 0 : a.bis < b.bis ? -1 : 1) : a.satz_bp === null ? -1 : b.satz_bp === null ? 1 : b.satz_bp - a.satz_bp));
 }
 
 function aktiveZahlungen(s) {
@@ -205,6 +216,7 @@ function datenFehler(s) {
     if (!istCent(p.netto_cent) || !istCent(p.ust_cent)) return `positionen[${i}]: netto_cent und ust_cent müssen ganze Cent sein`;
     if (!satzOk(p.satz_bp)) return `positionen[${i}].satz_bp ungültig`;
     if (p.vorsteuer_abziehbar_cent !== undefined && p.vorsteuer_abziehbar_cent !== null && !istCent(p.vorsteuer_abziehbar_cent)) return `positionen[${i}].vorsteuer_abziehbar_cent ungültig`;
+    if (p.leistung !== undefined && p.leistung !== null && !(istObjekt(p.leistung) && istDatum(p.leistung.bis))) return `positionen[${i}].leistung.bis ungültig`;
   }
   if (s.zahlungen !== undefined && s.zahlungen !== null && !Array.isArray(s.zahlungen)) return 'zahlungen kein Array';
   const zs = Array.isArray(s.zahlungen) ? s.zahlungen : [];
@@ -214,6 +226,8 @@ function datenFehler(s) {
     if (z.status === 'rueckgaengig') continue;
     if (!istDatum(z.datum)) return `zahlungen[${i}].datum ungültig`;
     if (!istCent(z.betrag_cent)) return `zahlungen[${i}].betrag_cent muss ganze Cent sein`;
+    // Standard K20: nie negatives Kz 141/186/234/183 aus einer Finanzamt-Zahlung (Entwurf eines blockierten Belegs, Audit 10 M2)
+    if (s.steuerfall === 'FA_ZAHLUNG' && z.betrag_cent < 0) return `zahlungen[${i}].betrag_cent negativ`;
     for (const f of ['skonto_cent', 'rabatt_cent']) if (z[f] !== undefined && z[f] !== null && !istCent(z[f])) return `zahlungen[${i}].${f} ungültig`;
   }
   if (s.leistung !== undefined && s.leistung !== null && !(istObjekt(s.leistung) && istDatum(s.leistung.bis))) return 'leistung.bis ungültig';
@@ -359,6 +373,12 @@ export function belegWirkungen(beleg, profil, optionen) {
     const c3 = { id: ctx.id, steuerfall: sf, beleg_status: 'ausgeschlossen', hinweise: ['HN_NOCH_NICHT_UNTERSTUETZT'] };
     return [mk(c3, { welt: 'ust', rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: 'wirkung_ohne_kennzahl' })];
   }
+  // Audit 10 (M2): Ein Entwurf mit Pflichtfeld-Blockern (normalisiereEingabe: beleg null, entwurf mit steuer.entwurf_blocker) rechnet nie in
+  // Kennzahlen ein: ungültige Entwürfe werden unbekannt (kein negatives Kz 141, keine nicht ganzzahligen Cent).
+  if (Array.isArray(s.entwurf_blocker) && s.entwurf_blocker.length && out.some((w) => w.status === 'berechnet')) {
+    const c4 = { id: ctx.id, steuerfall: sf, beleg_status: 'unbekannt', hinweise: ['HN_ENTWURF_UNGUELTIG'] };
+    return [mk(c4, { welt: 'ust', rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-ZP-11', hinweis_detail: `entwurf_ungueltig: ${s.entwurf_blocker.filter((x) => typeof x === 'string').join(',')}` })];
+  }
   // Hinweise, die erst nach dem Erzeugen einer Wirkung hinzukamen, gehören an alle Wirkungen des Belegs (Prüfbefund F4)
   for (const w of out) for (const h of ctx.hinweise) if (!w.hinweise.includes(h)) w.hinweise.push(h);
   if (!out.length && hinweise.length) out.push(mk(ctx, { welt: 'ust', rolle: 'hinweis', status: 'vorlaeufig', regel_id: 'R-ZP-01' }));
@@ -401,8 +421,13 @@ function schliesseAus(s, profil, ctx, out, grund, extraHinweise) {
 // ---------------------------------------------------------------------------------------------
 function ausgangWirkungen(s, profil, ctx, out) {
   const l = s.leistung;
-  const gruppen = gruppiere(s);
+  const teil = istTeilleistung(s);
+  const gruppen = gruppiere(s, teil);
   const zahlungen = aktiveZahlungen(s);
+  // R-ZP-01/-03: Teilleistungen werden je Position mit eigenem leistung.bis im Zeitraum dieser Leistung gebucht (Soll, keine Zahlung vor der
+  // letzten Teilleistung). Alles andere (Ist, Wechsel der Grenze, Zahlung vor einer Teilleistung = Anzahlung) ist nicht gerechnet: Hinweis statt
+  // stiller Falschrechnung.
+  const stichBis = teil ? gruppen.reduce((m, g) => (g.bis > m ? g.bis : m), '') : l.bis;
   const ver = s.versteuerung_beleg === 'soll' || s.versteuerung_beleg === 'ist' ? { art: s.versteuerung_beleg, hinweise: [] } : versteuerungAm(profil, l.bis);
   // F5 (UStAE 19.7 Abs. 1 S. 3, 4, Beispiel S. 6): Leistung in der Kleinunternehmer-Zeit, Grenze im selben Jahr später überschritten
   // und Zahlung ab dem Überschreitungsdatum: das Entgelt unterliegt "im Zeitpunkt der Vereinnahmung" der Regelbesteuerung, die
@@ -414,6 +439,13 @@ function ausgangWirkungen(s, profil, ctx, out) {
     if (st.grund === 'zahlung_nach_ueberschreiten' && istDatum(st.ueberschreitung_ab)) wechselAb = st.ueberschreitung_ab;
   }
   const ist = ver.art === 'ist' || wechselAb !== null;
+  if (teil) {
+    const st = new Set(gruppen.map((g) => statusAm(profil, g.bis).status));
+    if (ist || st.size > 1 || zahlungen.some((z) => z.datum < stichBis)) {
+      schliesseAus(s, profil, ctx, out, ist ? 'teilleistung_ist' : (st.size > 1 ? 'teilleistung_statuswechsel' : 'teilleistung_zahlung_vor_leistung'), ['HN_TEILLEISTUNG_NICHT_UNTERSTUETZT']);
+      return;
+    }
+  }
   // F6 (Ausgang): Ist-Zahlung in der Kleinunternehmer-Zeit für eine Leistung in der Regelzeit: Rechtslage nicht belegt, ausschließen
   if (ver.art === 'ist' && wechselAb === null && statusAm(profil, l.bis).status === 'regel' && zahlungen.some((z) => statusAm(profil, z.datum).status === 'ku')) {
     schliesseAus(s, profil, ctx, out, 'ist_zahlung_in_ku_zeit', ['W_WECHSEL_DIALOG']);
@@ -432,7 +464,7 @@ function ausgangWirkungen(s, profil, ctx, out) {
     const per = ustPeriode(profil, datum, hinw);
     out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: datum, kz: istKz(g), netto_cent: netto, ust_cent: ust, rolle, satz_bp: g.satz_bp, regel_id: regel, hinweise: hinw.slice(), ereignis_id: eid }));
   };
-  const vorLeistung = (z) => z.datum < l.bis;
+  const vorLeistung = (z) => z.datum < stichBis;
   if (ist) {
     // R-ZP-05: Wirkung im Zeitraum der Vereinnahmung jeder Zahlung
     // Gegenprüfung M2 (UStAE 19.7 Abs. 1 S. 4, K5-Antwort): Wurde vor dem Überschreiten eine Anzahlung vereinnahmt und die Restzahlung
@@ -477,7 +509,7 @@ function ausgangWirkungen(s, profil, ctx, out) {
         ustW(g, 'anzahlung', z.datum, a.netto_cent, a.ust_cent, 'R-ZP-04', z.id);
       });
     });
-    gruppen.forEach((g, gi) => ustW(g, 'umsatz', l.bis, nettoRest[gi], ustRest[gi], 'R-ZP-01', ctx.id));
+    gruppen.forEach((g, gi) => ustW(g, 'umsatz', teil ? g.bis : l.bis, nettoRest[gi], ustRest[gi], teil ? 'R-ZP-03' : 'R-ZP-01', ctx.id));
   }
   // EÜR: Zufluss je Zahlung (R-ZP-20), unabhängig von Soll und Ist
   zahlungen.forEach((z, zi) => {
@@ -546,8 +578,17 @@ function ausgabeKz(s, g) {
 
 function eingangWirkungen(s, profil, ctx, out) {
   const l = s.leistung;
-  const gruppen = gruppiere(s);
+  const teil = istTeilleistung(s);
+  const gruppen = gruppiere(s, teil);
   const zahlungen = aktiveZahlungen(s);
+  const stichBis = teil ? gruppen.reduce((m, g) => (g.bis > m ? g.bis : m), '') : l.bis;
+  if (teil && s.steuerfall === 'E_INLAND_VORSTEUER') {
+    const st = new Set(gruppen.map((g) => statusAm(profil, g.bis).status));
+    if (st.size > 1 || zahlungen.some((z) => z.datum < stichBis)) {
+      schliesseAus(s, profil, ctx, out, st.size > 1 ? 'teilleistung_statuswechsel' : 'teilleistung_zahlung_vor_leistung', ['HN_TEILLEISTUNG_NICHT_UNTERSTUETZT']);
+      return;
+    }
+  }
   const mitVorsteuer = s.steuerfall === 'E_INLAND_VORSTEUER' && !(s.ausschluss && s.ausschluss.vorsteuer === 'nein');
   const erhalt = istDatum(s.rechnung_erhalt_am) ? s.rechnung_erhalt_am : l.bis;
   // M3: Leistung in der Regelzeit, Rechnung erst nach dem Rückwechsel zum Kleinunternehmer: In welchem Zeitraum der Abzug möglich ist,
@@ -567,7 +608,7 @@ function eingangWirkungen(s, profil, ctx, out) {
     const nettoRest = gruppen.map((g) => g.netto_cent);
     const ustRest = gruppen.map((g) => g.abziehbar_cent);
     zahlungen.forEach((z, zi) => {
-      if (!(z.datum < l.bis)) return;
+      if (!(z.datum < stichBis)) return;
       // M2: Der Abzug entsteht, sobald Rechnung UND Zahlung vorliegen (§ 15 Abs. 1 S. 1 Nr. 1 S. 3 UStG): Stichtag max(Zahlung, Erhalt)
       const buch = z.datum < erhalt ? erhalt : z.datum;
       // F6: Anzahlung in der Kleinunternehmer-Zeit berechtigt nicht zum Vorsteuerabzug (UStAE 15.3 Abs. 2 S. 1, BMF 10.11.2025 Rz. 1,
@@ -582,9 +623,11 @@ function eingangWirkungen(s, profil, ctx, out) {
         out.push(mk(ctx, { welt: 'ust', periode: ustPeriode(profil, buch, hinw), datum_wirk: buch, kz: 66, netto_cent: a.netto_cent, ust_cent: abz, rolle: 'vorsteuer', satz_bp: g.satz_bp, regel_id: 'R-ZP-09', hinweise: hinw.slice(), ereignis_id: z.id }));
       });
     });
-    const stichtag = erhalt > l.bis ? erhalt : l.bis;
     gruppen.forEach((g, gi) => {
       if (nettoRest[gi] === 0 && ustRest[gi] === 0 && g.netto_cent !== 0) return;
+      // Teilleistung: Zeitraum von max(Rechnungserhalt, Leistung dieser Position) (R-ZP-08)
+      const gBis = teil ? g.bis : l.bis;
+      const stichtag = erhalt > gBis ? erhalt : gBis;
       const f = { welt: 'ust', periode: ustPeriode(profil, stichtag, hinw), datum_wirk: stichtag, kz: 66, netto_cent: nettoRest[gi], ust_cent: ustRest[gi], rolle: 'vorsteuer', satz_bp: g.satz_bp, regel_id: kb ? 'R-ZP-10' : 'R-ZP-08', hinweise: hinw.slice() };
       if (kb) { f.kleinbetrag = true; f.brutto_cent = nettoRest[gi] + ustRest[gi]; }
       out.push(mk(ctx, f));
@@ -681,7 +724,8 @@ function korrekturWirkungen(s, profil, ctx, opt, out) {
     return;
   }
   const wirk = s.wirkdatum;
-  const rz = istObjekt(s.rueckzahlung) ? s.rueckzahlung : null;
+  const rzRoh = istObjekt(s.rueckzahlung) ? s.rueckzahlung : null;
+  const rz = rzRoh !== null && istDatum(rzRoh.datum) && istCent(rzRoh.betrag_cent) && rzRoh.betrag_cent > 0 ? rzRoh : null;
   const bezug = istObjekt(s.bezug) ? (s.bezug.storniert_beleg_id || s.bezug.korrigiert_beleg_id) : null;
   const orig = istObjekt(opt.originale) && typeof opt.originale.get === 'function' ? opt.originale.get(bezug) : null;
   const leistungOrig = orig && orig.steuer && orig.steuer.leistung ? orig.steuer.leistung.bis : wirk;
@@ -692,20 +736,42 @@ function korrekturWirkungen(s, profil, ctx, opt, out) {
   // Datum, an dem die USt-Wirkung eintritt
   let wirkUst = wirk;
   let ustWirkt = true;
-  if (!eingang && istOrig) {
-    if (rz) wirkUst = rz.datum; else { ustWirkt = false; ctx.hinweise.push('HN_IST_KORREKTUR_OHNE_RUECKZAHLUNG'); }
-  }
+  // Audit 10 F1 (R-KOR-13, R-KOR-05; UStAE 17.1 Abs. 2 S. 3, Abs. 7 S. 3, Abs. 8 S. 5): Wird zurückgezahlt (bezahlte Rechnung), tritt die Berichtigung
+  // erst im Zeitraum der Rückgewähr ein und nur soweit zurückgezahlt wird, bei Soll wie bei Ist, bei Ausgang wie bei Eingang. Ohne Rückzahlung
+  // (unbezahlte Rechnung, Soll) gilt das Wirkdatum in voller Höhe; bei Ist ohne Rückzahlung gibt es keine Wirkung.
+  if (rz) wirkUst = rz.datum;
+  else if (!eingang && istOrig) { ustWirkt = false; ctx.hinweise.push('HN_IST_KORREKTUR_OHNE_RUECKZAHLUNG'); }
   if (ustWirkt) {
     const per = ustPeriode(profil, wirkUst, hinw);
     const origPer = istObjekt(opt.originalPerioden) && typeof opt.originalPerioden.get === 'function' ? opt.originalPerioden.get(bezug) : null;
     // Warnung bei Storno und Rückabwicklung; Preisnachlass, Skonto und Bonus sind gewöhnliche Minderungen (T-S2-012)
     const stornoGrund = s.korrektur_grund === 'rueckabwicklung' || s.korrektur_grund === 'leistung_nicht_erbracht' || s.beleg_art === 'storno';
     if (stornoGrund && origPer && origPer < per && periodenArt(origPer) === periodenArt(per)) ctx.hinweise.push('W_STORNO_ABGESCHLOSSENER_ZEITRAUM');
-    for (const g of gruppen) {
-      const abz = eingang ? g.abziehbar_cent : g.ust_cent;
+    // Umfang: Brutto der Korrektur, höchstens in Höhe der Rückzahlung, anteilig je Gruppe mit Rest-Cent (teile)
+    let bruttoKorr = 0;
+    for (const g of gruppen) bruttoKorr += Math.abs(g.netto_cent + g.ust_cent);
+    const teilweise = rz !== null && rz.betrag_cent < bruttoKorr && bruttoKorr > 0;
+    const anteil = teilweise ? teile(rz.betrag_cent, gruppen.map((g) => Math.abs(g.netto_cent + g.ust_cent))) : null;
+    if (teilweise) ctx.hinweise.push('HN_KORREKTUR_TEILRUECKZAHLUNG');
+    gruppen.forEach((g, gi) => {
+      let netto = g.netto_cent;
+      let ust = eingang ? g.abziehbar_cent : g.ust_cent;
+      if (teilweise) {
+        const gew = Math.abs(g.netto_cent + g.ust_cent);
+        const b = anteil[gi];
+        if (b !== gew) {
+          const u = g.satz_bp === null || g.satz_bp === undefined || g.satz_bp === 0 ? 0 : ustAusBrutto(b, g.satz_bp);
+          const ustVoll = Math.abs(g.ust_cent);
+          const abzVoll = Math.abs(g.abziehbar_cent);
+          const uAbz = eingang ? (ustVoll === 0 ? 0 : (abzVoll === ustVoll ? u : mulDivRund(u, abzVoll, ustVoll))) : u;
+          netto = 0 - (b - u);
+          ust = 0 - uAbz;
+        }
+      }
+      if (netto === 0 && ust === 0 && g.netto_cent !== 0) return;
       const kz = eingang ? 66 : basisKz(g.satz_bp);
-      out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: wirkUst, kz, netto_cent: g.netto_cent, ust_cent: eingang ? abz : g.ust_cent, rolle: eingang ? 'vorsteuer_minderung' : 'minderung', satz_bp: g.satz_bp, regel_id: 'R-KOR-01', hinweise: hinw.slice() }));
-    }
+      out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: wirkUst, kz, netto_cent: netto, ust_cent: ust, rolle: eingang ? 'vorsteuer_minderung' : 'minderung', satz_bp: g.satz_bp, regel_id: 'R-KOR-01', hinweise: hinw.slice() }));
+    });
   }
   if (rz && !eingang) {
     out.push(mk(ctx, { welt: 'euer', periode: String(jahrVon(rz.datum)), datum_wirk: rz.datum, kz: 183, netto_cent: rz.betrag_cent, betrag_cent: rz.betrag_cent, rolle: 'ausgabe', spalte: 'ausgabe', regel_id: 'R-ZP-25', hinweise: ['HN_EUER_RUECKZAHLUNG_K20'] }));

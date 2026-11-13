@@ -306,7 +306,7 @@ export function kuGrenzpruefung(eingabe) {
 
 // R-PR-06: Tag, an dem die laufende Summe der vereinnahmten Umsätze die Grenze überschreitet (erster Umsatz,
 // nach dem die Summe über der Grenze liegt; dieser Umsatz ist schon regelbesteuert). zahlungen: [{ datum, netto_cent,
-// anlagevermoegen? }], Reihenfolge am selben Tag wie angegeben. startsumme_cent = bereits vereinnahmte Umsätze davor.
+// anlagevermoegen?, nicht_steuerbar?, ausgenommen_abs2? }] (die drei Flags zählen nicht mit, § 19 Abs. 2), Reihenfolge am selben Tag wie angegeben. startsumme_cent = bereits vereinnahmte Umsätze davor.
 // Liefert zusätzlich den Vorschlag für den Eintrag im Zeitstrahl (der Nutzer bestätigt).
 export function kuUeberschreitung(eingabe) {
   const { zahlungen, startsumme_cent, gruendungsjahr } = istObjekt(eingabe) ? eingabe : {};
@@ -320,7 +320,8 @@ export function kuUeberschreitung(eingabe) {
     .sort((a, b) => (a.z.datum < b.z.datum ? -1 : a.z.datum > b.z.datum ? 1 : a.i - b.i));
   const ungueltig = zahlungen.length - liste.length;
   for (const { z, i } of liste) {
-    if (z.anlagevermoegen === true) continue;
+    // Audit 10 (R-PR-06, M4): wie gesamtumsatz19Abs2 nur steuerbare Umsätze abzüglich § 19 Abs. 2 S. 1 Nr. 1, 2 (Anlagevermögen) und S. 2
+    if (z.anlagevermoegen === true || z.nicht_steuerbar === true || z.ausgenommen_abs2 === true) continue;
     summe += z.netto_cent;
     if (summe > grenze) {
       return {

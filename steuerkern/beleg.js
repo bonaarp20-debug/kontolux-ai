@@ -588,6 +588,8 @@ export function normalisiereEingabe(eingabe, kontext) {
   for (const w of v.warnungen) unsicherheiten.push(w);
   Object.assign(entwurf, legacyFelder(entwurf));
   if (nichtLeer(e.kategorie)) entwurf.kategorie = e.kategorie;
+  // Audit 10 (M2): Der Entwurf eines blockierten Belegs trägt die Blocker-Codes; wirkung.js rechnet ihn nie in Kennzahlen ein.
+  if (fehler.length) entwurf.steuer.entwurf_blocker = [...new Set(fehler.map((f) => f.code))].sort();
   return { beleg: fehler.length ? null : entwurf, entwurf, unsicherheiten, pflichtfeld_fehler: fehler, vorschlaege };
 }
 
