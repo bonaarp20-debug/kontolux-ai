@@ -4,6 +4,8 @@
   "type": "module",
   "scripts": {
     "deploy": "wrangler deploy",
+    "predeploy": "npm run deploy:check",
+    "deploy:check": "node scripts/deploy-check.mjs",
     "dev": "wrangler dev",
     "test": "node --test test/*.test.mjs"
   },

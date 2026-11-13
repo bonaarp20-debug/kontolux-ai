@@ -15,6 +15,9 @@ jobs:
         with:
           node-version: '22'
       - run: npm ci
+      # Tests und Hashprüfung der Steuerkern-Kopie (test/steuerkern-paritaet.test.mjs: Worker-Manifest + goldene Vektoren) vor jedem Deploy.
+      # Das App-Repo ist in der CI nicht verfügbar; der Paritätswächter App gegen Worker läuft lokal (npm run deploy:check, Teil von npm run deploy).
+      - run: npm test
       - run: npx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

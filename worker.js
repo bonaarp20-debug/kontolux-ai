@@ -1004,7 +1004,8 @@ const SACHKONTO_MAPPING = {
   // Kilometerpauschale und Verpflegungsmehraufwand haben je eine eigene EÜR-Zeile und ein eigenes
   // DATEV-Unterkonto (siehe reichereMitBelegKategorieAn/splitReisekostenPosition in index.html),
   // werden aber nie direkt aus einem Absendernamen erkannt (kein KATEGORIE_REGELN-Eintrag nötig).
-  'Fahrtkosten (Kilometerpauschale)': { SKR03: '4673', SKR04: '6673', euer_zeile: 'Z.71' },
+  // KZ 147 (Nutzungseinlage, nicht zum Betriebsvermögen gehörende Fahrzeuge): Anlage EÜR 2026 Z.72 (2025: Z.71); 'Kfz-Kosten' = KZ 146 = Z.71 (2025: Z.70).
+  'Fahrtkosten (Kilometerpauschale)': { SKR03: '4673', SKR04: '6673', euer_zeile: 'Z.72' },
   'Verpflegungsmehraufwand':    { SKR03: '4674', SKR04: '6674', euer_zeile: 'Z.65' },
   // Umsatzsteuer-Durchlaufposten (Zeilen 17/18/58/59 der Anlage EÜR 2026). Gleich wie in index.html — test-sachkonten-sync.mjs.
   'Vereinnahmte Umsatzsteuer':  { SKR03: '1776', SKR04: '3806', euer_zeile: 'Z.17' },
