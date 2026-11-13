@@ -788,7 +788,8 @@ function bereinigeProfilUpdate(rest) {
   for (const t of teile) {
     const i = t.indexOf('=');
     if (i < 1) continue;
-    const k = t.slice(0, i).trim(); const v = t.slice(i + 1).trim();
+    const k = t.slice(0, i).trim(); let v = t.slice(i + 1).trim();
+    if (/^steuerruecklage_prozent$/i.test(k)) v = v.replace(/\s*%$/, ''); // '30%' wie '30' (Gegenprüfung TR3-sys-006)
     if (!/^[A-Za-z][A-Za-z0-9_]{1,39}$/.test(k) || KI_PROFIL_GESPERRT.test(k) || !v || v.length > 100 || /[<>{}\n]/.test(v)) continue;
     const pruefer = KI_PROFIL_PRUEFER[k.toLowerCase()];
     if (pruefer && !pruefer(v)) continue;
@@ -3198,6 +3199,12 @@ async function handleDocument(body, env, cors = {}, ctx) {
   }
 
   if (Nachricht === 'BELEG_MANUELL' || Nachricht === 'BELEG_SPEICHERN') {
+    // Fremde Steuersätze aus E-Rechnungen (z. B. 20 % AT, 16 % früher DE, 21 % NL) gehen nicht verloren (Gegenprüfung TR3-sys-001):
+    // sie werden als 'keine' gespeichert; der Kern erkennt mit Brutto > Netto den unklaren Steuerfall (UNBEKANNT) und warnt.
+    if (normalisiereMwstSatz(mwst_satz) === null && mwst_satz !== undefined && mwst_satz !== null && mwst_satz !== '') {
+      const zahl = parseFloat(String(mwst_satz).replace(',', '.'));
+      if (Number.isFinite(zahl) && zahl > 0 && zahl <= 30 && /^\s*\d+([.,]\d+)?\s*%?\s*$/.test(String(mwst_satz))) mwst_satz = 'keine';
+    }
     const eingabeFehler = belegEingabeFehler({ typ, mwst_satz, datum, bezahlt, bezahlt_am: bezahlt_am_client, betrag, betrag_netto });
     if (eingabeFehler) return new Response(JSON.stringify({ error: eingabeFehler }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
     mwst_satz = normalisiereMwstSatz(mwst_satz) || mwst_satz;
@@ -6364,7 +6371,13 @@ function nettoAusBrutto(brutto, mwst_satz) {
 export async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
   // Ersatz für die Regel 'Betrag >= 0 und begrenzt' (TR-integration-006): kein Beleg mit 0, negativem, nicht endlichem oder über 10 Mio EUR liegendem Betrag.
   const bBetrag = belegData.betrag;
-  if (typeof bBetrag !== 'number' || !Number.isFinite(bBetrag) || bBetrag <= 0 || bBetrag > BELEG_MAX_BETRAG) throw new Error('writeBelegAsAdmin: Betrag ungültig, Beleg nicht geschrieben');
+  // Betrag 0 oder negativ (Gratisbestellung, Erstattung): kein Beleg, aber Erfolg melden, damit die Plattform nicht wiederholt und das Webhook-Abo
+  // nicht abschaltet (Gegenprüfung TR3-sys-003). Nicht endliche oder zu große Beträge sind ein Fehler.
+  if (typeof bBetrag === 'number' && Number.isFinite(bBetrag) && bBetrag <= 0) {
+    console.warn('writeBelegAsAdmin: Betrag <= 0, Beleg nicht geschrieben (kein Fehler)');
+    return { success: true, skipped: 'betrag_nicht_positiv' };
+  }
+  if (typeof bBetrag !== 'number' || !Number.isFinite(bBetrag) || bBetrag > BELEG_MAX_BETRAG) throw new Error('writeBelegAsAdmin: Betrag ungültig, Beleg nicht geschrieben');
   if (belegData.betrag_netto != null && (typeof belegData.betrag_netto !== 'number' || !Number.isFinite(belegData.betrag_netto) || belegData.betrag_netto < 0 || belegData.betrag_netto > bBetrag + 0.005)) throw new Error('writeBelegAsAdmin: Nettobetrag ungültig, Beleg nicht geschrieben');
   // Zufallssuffix: der SumUp-Abruf schreibt mehrere Belege direkt hintereinander — reine
   // Date.now()-IDs könnten in derselben Millisekunde kollidieren und sich überschreiben.
