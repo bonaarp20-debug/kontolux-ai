@@ -1,7 +1,7 @@
 {
  "format": 1,
  "art": "pruefberichte",
- "kern_version": "2026.11.13-6",
+ "kern_version": "2026.11.13-7",
  "quelle": "docs/regelbesteuerung/07-*.md und 08-gegenpruefung-phase1.md: Schlüsselzahlen von Hand, Rest Kern-Ausgabe",
  "vektoren": [
   {
@@ -1361,9 +1361,12 @@
          "status": "zwischenwert"
         },
         "unvollstaendig": true,
-        "warnungen": [],
+        "warnungen": [
+         "W_TABELLE_VORLAEUFIG"
+        ],
         "hinweise": [
-         "HN_NOCH_NICHT_UNTERSTUETZT"
+         "HN_NOCH_NICHT_UNTERSTUETZT",
+         "W_TABELLE_VORLAEUFIG"
         ],
         "ausgeschlossene": [
          {
@@ -1388,7 +1391,8 @@
        ]
       },
       "warnungen": [
-       "W_BELEGE_AUSGESCHLOSSEN"
+       "W_BELEGE_AUSGESCHLOSSEN",
+       "W_TABELLE_VORLAEUFIG"
       ],
       "nicht_beruecksichtigt_anzahl": 1,
       "dashboard": {
@@ -1569,8 +1573,12 @@
          "status": "ergebnis"
         },
         "unvollstaendig": false,
-        "warnungen": [],
-        "hinweise": [],
+        "warnungen": [
+         "W_TABELLE_VORLAEUFIG"
+        ],
+        "hinweise": [
+         "W_TABELLE_VORLAEUFIG"
+        ],
         "ausgeschlossene": []
        }
       ],
@@ -1583,7 +1591,9 @@
        "gewinn_cent": 59500,
        "ausgeschlossene": []
       },
-      "warnungen": [],
+      "warnungen": [
+       "W_TABELLE_VORLAEUFIG"
+      ],
       "nicht_beruecksichtigt_anzahl": 0,
       "dashboard": {
        "umsatz_netto_vereinnahmt": 50000,

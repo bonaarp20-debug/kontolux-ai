@@ -119,6 +119,9 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
   const jahr = Number(periode.slice(0, 4));
   const tabelle = zeilenTabelle(jahr);
   if (!tabelle) hinweise.push('HN_KZ_JAHR');
+  // TR3-kern-006: Zeilen und Kennzahlen aus einer vorläufigen Tabelle (2027, Platzhalter aus 2026) sind nicht amtlich: Feld und Hinweiscode, generisch weiterzugeben
+  const vorlaeufig = !!tabelle && tabelle.vorlaeufig === true;
+  if (vorlaeufig) hinweise.push('W_TABELLE_VORLAEUFIG');
   // Die Rundung steht allein in RUNDUNG_BASIS (tabellen.js). optionen.rundung überschreibt sie nur für Vergleichsrechnungen
   // (Schatten-Modus, Tests), nie dauerhaft.
   const rd = istObjekt(opt.rundung) ? opt.rundung : {};
@@ -263,6 +266,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
 
   return {
     periode, jahr, zeilen, kennzahlen,
+    ...(vorlaeufig ? { vorlaeufig: true } : {}),
     summen: primaer,
     summen_alternativ: alternativ,
     kz83: {

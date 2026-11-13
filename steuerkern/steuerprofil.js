@@ -586,7 +586,11 @@ export function pruefeWechsel(profil, bereich, eintrag, optionen) {
     // TR-ustva-002 (§ 18 Abs. 2 S. 1, 2, Abs. 2a S. 3 UStG): Der Zeitraum folgt der Steuer des Vorjahres, das Wahlrecht bindet für das Kalenderjahr. Ein
     // Wechsel mitten im Jahr ist nur bei Aufnahme der Tätigkeit (Gründer) oder auf Anordnung des Finanzamts vorgesehen: Warnung, kein Fehler.
     const gruenderBeginn = istObjekt(p.gruendung) && p.gruendung.datum === eintrag.gueltig_ab;
-    if (verlauf.length > 0 && !ersterJanuar(eintrag.gueltig_ab) && !gruenderBeginn) w.push('W_VORANMELDUNG_UNTERJAEHRIG');
+    // Welle 3 (Beobachtung G-KERN): Die Dauerfristverlängerung (§ 46 UStDV) ist ein eigener Antrag und nicht an den 1. Januar gebunden; nur ein Wechsel des
+    // Zeitraums (Monat/Quartal) mitten im Jahr warnt.
+    const vorEintrag = eintragAm(verlauf, eintrag.gueltig_ab);
+    const zeitraumWechsel = !istObjekt(vorEintrag) || vorEintrag.zeitraum !== eintrag.zeitraum;
+    if (verlauf.length > 0 && !ersterJanuar(eintrag.gueltig_ab) && !gruenderBeginn && zeitraumWechsel) w.push('W_VORANMELDUNG_UNTERJAEHRIG');
     const gh = gruenderHinweis(p, jahrVon(eintrag.gueltig_ab));
     if (gh.betroffen) w.push('W_GRUENDER_2027');
   }

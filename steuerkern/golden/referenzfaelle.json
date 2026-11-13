@@ -1,7 +1,7 @@
 {
  "format": 1,
  "art": "auswertung",
- "kern_version": "2026.11.13-6",
+ "kern_version": "2026.11.13-7",
  "quelle": "docs/regelbesteuerung/05-testfaelle.json (112 Referenzfälle, mit scripts/test-steuerkern-golden-korrekturen.json); Ausgabe = Kern, vom Golden-Runner gegen die Fixture geprüft",
  "ohne_vektor": {
   "gesamt_faelle": 112,
@@ -2063,7 +2063,9 @@
        "gewinn_cent": -59500,
        "ausgeschlossene": []
       },
-      "warnungen": [],
+      "warnungen": [
+       "W_TABELLE_VORLAEUFIG"
+      ],
       "nicht_beruecksichtigt_anzahl": 0,
       "dashboard": {
        "umsatz_netto_vereinnahmt": 0,
@@ -2174,8 +2176,12 @@
          "status": "ergebnis"
         },
         "unvollstaendig": false,
-        "warnungen": [],
-        "hinweise": [],
+        "warnungen": [
+         "W_TABELLE_VORLAEUFIG"
+        ],
+        "hinweise": [
+         "W_TABELLE_VORLAEUFIG"
+        ],
         "ausgeschlossene": []
        }
       ],
@@ -2188,7 +2194,9 @@
        "gewinn_cent": -95200,
        "ausgeschlossene": []
       },
-      "warnungen": [],
+      "warnungen": [
+       "W_TABELLE_VORLAEUFIG"
+      ],
       "nicht_beruecksichtigt_anzahl": 0,
       "dashboard": {
        "umsatz_netto_vereinnahmt": 0,
@@ -2346,7 +2354,8 @@
        "ausgeschlossene": []
       },
       "warnungen": [
-       "W_LIQUIDITAET_DEZEMBER"
+       "W_LIQUIDITAET_DEZEMBER",
+       "W_TABELLE_VORLAEUFIG"
       ],
       "nicht_beruecksichtigt_anzahl": 0,
       "dashboard": {
@@ -4622,8 +4631,12 @@
          "status": "ergebnis"
         },
         "unvollstaendig": false,
-        "warnungen": [],
-        "hinweise": [],
+        "warnungen": [
+         "W_TABELLE_VORLAEUFIG"
+        ],
+        "hinweise": [
+         "W_TABELLE_VORLAEUFIG"
+        ],
         "ausgeschlossene": []
        }
       ],
@@ -4638,6 +4651,7 @@
        "ausgeschlossene": []
       },
       "warnungen": [
+       "W_TABELLE_VORLAEUFIG",
        "W_WECHSEL_DIALOG"
       ],
       "nicht_beruecksichtigt_anzahl": 0,
@@ -5495,8 +5509,12 @@
          "status": "ergebnis"
         },
         "unvollstaendig": false,
-        "warnungen": [],
-        "hinweise": [],
+        "warnungen": [
+         "W_TABELLE_VORLAEUFIG"
+        ],
+        "hinweise": [
+         "W_TABELLE_VORLAEUFIG"
+        ],
         "ausgeschlossene": []
        }
       ],
@@ -5509,7 +5527,9 @@
        "gewinn_cent": 119000,
        "ausgeschlossene": []
       },
-      "warnungen": [],
+      "warnungen": [
+       "W_TABELLE_VORLAEUFIG"
+      ],
       "nicht_beruecksichtigt_anzahl": 0,
       "dashboard": {
        "umsatz_netto_vereinnahmt": 100000,
@@ -5680,7 +5700,8 @@
       },
       "warnungen": [
        "W_IST_OHNE_GENEHMIGUNG",
-       "W_LIQUIDITAET_DEZEMBER"
+       "W_LIQUIDITAET_DEZEMBER",
+       "W_TABELLE_VORLAEUFIG"
       ],
       "nicht_beruecksichtigt_anzahl": 0,
       "dashboard": {
@@ -5854,8 +5875,12 @@
          "status": "ergebnis"
         },
         "unvollstaendig": false,
-        "warnungen": [],
-        "hinweise": [],
+        "warnungen": [
+         "W_TABELLE_VORLAEUFIG"
+        ],
+        "hinweise": [
+         "W_TABELLE_VORLAEUFIG"
+        ],
         "ausgeschlossene": []
        }
       ],
@@ -5868,7 +5893,9 @@
        "gewinn_cent": 59500,
        "ausgeschlossene": []
       },
-      "warnungen": [],
+      "warnungen": [
+       "W_TABELLE_VORLAEUFIG"
+      ],
       "nicht_beruecksichtigt_anzahl": 0,
       "dashboard": {
        "umsatz_netto_vereinnahmt": 50000,
@@ -6165,7 +6192,8 @@
        "ausgeschlossene": []
       },
       "warnungen": [
-       "W_LIQUIDITAET_DEZEMBER"
+       "W_LIQUIDITAET_DEZEMBER",
+       "W_TABELLE_VORLAEUFIG"
       ],
       "nicht_beruecksichtigt_anzahl": 0,
       "dashboard": {
@@ -6354,10 +6382,13 @@
          "status": "ergebnis"
         },
         "unvollstaendig": false,
-        "warnungen": [],
+        "warnungen": [
+         "W_TABELLE_VORLAEUFIG"
+        ],
         "hinweise": [
          "HN_RD_ELSTER",
-         "HN_RD_SUMME"
+         "HN_RD_SUMME",
+         "W_TABELLE_VORLAEUFIG"
         ],
         "ausgeschlossene": []
        }
@@ -6371,7 +6402,9 @@
        "gewinn_cent": 79000,
        "ausgeschlossene": []
       },
-      "warnungen": [],
+      "warnungen": [
+       "W_TABELLE_VORLAEUFIG"
+      ],
       "nicht_beruecksichtigt_anzahl": 0,
       "dashboard": {
        "umsatz_netto_vereinnahmt": 66387,
@@ -6988,10 +7021,12 @@
         },
         "unvollstaendig": false,
         "warnungen": [
-         "W_LIQUIDITAET_DEZEMBER"
+         "W_LIQUIDITAET_DEZEMBER",
+         "W_TABELLE_VORLAEUFIG"
         ],
         "hinweise": [
-         "W_LIQUIDITAET_DEZEMBER"
+         "W_LIQUIDITAET_DEZEMBER",
+         "W_TABELLE_VORLAEUFIG"
         ],
         "ausgeschlossene": []
        }
@@ -7006,7 +7041,8 @@
        "ausgeschlossene": []
       },
       "warnungen": [
-       "W_LIQUIDITAET_DEZEMBER"
+       "W_LIQUIDITAET_DEZEMBER",
+       "W_TABELLE_VORLAEUFIG"
       ],
       "nicht_beruecksichtigt_anzahl": 0,
       "dashboard": {
@@ -7583,10 +7619,12 @@
         },
         "unvollstaendig": false,
         "warnungen": [
-         "W_STORNO_ABGESCHLOSSENER_ZEITRAUM"
+         "W_STORNO_ABGESCHLOSSENER_ZEITRAUM",
+         "W_TABELLE_VORLAEUFIG"
         ],
         "hinweise": [
-         "W_STORNO_ABGESCHLOSSENER_ZEITRAUM"
+         "W_STORNO_ABGESCHLOSSENER_ZEITRAUM",
+         "W_TABELLE_VORLAEUFIG"
         ],
         "ausgeschlossene": []
        }
@@ -7600,7 +7638,8 @@
        "ausgeschlossene": []
       },
       "warnungen": [
-       "W_STORNO_ABGESCHLOSSENER_ZEITRAUM"
+       "W_STORNO_ABGESCHLOSSENER_ZEITRAUM",
+       "W_TABELLE_VORLAEUFIG"
       ],
       "nicht_beruecksichtigt_anzahl": 0,
       "dashboard": {
@@ -8532,8 +8571,12 @@
          "status": "ergebnis"
         },
         "unvollstaendig": false,
-        "warnungen": [],
-        "hinweise": [],
+        "warnungen": [
+         "W_TABELLE_VORLAEUFIG"
+        ],
+        "hinweise": [
+         "W_TABELLE_VORLAEUFIG"
+        ],
         "ausgeschlossene": []
        }
       ],
@@ -8546,7 +8589,9 @@
        "gewinn_cent": -59500,
        "ausgeschlossene": []
       },
-      "warnungen": [],
+      "warnungen": [
+       "W_TABELLE_VORLAEUFIG"
+      ],
       "nicht_beruecksichtigt_anzahl": 0,
       "dashboard": {
        "umsatz_netto_vereinnahmt": 0,
@@ -10725,7 +10770,9 @@
        "gewinn_cent": -114000,
        "ausgeschlossene": []
       },
-      "warnungen": [],
+      "warnungen": [
+       "W_TABELLE_VORLAEUFIG"
+      ],
       "nicht_beruecksichtigt_anzahl": 0,
       "dashboard": {
        "umsatz_netto_vereinnahmt": 0,
@@ -11814,7 +11861,8 @@
        "ausgeschlossene": []
       },
       "warnungen": [
-       "W_LIQUIDITAET_DEZEMBER"
+       "W_LIQUIDITAET_DEZEMBER",
+       "W_TABELLE_VORLAEUFIG"
       ],
       "nicht_beruecksichtigt_anzahl": 0,
       "dashboard": {
@@ -12319,8 +12367,12 @@
          "status": "ergebnis"
         },
         "unvollstaendig": false,
-        "warnungen": [],
-        "hinweise": [],
+        "warnungen": [
+         "W_TABELLE_VORLAEUFIG"
+        ],
+        "hinweise": [
+         "W_TABELLE_VORLAEUFIG"
+        ],
         "ausgeschlossene": []
        }
       ],
@@ -12335,7 +12387,9 @@
        "gewinn_cent": 499800,
        "ausgeschlossene": []
       },
-      "warnungen": [],
+      "warnungen": [
+       "W_TABELLE_VORLAEUFIG"
+      ],
       "nicht_beruecksichtigt_anzahl": 0,
       "dashboard": {
        "umsatz_netto_vereinnahmt": 500000,

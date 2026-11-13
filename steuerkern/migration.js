@@ -266,7 +266,16 @@ export function migrationsPlan(docsV1, profil, optionen) {
     zaehle(bericht.je_steuerfall, String(s.steuerfall));
     if (s.steuerfall === 'UNBEKANNT') {
       zaehle(bericht.unbekannt_je_grund, String(s.unbekannt_grund || 'ohne_grund'));
-      if (s.unbekannt_detail) zaehle(bericht.unbekannt_je_detail, String(s.unbekannt_detail));
+      if (s.unbekannt_detail) {
+        // TR3-kern-007 (Konzept 3.8.5: der Bericht enthält nur Zahlen, Codes und laufende Nummern): freier Text aus den Altdaten (freier_wert:<Text>)
+        // wird durch den Code 'freier_wert' ersetzt, die Belege stehen als laufende Nummer in freier_wert_laufnummern
+        const d = String(s.unbekannt_detail);
+        if (d === 'freier_wert' || d.startsWith('freier_wert:')) {
+          zaehle(bericht.unbekannt_je_detail, 'freier_wert');
+          if (!Array.isArray(bericht.freier_wert_laufnummern)) bericht.freier_wert_laufnummern = [];
+          bericht.freier_wert_laufnummern.push(laufnr);
+        } else zaehle(bericht.unbekannt_je_detail, d);
+      }
     }
     const m = istObjekt(s.migration) ? s.migration : { flags: [], hinweise: [] };
     const flags = Array.isArray(m.flags) ? m.flags : [];

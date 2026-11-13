@@ -446,6 +446,9 @@ export function normalisiereEingabe(eingabe, kontext) {
     } else kleinbetrag = true;
   }
 
+  // Anlagegut (TR3-kern, Entscheidung Welle 3): Nutzer erklärt anlagegut: true oder kein_anlagegut: true (siehe wirkung.js anlagegutLage)
+  if (e.anlagegut === true) kennzeichen.push('anlagegut');
+  if (e.kein_anlagegut === true) kennzeichen.push('kein_anlagegut');
   // --- Ausschlüsse: Bewirtung, Geschenk (Schritt 8) ---
   let bewirtung = null;
   if (istObjekt(e.bewirtung) || e.bewirtung === true) {

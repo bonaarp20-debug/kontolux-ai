@@ -29,6 +29,9 @@ export function euerFuer(wirkungen, profil, jahr, optionen) {
   const tabelle = EUER_ZEILEN[J] || null;
   const hinweise = [];
   if (!tabelle) hinweise.push('HN_KZ_JAHR');
+  // TR3-kern-006: vorläufige Tabelle (2027, Platzhalter aus 2026, nicht amtlich): Feld vorlaeufig und Hinweiscode W_TABELLE_VORLAEUFIG
+  const vorlaeufig = !!tabelle && tabelle.vorlaeufig === true;
+  if (vorlaeufig) hinweise.push('W_TABELLE_VORLAEUFIG');
   const imJahr = ws.filter((w) => w.welt === 'euer' && w.periode === J);
   const sicher = imJahr.filter((w) => w.status === 'berechnet' && w.kz !== null);
 
@@ -139,6 +142,7 @@ export function euerFuer(wirkungen, profil, jahr, optionen) {
     jahr,
     zeilen,
     kennzahlen,
+    ...(vorlaeufig ? { vorlaeufig: true } : {}),
     einnahmen_cent: einnahmen,
     ausgaben_cent: ausgaben,
     gewinn_cent: einnahmen - ausgaben,
