@@ -142,7 +142,7 @@ export const USTVA_ZEILEN = frieren({
       bemessungsgrundlage: 'nur volle Euro (Anleitung, Datei-Zeile 588; Zeilen 13 bis 16 "in vollen Euro (ohne Centbeträge)", Datei-Zeile 780)',
       steuer_und_vorsteuer: 'stets auch Centbeträge (Datei-Zeile 588)',
       negative_betraege: 'mit Minuszeichen kennzeichnen (Datei-Zeile 585)',
-      rundungsrichtung: luecke('Die Richtung der Rundung der Bemessungsgrundlage steht in keiner amtlichen Quelle (K4, Messung L11). Standard laut 06: abschneiden Richtung Null.'),
+      rundungsrichtung: luecke('Die Richtung der Rundung der Bemessungsgrundlage steht weder im Gesetz noch im Vordruck oder in der Anleitung (K4, Messung L11). Standard laut 06: abschneiden Richtung Null.'),
     },
   },
   // VORLÄUFIG (13.11.2026, auf Wunsch von Jona): Übernahme der Zeilen und Kennzahlen 2026 als Platzhalter für 2027, damit der Kern ab
@@ -153,18 +153,18 @@ export const USTVA_ZEILEN = frieren({
     jahr: 2027,
     zeilen: USTVA_2026,
     dauerfrist_antrag: USTVA_1H_2026,
-    quelle: 'VORLÄUFIG, nicht amtlich: Übernahme der Zeilen und Kennzahlen aus dem Vordruck USt 1 A 2026 (BMF 29.12.2025). Der Vordruck 2027 liegt nicht vor.',
+    quelle: 'VORLÄUFIG: Übernahme der Zeilen und Kennzahlen aus dem Vordruck USt 1 A 2026 (BMF 29.12.2025). Der Vordruck 2027 des BMF liegt noch nicht vor; vor dem Eintragen mit dem Formular in ELSTER abgleichen.',
     abruf: null,
     gueltig_von: '2027-01-01',
     gueltig_bis: '2027-12-31',
     konfidenz: 'E',
     vorlaeufig: true,
-    hinweis: 'Platzhalter aus 2026; vor Nutzung gegen den amtlichen Vordruck 2027 prüfen.',
+    hinweis: 'Platzhalter aus 2026; vor Nutzung gegen den Vordruck USt 1 A 2027 des BMF prüfen.',
     format: {
       bemessungsgrundlage: 'nur volle Euro (wie 2026, nicht für 2027 bestätigt)',
       steuer_und_vorsteuer: 'stets auch Centbeträge (wie 2026, nicht für 2027 bestätigt)',
       negative_betraege: 'mit Minuszeichen kennzeichnen (wie 2026, nicht für 2027 bestätigt)',
-      rundungsrichtung: luecke('Die Richtung der Rundung der Bemessungsgrundlage steht in keiner amtlichen Quelle (K4). Standard laut 06: abschneiden Richtung Null.'),
+      rundungsrichtung: luecke('Die Richtung der Rundung der Bemessungsgrundlage steht weder im Gesetz noch im Vordruck oder in der Anleitung (K4). Standard laut 06: abschneiden Richtung Null.'),
     },
   },
   '2025': luecke('Vordruck USt 1 A 2025 (BMF 09.12.2024) liegt nicht im Repo (INDEX L6); nur ELSTER-Hilfetext elster-hilfe-ustva-2025.md. Für berichtigte Anmeldungen 2025 vor Nutzung beschaffen.'),
@@ -272,13 +272,13 @@ export const EUER_ZEILEN = frieren({
   '2027': {
     jahr: 2027,
     zeilen: EUER_ZEILEN_LISTE.map((r) => ({ kz: r.kz, zeile: r.zeile_2026, bez: r.bez, quelle: 'VORLÄUFIG: Zeile aus Anlage EÜR 2026 übernommen, 2027 nicht bestätigt', konfidenz: 'E', spalte: r.spalte || null, hinweis: r.hinweis || null, stufe: r.stufe || null })),
-    quelle: 'VORLÄUFIG, nicht amtlich: Übernahme der Zeilen aus der Anlage EÜR 2026 (BMF 01.09.2026). Die Anlage EÜR 2027 liegt nicht vor.',
+    quelle: 'VORLÄUFIG: Übernahme der Zeilen aus der Anlage EÜR 2026 (BMF 01.09.2026). Die Anlage EÜR 2027 des BMF liegt noch nicht vor; vor dem Eintragen mit dem Formular in ELSTER abgleichen.',
     abruf: null,
     gueltig_von: '2027-01-01',
     gueltig_bis: '2027-12-31',
     konfidenz: 'E',
     vorlaeufig: true,
-    hinweis: 'Platzhalter aus 2026; vor Nutzung gegen die amtliche Anlage EÜR 2027 prüfen.',
+    hinweis: 'Platzhalter aus 2026; vor Nutzung gegen die Anlage EÜR 2027 des BMF prüfen.',
   },
   '2025': {
     jahr: 2025,
@@ -424,6 +424,24 @@ export const BELEG_ARTEN = Object.freeze(['rechnung', 'kleinbetrag', 'anzahlung'
 export const KORREKTUR_GRUENDE = Object.freeze(['rueckabwicklung', 'leistung_nicht_erbracht', 'preisnachlass', 'skonto', 'bonus', 'uneinbringlich', 'geschenk_nachtraeglich', 'tippfehler_berichtigung', 'ust_falsch_ausgewiesen']);
 
 export const FA_ARTEN = Object.freeze(['ust', 'ust_zinsen', 'ust_zuschlag', 'est_nicht_abziehbar', 'erstattung_ust', 'erstattung_nebenleistung']);
+
+// Kategorien des Altbestands für Zahlungen an das Finanzamt und Erstattungen (KATEGORIEN unten, App: kontoauszug.js, regel/euer-ui-daten.js
+// FA_KATEGORIEN). Ein Beleg mit einer dieser Kategorien ist bei Regelbesteuerung eine Finanzamt-Zahlung (K16), nie ein Vorsteuer- oder
+// Umsatz-Beleg: eine Steuerzahlung ist keine Leistung eines anderen Unternehmers (§ 15 Abs. 1 S. 1 Nr. 1 UStG, docs/quellen/ustg-15.md Z. 16).
+export const FA_ALT_KATEGORIEN = Object.freeze(['Finanzamt', 'Gezahlte Umsatzsteuer', 'Umsatzsteuer-Erstattung']);
+
+// Anzeige-Schlüssel der Nutzerwahl am Altbeleg (Feld fa_kategorie, Katalog FA_ARTEN in kontoauszug.js, BP-11) -> Art des Kerns (fa_art).
+// Der Test scripts/test-steuerkern-fa-alt.mjs vergleicht beide Kataloge. Einkommensteuer: § 12 Nr. 3 EStG (docs/quellen/estg-12.md), keine Betriebsausgabe.
+export const FA_KATEGORIE_ZU_ART = Object.freeze({
+  ust_vorauszahlung: 'ust',
+  ust_nachzahlung: 'ust',
+  ust_sondervorauszahlung: 'ust',
+  ust_erstattung: 'erstattung_ust',
+  erstattung_nebenleistung: 'erstattung_nebenleistung',
+  ust_zinsen: 'ust_zinsen',
+  ust_zuschlag: 'ust_zuschlag',
+  est_privat: 'est_nicht_abziehbar',
+});
 
 // Gründe für einen Statuswechsel im Zeitstrahl (Konzept 3.4).
 export const STATUS_GRUENDE = Object.freeze(['beginn', 'vorjahr_ueber_25k', 'laufend_ueber_100k', 'gruendung_ueber_25k', 'option_19_3', 'widerruf_option', 'freiwillig_wechsel', 'rueckwechsel_unter_grenze']);

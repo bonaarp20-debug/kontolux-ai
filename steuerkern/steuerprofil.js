@@ -559,6 +559,8 @@ export function pruefeWechsel(profil, bereich, eintrag, optionen) {
         folgen.option_frist = frist;
         w.push('W_OPTION_5_JAHRE');
       }
+    } else if (eintrag.status === 'ku' && eintrag.grund === 'beginn' && verlauf.length === 0) {
+      // K-B (BP-08 Nr. 8): erster Eintrag am Tätigkeitsbeginn ist kein Wechsel (keine Rückwechsel- oder Dialog-Warnung)
     } else if (eintrag.status === 'ku') {
       const opt = p.option_19_3;
       if (istObjekt(opt) && istDatum(opt.bindung_bis) && eintrag.gueltig_ab <= opt.bindung_bis) f.push(fehler('OPTION_BINDUNG_5_JAHRE', `Der Verzicht auf die Kleinunternehmerregelung bindet bis ${opt.bindung_bis}.`));

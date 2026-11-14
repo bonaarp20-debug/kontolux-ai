@@ -2,9 +2,10 @@
 // daten.js: Datums-Hilfen (Konzept 2.2.2, K-3). ISO-Strings YYYY-MM-DD, Rechnen über einen eigenen
 // UTC-Tageszähler (Tage seit 1970-01-01, proleptisch gregorianisch), ohne Zeitzonen, ohne Date-Objekt.
 //
-// Feiertage: Der Kern kennt keinen Feiertagskalender. naechsterWerktag() verschiebt nur Samstag und Sonntag.
-// Wer einen Feiertagskalender hat, übergibt optionen.istFeiertag(datum) (§ 108 Abs. 3 AO). Ohne Kalender
-// liefern Fristfunktionen den Hinweiscode FRIST_OHNE_FEIERTAGSKALENDER (Warnung bei Wochenende: W_FRIST_WOCHENENDE).
+// Feiertage: naechsterWerktag() verschiebt ohne Kalender nur Samstag und Sonntag. Wer einen Feiertagskalender hat, übergibt
+// optionen.istFeiertag(datum) (§ 108 Abs. 3 AO). Der Kern liefert einen Kalender der neun bundeseinheitlichen Feiertage
+// (istBundeseinheitlicherFeiertag, K-B 14.11.2026); landesspezifische Feiertage am Sitz des Finanzamts kennt er nicht (Hinweis
+// FRIST_NUR_BUNDESEINHEITLICHE_FEIERTAGE). Ohne Kalender liefern Fristfunktionen FRIST_OHNE_FEIERTAGSKALENDER (Verschiebung: W_FRIST_WOCHENENDE).
 //
 // Perioden: 'JJJJ-MM' (Monat), 'JJJJ-Qn' (Quartal), 'JJJJ' (Jahr).
 
@@ -220,6 +221,64 @@ export function periodenZwischen(a, b, art) {
   return out;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Bundeseinheitliche Feiertage (§ 108 Abs. 3 AO "gesetzlicher Feiertag"). Quellen: BMI "Nationale Feiertage" (docs/quellen/bmi-nationale-feiertage.md:
+// neun Feiertage sind durch die Sonn- und Feiertagsgesetze aller Länder geschützt), Einigungsvertrag Art. 2 Abs. 2 (docs/quellen/einigvtr-art-2.md:
+// 3. Oktober). Bewegliche Feiertage aus dem Ostersonntag (gregorianische Osterformel, Rechenregel): Karfreitag -2, Ostermontag +1,
+// Christi Himmelfahrt +39, Pfingstmontag +50 Tage. Landesspezifische Feiertage (zum Beispiel Fronleichnam, Reformationstag, Allerheiligen)
+// sind nicht enthalten, weil das Land des Finanzamts nicht bekannt ist und deren Wortlaut nicht in docs/quellen liegt (Lücke).
+// ---------------------------------------------------------------------------------------------
+export const FEIERTAGE_BUNDESEINHEITLICH = Object.freeze({
+  anzahl: 9,
+  quelle: 'BMI Nationale Feiertage (docs/quellen/bmi-nationale-feiertage.md, Abruf 2026-11-14); Einigungsvertrag Art. 2 Abs. 2 (docs/quellen/einigvtr-art-2.md)',
+  konfidenz: 'B', // Liste: Wortlaut einer amtlichen Seite (kein Gesetz); Ostertermin: Rechenregel, gegen eine zweite Formel getestet
+  landesspezifisch: 'nicht enthalten (Lücke), Hinweis FRIST_NUR_BUNDESEINHEITLICHE_FEIERTAGE',
+});
+
+// Ostersonntag nach der gregorianischen Osterformel (Meeus/Jones/Butcher), für die Jahre 1583 bis 9999.
+export function osterSonntag(jahr) {
+  if (!Number.isSafeInteger(jahr) || jahr < 1583 || jahr > 9999) throw new RangeError('jahr muss eine ganze Zahl von 1583 bis 9999 sein');
+  const a = jahr % 19;
+  const b = Math.floor(jahr / 100);
+  const c = jahr % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const monat = Math.floor((h + l - 7 * m + 114) / 31);
+  const tag = ((h + l - 7 * m + 114) % 31) + 1;
+  return formatDatum(jahr, monat, tag);
+}
+
+// Die neun bundeseinheitlichen Feiertage eines Jahres, nach Datum sortiert: [{ datum, name }]
+export function bundeseinheitlicheFeiertage(jahr) {
+  const o = osterSonntag(jahr);
+  const liste = [
+    { datum: formatDatum(jahr, 1, 1), name: 'Neujahr' },
+    { datum: addiereTage(o, -2), name: 'Karfreitag' },
+    { datum: addiereTage(o, 1), name: 'Ostermontag' },
+    { datum: formatDatum(jahr, 5, 1), name: '1. Mai' },
+    { datum: addiereTage(o, 39), name: 'Christi Himmelfahrt' },
+    { datum: addiereTage(o, 50), name: 'Pfingstmontag' },
+    { datum: formatDatum(jahr, 10, 3), name: 'Tag der Deutschen Einheit' },
+    { datum: formatDatum(jahr, 12, 25), name: 'erster Weihnachtstag' },
+    { datum: formatDatum(jahr, 12, 26), name: 'zweiter Weihnachtstag' },
+  ];
+  return liste.sort((x, y) => (x.datum < y.datum ? -1 : x.datum > y.datum ? 1 : 0));
+}
+
+// Kalender für optionen.istFeiertag: true nur für einen der neun bundeseinheitlichen Feiertage; Datenmüll ergibt false (keine Ausnahme).
+export function istBundeseinheitlicherFeiertag(datum) {
+  const z = zerlege(datum);
+  if (!z || z[0] < 1583) return false;
+  return bundeseinheitlicheFeiertage(z[0]).some((f) => f.datum === datum);
+}
+
 export function istWerktag(datum, optionen) {
   if (istWochenende(datum)) return false;
   const f = optionen && optionen.istFeiertag;
@@ -250,6 +309,7 @@ export function frist10Tag(periode, dauerfrist, optionen) {
   const hinweise = [];
   const hatKalender = !!(optionen && typeof optionen.istFeiertag === 'function');
   if (!hatKalender) hinweise.push('FRIST_OHNE_FEIERTAGSKALENDER');
+  else if (optionen.istFeiertag === istBundeseinheitlicherFeiertag) hinweise.push('FRIST_NUR_BUNDESEINHEITLICHE_FEIERTAGE');
   if (faellig !== gesetzlich) hinweise.push('W_FRIST_WOCHENENDE');
   return {
     periode,

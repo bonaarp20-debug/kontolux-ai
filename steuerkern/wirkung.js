@@ -971,7 +971,16 @@ function faWirkungen(s, profil, ctx, out) {
   if (art === null) {
     ctx.beleg_status = 'unbekannt';
     ctx.hinweise.push('FA_ART_FEHLT');
-    out.push(mk(ctx, { welt: 'ust', rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-ZP-23' }));
+    // K-B (Zuruf BP-11 Nr. 2, R-EUER-37): Ohne Art ist offen, ob die Zahlung in Kz 186, 141, 103, 234, 183 oder gar nicht (Einkommensteuer) steht.
+    // Die Zahlung sperrt die EÜR des Zahlungsjahres; liegt sie im Zehn-Tage-Fenster (§ 11 Abs. 1 S. 2, Abs. 2 S. 2 EStG), auch die des Vorjahres,
+    // weil sie dorthin gehören kann. Kein stilles Fehlen in Kz 186.
+    const ez = [];
+    for (const z of zahlungen) {
+      const e = { datum: z.datum, betrag_cent: z.betrag_cent, spalte: s.richtung === 'ausgang' ? 'einnahme' : 'ausgabe' };
+      ez.push(e);
+      if (z.datum.slice(5, 7) === '01' && Number(z.datum.slice(8, 10)) <= GRENZEN.ZEHN_TAGE_REGEL.wert) ez.push({ ...e, jahr: String(jahrVon(z.datum) - 1) });
+    }
+    out.push(mk(ctx, { welt: 'ust', rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-ZP-23', euer_zahlungen: ez }));
     return;
   }
   for (const z of zahlungen) {

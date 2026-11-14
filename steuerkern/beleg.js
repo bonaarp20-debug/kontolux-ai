@@ -9,10 +9,11 @@
 // Gesamtbeleg-Form (Ausgabe): { schema_version: 2, id, ...Altfelder (legacyFelder), steuer: {...} }.
 
 import { istCent, ustAusNetto, ustAusBrutto, teile } from './geld.js';
-import { istDatum, monatsende, monatsanfang, datumAusTagen, tageSeitEpoche, formatDatum, tageImMonat, wochentagNr } from './daten.js';
+import { istDatum, monatsende, monatsanfang, datumAusTagen, tageSeitEpoche, formatDatum, tageImMonat, wochentagNr, istPeriode } from './daten.js';
 import { statusAm, statusFuerAusgangsumsatz, vorsteuerAbziehbar } from './steuerprofil.js';
 import {
   STEUERFAELLE, SPERRGRUENDE, BELEG_ARTEN, KORREKTUR_GRUENDE, FA_ARTEN, KATEGORIEN, STEUERSAETZE, GRENZEN, SATZ_REGEL_BP, SATZ_ERMAESSIGT_BP, SATZ_NULL_BP,
+  FA_ALT_KATEGORIEN, FA_KATEGORIE_ZU_ART,
 } from './tabellen.js';
 
 const istObjekt = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -31,7 +32,6 @@ export const BELEG_BETRAG_MAX_CENT = 1000000000; // 10 Mio EUR je Beleg (Konzept
 
 // Kategorien, bei denen ein Altbeleg mit mwst_satz 'keine' im Regelstatus eindeutig ohne Vorsteuer ist (3.8.2).
 const KATEGORIEN_OHNE_VORSTEUER = Object.freeze(['Bankgebühren', 'Versicherungen', 'Versicherung', 'Reisekosten', 'Verpflegungsmehraufwand', 'Fahrtkosten (Kilometerpauschale)']);
-const KATEGORIEN_FINANZAMT = Object.freeze(['Finanzamt']);
 const PLATTFORM_QUELLEN = ['webhook', 'stripe', 'copecart', 'digistore', 'shopify', 'paypal', 'plattform'];
 
 // ---------------------------------------------------------------------------------------------
@@ -808,7 +808,12 @@ export function normalisiereAlt(alt, profil, optionen) {
   else if (typ === 'reisekosten') belegArt = 'quittung';
   const privat = a.art === 'entnahme' || a.art === 'einlage' || typ === 'privat';
   if (privat) { belegArt = 'privat'; wirkungslos = true; }
-  if (a.deleted === true || a.storniert === true) { wirkungslos = true; hinweise.push('ORIGINAL_STORNIERT'); }
+  // K-B (Zuruf BP-14 Nr. 4, Standardentscheidung 1, UStAE 17.1 Abs. 2 S. 3): Eine bezahlte, stornierte Ausgangsrechnung bleibt ohne erfasste Rückzahlung
+  // stehen (die App sagt beim Stornieren selbst, dass sich Einnahmen und Steuer nicht ändern und eine Rückzahlung eigens zu erfassen ist). Hinweis
+  // W_STORNO_BEZAHLT_OHNE_RUECKZAHLUNG ("Rückzahlung erfassen"). Unbezahlt stornierte und nur gelöschte Belege bleiben wirkungslos.
+  const stornoBezahlt = a.storniert === true && a.bezahlt === true && typ === 'rechnung_ausgehend' && !privat;
+  if (stornoBezahlt) hinweise.push('ORIGINAL_STORNIERT_BEZAHLT');
+  else if (a.deleted === true || a.storniert === true) { wirkungslos = true; hinweise.push('ORIGINAL_STORNIERT'); }
 
   // Datum (3.8.2)
   const createdTag = tagVonZeit(a.createdAt);
@@ -852,6 +857,22 @@ export function normalisiereAlt(alt, profil, optionen) {
   const status = leistung && istObjekt(profil) ? statusAm(profil, leistung.bis).status : null;
   const mwst = a.mwst_satz === undefined || a.mwst_satz === null ? null : String(a.mwst_satz).trim();
   const kategorie = nichtLeer(a.kategorie) ? a.kategorie : null;
+  // K-B (Zuruf BP-11 Nr. 1, K16): Zahlung an das Finanzamt oder Erstattung. Die Wahl des Nutzers steht am Altbeleg in fa_art (Wert aus FA_ARTEN),
+  // fa_kategorie (Anzeige-Schlüssel der App, FA_KATEGORIE_ZU_ART) und fa_periode (Zeitraum der Anmeldung, für die Zehn-Tage-Regel). Nichts wird
+  // geraten: widersprechen sich fa_art und fa_kategorie, bleibt die Art offen (FA_ART_WIDERSPRUCH).
+  // Freie Satz-Werte (Bot-Text, '19%') und Reverse Charge bleiben wie bisher UNBEKANNT: dann ist auch die Kategorie nicht verlässlich.
+  const faKat = (belegArt === 'rechnung' || belegArt === 'quittung') && !privat && kategorie !== null && FA_ALT_KATEGORIEN.includes(kategorie) && (mwst === null || ['keine', '19', '7', '0'].includes(mwst));
+  let faWahl = null;
+  if (faKat) {
+    const artDirekt = FA_ARTEN.includes(a.fa_art) ? a.fa_art : null;
+    const faSchl = typeof a.fa_kategorie === 'string' && Object.prototype.hasOwnProperty.call(FA_KATEGORIE_ZU_ART, a.fa_kategorie) ? a.fa_kategorie : null;
+    const artAusSchl = faSchl ? FA_KATEGORIE_ZU_ART[faSchl] : null;
+    let art = artDirekt || artAusSchl;
+    if (artDirekt && artAusSchl && artDirekt !== artAusSchl) { art = null; hinweise.push('FA_ART_WIDERSPRUCH'); }
+    faWahl = { fa_art: art, periode: typeof a.fa_periode === 'string' && istPeriode(a.fa_periode) ? a.fa_periode : null };
+    if (faSchl) faWahl.kategorie = faSchl;
+  }
+  const faSatz = mwst === '19' || mwst === '7';
 
   let steuerfall = null;
   let unbekanntGrund = null;
@@ -864,6 +885,13 @@ export function normalisiereAlt(alt, profil, optionen) {
 
   if (privat) steuerfall = 'PRIVAT';
   else if (belegArt === 'sonstig') { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'steuerfall_nicht_gewaehlt'; unbekanntDetail = 'mahnung'; }
+  else if (faKat && status === 'regel') {
+    // Zuruf BP-11 Nr. 3: auch mit Steuersatz 19/7 nie ein Vorsteuer- oder Umsatz-Beleg (§ 15 Abs. 1 S. 1 Nr. 1 UStG); der Satz wird ignoriert
+    steuerfall = 'FA_ZAHLUNG'; belegArt = 'fa_zahlung'; fa = faWahl;
+    if (fa.fa_art === null) hinweise.push('FA_ART_FEHLT');
+    if (faSatz) hinweise.push('FA_ZAHLUNG_SATZ_IGNORIERT');
+  }
+  else if (faKat && faSatz && status !== 'ku') { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'steuerfall_nicht_gewaehlt'; unbekanntDetail = 'fa_kategorie_mit_satz'; hinweise.push('FA_ZAHLUNG_SATZ_IGNORIERT'); }
   else if (a.ust_unklar === true) { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'steuerfall_nicht_gewaehlt'; unbekanntDetail = 'ust_unklar_datev'; }
   else if (mwst === '19' || mwst === '7') {
     satzBp = mwst === '19' ? SATZ_REGEL_BP : SATZ_ERMAESSIGT_BP;
@@ -872,7 +900,6 @@ export function normalisiereAlt(alt, profil, optionen) {
     else steuerfall = richtung === 'ausgang' ? (satzBp === SATZ_REGEL_BP ? 'A_INLAND_19' : 'A_INLAND_7') : 'E_INLAND_VORSTEUER';
   } else if (mwst === 'keine') {
     if (status === 'ku') steuerfall = richtung === 'ausgang' ? 'A_KU' : 'E_INLAND_OHNE_VORSTEUER';
-    else if (status === 'regel' && richtung === 'eingang' && kategorie && KATEGORIEN_FINANZAMT.includes(kategorie)) { steuerfall = 'FA_ZAHLUNG'; fa = { fa_art: null, periode: null }; hinweise.push('FA_ART_FEHLT'); }
     else if (status === 'regel' && richtung === 'eingang' && istPlattform && kategorie && KATEGORIEN_OHNE_VORSTEUER.includes(kategorie)) {
       // TR-ausland-015 (Standard K11): Gebühren von Plattformen (Stripe, PayPal, Shopify ...) nach Rechnungsinhalt, nicht als steuerfrei geraten
       steuerfall = 'UNBEKANNT'; unbekanntGrund = 'mwst_keine_mehrdeutig'; unbekanntDetail = 'plattformgebuehr';
@@ -943,6 +970,7 @@ export function normalisiereAlt(alt, profil, optionen) {
     migration: { flags, hinweise },
   };
   if (unbekanntDetail) steuer.unbekannt_detail = unbekanntDetail;
+  if (stornoBezahlt) steuer.status_hinweise = ['W_STORNO_BEZAHLT_OHNE_RUECKZAHLUNG'];
   if (fa) steuer.fa = fa;
   if (kategorie) steuer.kategorie = kategorie;
   if (nichtLeer(a.rechnungsnr)) steuer.rechnungsnr = a.rechnungsnr;
@@ -961,9 +989,9 @@ export function normalisiereAlt(alt, profil, optionen) {
 
   const beleg = { schema_version: 2, id, steuer };
   Object.assign(beleg, legacyFelder(beleg));
-  // TR-integration-002: Bei UNBEKANNT bleiben die gültigen Altwerte (mwst_satz, betrag_netto) in den Legacy-Feldern stehen, sonst würde ein
+  // TR-integration-002: Bei UNBEKANNT (und bei einer Finanzamt-Zahlung, deren Satz ignoriert wird) bleiben die gültigen Altwerte (mwst_satz, betrag_netto) in den Legacy-Feldern stehen, sonst würde ein
   // späteres Rückschreiben (Konzept 3.8) 7, 0 oder reverse_charge zu 'keine' und das Netto zum Brutto verfälschen.
-  if (steuerfall === 'UNBEKANNT' && !privat) {
+  if ((steuerfall === 'UNBEKANNT' || steuerfall === 'FA_ZAHLUNG') && !privat) {
     if (mwst !== null && ['19', '7', '0', 'keine', 'reverse_charge'].includes(mwst)) beleg.mwst_satz = mwst;
     if (istCent(nettoAlt) && istCent(brutto) && nettoAlt >= 0 && nettoAlt <= brutto) beleg.betrag_netto = nettoAlt / 100;
   }

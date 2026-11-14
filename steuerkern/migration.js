@@ -111,14 +111,54 @@ function monateAus(liste) {
 }
 
 function eindeutigeNr(docs, a) {
-  // Rechnungsnummer des Originals zu einem Storno-Dokument
-  const nr = nichtLeer(a.storno_rechnungsnummer) ? a.storno_rechnungsnummer : (nichtLeer(a.storniert_rechnungsnr) ? a.storniert_rechnungsnr : null);
+  // Rechnungsnummer des Originals zu einem Storno-Dokument (Bedingung: kontextKandidatPasst)
+  const nr = stornoNr(a);
   if (nr === null) return null;
-  const treffer = docs.filter((d) => istObjekt(d) && d.typ !== 'storno' && (d.rechnungsnr === nr || d.rechnungsnummer === nr));
+  const o = { id: KEINE_ID, art: 'storno', nr };
+  const treffer = docs.filter((d) => istObjekt(d) && kontextKandidatPasst(o, d.id, d));
   return treffer.length >= 1 ? treffer[0] : null;
 }
 
 function datumMonat(d) { return istDatum(d) ? d.slice(0, 7) : null; }
+
+// ---------------------------------------------------------------------------------------------
+// Kontext über Blockgrenzen (Zuruf BP-14 Nr. 2): Der Worker migriert in Blöcken; Storno-Dokumente (bei festgeschriebenen Monaten) und
+// Plattform-Erstattungen brauchen Belege aus anderen Blöcken. Diese reinen Funktionen sind dieselben Bedingungen, die migrationsPlan unten
+// verwendet (eindeutigeNr, ursprung), damit der Worker sie nicht nachbilden muss.
+//   kontextSchluessel(doc, festschreibung) -> null | { id, art: 'storno', nr, k: [] } | { id, art: 'erstattung', quelle, cent, datum, ursprung_id, k: [] }
+//   kontextKandidatPasst(schluessel, id, doc) -> true, wenn doc ein Kandidat (Original bzw. Ursprungszahlung) ist
+//   kontextKandidatenMax(schluessel) -> wie viele Kandidaten die Entscheidung braucht (Storno: erster Treffer, Ursprungs-ID: eindeutig, Betrag: genau einer)
+// ---------------------------------------------------------------------------------------------
+const KEINE_ID = Object.freeze({}); // Platzhalter, der keiner Beleg-ID gleicht (eindeutigeNr schließt keinen Beleg über die ID aus)
+function stornoNr(a) {
+  return nichtLeer(a.storno_rechnungsnummer) ? a.storno_rechnungsnummer : (nichtLeer(a.storniert_rechnungsnr) ? a.storniert_rechnungsnr : null);
+}
+
+export function kontextSchluessel(doc, festschreibung) {
+  if (!istObjekt(doc) || istV2(doc)) return null;
+  const id = nichtLeer(doc.id) ? doc.id : null;
+  if (doc.typ === 'storno') {
+    if (!monateAus(festschreibung).size) return null;
+    const nr = stornoNr(doc);
+    return nr === null ? null : { id, art: 'storno', nr, k: [] }; // ohne Rechnungsnummer kontextfrei (wirkungslos)
+  }
+  if (!istErstattung(doc)) return null;
+  const cent = euroZuCent(doc.betrag);
+  return { id, art: 'erstattung', k: [], quelle: typeof doc.quelle === 'string' ? doc.quelle : null, cent: Number.isSafeInteger(cent) ? cent : null, datum: istDatum(doc.datum) ? doc.datum : null, ursprung_id: nichtLeer(doc.ursprung_id) ? doc.ursprung_id : null };
+}
+
+export function kontextKandidatPasst(o, id, d) {
+  if (!istObjekt(o) || !istObjekt(d) || id === o.id) return false;
+  if (o.art === 'storno') return d.typ !== 'storno' && (d.rechnungsnr === o.nr || d.rechnungsnummer === o.nr);
+  if (o.ursprung_id) return id === o.ursprung_id && d.typ === 'rechnung_ausgehend';
+  if (o.cent === null || o.cent <= 0) return false;
+  return d.typ === 'rechnung_ausgehend' && istPlattform(d) && d.deleted !== true && d.storniert !== true && d.quelle === o.quelle
+    && euroZuCent(d.betrag) === o.cent && (!istDatum(o.datum) || !istDatum(d.datum) || d.datum <= o.datum);
+}
+
+export function kontextKandidatenMax(o) {
+  return istObjekt(o) && (o.art === 'storno' || o.ursprung_id) ? 1 : 2;
+}
 
 // Webhook-Erstattung (3.8.2 vorletzte Zeilen): eindeutig zuordenbar zu genau einer Ursprungszahlung -> gutschrift_erteilt, sonst UNBEKANNT.
 function istErstattung(a) {
@@ -128,14 +168,10 @@ function istErstattung(a) {
 }
 
 function ursprung(docs, a, selbstIndex) {
+  // Bedingungen: kontextKandidatPasst (Ursprungs-ID eindeutig, sonst genau eine Plattform-Zahlung mit gleichem Betrag und Quelle, nicht später)
   const cent = euroZuCent(a.betrag);
-  if (a.ursprung_id !== undefined && nichtLeer(a.ursprung_id)) {
-    const t = docs.filter((d, i) => i !== selbstIndex && istObjekt(d) && d.id === a.ursprung_id && d.typ === 'rechnung_ausgehend');
-    return t.length === 1 ? t[0] : null;
-  }
-  if (cent === null || cent <= 0) return null;
-  const t = docs.filter((d, i) => i !== selbstIndex && istObjekt(d) && d.typ === 'rechnung_ausgehend' && istPlattform(d) && d.deleted !== true && d.storniert !== true
-    && euroZuCent(d.betrag) === cent && (!istDatum(a.datum) || !istDatum(d.datum) || d.datum <= a.datum) && (d.quelle === a.quelle));
+  const o = { id: KEINE_ID, art: 'erstattung', quelle: a.quelle, cent: Number.isSafeInteger(cent) ? cent : null, datum: istDatum(a.datum) ? a.datum : null, ursprung_id: nichtLeer(a.ursprung_id) ? a.ursprung_id : null };
+  const t = docs.filter((d, i) => i !== selbstIndex && istObjekt(d) && kontextKandidatPasst(o, d.id, d));
   return t.length === 1 ? t[0] : null;
 }
 
@@ -200,6 +236,7 @@ export function migrationsPlan(docsV1, profil, optionen) {
     ungueltig: 0,
     bereits_v2: 0,
     nicht_schreibbar: 0,
+    ohne_datum: 0,
     blocker_codes: {},
     je_steuerfall: {},
     unbekannt_je_grund: {},
@@ -309,8 +346,12 @@ export function migrationsPlan(docsV1, profil, optionen) {
     if (aktion === 'schreiben') {
       const wirkungslosStorno = s.beleg_art === 'storno' && s.wirkungslos === true;
       blocker = validiereBeleg(beleg).blocker.map((x) => x.code).filter((c) => !(wirkungslosStorno && ['PF_WIRKDATUM', 'PF_BEZUG', 'PF_KORREKTUR_GRUND'].includes(c)));
+      // K-B (Zuruf W0, migration-rollout.md 1.2): ohne datum und ohne createdAt fehlt jedes Rechnungsdatum. Auch Eingangsbelege und wirkungslose
+      // Belege werden dann nicht geschrieben (validiereBeleg meldet bei Eingang nur eine Warnung), sondern zum Nachtragen gemeldet; gleiche Regel
+      // wie der Worker /migration (ohne_datum). Der Kern liest solche Belege weiter in-memory (normalisiereAlt), die Summen bleiben unberührt.
+      if (!istDatum(s.rechnungsdatum)) blocker.push('PF_RECHNUNGSDATUM');
       blocker = [...new Set(blocker)].sort();
-      if (blocker.length) { aktion = 'ueberspringen'; grund = 'validierung'; bericht.nicht_schreibbar++; for (const c of blocker) zaehle(bericht.blocker_codes, c); }
+      if (blocker.length) { aktion = 'ueberspringen'; grund = 'validierung'; bericht.nicht_schreibbar++; for (const c of blocker) zaehle(bericht.blocker_codes, c); if (blocker.includes('PF_RECHNUNGSDATUM')) bericht.ohne_datum++; }
     }
     eintraege.push({
       laufnr, id, aktion, grund, ...(blocker.length ? { blocker } : {}),

@@ -15,3 +15,4 @@ export * from './auswertung.js';
 export * from './hinweise.js';
 export * from './zahlenliste.js';
 export * from './migration.js';
+export * from './drift.js';

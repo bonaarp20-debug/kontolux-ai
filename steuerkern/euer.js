@@ -149,7 +149,9 @@ export function euerFuer(wirkungen, profil, jahr, optionen) {
     if (gesehenZ.has(k)) continue;
     gesehenZ.add(k);
     for (const z of w.euer_zahlungen) {
-      if (!z || typeof z.datum !== 'string' || z.datum.slice(0, 4) !== J.padStart(4, '0') || !Number.isSafeInteger(z.betrag_cent)) continue;
+      // jahr: ausdrückliches Jahr einer möglichen Zuordnung (Zehn-Tage-Fenster einer Finanzamt-Zahlung ohne Art), sonst das Zahlungsjahr
+      const zj = z && typeof z.jahr === 'string' ? z.jahr.padStart(4, '0') : (z && typeof z.datum === 'string' ? z.datum.slice(0, 4) : null);
+      if (!z || typeof z.datum !== 'string' || zj !== J.padStart(4, '0') || !Number.isSafeInteger(z.betrag_cent)) continue;
       fehlend.add(k);
       if (z.spalte === 'einnahme') gEin += z.betrag_cent; else gAus += z.betrag_cent;
       // Leistung in einem anderen Jahr, Zahlung in diesem: der Beleg fehlt auch in dieser EÜR (nicht berücksichtigt)
