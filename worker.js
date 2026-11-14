@@ -16,6 +16,7 @@ import { regelAdminFeatures } from './regel/admin-features.js';
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
 import { v2Vorbereiten, clientSteuerVorbereiten } from './regel/schreibweg-v2.js';
+import { kodiereWert as kodiereFirestoreWert } from './regel/firestore.js';
 import { REGEL_SAMMLUNGEN, REGEL_UNTERSAMMLUNGEN, untersammlungenLoeschen, untersammlungenExport, untersammlungLesen } from './regel/archiv.js';
 
 const ALLOWED_ORIGINS = [
@@ -3143,9 +3144,33 @@ async function handleDocument(body, env, cors = {}, ctx) {
         metadata.fields.betrag_netto = { doubleValue: nettoAusBrutto(parseFloat(betrag), mwst_satz) };
       }
 
+      // Beleg-Formular v2 im Datei-Zustand (BP-09/F1, W1): mitgeschicktes steuer wie bei BELEG_MANUELL nur nach serverseitiger Prüfung
+      // (clientSteuerVorbereiten: Freigabe beleg_formular, kern_max nicht 'aus', bestätigtes Profil, Whitelist, validiereBeleg, Brutto = Legacy).
+      // Anders als BELEG_MANUELL lehnt der Upload-Weg NIE ab (D7): verwirft die Prüfung das steuer des Browsers, wird der Beleg wie bisher
+      // gespeichert (Legacy-Felder, im Modus 'an' das steuer des Servers) und die Antwort sagt steuer_gespeichert: false mit den Codes.
+      let v2 = null;
+      let clientSteuerCodes = null;
+      if (body.steuer !== undefined && body.steuer !== null) {
+        try {
+          v2 = await clientSteuerVorbereiten({ uid: userId, token, steuer: body.steuer, felder: metadata.fields, stichtag: berlinDatumAlsString(), fetchFn: (...a) => fetch(...a), zeit: new Date().toISOString() });
+        } catch (e) {
+          console.warn('beleg_formular_v2_fehler ' + JSON.stringify({ weg: 'datei', fehlerart: String(e?.name || 'Error').replace(/[^A-Za-z0-9_]/g, '').slice(0, 40) }));
+          v2 = null;
+        }
+        if (v2 && !v2.ignoriert) console.log('beleg_formular_v2 ' + JSON.stringify({ weg: 'datei', ablehnen: !!v2.ablehnen, kern: Steuerkern.KERN_VERSION, codes: (v2.codes || []).slice(0, 30) }));
+        if (v2 && v2.ablehnen) { clientSteuerCodes = (v2.codes || []).slice(0, 30); v2 = null; }
+        if (v2 && v2.ignoriert) v2 = null;
+        if (v2 && v2.steuer) {
+          // Herkunft: Datei-Zustand des Formulars (gleiche Prüfung wie manuell, eigener Weg für Auswertung und Rücknahme-Logik)
+          v2.steuer = { ...v2.steuer, herkunft: { ...v2.steuer.herkunft, weg: 'beleg_formular_v2_datei' } };
+          v2.felder = { ...v2.felder, steuer: kodiereFirestoreWert(v2.steuer) };
+          v2.clientSteuer = true;
+        } else v2 = null;
+      }
       // Modus 'an' (NP-05): steuer im selben PATCH; Upload-Weg lehnt nie ab (D7), Mängel werden UNBEKANNT
-      const v2 = await schreibwegV2(env, 'beleg_speichern', userId, token, { typ, betrag, mwst_satz, datum: metadata.fields.datum.stringValue, bezahlt, bezahlt_am: metadata.fields.bezahlt_am?.stringValue }, metadata.fields, { nieAblehnen: true });
+      if (!v2) v2 = await schreibwegV2(env, 'beleg_speichern', userId, token, { typ, betrag, mwst_satz, datum: metadata.fields.datum.stringValue, bezahlt, bezahlt_am: metadata.fields.bezahlt_am?.stringValue }, metadata.fields, { nieAblehnen: true });
       if (v2 && v2.felder) Object.assign(metadata.fields, v2.felder);
+      const steuerGespeichert = !!(v2 && v2.clientSteuer && v2.felder && v2.felder.steuer);
 
       const firestoreRes = await fetch(firestoreUrl, {
         method: 'PATCH',
@@ -3205,6 +3230,9 @@ async function handleDocument(body, env, cors = {}, ctx) {
         storage_url: storageUrl,
         typ: typ || 'rechnung_eingehend',
         message: 'Beleg erfolgreich gespeichert',
+        // Nur wenn der Browser steuer mitgeschickt hat (Beleg-Formular v2); ohne steuer im Body bleibt die Antwort wie bisher
+        ...(steuerGespeichert ? { steuer_gespeichert: true } : {}),
+        ...(clientSteuerCodes ? { steuer_gespeichert: false, steuer_codes: clientSteuerCodes } : {}),
         ...(tagesbewegungWarnung ? { warning: tagesbewegungWarnung } : {})
       }), {
         status: 200,
