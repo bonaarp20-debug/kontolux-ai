@@ -25,6 +25,7 @@ test('Vorfilter ändert nichts: gefiltert = ungefiltert für jeden Voranmeldungs
         assert.ok(vergleicheSnapshot(a, b).gleich, `${v.id} ${u.periode}`);
         assert.deepEqual(a.beleg_ids, b.beleg_ids, `${v.id} ${u.periode} Beleg-IDs`);
         if (u.kennzahlen && u.kennzahlen['83'] !== undefined) assert.equal(a.zeilen.find((z) => z.kz === '83')?.betrag_cent, u.kennzahlen['83'], `${v.id} ${u.periode} Kz 83`);
+        assert.ok(a.zeilen.every((z) => /^[0-9A-Za-z_]{1,12}$/.test(z.kz)), 'kz passt zur Eingabeprüfung');
         vergleiche++;
       }
       for (let m = 1; m <= 12; m++) {

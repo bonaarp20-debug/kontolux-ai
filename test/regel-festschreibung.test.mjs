@@ -111,7 +111,7 @@ test('Abweichung zwischen Client und Kern: 409 mit den Kennzahlen, nichts geschr
   const r = await rufe({ aktion: 'festschreiben', periode_id: 'ust-2026-Q3', snapshot: falsch });
   assert.equal(r.status, 409);
   assert.equal(r.json.fehler[0].code, 'ABWEICHUNG');
-  assert.deepEqual(r.json.abweichungen, [{ kz: '83', server_cent: 950, client_cent: 951 }]);
+  assert.deepEqual(r.json.abweichungen, [{ kz: '83', feld: 'betrag_cent', server_cent: 950, client_cent: 951 }]);
   assert.equal(fs.log.commits, 0);
   assert.equal(fs.lies(D('a')).gesperrt, undefined);
   assert.equal((await rufe({ aktion: 'festschreiben', periode_id: 'ust-2026-Q3', snapshot: snap, kern_version: '1999.01.01-1' })).json.fehler[0].code, 'KERN_VERSION_ABWEICHUNG');

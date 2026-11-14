@@ -3,8 +3,11 @@
 // geglaubt), bestimmt die Belege, die den Zeitraum berühren (diese werden gesperrt), und den belege_hash.
 //
 // Zeiträume: 'ust-JJJJ-Qn' / 'ust-JJJJ-MM' (Voranmeldungszeitraum laut bestätigtem Steuerprofil) und 'euer-JJJJ-MM' (Kalendermonat, Zahlungsmonat).
-// Snapshot-Format (gleich im Client, App regel/festschreibung-ui.js snapshotFuer):
-//   ust:  Zeilen { kz, betrag_cent } aus ustvaFuer(...).kennzahlen, sortiert nach kz; ausgeschlossen_anzahl = ausgeschlossene.length
+// Snapshot-Format (Vertrag mit dem Client):
+//   ust:  die Zahlenliste des Kerns (zahlenlisteUstva(ustvaFuer(...)), Reihenfolge des Vordrucks), je Zeile { kz, basis_cent (genau),
+//         steuer_cent (ELSTER), betrag_cent (ELSTER) }, ohne Datumszeile; kz ist die Kennzahl oder 'Z<zeile>' bei Zeilen ohne Kennzahl;
+//         ausgeschlossen_anzahl = anzahl_nicht_beruecksichtigt. Gleiche Abbildung wie App regel/voranmeldung-ui-daten.js snapshotFuer (BP-10)
+//         und regel/festschreibung-ui.js; ein Test im App-Repo vergleicht die Abbildungen.
 //   euer: Zeilen { kz, betrag_cent } aus euerFuer(...).kennzahlen über die EÜR-Wirkungen mit datum_wirk im Monat; dazu GEWINN/EINNAHMEN/AUSGABEN
 //
 // CPU (Free-Plan, 10 ms): Der Kern rechnet nicht über alle Belege des Kontos, sondern über die Belege, die den Zeitraum überhaupt berühren
@@ -111,6 +114,22 @@ export function periodePruefen(profil, p) {
   return null;
 }
 
+// Zahlenliste (zahlenlisteUstva) -> Snapshot-Zeilen (Vertrag oben)
+export function snapshotAusZahlenliste(liste) {
+  const zeilen = [];
+  for (const r of (liste && Array.isArray(liste.zeilen) ? liste.zeilen : [])) {
+    if (r.art === 'datum') continue;
+    const kz = r.kz !== null && r.kz !== undefined ? String(r.kz) : `Z${r.z}`;
+    const z = { kz };
+    if (r.art === 'bemessung' && r.bemessung) {
+      z.basis_cent = r.bemessung.genau_cent;
+      if (r.steuer) z.steuer_cent = r.steuer.elster_cent;
+    } else if (r.art === 'betrag' && r.betrag) z.betrag_cent = r.betrag.elster_cent;
+    zeilen.push(z);
+  }
+  return { zeilen: zeilen.slice(0, 120), ausgeschlossen_anzahl: liste && Number.isSafeInteger(liste.anzahl_nicht_beruecksichtigt) ? liste.anzahl_nicht_beruecksichtigt : 0 };
+}
+
 function zeilenAus(kennzahlen) {
   return Object.keys(kennzahlen || {}).sort().filter((k) => Number.isSafeInteger(kennzahlen[k])).map((k) => ({ kz: String(k), betrag_cent: kennzahlen[k] }));
 }
@@ -130,7 +149,8 @@ export function snapshotFuer(zeilenAlle, profil, periodeId, { gefiltert = true }
     const u = Steuerkern.ustvaFuer(wirkungen, profil, p.periode);
     for (const w of wirkungen) if (w.welt === 'ust' && w.periode === p.periode && typeof w.beleg_id === 'string' && w.beleg_id) ids.add(w.beleg_id);
     for (const a of u.ausgeschlossene || []) if (typeof a.beleg_id === 'string' && a.beleg_id) ids.add(a.beleg_id);
-    snap = { zeilen: zeilenAus(u.kennzahlen), ausgeschlossen_anzahl: (u.ausgeschlossene || []).length, kz83_status: u.kz83 ? u.kz83.status : null, unvollstaendig: u.unvollstaendig === true };
+    const sl = snapshotAusZahlenliste(Steuerkern.zahlenlisteUstva(u));
+    snap = { zeilen: sl.zeilen, ausgeschlossen_anzahl: sl.ausgeschlossen_anzahl, kz83_status: u.kz83 ? u.kz83.status : null, unvollstaendig: u.unvollstaendig === true };
   } else {
     const jahr = Number(p.periode.slice(0, 4));
     // Nur Wirkungen mit Wirkdatum im Monat. Wirkungen ohne Wirkdatum gehören zu keinem Monat (sie stehen in der Jahres-EÜR als nicht berechnet)
@@ -144,16 +164,22 @@ export function snapshotFuer(zeilenAlle, profil, periodeId, { gefiltert = true }
   return { ...snap, art: p.art, periode: p.periode, beleg_ids: [...ids].sort(), gelesen: (zeilenAlle || []).length, gerechnet: zeilen.length, veraltet, kern_version: Steuerkern.KERN_VERSION };
 }
 
-// Vergleich Server-Snapshot gegen Client-Snapshot (Konzept 3.6 Schritt 1): exakt je kz, fehlende Zeile zählt als 0.
+// Vergleich Server-Snapshot gegen Client-Snapshot (Konzept 3.6 Schritt 1): exakt je Kennzahl und Feld (basis_cent, steuer_cent, betrag_cent);
+// ein fehlendes Feld zählt als 0 (Zeilen mit 0 dürfen fehlen), dazu die Zahl der nicht berücksichtigten Belege.
+const FELDER = ['basis_cent', 'steuer_cent', 'betrag_cent'];
 export function vergleicheSnapshot(server, client) {
-  const m = (zeilen) => new Map((zeilen || []).map((z) => [String(z.kz), Number.isSafeInteger(z.betrag_cent) ? z.betrag_cent : (Number.isSafeInteger(z.steuer_cent) ? z.steuer_cent : 0)]));
+  const m = (zeilen) => {
+    const x = new Map();
+    for (const z of zeilen || []) for (const f of FELDER) if (Number.isSafeInteger(z && z[f])) x.set(`${String(z.kz)}|${f}`, (x.get(`${String(z.kz)}|${f}`) || 0) + z[f]);
+    return x;
+  };
   const a = m(server.zeilen); const b = m(client.zeilen);
   const abweichungen = [];
-  for (const kz of [...new Set([...a.keys(), ...b.keys()])].sort()) {
-    const s = a.get(kz) || 0; const c = b.get(kz) || 0;
-    if (s !== c) abweichungen.push({ kz, server_cent: s, client_cent: c });
+  for (const k of [...new Set([...a.keys(), ...b.keys()])].sort()) {
+    const s = a.get(k) || 0; const c = b.get(k) || 0;
+    if (s !== c) { const [kz, feld] = k.split('|'); abweichungen.push({ kz, feld, server_cent: s, client_cent: c }); }
   }
-  if ((server.ausgeschlossen_anzahl || 0) !== (client.ausgeschlossen_anzahl || 0)) abweichungen.push({ kz: 'AUSGESCHLOSSEN', server_cent: server.ausgeschlossen_anzahl || 0, client_cent: client.ausgeschlossen_anzahl || 0 });
+  if ((server.ausgeschlossen_anzahl || 0) !== (client.ausgeschlossen_anzahl || 0)) abweichungen.push({ kz: 'AUSGESCHLOSSEN', feld: 'anzahl', server_cent: server.ausgeschlossen_anzahl || 0, client_cent: client.ausgeschlossen_anzahl || 0 });
   return { gleich: abweichungen.length === 0, abweichungen: abweichungen.slice(0, 40) };
 }
 
