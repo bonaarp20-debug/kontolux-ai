@@ -873,6 +873,18 @@ export function normalisiereAlt(alt, profil, optionen) {
     if (faSchl) faWahl.kategorie = faSchl;
   }
   const faSatz = mwst === '19' || mwst === '7';
+  // K-D (Rollout-Drehbuch Stolperstein 15): Eingangsrechnung im Kleinunternehmer-Status (Status am Leistungstag, R-PR-03, UStAE 15.1 Abs. 5).
+  // Ein Kleinunternehmer hat keinen Vorsteuerabzug (§ 19 Abs. 1 S. 3 UStG: § 15 findet keine Anwendung), die ausgewiesene Steuer des Lieferanten
+  // gehört zu den Kosten (§ 9b Abs. 1 EStG), Abfluss mit der Zahlung (§ 11 Abs. 2 EStG). Darum gibt es hier keine Netto/Brutto-Frage: der
+  // Bruttobetrag ist die Betriebsausgabe, gleich ob am Altbeleg 19, 7, eine Zahl, ein eindeutiger Prozent-Text ('19%', '7 %') oder kein Satz
+  // (leer, null; die App zeigt das bei Kleinunternehmern als 'Keine') steht. Gekennzeichnet bleiben nur mögliche Auslands- und § 13b-Fälle
+  // ('0', 'reverse_charge', andere freie Texte), weil ein Kleinunternehmer als Leistungsempfänger die Steuer nach § 13b Abs. 5 S. 1, 8 UStG schuldet.
+  // Kategorie Finanzamt mit Satz bleibt ein Widerspruch (Steuerzahlungen tragen keine Umsatzsteuer).
+  const satzText = mwst === null ? '' : mwst.toLowerCase().replace(/\s+/g, '');
+  const kuEingangSatz = /^(19|7)(,0+|\.0+)?%$/.test(satzText) || mwst === '19' || mwst === '7';
+  const kuEingangLeer = mwst === null || mwst === '';
+  const kuEingang = status === 'ku' && richtung === 'eingang' && !privat && belegArt !== 'sonstig' && belegArt !== 'storno' && !faKat && a.ust_unklar !== true
+    && (kuEingangSatz || kuEingangLeer);
 
   let steuerfall = null;
   let unbekanntGrund = null;
@@ -893,10 +905,13 @@ export function normalisiereAlt(alt, profil, optionen) {
   }
   else if (faKat && faSatz && status !== 'ku') { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'steuerfall_nicht_gewaehlt'; unbekanntDetail = 'fa_kategorie_mit_satz'; hinweise.push('FA_ZAHLUNG_SATZ_IGNORIERT'); }
   else if (a.ust_unklar === true) { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'steuerfall_nicht_gewaehlt'; unbekanntDetail = 'ust_unklar_datev'; }
+  else if (kuEingang) { steuerfall = 'E_INLAND_OHNE_VORSTEUER'; hinweise.push(kuEingangLeer ? 'KU_EINGANG_SATZ_LEER' : 'KU_EINGANG_OHNE_VORSTEUERABZUG'); }
   else if (mwst === '19' || mwst === '7') {
     satzBp = mwst === '19' ? SATZ_REGEL_BP : SATZ_ERMAESSIGT_BP;
     if (status === 'ku') { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'mwst_keine_mehrdeutig'; unbekanntDetail = 'satz_bei_kleinunternehmer_status'; hinweise.push('STATUS_WIDERSPRUCH'); }
-    else if (status === null && istObjekt(profil)) { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'steuerfall_nicht_gewaehlt'; unbekanntDetail = 'status_unbekannt'; }
+    // K-D (Fund 2): statusAm liefert 'unbekannt' (Datum vor dem ersten Statuseintrag, Eintrag ungültig), nie null; ohne diese Prüfung wurde ein
+    // solcher Beleg still als Regelbesteuerung gerechnet (Vorsteuer auch bei einem Kleinunternehmer). Gleich normalisiereEingabe (status_unbekannt).
+    else if ((status === null || status === 'unbekannt') && istObjekt(profil)) { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'steuerfall_nicht_gewaehlt'; unbekanntDetail = 'status_unbekannt'; }
     else steuerfall = richtung === 'ausgang' ? (satzBp === SATZ_REGEL_BP ? 'A_INLAND_19' : 'A_INLAND_7') : 'E_INLAND_VORSTEUER';
   } else if (mwst === 'keine') {
     if (status === 'ku') steuerfall = richtung === 'ausgang' ? 'A_KU' : 'E_INLAND_OHNE_VORSTEUER';
@@ -993,6 +1008,12 @@ export function normalisiereAlt(alt, profil, optionen) {
   // späteres Rückschreiben (Konzept 3.8) 7, 0 oder reverse_charge zu 'keine' und das Netto zum Brutto verfälschen.
   if ((steuerfall === 'UNBEKANNT' || steuerfall === 'FA_ZAHLUNG') && !privat) {
     if (mwst !== null && ['19', '7', '0', 'keine', 'reverse_charge'].includes(mwst)) beleg.mwst_satz = mwst;
+    if (istCent(nettoAlt) && istCent(brutto) && nettoAlt >= 0 && nettoAlt <= brutto) beleg.betrag_netto = nettoAlt / 100;
+  }
+  // K-D: auch beim Kleinunternehmer-Eingang mit Satz oder ohne Angabe bleiben die Altwerte stehen (sonst würde ein Rückschreiben '19' zu 'keine'
+  // und das Netto zum Brutto machen; ein später korrigierter Status-Verlauf fände die Angaben der Rechnung nicht mehr)
+  if (kuEingang && steuerfall === 'E_INLAND_OHNE_VORSTEUER') {
+    beleg.mwst_satz = a.mwst_satz === undefined ? null : a.mwst_satz;
     if (istCent(nettoAlt) && istCent(brutto) && nettoAlt >= 0 && nettoAlt <= brutto) beleg.betrag_netto = nettoAlt / 100;
   }
   if (belegArt === 'storno' && steuer.wirkungslos !== true) beleg.typ = 'storno';

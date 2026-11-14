@@ -252,6 +252,8 @@ const KATALOG = {
   ORIGINAL_STORNIERT: H('hinweis', 'Der Beleg ist storniert oder gelöscht und hat keine Wirkung.', 'R-HN-02', TECHNIK, 'T'),
   SATZ_NICHT_ZULAESSIG: H('hinweis', 'Der Steuersatz gehört nicht zu den Sätzen, die Kontolux rechnet (19 %, 7 %, 0 % nach § 12 Abs. 3 UStG). Der Beleg bleibt ein offener Steuerfall.', 'R-KZ-16', '§ 12 Abs. 1 bis 3 UStG', 'A'),
   SPERRGRUND_UNBEKANNT: H('hinweis', 'Der Grund für den nicht berechneten Fall ist unbekannt.', 'R-HN-03', PFLICHT, 'T'),
+  KU_EINGANG_OHNE_VORSTEUERABZUG: H('hinweis', 'Die Rechnung weist Umsatzsteuer aus. Als Kleinunternehmer ziehst du keine Vorsteuer ab, darum zählt der Bruttobetrag als Betriebsausgabe.', 'R-PR-03', '§ 15 Abs. 2 S. 1 Nr. 1, Abs. 3 S. 2 i. V. m. § 19 Abs. 1 S. 1 UStG; § 9b Abs. 1 EStG; UStAE 19.5 Abs. 2', 'A'),
+  KU_EINGANG_SATZ_LEER: H('hinweis', 'Am Beleg ist kein Steuersatz angegeben. Als Kleinunternehmer ziehst du keine Vorsteuer ab, darum zählt der Bruttobetrag als Betriebsausgabe. Kam die Rechnung aus dem Ausland ohne deutsche Umsatzsteuer, wähle Reverse Charge.', 'R-PR-03', '§ 15 Abs. 2 S. 1 Nr. 1 i. V. m. § 19 Abs. 1 S. 1 UStG; § 13b Abs. 5 S. 1, 8 UStG', 'B'),
   STATUS_WIDERSPRUCH: H('hinweis', 'Auf dem Beleg ist ein Steuersatz angegeben, im Steuerprofil gilt zu diesem Datum aber die Kleinunternehmerregelung. Bitte kläre den Beleg.', 'R-PR-02', '§ 19 Abs. 1 UStG', 'B'),
   WAEHRUNG_NICHT_EUR: H('hinweis', 'Der Beleg ist nicht in Euro. Beträge in fremder Währung sind nach § 16 Abs. 6 UStG umzurechnen; Kontolux rechnet sie noch nicht.', 'R-RD-08', '§ 16 Abs. 6 UStG', 'A'),
   ZAHLUNGSDATUM_UNSICHER: H('hinweis', 'Das Zahlungsdatum fehlte und wurde aus dem Erfassungszeitpunkt oder dem Rechnungsdatum abgeleitet. Bitte prüfe es.', 'R-ZP-07', TECHNIK, 'T'),
