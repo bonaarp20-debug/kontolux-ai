@@ -240,6 +240,24 @@ export function neuesProfil(aktion, body, alt, kontext) {
   return { fehler: [F('AKTION_UNBEKANNT')] };
 }
 
+// N1 (Neukonto, scope.md D1/D3, NP-02): Wird ein Profil zum ersten Mal bestätigt (aktion 'anlegen' mit bestaetigt: true oder 'bestaetigen'),
+// prüft der Worker serverseitig, ob schon Belege existieren: EINE Firestore-Abfrage auf users/{uid}/dokumente mit limit 1 (nur __name__).
+// Kein Treffer -> das Profil erhält neukonto: { festgestellt_am, aktion } (nur der Worker schreibt es; Clients dürfen steuerprofil/** nicht
+// schreiben, firestore.rules). Fail-safe: Fehler, Budgetgrenze, unerwartete Antwort oder fehlende Abfragefunktion = KEIN Neukonto (Migrationsweg).
+// Die App (regel/bereitschaft.js) behandelt ein Neukonto als bereit, solange alle Belege originär v2 sind; sonst entscheidet der Selbsttest.
+export const NEUKONTO_FELD = 'neukonto';
+export async function keineBelege(fs, uid) {
+  try {
+    if (!fs || typeof fs.runQuery !== 'function' || !istText(uid, 128)) return false;
+    const treffer = await fs.runQuery(`users/${uid}`, {
+      from: [{ collectionId: 'dokumente' }], select: { fields: [{ fieldPath: '__name__' }] }, limit: 1,
+    });
+    return Array.isArray(treffer) && treffer.length === 0;
+  } catch {
+    return false;
+  }
+}
+
 export async function regelSteuerprofil(body, env, cors = {}, deps = {}) {
   const gp = grundpruefung(body);
   if (gp) return fehlerAntwort(gp === 'NICHT_ANGEMELDET' ? 401 : 400, gp, cors);
@@ -269,8 +287,12 @@ export async function regelSteuerprofil(body, env, cors = {}, deps = {}) {
     if (pruef.fehler.length) return antwort({ ok: false, fehler: pruef.fehler.map((x) => F(x.code)) }, 400, cors);
 
     const bestaetigtAm = r.bestaetigen ? zeit : (alt && alt.bestaetigt_am) || null;
+    // Neukonto-Merker: einmal bei der ersten Bestätigung festgestellt, danach bei jeder Änderung unverändert mitgeführt
+    let neukonto = alt && istObjekt(alt[NEUKONTO_FELD]) ? alt[NEUKONTO_FELD] : null;
+    if (r.bestaetigen && !neukonto && await keineBelege(fs, uid)) neukonto = { festgestellt_am: zeit, aktion: body.aktion };
     const neu = {
       ...r.profil,
+      ...(neukonto ? { [NEUKONTO_FELD]: neukonto } : {}),
       bestaetigt_am: bestaetigtAm,
       aktualisiert_am: zeit,
       letzte_anfrage_id: body.anfrage_id,
@@ -280,7 +302,7 @@ export async function regelSteuerprofil(body, env, cors = {}, deps = {}) {
     const warnungen = codesBereinigen([...r.warnungen, ...pruef.warnungen]);
     const audit = await auditSchreibvorgaenge(uid, docs.get(kopfPfad(uid)), {
       aktion: r.audit, ziel: r.ziel || 'steuerprofil', vorher: alt ? kernProfil(alt) : null, nachher: kernProfil(neu),
-      details: { version: neu.version, warnungen }, zeit,
+      details: { version: neu.version, warnungen, ...(neukonto && r.bestaetigen ? { neukonto: true } : {}) }, zeit,
     });
     const verlauf = {
       version: neu.version, aktion: body.aktion, zeit, anfrage_id: body.anfrage_id, audit_seq: audit.seq,
