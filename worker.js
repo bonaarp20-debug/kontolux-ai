@@ -686,7 +686,7 @@ export default {
       if (url.pathname === '/send-email-change-verification') return handleSendEmailChangeVerification(verifiedEmail, body, env, cors);
       if (url.pathname === '/admin/seed-steuerrecht') return handleSeedSteuerrecht(request, body, env, cors);
       // Regelbesteuerung Phase 2 (W0): Logik in regel/*.js; UID kommt aus dem geprüften Token (protectedPaths), Firestore per Dienstkonto
-      if (url.pathname === '/steuerprofil') return regelSteuerprofil(body, env, cors, regelAbhaengigkeiten(env));
+      if (url.pathname === '/steuerprofil') return handleSteuerprofil(body, env, cors);
       if (url.pathname === '/festschreibung' || url.pathname === '/entsperren') return handleFestschreiben(url.pathname, body, env, cors);
       if (url.pathname === '/migration') return handleMigrationAusfuehren(body, env, cors);
       if (url.pathname === '/admin/features') return regelAdminFeatures(request, authHeader, env, cors, regelAbhaengigkeiten(env));
@@ -1076,10 +1076,10 @@ const SACHKONTO_MAPPING = {
   'Wareneinkauf 19%':           { SKR03: '3400', SKR04: '5400', euer_zeile: 'Z.29' },
   'Wareneinkauf 7%':            { SKR03: '3300', SKR04: '5300', euer_zeile: 'Z.29' },
   'GWG bis 800€':               { SKR03: '0480', SKR04: '0670', euer_zeile: 'Z.37' },
-  // AfA nach §7 EStG (lineare Abschreibung). SKR03 4832/SKR04 6832 = Abschreibungen auf Betriebs-
-  // und Geschäftsausstattung (allgemeines AfA-Konto für EÜR). EÜR Z.35 (2026+) = Anlage EÜR
-  // "Absetzung für Abnutzung (AfA) gem. §7 EStG". §4 Abs.3 Satz 3 EStG: AfA ist vom Zufluss-
-  // Abfluss-Prinzip ausgenommen — zeitanteiliger Abzug, nicht bei Zahlung.
+  // AfA nach §7 EStG (lineare Abschreibung). SKR03 4830/SKR04 6220 = "Abschreibungen auf Sachanlagen
+  // (ohne AfA auf Fahrzeuge und Gebäude)" laut DATEV-Kontenrahmen 2026 (geprüft in test-sachkonten-sync.mjs).
+  // EÜR Z.34 = Kz 130 "AfA auf bewegliche Wirtschaftsgüter" (steuerkern/tabellen.js EUER_ZEILEN, Anlage EÜR 2026).
+  // §4 Abs.3 Satz 3 EStG: AfA ist vom Zufluss-Abfluss-Prinzip ausgenommen — zeitanteiliger Abzug, nicht bei Zahlung.
   'Abschreibung (AfA)':         { SKR03: '4830', SKR04: '6220', euer_zeile: 'Z.34' },
   'Versicherungen':             { SKR03: '4360', SKR04: '6400', euer_zeile: 'Z.50' },
   'Steuerberater/Buchhaltung':  { SKR03: '4950', SKR04: '6825', euer_zeile: 'Z.47' },
@@ -6038,6 +6038,54 @@ export function steuerkernWarnung(env, weg, belegRoh, profil = null, optionen = 
 // E1 (PF-083, Zuruf BP-14): Hülle für POST /migration (Migration ausführen, Rückweg, Klärung, Kenntnis); Logik in regel/migration.js.
 async function handleMigrationAusfuehren(body, env, cors) {
   return regelMigration(body, env, cors, regelAbhaengigkeiten(env));
+}
+
+// R1 (Zuruf E2, Upload-Monatslimit): Der Ist-Nachweis aus dem Steuerprofil wird von der App hochgeladen (kxHochladen prüft vorher
+// GET /check-upload-limit); hochzählen kann nur der Worker. Gezählt wird je NEUER Nachweis-Adresse (genehmigung.storage_url), wenn
+// POST /steuerprofil sie angenommen hat (200, ok, nicht idempotent). Nicht gezählt: unveränderte Adresse (steht schon im Profil),
+// Wiederholung derselben anfrage_id, abgelehnte Anfragen. Der zusätzliche Lesezugriff passiert nur, wenn die Anfrage eine Adresse trägt.
+// Lesefehler: zählen (Kostengrenze, im Zweifel streng). Logik bleibt in regel/steuerprofil.js unverändert.
+function nachweisUrlsSammeln(verlauf, ziel) {
+  if (!Array.isArray(verlauf)) return ziel;
+  for (const e of verlauf.slice(0, 50)) {
+    const u = e && typeof e === 'object' && e.genehmigung && typeof e.genehmigung === 'object' ? e.genehmigung.storage_url : null;
+    if (typeof u === 'string' && u) ziel.add(u);
+  }
+  return ziel;
+}
+export function steuerprofilNachweisUrls(body) {
+  const s = new Set();
+  if (!body || typeof body !== 'object') return s;
+  if (body.aktion === 'eintrag' && body.bereich === 'versteuerung') nachweisUrlsSammeln([body.eintrag], s);
+  if (body.aktion === 'anlegen' && body.profil && typeof body.profil === 'object') nachweisUrlsSammeln(body.profil.versteuerung_verlauf, s);
+  return s;
+}
+export function steuerprofilNeueNachweise(body, altProfil) {
+  const alt = nachweisUrlsSammeln(altProfil && typeof altProfil === 'object' ? altProfil.versteuerung_verlauf : null, new Set());
+  return [...steuerprofilNachweisUrls(body)].filter((u) => !alt.has(u));
+}
+async function handleSteuerprofil(body, env, cors) {
+  const deps = regelAbhaengigkeiten(env);
+  const urls = steuerprofilNachweisUrls(body);
+  let alt = null;
+  let altGelesen = false;
+  if (urls.size && body && typeof body.userId === 'string') {
+    try {
+      const d = await firestoreGetDoc(`users/${encodeURIComponent(body.userId)}/steuerprofil/aktuell`, await deps.adminToken());
+      alt = d && d.fields ? firestoreFieldsToObject(d.fields) : null;
+      altGelesen = true;
+    } catch { altGelesen = false; }
+  }
+  const antwortSp = await regelSteuerprofil(body, env, cors, deps);
+  if (!urls.size || antwortSp.status !== 200) return antwortSp;
+  try {
+    const j = await antwortSp.clone().json();
+    if (j && j.ok === true && j.idempotent !== true) {
+      const neu = altGelesen ? steuerprofilNeueNachweise(body, alt) : [...urls];
+      for (let i = 0; i < Math.min(neu.length, 5); i++) await incrementUploadLimit(body.userId, env);
+    }
+  } catch { /* Antwort unverändert zurückgeben */ }
+  return antwortSp;
 }
 
 async function handleFestschreiben(pfad, body, env, cors) {
