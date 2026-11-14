@@ -113,7 +113,9 @@ export function kz48Cent(wirkungen, periode) {
 // Bruttobetrag (§ 10 Abs. 1 S. 2 UStG, UStAE 10.1 Abs. 3 S. 4 entsprechend; Konfidenz B):
 //   Variante B (Standard): Kz 65 = Anzahlung mal Satz/(100 + Satz), kaufmännisch auf Cent; Kz 81/86 nur das Restentgelt (Basis minus Anzahlung netto).
 //   Variante A: alles in Kz 81/86, Kz 65 leer.
-// Die Gesamtsteuer ist gleich (Steuer auf das volle Entgelt), nie steht derselbe Betrag in beiden Zeilen. Anzahlungen im selben Kalenderjahr
+// Die Steuer auf das volle Entgelt ist gleich, nie steht derselbe Betrag in beiden Zeilen. TR4-kern-008: Weil die Bemessungsgrundlage in vollen Euro
+// eingetragen wird (RUNDUNG_BASIS, Cent abgeschnitten) und Kz 65 in Cent, kann Kz 83 zwischen A und B je Zeile um weniger als Satz mal 1 Euro abweichen
+// (K5-Beispiel: A 190,00, B 189,84; Test test-steuerkern-ke-funde.mjs: höchstens 0,19 EUR bei 19 %). Anzahlungen im selben Kalenderjahr
 // (unterjähriger Wechsel) sind kein Fall von Kz 65 (UStAE 19.7 Abs. 1 S. 4): sie stehen in nicht_einschlaegig, das volle Entgelt bleibt in Kz 81.
 export function kz65Vorschlag(wirkungen, periode) {
   const { ok } = pruefeWirkungen(wirkungen);
@@ -143,7 +145,7 @@ export function kz65Vorschlag(wirkungen, periode) {
     variante_b: { kz65_cent: kz65, minderung_cent: minderung },
     regel_id: 'R-KZ-46',
     konfidenz: 'B',
-    text: belege.length ? 'Vorschlag: Steuer auf die Anzahlung aus der Kleinunternehmerzeit in Zeile 46 (Kz 65), Kz 81/86 nur das Restentgelt (Variante B). Alternative: alles in Kz 81/86 (Variante A). Die Gesamtsteuer ist gleich; eine amtliche Formel gibt es nicht.' : null,
+    text: belege.length ? 'Vorschlag: Steuer auf die Anzahlung aus der Kleinunternehmerzeit in Zeile 46 (Kz 65), Kz 81/86 nur das Restentgelt (Variante B). Alternative: alles in Kz 81/86 (Variante A). Die Steuer auf das volle Entgelt ist in beiden Varianten gleich. Weil die Bemessungsgrundlage in vollen Euro eingetragen wird, kann die Summe in Kz 83 zwischen den Varianten um einige Cent abweichen (bei 19 % höchstens 0,19 EUR, bei 7 % höchstens 0,07 EUR je Zeile).' : null,
   };
 }
 
@@ -290,6 +292,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
   const gesehen = new Set();
   for (const w of ws) {
     if (w.welt !== 'ust' || (w.status !== 'ausgeschlossen' && w.status !== 'unbekannt')) continue;
+    if (w.nur_euer === true) continue; // TR4-kern-004: Finanzamt-Zahlung ohne Art betrifft nur die EÜR (R-ZP-23, K16)
     if (w.periode !== periode && w.periode !== null) continue;
     const k = `${w.beleg_id}|${w.status}`;
     if (gesehen.has(k)) continue;
@@ -319,7 +322,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
   } else if (k70 && imZ(k70.datum)) z12 = zeile(tabelle, 12, { datum: k70.datum, grund: k70.grund, vorschlag: true });
 
   // --- Hinweise und Warnungen ---
-  for (const w of imZeitraum.concat(ws.filter((x) => x.welt === 'ust' && x.periode === null))) for (const h of w.hinweise) hinweise.push(h);
+  for (const w of imZeitraum.concat(ws.filter((x) => x.welt === 'ust' && x.periode === null && x.nur_euer !== true))) for (const h of w.hinweise) hinweise.push(h);
   for (const h of profilHinweise(profil, jahr)) hinweise.push(h);
   const alle = eindeutig(hinweise);
   const angenommen = alle.includes('W_VORANMELDUNG_ANGENOMMEN');

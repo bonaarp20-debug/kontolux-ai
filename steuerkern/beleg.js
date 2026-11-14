@@ -521,6 +521,13 @@ export function normalisiereEingabe(eingabe, kontext) {
       else if (istCent(p.netto_cent)) o.netto_cent = vorz * p.netto_cent;
       else fehler.push(hin('PF_BETRAG', `positionen[${i}]`, 'netto_cent oder brutto_cent fehlt'));
       if (istCent(p.ust_cent)) { o.ust_cent = vorz * p.ust_cent; o.ust_ausgewiesen = true; }
+      // K-E (Zusatzfund ZF-1, R-EUER-30): Eingang ohne Vorsteuerabzug wegen des eigenen Kleinunternehmer-Status (Steuerwahl mit Satz) und Position mit
+      // Netto: die Steuer des Lieferanten gehört zu den Kosten (§ 9b Abs. 1 EStG), also Netto plus Steuer wie im Betrag-Zweig (vorher nur das Netto:
+      // die Zahlung über das Brutto galt als Überzahlung, der Beleg fiel aus der EÜR). ust_enthalten_cent hält die enthaltene, nicht abziehbare Steuer
+      // für die Grenze des § 6 Abs. 2 S. 1 EStG fest (TR4-kern-006, EStR R 9b Abs. 2).
+      const kuSatz = keinSatz && steuerfall === 'E_INLAND_OHNE_VORSTEUER' && satzBp !== null && satzGueltig(satz) && satz > 0 && vorz === 1;
+      if (kuSatz && o.brutto_basis) o.ust_enthalten_cent = ustAusBrutto(o.brutto_cent, satz);
+      else if (kuSatz && istCent(o.netto_cent)) { const u = istCent(p.ust_cent) ? p.ust_cent : ustAusNetto(o.netto_cent, satz); o.netto_cent += u; o.ust_enthalten_cent = u; }
       if (keinSatz) { o.ust_cent = 0; delete o.ust_ausgewiesen; if (o.brutto_basis) { o.netto_cent = o.brutto_cent; delete o.brutto_basis; delete o.brutto_cent; } }
       if (istObjekt(p.leistung) && istDatum(p.leistung.von) && istDatum(p.leistung.bis)) o.leistung = { von: p.leistung.von, bis: p.leistung.bis };
       positionen.push(o);
@@ -538,6 +545,12 @@ export function normalisiereEingabe(eingabe, kontext) {
       if (ausStatus && art === 'netto') o.netto_cent = c + ustAusNetto(c, satzBp);
       else if (ausStatus && art === 'ust_ausgewiesen' && istCent(e.betrag.ust_cent) && !betragNegativ) o.netto_cent = c + vorz * e.betrag.ust_cent;
       else o.netto_cent = c;
+      // TR4-kern-006: enthaltene, nicht abziehbare Steuer für die Grenze des § 6 Abs. 2 S. 1 EStG (EStR R 9b Abs. 2: stets netto)
+      if (ausStatus && vorz === 1 && satzBp > 0) {
+        if (art === 'netto') o.ust_enthalten_cent = ustAusNetto(c, satzBp);
+        else if (art === 'ust_ausgewiesen' && istCent(e.betrag.ust_cent) && !betragNegativ) o.ust_enthalten_cent = e.betrag.ust_cent;
+        else if (art === 'brutto') o.ust_enthalten_cent = ustAusBrutto(c, satzBp);
+      }
     } else if (art === 'brutto') { o.brutto_cent = c; o.brutto_basis = true; o.netto_cent = c; }
     else if (art === 'ust_ausgewiesen') { o.netto_cent = c; if (betragNegativ) { /* Fehler bereits gemeldet */ } else if (istCent(e.betrag.ust_cent)) { o.ust_cent = vorz * e.betrag.ust_cent; o.ust_ausgewiesen = true; } else fehler.push(hin('PF_BETRAG', 'betrag.ust_cent', 'ausgewiesene Steuer fehlt')); }
     else if (art === 'netto' || art === undefined) o.netto_cent = c;
@@ -562,7 +575,7 @@ export function normalisiereEingabe(eingabe, kontext) {
   let summe = summiere(positionen);
   // Prüfbefund M1: Kleinbetragsrechnung über 250 EUR (§ 33 UStDV) auch bei Netto-Eingabe und bei Positionen: kein Vorsteuerabzug
   if (kleinbetrag && summe.brutto_cent > KLEINBETRAG_GRENZE_CENT) {
-    for (const p of positionen) { p.netto_cent += p.ust_cent; p.ust_cent = 0; p.satz_bp = null; delete p.vorsteuer_abziehbar_cent; }
+    for (const p of positionen) { if (p.ust_cent > 0) p.ust_enthalten_cent = p.ust_cent; p.netto_cent += p.ust_cent; p.ust_cent = 0; p.satz_bp = null; delete p.vorsteuer_abziehbar_cent; }
     steuerfall = 'E_INLAND_OHNE_VORSTEUER';
     ausschluss = { vorsteuer: 'nein', grund: 'kleinbetrag_ueber_250' };
     unsicherheiten.push(hin('W_KLEINBETRAG_UEBER_250', 'betrag', 'Gesamtbetrag über 250 EUR'));
@@ -874,17 +887,24 @@ export function normalisiereAlt(alt, profil, optionen) {
   }
   const faSatz = mwst === '19' || mwst === '7';
   // K-D (Rollout-Drehbuch Stolperstein 15): Eingangsrechnung im Kleinunternehmer-Status (Status am Leistungstag, R-PR-03, UStAE 15.1 Abs. 5).
-  // Ein Kleinunternehmer hat keinen Vorsteuerabzug (§ 19 Abs. 1 S. 3 UStG: § 15 findet keine Anwendung), die ausgewiesene Steuer des Lieferanten
+  // Ein Kleinunternehmer hat keinen Vorsteuerabzug (§ 15 Abs. 2 S. 1 Nr. 1 UStG: Ausschluss für steuerfreie Umsätze, hier § 19 Abs. 1 S. 1; die
+  // Rückausnahme des § 15 Abs. 3 nennt § 19 nicht; TR4-kern-009: früher falsch "§ 19 Abs. 1 S. 3"), die ausgewiesene Steuer des Lieferanten
   // gehört zu den Kosten (§ 9b Abs. 1 EStG), Abfluss mit der Zahlung (§ 11 Abs. 2 EStG). Darum gibt es hier keine Netto/Brutto-Frage: der
   // Bruttobetrag ist die Betriebsausgabe, gleich ob am Altbeleg 19, 7, eine Zahl, ein eindeutiger Prozent-Text ('19%', '7 %') oder kein Satz
   // (leer, null; die App zeigt das bei Kleinunternehmern als 'Keine') steht. Gekennzeichnet bleiben nur mögliche Auslands- und § 13b-Fälle
-  // ('0', 'reverse_charge', andere freie Texte), weil ein Kleinunternehmer als Leistungsempfänger die Steuer nach § 13b Abs. 5 S. 1, 8 UStG schuldet.
+  // ('0', 'reverse_charge', andere freie Texte), weil ein Kleinunternehmer als Leistungsempfänger die Steuer nach § 13b Abs. 5 S. 1 (Abs. 1, 2 Nr. 1
+  // bis 3: jeder Unternehmer), S. 9 (Abs. 2 Nr. 4, 8 auch bei Steuerfreiheit nach § 19 Abs. 1) UStG schuldet und anmeldet (§ 18 Abs. 4a UStG).
   // Kategorie Finanzamt mit Satz bleibt ein Widerspruch (Steuerzahlungen tragen keine Umsatzsteuer).
   const satzText = mwst === null ? '' : mwst.toLowerCase().replace(/\s+/g, '');
   const kuEingangSatz = /^(19|7)(,0+|\.0+)?%$/.test(satzText) || mwst === '19' || mwst === '7';
   const kuEingangLeer = mwst === null || mwst === '';
   const kuEingang = status === 'ku' && richtung === 'eingang' && !privat && belegArt !== 'sonstig' && belegArt !== 'storno' && !faKat && a.ust_unklar !== true
     && (kuEingangSatz || kuEingangLeer);
+  const kuSatzBp = kuEingangSatz ? (mwst === '19' || satzText.startsWith('19') ? SATZ_REGEL_BP : SATZ_ERMAESSIGT_BP) : null;
+  // TR4-kern-005: Satz am Beleg, aber Netto gleich Brutto: die Rechnung weist keine deutsche Steuer aus (zum Beispiel aus dem Ausland). Ein
+  // Kleinunternehmer kann dann als Leistungsempfänger Steuerschuldner sein (§ 13b Abs. 5 S. 1, 9 UStG) und eine Voranmeldung abgeben müssen
+  // (§ 18 Abs. 4a UStG). Nur Hinweis, keine Sperre (K-D: KU-Eingang brutto ohne Rückfrage); die EÜR-Zahl (Brutto) stimmt in beiden Fällen.
+  const kuNettoGleichBrutto = kuEingangSatz && istCent(nettoAlt) && istCent(brutto) && brutto > 0 && nettoAlt === brutto;
 
   let steuerfall = null;
   let unbekanntGrund = null;
@@ -897,15 +917,17 @@ export function normalisiereAlt(alt, profil, optionen) {
 
   if (privat) steuerfall = 'PRIVAT';
   else if (belegArt === 'sonstig') { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'steuerfall_nicht_gewaehlt'; unbekanntDetail = 'mahnung'; }
-  else if (faKat && status === 'regel') {
-    // Zuruf BP-11 Nr. 3: auch mit Steuersatz 19/7 nie ein Vorsteuer- oder Umsatz-Beleg (§ 15 Abs. 1 S. 1 Nr. 1 UStG); der Satz wird ignoriert
+  else if (faKat && (status === 'regel' || status === 'ku')) {
+    // Zuruf BP-11 Nr. 3: auch mit Steuersatz 19/7 nie ein Vorsteuer- oder Umsatz-Beleg (§ 15 Abs. 1 S. 1 Nr. 1 UStG); der Satz wird ignoriert.
+    // K-E (TR4-kern-003): auch beim Kleinunternehmer. Die Einkommensteuer ist keine Betriebsausgabe (§ 12 Nr. 3 EStG); ohne gewählte Art bleibt offen,
+    // ob es Einkommensteuer oder eine abziehbare Steuer (zum Beispiel nach § 13b) ist: FA_ART_FEHLT sperrt die EÜR wie bei Regelbesteuerten.
     steuerfall = 'FA_ZAHLUNG'; belegArt = 'fa_zahlung'; fa = faWahl;
     if (fa.fa_art === null) hinweise.push('FA_ART_FEHLT');
     if (faSatz) hinweise.push('FA_ZAHLUNG_SATZ_IGNORIERT');
   }
   else if (faKat && faSatz && status !== 'ku') { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'steuerfall_nicht_gewaehlt'; unbekanntDetail = 'fa_kategorie_mit_satz'; hinweise.push('FA_ZAHLUNG_SATZ_IGNORIERT'); }
   else if (a.ust_unklar === true) { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'steuerfall_nicht_gewaehlt'; unbekanntDetail = 'ust_unklar_datev'; }
-  else if (kuEingang) { steuerfall = 'E_INLAND_OHNE_VORSTEUER'; hinweise.push(kuEingangLeer ? 'KU_EINGANG_SATZ_LEER' : 'KU_EINGANG_OHNE_VORSTEUERABZUG'); }
+  else if (kuEingang) { steuerfall = 'E_INLAND_OHNE_VORSTEUER'; hinweise.push(kuEingangLeer ? 'KU_EINGANG_SATZ_LEER' : 'KU_EINGANG_OHNE_VORSTEUERABZUG'); if (kuNettoGleichBrutto) hinweise.push('KU_EINGANG_13B_PRUEFEN'); }
   else if (mwst === '19' || mwst === '7') {
     satzBp = mwst === '19' ? SATZ_REGEL_BP : SATZ_ERMAESSIGT_BP;
     if (status === 'ku') { steuerfall = 'UNBEKANNT'; unbekanntGrund = 'mwst_keine_mehrdeutig'; unbekanntDetail = 'satz_bei_kleinunternehmer_status'; hinweise.push('STATUS_WIDERSPRUCH'); }
@@ -936,6 +958,8 @@ export function normalisiereAlt(alt, profil, optionen) {
   }
   else {
     const o = { bez: nichtLeer(a.bezeichnung) ? a.bezeichnung : (nichtLeer(a.absender) ? a.absender : 'Beleg'), netto_cent: brutto, satz_bp: null, ust_cent: 0 };
+    // TR4-kern-006: im Brutto enthaltene Steuer des Lieferanten (nicht abziehbar) für die Grenze des § 6 Abs. 2 S. 1 EStG; nicht bei Netto = Brutto
+    if (kuEingang && steuerfall === 'E_INLAND_OHNE_VORSTEUER' && kuSatzBp !== null && !kuNettoGleichBrutto) o.ust_enthalten_cent = ustAusBrutto(brutto, kuSatzBp);
     if (satzBp !== null && (steuerfall === 'A_INLAND_19' || steuerfall === 'A_INLAND_7' || steuerfall === 'E_INLAND_VORSTEUER')) {
       const ustRechn = ustAusBrutto(brutto, satzBp);
       let netto;

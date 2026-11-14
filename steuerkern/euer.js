@@ -109,6 +109,7 @@ export function euerFuer(wirkungen, profil, jahr, optionen) {
   const gesehen = new Set();
   for (const w of ws) {
     if (w.welt !== 'ust' || (w.status !== 'ausgeschlossen' && w.status !== 'unbekannt')) continue;
+    if (w.nur_euer === true) continue; // TR4-kern-004: zählt nur in den Jahren seiner euer_zahlungen (unten)
     const j = typeof w.periode === 'string' ? Number(w.periode.slice(0, 4)) : null;
     if (j !== null && j !== jahr) continue;
     if (gesehen.has(w.beleg_id)) continue;
@@ -153,6 +154,8 @@ export function euerFuer(wirkungen, profil, jahr, optionen) {
       const zj = z && typeof z.jahr === 'string' ? z.jahr.padStart(4, '0') : (z && typeof z.datum === 'string' ? z.datum.slice(0, 4) : null);
       if (!z || typeof z.datum !== 'string' || zj !== J.padStart(4, '0') || !Number.isSafeInteger(z.betrag_cent)) continue;
       fehlend.add(k);
+      // TR4-kern-004: der Hinweis einer Finanzamt-Zahlung ohne Art (FA_ART_FEHLT) erscheint in genau den EÜR-Jahren, die er sperrt
+      if (w.nur_euer === true) for (const h of w.hinweise) hinweise.push(h);
       if (z.spalte === 'einnahme') gEin += z.betrag_cent; else gAus += z.betrag_cent;
       // Leistung in einem anderen Jahr, Zahlung in diesem: der Beleg fehlt auch in dieser EÜR (nicht berücksichtigt)
       if (!gesehen.has(w.beleg_id)) { gesehen.add(w.beleg_id); ausg.push({ beleg_id: w.beleg_id, status: w.status, grund: w.hinweis_detail || null }); }

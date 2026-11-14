@@ -88,6 +88,7 @@ function mk(ctx, f) {
   if (Array.isArray(f.euer_zahlungen) && f.euer_zahlungen.length) w.euer_zahlungen = f.euer_zahlungen; // BP-07: Zahlungen eines nicht berechneten Belegs
   if (f.ku_anzahlung) w.ku_anzahlung = f.ku_anzahlung;
   if (f.kz48_offen) w.kz48_offen = true;
+  if (f.nur_euer) w.nur_euer = true; // TR4-kern-004: Hinweis wirkt nur über euer_zahlungen auf die EÜR, nie auf eine Voranmeldung
   return w;
 }
 
@@ -98,6 +99,45 @@ function gesperrteZahlungen(s) {
   if (KORREKTUR_ARTEN.includes(s.beleg_art)) return [];
   const spalte = s.richtung === 'ausgang' ? 'einnahme' : 'ausgabe';
   return aktiveZahlungen(s).map((z) => ({ datum: z.datum, betrag_cent: z.betrag_cent, spalte }));
+}
+
+// K-E (TR4-kern-002): Ein nicht berechneter Beleg kann Steuer nicht nur im Zeitraum der Leistung auslösen. Weitere Tage mit möglicher USt-Wirkung:
+//   Teilleistungen: Ende jeder Position mit eigener Leistung (§ 13 Abs. 1 Nr. 1 Buchst. a S. 2, 3 UStG)
+//   Zahlung vor dem Ende der Leistung (Anzahlung): § 13 Abs. 1 Nr. 1 Buchst. a S. 4 UStG (Ausgang), § 15 Abs. 1 S. 1 Nr. 1 S. 3 UStG (Eingang)
+//   Ist-Versteuerung (Ausgang): jede Zahlung, § 13 Abs. 1 Nr. 1 Buchst. b UStG
+//   Eingang: Rechnungserhalt nach der Leistung (Vorsteuer erst mit der Rechnung, § 15 Abs. 1 S. 1 Nr. 1 S. 2 UStG)
+//   Zahlung mit Skonto: Minderung im Zeitraum der Zahlung (§ 17 Abs. 1 S. 1, 2, 8 UStG; R-KOR-02)
+// Korrekturbelege haben eigene Zeiträume (Wirkdatum). Ergebnis: Tage (ISO), ohne den Leistungstag selbst.
+function weitereWirkTage(s, profil) {
+  if (KORREKTUR_ARTEN.includes(s.beleg_art)) return [];
+  const bis = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null;
+  if (!bis) return [];
+  const tage = [];
+  for (const p of Array.isArray(s.positionen) ? s.positionen : []) if (istObjekt(p) && istObjekt(p.leistung) && istDatum(p.leistung.bis)) tage.push(p.leistung.bis);
+  const eingang = s.richtung === 'eingang';
+  const erhalt = istDatum(s.rechnung_erhalt_am) ? s.rechnung_erhalt_am : (istDatum(s.rechnungsdatum) ? s.rechnungsdatum : null);
+  if (eingang && erhalt && erhalt > bis) tage.push(erhalt);
+  const ver = s.versteuerung_beleg === 'soll' || s.versteuerung_beleg === 'ist' ? s.versteuerung_beleg : versteuerungAm(profil, bis).art;
+  const ist = s.richtung === 'ausgang' && ver === 'ist';
+  for (const z of aktiveZahlungen(s)) {
+    if (istCent(z.skonto_cent) && z.skonto_cent > 0) tage.push(z.datum);
+    if (!(ist || z.datum < bis)) continue;
+    // Eingang: Vorsteuer aus der Anzahlung erst, wenn auch die Rechnung vorliegt (§ 15 Abs. 1 S. 1 Nr. 1 S. 3 UStG): der spätere der beiden Tage
+    tage.push(eingang && erhalt && erhalt > z.datum ? erhalt : z.datum);
+  }
+  return tage.filter((t) => t !== bis);
+}
+
+// Hinweis-Wirkungen (gleicher Status, gleiche Regel) für die weiteren Zeiträume eines nicht berechneten Belegs; ohne euer_zahlungen, damit die
+// EÜR die Zahlungen nur einmal zählt (euerFuer nimmt je Beleg die erste Wirkung mit euer_zahlungen).
+function weitereHinweisWirkungen(s, profil, ctx, out, hauptPeriode, f) {
+  const gesehen = new Set(hauptPeriode ? [hauptPeriode] : []);
+  for (const t of weitereWirkTage(s, profil)) {
+    const per = ustPeriode(profil, t, ctx.hinweise);
+    if (gesehen.has(per)) continue;
+    gesehen.add(per);
+    out.push(mk(ctx, { ...f, welt: 'ust', periode: per, datum_wirk: t, rolle: 'hinweis' }));
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -302,15 +342,22 @@ function anlagegutLage(s, kategorie) {
   if (kategorie === 'Bürobedarf') return nein ? 'hinweis' : 'ausschluss';
   return null;
 }
+// K-E (TR4-kern-006): Wert für die Grenze des § 6 Abs. 2 S. 1 EStG: Anschaffungskosten "vermindert um einen darin enthaltenen Vorsteuerbetrag".
+// Nach § 9b Abs. 1 EStG gehört nur die nicht abziehbare Vorsteuer zu den Anschaffungskosten; der Abzug "eines darin enthaltenen" Betrags betrifft also
+// gerade sie. EStR R 9b Abs. 2 S. 1, 2 (docs/quellen/estr-9b-esth-2025-amtlich-rf.md): stets der Nettowert, die Abziehbarkeit spielt keine Rolle.
+// Positionen mit ausgewiesener Steuer: netto_cent. Eingang ohne Vorsteuerabzug mit Steuer im Brutto (Kleinunternehmer, Kleinbetrag über 250 EUR):
+// netto_cent (= Brutto) minus ust_enthalten_cent. Ohne erkennbare Steuer (kein Satz) bleibt es beim Brutto. (Ersetzt TR-euer-003.)
+function gwgKosten(p) {
+  const e = istCent(p.ust_enthalten_cent) && p.ust_enthalten_cent >= 0 && p.ust_enthalten_cent <= p.netto_cent ? p.ust_enthalten_cent : 0;
+  return p.netto_cent - e;
+}
 function anlagegutHinweis(s) {
   if (s.richtung !== 'eingang' || KORREKTUR_ARTEN.includes(s.beleg_art) || !Array.isArray(s.positionen)) return false;
   for (const p of s.positionen) {
     if (!istObjekt(p) || !istCent(p.netto_cent) || !istCent(p.ust_cent)) continue;
     const k = p.kategorie || s.kategorie || null;
     if (k === 'GWG bis 800€' || k === 'Abschreibung (AfA)') continue;
-    const sf = s.steuerfall;
-    const abziehbar = sf === 'E_INLAND_VORSTEUER' && !(s.ausschluss && s.ausschluss.vorsteuer === 'nein') ? (istCent(p.vorsteuer_abziehbar_cent) ? p.vorsteuer_abziehbar_cent : p.ust_cent) : 0;
-    if (p.netto_cent + p.ust_cent - abziehbar > GRENZEN.GWG_NETTO.wert_cent && anlagegutLage(s, k) === 'hinweis') return true;
+    if (gwgKosten(p) > GRENZEN.GWG_NETTO.wert_cent && anlagegutLage(s, k) === 'hinweis') return true;
   }
   return false;
 }
@@ -396,10 +443,8 @@ function nichtUnterstuetzt(s) {
     for (const p of pos) {
       const k = p.kategorie || s.kategorie || null;
       if (k === 'Abschreibung (AfA)') return { grund: 'afa_kategorie', hinweise: [] };
-      // TR-euer-003 (§ 6 Abs. 2 S. 1 EStG, § 9b Abs. 1 EStG): Die Grenze gilt für die um den abziehbaren Vorsteuerbetrag verminderten Anschaffungskosten;
-      // nicht abziehbare Vorsteuer (ausschluss.vorsteuer 'nein', Steuerfall ohne Vorsteuer) bleibt Teil der Kosten.
-      const abziehbar = sf === 'E_INLAND_VORSTEUER' && !(s.ausschluss && s.ausschluss.vorsteuer === 'nein') ? (istCent(p.vorsteuer_abziehbar_cent) ? p.vorsteuer_abziehbar_cent : p.ust_cent) : 0;
-      const kosten = p.netto_cent + p.ust_cent - abziehbar;
+      // TR4-kern-006 (§ 6 Abs. 2 S. 1, § 9b Abs. 1 EStG, EStR R 9b Abs. 2): Grenze netto, auch wenn die Vorsteuer nicht abziehbar ist (gwgKosten)
+      const kosten = gwgKosten(p);
       if (k === 'GWG bis 800€') {
         if (kosten > GRENZEN.GWG_NETTO.wert_cent) return { grund: 'gwg_ueber_800', hinweise: [] };
       } else if (kosten > GRENZEN.GWG_NETTO.wert_cent && anlagegutLage(s, k) === 'ausschluss') {
@@ -470,7 +515,10 @@ export function belegWirkungen(beleg, profil, optionen) {
     hinweise.push('HN_NOCH_NICHT_UNTERSTUETZT');
     for (const h of nu.hinweise) if (!hinweise.includes(h)) hinweise.push(h);
     const datum = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : (istDatum(s.wirkdatum) ? s.wirkdatum : null);
-    return [mk(ctx, { welt: 'ust', periode: datum ? ustPeriode(profil, datum, hinweise) : null, datum_wirk: datum, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: nu.grund, euer_zahlungen: gesperrteZahlungen(s) })];
+    const per0 = datum ? ustPeriode(profil, datum, hinweise) : null;
+    const o0 = [mk(ctx, { welt: 'ust', periode: per0, datum_wirk: datum, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: nu.grund, euer_zahlungen: gesperrteZahlungen(s) })];
+    if (per0) weitereHinweisWirkungen(s, profil, ctx, o0, per0, { status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: nu.grund });
+    return o0;
   }
   try {
     if (sf === 'SPERRE_STUFE4' || (typeof s.sperrgrund === 'string' && s.sperrgrund !== '' && sf !== 'FA_ZAHLUNG')) {
@@ -479,11 +527,13 @@ export function belegWirkungen(beleg, profil, optionen) {
       ctx.beleg_status = 'ausgeschlossen';
       const per = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? ustPeriode(profil, s.leistung.bis, hinweise) : null;
       out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: s.leistung ? s.leistung.bis : null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: s.sperrgrund || null, euer_zahlungen: gesperrteZahlungen(s) }));
+      if (per) weitereHinweisWirkungen(s, profil, ctx, out, per, { status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: s.sperrgrund || null });
     } else if (sf === 'UNBEKANNT') {
       ctx.beleg_status = s.unbekannt_grund === 'datum_fehlt' ? 'zuordnung_offen' : 'unbekannt';
       const datum = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null;
       const per = datum ? ustPeriode(profil, datum, hinweise) : null;
       out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: datum, rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-ZP-11', hinweis_detail: s.unbekannt_grund || null }));
+      if (per) weitereHinweisWirkungen(s, profil, ctx, out, per, { status: 'unbekannt', regel_id: 'R-ZP-11', hinweis_detail: s.unbekannt_grund || null });
       // EÜR: Brutto der Zahlungen als "unsicher" (Entscheidung 3.3-a), getrennt von den Kennzahlen
       for (const z of aktiveZahlungen(s)) {
         out.push(mk(ctx, { welt: 'euer', periode: String(jahrVon(z.datum)), datum_wirk: z.datum, kz: null, betrag_cent: z.betrag_cent, netto_cent: z.betrag_cent, rolle: s.richtung === 'ausgang' ? 'einnahme' : 'ausgabe', spalte: s.richtung === 'ausgang' ? 'einnahme' : 'ausgabe', status: 'unbekannt', regel_id: 'R-EUER-35', unsicher: true, ereignis_id: z.id }));
@@ -491,7 +541,9 @@ export function belegWirkungen(beleg, profil, optionen) {
     } else if (s.dialog === 'dialog_erforderlich') {
       ctx.beleg_status = 'dialog_erforderlich';
       const datum = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null;
-      out.push(mk(ctx, { welt: 'ust', periode: datum ? ustPeriode(profil, datum, hinweise) : null, datum_wirk: datum, rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-VS-01', hinweis_detail: 'dialog_erforderlich', euer_zahlungen: gesperrteZahlungen(s) }));
+      const perD = datum ? ustPeriode(profil, datum, hinweise) : null;
+      out.push(mk(ctx, { welt: 'ust', periode: perD, datum_wirk: datum, rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-VS-01', hinweis_detail: 'dialog_erforderlich', euer_zahlungen: gesperrteZahlungen(s) }));
+      if (perD) weitereHinweisWirkungen(s, profil, ctx, out, perD, { status: 'unbekannt', regel_id: 'R-VS-01', hinweis_detail: 'dialog_erforderlich' });
     } else if (STEUERFAELLE_STUFE_NICHT_GERECHNET.includes(sf)) {
       ctx.beleg_status = 'ausgeschlossen';
       hinweise.push('HN_NOCH_NICHT_UNTERSTUETZT');
@@ -506,7 +558,11 @@ export function belegWirkungen(beleg, profil, optionen) {
           gesehen.add(per);
           out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: d, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: sf }));
         }
-      } else out.push(mk(ctx, { welt: 'ust', periode: datum ? ustPeriode(profil, datum, hinweise) : null, datum_wirk: datum, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: sf }));
+      } else {
+        const perS = datum ? ustPeriode(profil, datum, hinweise) : null;
+        out.push(mk(ctx, { welt: 'ust', periode: perS, datum_wirk: datum, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: sf }));
+        if (perS) weitereHinweisWirkungen(s, profil, ctx, out, perS, { status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: sf });
+      }
       // TR-ausland-012: Die Betriebsausgabe bzw. Einnahme hängt nicht an der USt-Einordnung (Anleitung Anlage EÜR): bezahlte Beträge stehen in der EÜR
       // als unsicherer Betrag (wie UNBEKANNT, R-EUER-35), nicht gar nicht
       for (const z of aktiveZahlungen(s)) {
@@ -578,7 +634,9 @@ function schliesseAus(s, profil, ctx, out, grund, extraHinweise) {
   ctx.beleg_status = 'ausgeschlossen';
   for (const h of ['HN_NOCH_NICHT_UNTERSTUETZT'].concat(extraHinweise || [])) if (!ctx.hinweise.includes(h)) ctx.hinweise.push(h);
   const datum = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null;
-  out.push(mk(ctx, { welt: 'ust', periode: datum ? ustPeriode(profil, datum, ctx.hinweise) : null, datum_wirk: datum, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: grund, euer_zahlungen: gesperrteZahlungen(s) }));
+  const per = datum ? ustPeriode(profil, datum, ctx.hinweise) : null;
+  out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: datum, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: grund, euer_zahlungen: gesperrteZahlungen(s) }));
+  if (per) weitereHinweisWirkungen(s, profil, ctx, out, per, { status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: grund });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -980,7 +1038,9 @@ function faWirkungen(s, profil, ctx, out) {
       ez.push(e);
       if (z.datum.slice(5, 7) === '01' && Number(z.datum.slice(8, 10)) <= GRENZEN.ZEHN_TAGE_REGEL.wert) ez.push({ ...e, jahr: String(jahrVon(z.datum) - 1) });
     }
-    out.push(mk(ctx, { welt: 'ust', rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-ZP-23', euer_zahlungen: ez }));
+    // K-E (TR4-kern-004): Eine Finanzamt-Zahlung gehört nie in die Voranmeldung (R-ZP-23, K16). Der Hinweis trägt deshalb keinen Zeitraum und ist
+    // nur_euer: ustvaFuer übergeht ihn, euerFuer zählt ihn nur in den Jahren seiner euer_zahlungen (Zahlungsjahr, im Fenster auch das Vorjahr).
+    out.push(mk(ctx, { welt: 'ust', rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-ZP-23', euer_zahlungen: ez, nur_euer: true }));
     return;
   }
   for (const z of zahlungen) {
@@ -997,11 +1057,16 @@ function faWirkungen(s, profil, ctx, out) {
     let jahr = jahrVon(z.datum);
     const h = [];
     if ((art === 'ust' || art === 'erstattung_ust') && (z.datum.slice(5, 7) === '01' && Number(z.datum.slice(8, 10)) <= GRENZEN.ZEHN_TAGE_REGEL.wert)) h.push('W_10TAGE_HINWEIS');
+    // K-E (TR4-kern-007, geprüft): Auch für Erstattungen gilt die Zehn-Tage-Regel mit Quelle: Anleitung zur Anlage EÜR 2026, Zeile 18 (BMF-Schreiben
+    // vom 01.09.2026, docs/quellen/bmf-2026-09-01-anlage-euer-2026.md Z. 1217 bis 1220): "Eine innerhalb von 10 Tagen nach Beginn des Kj. fällig
+    // gewordene und zugeflossene Umsatzsteuer-Erstattung für einen Voranmeldungszeitraum des Vorjahres ist als regelmäßig wiederkehrende Einnahme
+    // i. S. d. § 11 Abs. 1 Satz 2 EStG im Vorjahr als Betriebseinnahme zu berücksichtigen." Lücke: Die Fälligkeit der Erstattung selbst (Zustimmung
+    // des Finanzamts) kennt der Kern nicht; er nimmt wie bei der Vorauszahlung den gesetzlichen Abgabetag an (Hinweis HN_10TAGE_VORJAHR_ERSTATTUNG).
     if ((art === 'ust' || art === 'erstattung_ust') && typeof fa.periode === 'string' && (periodenArt(fa.periode) === 'monat' || periodenArt(fa.periode) === 'quartal')) {
       const dauer = voranmeldungAm(profil, periodenEnde(fa.periode)).dauerfrist === true;
       const fr = frist10Tag(fa.periode, dauer);
       const r = zehnTageRegelVorjahr(z.datum, fr.gesetzlich);
-      if (r.vorjahr) { jahr -= 1; h.push('HN_10TAGE_VORJAHR'); }
+      if (r.vorjahr) { jahr -= 1; h.push(art === 'erstattung_ust' ? 'HN_10TAGE_VORJAHR_ERSTATTUNG' : 'HN_10TAGE_VORJAHR'); }
     }
     out.push(mk(ctx, { welt: 'euer', periode: String(jahr), datum_wirk: z.datum, kz, netto_cent: z.betrag_cent, betrag_cent: z.betrag_cent, rolle, spalte, regel_id: 'R-ZP-23', hinweise: h, ereignis_id: z.id, hinweis_detail: regel }));
   }
