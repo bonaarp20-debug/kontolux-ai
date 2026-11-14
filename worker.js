@@ -13,6 +13,8 @@ import { regelSteuerprofil } from './regel/steuerprofil.js';
 import { regelFestschreibung } from './regel/festschreibung.js';
 import { regelMigration } from './regel/migration.js';
 import { regelAdminFeatures } from './regel/admin-features.js';
+// BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
+import { REGEL_SAMMLUNGEN, REGEL_UNTERSAMMLUNGEN, untersammlungenLoeschen, untersammlungenExport, untersammlungLesen } from './regel/archiv.js';
 
 const ALLOWED_ORIGINS = [
   'https://app.kontolux-ai.de',
@@ -4326,10 +4328,12 @@ async function handlePrueferDaten(body, env, cors = {}, authHeader = null) {
     }
 
     const base = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${uid}`;
-    const [dokDocs, maDocs, sammelbelegDocs] = await Promise.all([
+    const [dokDocs, maDocs, sammelbelegDocs, festDocs] = await Promise.all([
       firestoreListAll(`${base}/dokumente`, adminToken),
       firestoreListAll(`${base}/monatsabschluesse`, adminToken),
-      firestoreListAll(`${base}/sammelbelege`, adminToken)
+      firestoreListAll(`${base}/sammelbelege`, adminToken),
+      // BP-13: Festschreibungen (Zeitraum, Snapshot, Status, Rücknahmen) gehören zum Nachweis für den Prüfer; Fehler hier bricht nichts ab
+      firestoreListAll(`${base}/festschreibung`, adminToken).catch(() => [])
     ]);
 
     // Absichtlich UNGEFILTERT, auch soft-gelöschte/stornierte Belege (deleted:true) — genau das
@@ -4343,7 +4347,13 @@ async function handlePrueferDaten(body, env, cors = {}, authHeader = null) {
     // (nur_nachweis:true), siehe Sammelbelege-Block in index.html.
     const sammelbelege = sammelbelegDocs.map(d => ({ id: dokIdAusPfad(d.name), ...firestoreFieldsToObject(d.fields) }));
 
-    return new Response(JSON.stringify({ dokumente, monatsabschluesse, sammelbelege }), {
+    const festschreibungen = festDocs.map(d => {
+      const f = firestoreFieldsToObject(d.fields);
+      // nur der Nachweis, keine internen Laufdaten (offene Sperrliste)
+      if (f && f.sperre) delete f.sperre.offen;
+      return { id: dokIdAusPfad(d.name), ...f };
+    });
+    return new Response(JSON.stringify({ dokumente, monatsabschluesse, sammelbelege, festschreibungen }), {
       status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
     });
   } catch (e) {
@@ -5173,7 +5183,10 @@ const ARCHIV_SAMMLUNGEN = [
   'chats', 'dokumente', 'monatsabschluesse', 'abschreibungen', 'privatvorgaenge', 'tagesdaten',
   'audit_log', 'angebote', 'kunden', 'zeiteintraege', 'reisekosten', 'sammelbelege',
   'stripe_links', 'stripe_rechnungen', 'eigenefristen', 'absender_kategorien',
-  'webhook_secrets', 'webhook_processed', 'profil'
+  'webhook_secrets', 'webhook_processed', 'profil',
+  // BP-13: steuerprofil, festschreibung, audit_v2, migration, rechnungsnummern (Regelbesteuerung). Ihre Unterkollektionen
+  // steuerprofil/{doc}/verlauf und dokumente/{id}/versionen räumt archivDatenLoeschen eigens ab (regel/archiv.js)
+  ...REGEL_SAMMLUNGEN
 ];
 
 // Reine Entscheidung je Konto. tageBis = Tage bis aufbewahrung_bis (negativ = abgelaufen).
@@ -5220,6 +5233,10 @@ async function archivZaehlen(uid, adminToken) {
     const data = await res.json();
     const anzahl = (data.documents || []).length;
     bericht[coll] = data.nextPageToken ? `${anzahl}+` : anzahl;
+  }
+  // BP-13: Unterkollektionen (verlauf, versionen) mitzählen, damit der Trockenlauf zeigt, was der Löschlauf zusätzlich entfernt
+  for (const name of REGEL_UNTERSAMMLUNGEN) {
+    try { bericht[`*/${name}`] = (await untersammlungLesen(uid, name, adminToken, fetch, { nurName: true })).length; } catch { bericht[`*/${name}`] = 'Fehler'; }
   }
   return bericht;
 }
@@ -5275,9 +5292,11 @@ async function archivKontoLoeschen(uid, env, adminToken) {
 }
 
 // Löscht alle Firestore-Sammlungen, Feedback, Dateien und KV-Spuren eines Kontos (ohne das Login selbst).
-async function archivDatenLoeschen(uid, env, adminToken, { markerBehalten = false } = {}) {
+export async function archivDatenLoeschen(uid, env, adminToken, { markerBehalten = false } = {}) {
   let marker = null;
   if (markerBehalten) marker = await firestoreGetDoc(`users/${uid}/profil/konto_archiv`, adminToken);
+  // BP-13: zuerst die Unterkollektionen (steuerprofil/*/verlauf, dokumente/*/versionen): Firestore löscht sie nicht mit dem Elterndokument
+  await untersammlungenLoeschen(uid, adminToken);
   for (const coll of ARCHIV_SAMMLUNGEN) {
     await loescheAlleUnterPfad(`users/${uid}/${coll}`, adminToken, coll === 'chats' ? 'messages' : null);
   }
@@ -5446,7 +5465,7 @@ async function handleAdminSpeicherUmzug(request, authHeader, env, cors = {}) {
   const trocken = body.trocken !== false; // nur ein ausdrückliches false schreibt wirklich
   try {
     const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
-    const sammlungen = [...new Set([...ARCHIV_SAMMLUNGEN, 'messages'])];
+    const sammlungen = [...new Set([...ARCHIV_SAMMLUNGEN, 'messages', ...REGEL_UNTERSAMMLUNGEN])];
     const bericht = { trocken, dokumente_geprueft: 0, dokumente_geaendert: 0, felder_geaendert: 0, je_sammlung: {} };
     const schreibvorgaenge = [];
     for (const coll of sammlungen) {
@@ -6093,6 +6112,8 @@ async function handleAdminExportListe(request, authHeader, env, cors = {}) {
     for (const coll of EXPORT_SAMMLUNGEN_OHNE_CHATS) {
       sammlungen[coll] = await firestoreListAll(`${base}/${coll}`, adminToken);
     }
+    // BP-13: Unterkollektionen steuerprofil/*/verlauf und dokumente/*/versionen (als steuerprofil_verlauf, dokumente_versionen)
+    Object.assign(sammlungen, await untersammlungenExport(ziel.uid, adminToken));
     // Dateiliste aus dem Speicher (nur Namen, die Dateien holt die Seite einzeln)
     const storageToken = await getGoogleAccessToken(env, STORAGE_SCOPE);
     const dateien = [];
