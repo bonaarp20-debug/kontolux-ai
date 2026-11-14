@@ -59,6 +59,7 @@ function vergleichbar(s) {
   delete c.herkunft;
   if (c.migration) {
     delete c.migration.evidenz;
+    delete c.migration.legacy_hash;
     c.migration.hinweise = (c.migration.hinweise || []).filter((h) => !h.startsWith('PLATTFORM_SATZ_ABWEICHEND') && h !== 'PLATTFORM_EINSTELLUNG_FEHLT');
   }
   return c;

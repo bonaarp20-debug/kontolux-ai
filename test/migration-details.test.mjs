@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import * as K from '../steuerkern/index.js';
 import { regelMigration, kernHash, sicherungPruefen, plattformAusQuelle, plattformSaetzeAus, KLAERUNG_MAX } from '../regel/migration.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
+import { driftStatus } from '../regel/drift.js';
 
 const UID = 'nutzerDetails0000000000001';
 const PROFIL = {
@@ -65,6 +66,9 @@ test('Belege ohne Datum und ohne createdAt: nicht geschrieben, Blocker PF_RECHNU
   assert.equal(lauf.blocker_codes.PF_RECHNUNGSDATUM, 2);
   assert.equal(fs.lies(`users/${UID}/dokumente/o1`).schema_version, undefined);
   const o3 = fs.lies(`users/${UID}/dokumente/o3`);
+  assert.equal(driftStatus(o3), 'ok', 'Drift-Wächter: legacy_hash passt direkt nach der Migration');
+  fs.setze(`users/${UID}/dokumente/o3`, { ...o3, betrag_netto: 12.34 }); // alte App schreibt nur Legacy-Felder
+  assert.equal(driftStatus(fs.lies(`users/${UID}/dokumente/o3`)), 'veraltet');
   assert.equal(o3.steuer.rechnungsdatum, '2026-05-02');
   assert.ok(o3.steuer.migration.flags.includes('datum_unsicher'));
 });

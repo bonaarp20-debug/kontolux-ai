@@ -24,6 +24,7 @@
 //   - Wirkungslose Storno-Dokumente (ohne Festschreibung) tragen kein Wirkdatum und werden als wirkungslos geschrieben (Kern, inbox-WORKER).
 //   - Webhook-Einnahmen (3.8.6, steuerfall_herkunft plattform_setting): steuer.migration.evidenz hält fest, welche Integrations-Einstellung
 //     (mwst_setting aus webhook_secrets/{plattform}, nur dieses eine Feld wird gelesen) heute gilt und ob der Satz des Belegs dazu passt.
+//   - steuer.migration.legacy_hash (Drift-Wächter, regel/drift.js) über die Legacy-Felder zum Zeitpunkt der Migration.
 //   - Fortschrittsdokument mit Zählern, Kern-Version, Kern-Hash (SHA-256 über das Kern-Manifest) und der Sicherung des Browsers (NP-04).
 //
 // Body: { aktion, lauf_id?, anfrage_id?, trockenlauf?, cursor?, sicherung?, beleg_ids?, antwort? }
@@ -46,6 +47,7 @@ import {
 import { schreibe, vorbedingungAus, vollerName, FirestoreFehler, BudgetFehler } from './firestore.js';
 import { auditSchreibvorgaenge, kopfPfad, AUDIT_AKTIONEN } from './audit.js';
 import { aktuellPfad } from './steuerprofil.js';
+import { legacyHash } from './drift.js';
 
 export const BLOCK_MIN = 100;
 export const BLOCK_MAX = 200;
@@ -210,6 +212,8 @@ function migrationsPlanSicher(docs, profil, festMonate) {
 // steuer für das Schreiben ergänzen: Herkunft (weg 'migration', Kern-Version) und Evidenz für Webhook-Einnahmen (3.8.6)
 export function steuerFuerSchreiben(steuer, daten, plattformSaetze) {
   const s = { ...steuer, herkunft: { ...(istObjekt(steuer.herkunft) ? steuer.herkunft : {}), weg: 'migration', kern_version: Steuerkern.KERN_VERSION } };
+  // Drift-Wächter (regel/drift.js, migration-rollout.md 2.6): Fingerabdruck der Legacy-Felder zum Zeitpunkt der Migration
+  s.migration = { ...(istObjekt(s.migration) ? s.migration : { flags: [], hinweise: [] }), legacy_hash: legacyHash(daten) };
   if (s.steuerfall_herkunft === 'plattform_setting') {
     const plattform = plattformAusQuelle(daten.quelle);
     const satzBeleg = daten.mwst_satz === undefined || daten.mwst_satz === null ? null : String(daten.mwst_satz).trim();
@@ -639,7 +643,7 @@ export function klaerungEinheit(uid, id, dok, profil, steuerwahl, zeit) {
     ...neu.steuer,
     steuerfall_herkunft: 'nutzer',
     herkunft: { ...s.herkunft, weg: 'migration', kern_version: Steuerkern.KERN_VERSION },
-    migration: { ...m, klaerung: { steuerwahl, am: zeit, vorher: s.unbekannt_grund || null } },
+    migration: { ...m, legacy_hash: legacyHash(d), klaerung: { steuerwahl, am: zeit, vorher: s.unbekannt_grund || null } },
   };
   try {
     return { id, write: schreibe.aendern(dokPfad(uid, id), { steuer }, ['steuer'], { updateTime: dok.updateTime }), code: 'geklaert' };
