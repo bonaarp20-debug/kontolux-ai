@@ -1,0 +1,84 @@
+{
+  "stand": "2026-11-14",
+  "methode": "Zeichen/3.5, aufgerundet",
+  "wissensbasis": {
+    "zeichen": 21449,
+    "token": 6129
+  },
+  "module": {
+    "core": {
+      "zeichen": 9138,
+      "token": 2611
+    },
+    "steuer": {
+      "zeichen": 10551,
+      "token": 3015
+    },
+    "euer": {
+      "zeichen": 16185,
+      "token": 4625
+    },
+    "rechnungen": {
+      "zeichen": 14091,
+      "token": 4026
+    },
+    "tools": {
+      "zeichen": 8589,
+      "token": 2454
+    },
+    "integrationen": {
+      "zeichen": 679,
+      "token": 194
+    }
+  },
+  "zusammenstellungen": {
+    "chat_core": {
+      "zeichen_statisch": 9138,
+      "token_statisch": 2611,
+      "token_wissensbasis": 6129,
+      "token_gesamt": 8740
+    },
+    "chat_steuer": {
+      "zeichen_statisch": 19691,
+      "token_statisch": 5626,
+      "token_wissensbasis": 6129,
+      "token_gesamt": 11755
+    },
+    "chat_euer": {
+      "zeichen_statisch": 25325,
+      "token_statisch": 7236,
+      "token_wissensbasis": 6129,
+      "token_gesamt": 13365
+    },
+    "chat_rechnungen": {
+      "zeichen_statisch": 39418,
+      "token_statisch": 11263,
+      "token_wissensbasis": 6129,
+      "token_gesamt": 17392
+    },
+    "chat_frist": {
+      "zeichen_statisch": 35878,
+      "token_statisch": 10251,
+      "token_wissensbasis": 6129,
+      "token_gesamt": 16380
+    },
+    "chat_datei": {
+      "zeichen_statisch": 58562,
+      "token_statisch": 16732,
+      "token_wissensbasis": 6129,
+      "token_gesamt": 22861
+    },
+    "chat_alle": {
+      "zeichen_statisch": 59243,
+      "token_statisch": 16927,
+      "token_wissensbasis": 6129,
+      "token_gesamt": 23056
+    },
+    "bild_dokument": {
+      "zeichen_statisch": 58666,
+      "token_statisch": 16762,
+      "token_wissensbasis": 6129,
+      "token_gesamt": 22891
+    }
+  }
+}

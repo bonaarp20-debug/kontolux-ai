@@ -1996,6 +1996,16 @@ function buildStaticForModules(modules) {
   return parts.join('\n\n');
 }
 
+// Prompt-Tests (test/prompt-*.test.mjs, scripts/test-prompt-tokens.mjs): Zugriff auf die Bausteine ohne Netz.
+export function kiPromptTeile() {
+  return {
+    bildDokument: STATIC_SYSTEM_INSTRUCTIONS,
+    module: { core: _KI_CORE, steuer: _KI_STEUER, euer: _KI_EUER, rechnungen: _KI_RECHNUNGEN, tools: _KI_TOOLS, integrationen: _KI_INTEGRATIONEN },
+    bauen: buildStaticForModules,
+    systemBloecke: buildSystemBlocks
+  };
+}
+
 function filterProfilForModules(profil, modules) {
   if (!profil) return profil;
   if (['euer','rechnungen','tools'].every(m => modules.includes(m))) return profil;
