@@ -22,7 +22,7 @@ import { istCent, ustAusBrutto, teile, mulDivRund } from './geld.js';
 import { istDatum, jahrVon, addiereMonate, monatsende, periodenEnde, periodenArt, quartalVon, frist10Tag, zehnTageRegelVorjahr, ustPeriodeFuer } from './daten.js';
 import { voranmeldungsperiodeFuer, voranmeldungAm, versteuerungAm, statusAm, statusFuerAusgangsumsatz } from './steuerprofil.js';
 import { regelNachId, KATEGORIEN, GRENZEN, USTVA_ZEILEN, EUER_ZEILEN, STEUERSAETZE, BELEG_ARTEN, KORREKTUR_GRUENDE, basisKzFuerSatz } from './tabellen.js';
-import { KORREKTUR_ARTEN } from './beleg.js';
+import { KORREKTUR_ARTEN, tagVonZeit } from './beleg.js';
 
 const istObjekt = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 
@@ -390,6 +390,100 @@ function datenFehler(s) {
   }
   if (s.leistung !== undefined && s.leistung !== null && !(istObjekt(s.leistung) && istDatum(s.leistung.bis))) return 'leistung.bis ungültig';
   return null;
+}
+
+// ---------------------------------------------------------------------------------------------
+// belegZeitraumDaten (D4, 15.11.2026; Zurufe D3 an WORKER und KERN): Tage, an denen ein GESPEICHERTES Dokument (Altfelder und/oder steuer, so wie
+// belegFuerKern es liest) im Kern eine Wirkung haben kann. Gemeinsame Liste für den Vorfilter der Festschreibung (KontoluxWorker/regel/festschreibung-
+// kern.js relevanteZeilen: rechnet nur über Dokumente, die den Zeitraum berühren können) und die Sperrprüfung der App (regel/festschreibung-ui.js
+// belegTage). Die Liste ist eine Obermenge: jede Wirkung (datum_wirk) liegt an einem Tag aus tage oder in einer Spanne aus spannen, jede EÜR-Wirkung
+// an einem Tag aus euer_tage (Test scripts/test-steuerkern-d4-zeitraum.mjs, Eigenschaft gegen alleWirkungen).
+//   Altfelder (normalisiereAlt; v1, und bei v2 für den Fall 'veraltet'/'neu_pruefen'): datum, leistungsdatum, bezahlt_am (nur bei bezahlt), createdAt
+//     als Berliner Tag (nur wo normalisiereAlt ihn nutzt: kein gültiges datum, Zahlung ohne bezahlt_am, Storno-Wirkdatum).
+//   steuer: rechnungsdatum, rechnung_erhalt_am, wirkdatum, leistung {von, bis} und positionen[].leistung (Teilleistungen) als Spannen (Dauerleistung:
+//     Jahresenden dazwischen, § 13b Abs. 3 UStG), § 13b Abs. 2 Nr. 1 UStG (E_13B_DRITTLAND_DL): Spanne bis zum Ende des Folgemonats, zahlungen[].datum,
+//     rueckzahlung, geschenk.ruecknahme_datum.
+//   undatiert: der Kern kann eine Wirkung OHNE Zeitraum erzeugen (periode null; ustvaFuer zählt sie in JEDEM Zeitraum als nicht berücksichtigt):
+//     Altfelder ohne Rechnungs- und Leistungstag, gespeichertes steuer mit Datenfehler oder ohne gültiges leistung.bis. Wer filtert, nimmt solche
+//     Dokumente immer mit.
+// Nie eine Ausnahme: kommt die Rechnung durch Datenmüll zu Fall, gilt das Dokument als undatiert (sichere Richtung: es wird mitgerechnet).
+// Ergebnis { tage, euer_tage, spannen: [[von, bis]], undatiert }, Tage sortiert und eindeutig.
+// ---------------------------------------------------------------------------------------------
+// Kann belegWirkungen für dieses steuer eine USt-Wirkung ohne Zeitraum erzeugen, die ustvaFuer in JEDEM Zeitraum als nicht berücksichtigt zählt
+// (Status ausgeschlossen oder unbekannt)? Spiegelt die Ausgänge von belegWirkungen ohne Leistungstag, im Zweifel ja. Keine Wirkung: wirkungslos,
+// PRIVAT. Finanzamt-Zahlung: nur EÜR (der Hinweis ohne Art ist nur_euer, ein reiner Hinweis 'vorlaeufig' zählt nicht). Korrekturen hängen am
+// Original (Kontext); der Vorfilter nimmt sie ohnehin immer mit. Sonst braucht jeder bekannte Steuerfall ein gültiges leistung.bis, keine
+// Datenfehler und keine Entwurfs-Blocker; ein unbekannter Steuerfall hat nie einen Zeitraum.
+const STEUERFAELLE_MIT_ZEITRAUM = Object.freeze(['A_KU', 'A_INLAND_19', 'A_INLAND_7', 'A_INLAND_0_PV', 'E_INLAND_VORSTEUER', 'E_INLAND_OHNE_VORSTEUER', 'UNBEKANNT', 'SPERRE_STUFE4',
+  ...STEUERFAELLE_STUFE_NICHT_GERECHNET]);
+function steuerOhneZeitraum(s) {
+  if (s.wirkungslos === true || s.steuerfall === 'PRIVAT') return false;
+  if (datenFehler(s) !== null) return true;
+  if (Array.isArray(s.entwurf_blocker) && s.entwurf_blocker.length > 0) return true;
+  const bisOk = istObjekt(s.leistung) && istDatum(s.leistung.bis);
+  if (s.dialog === 'dialog_erforderlich' && !bisOk) return true;
+  if (s.steuerfall === 'FA_ZAHLUNG') return false;
+  if (KORREKTUR_ARTEN.includes(s.beleg_art)) return true;
+  return !STEUERFAELLE_MIT_ZEITRAUM.includes(s.steuerfall) || !bisOk;
+}
+
+export function belegZeitraumDaten(dok) {
+  const tage = [];
+  const euer = [];
+  const spannen = [];
+  let undatiert = false;
+  const tag = (liste, v) => { if (istDatum(v)) liste.push(v); };
+  const spanne = (l, bisSpaeter) => {
+    if (!istObjekt(l)) return;
+    const a = istDatum(l.von) ? l.von : null;
+    const b = istDatum(l.bis) ? l.bis : null;
+    if (!a && !b) return;
+    let von = a && b ? (a < b ? a : b) : (a || b);
+    let bis = a && b ? (a < b ? b : a) : (a || b);
+    if (bisSpaeter && b) { const s = monatsende(addiereMonate(b, 1)); if (s > bis) bis = s; if (von > bis) von = bis; }
+    spannen.push([von, bis]);
+  };
+  try {
+    const d = istObjekt(dok) ? dok : {};
+    // Altfelder
+    const datumOk = istDatum(d.datum);
+    const bezahlt = d.bezahlt === true;
+    const bezahltAmOk = istDatum(d.bezahlt_am);
+    const erfasst = tagVonZeit(d.createdAt);
+    const rechnungstag = datumOk ? d.datum : erfasst;
+    tag(tage, d.datum);
+    tag(tage, d.leistungsdatum);
+    if (!datumOk || (bezahlt && !bezahltAmOk) || d.typ === 'storno') tag(tage, erfasst);
+    if (bezahlt) {
+      const zt = bezahltAmOk ? d.bezahlt_am : (erfasst || rechnungstag);
+      tag(tage, zt);
+      tag(euer, zt);
+    }
+    if (!rechnungstag && !istDatum(d.leistungsdatum)) undatiert = true;
+    // steuer
+    const s = istObjekt(d.steuer) ? d.steuer : null;
+    if (s) {
+      tag(tage, s.rechnungsdatum);
+      tag(tage, s.rechnung_erhalt_am);
+      tag(tage, s.wirkdatum);
+      spanne(s.leistung, s.steuerfall === 'E_13B_DRITTLAND_DL');
+      for (const p of Array.isArray(s.positionen) ? s.positionen : []) if (istObjekt(p)) spanne(p.leistung, false);
+      for (const z of Array.isArray(s.zahlungen) ? s.zahlungen : []) {
+        if (!istObjekt(z)) continue;
+        tag(tage, z.datum);
+        if (z.status !== 'rueckgaengig') tag(euer, z.datum);
+      }
+      const rz = Array.isArray(s.rueckzahlung) ? s.rueckzahlung : (istObjekt(s.rueckzahlung) ? [s.rueckzahlung] : []);
+      for (const r of rz) if (istObjekt(r)) { tag(tage, r.datum); tag(euer, r.datum); }
+      if (istObjekt(s.geschenk)) tag(tage, s.geschenk.ruecknahme_datum);
+      // Nur so liest belegFuerKern das gespeicherte steuer (sonst: Altfelder)
+      if (d.schema_version === 2 && steuerOhneZeitraum(s)) undatiert = true;
+    }
+  } catch (e) {
+    undatiert = true;
+  }
+  const sortiert = (l) => [...new Set(l)].sort();
+  return { tage: sortiert(tage), euer_tage: sortiert(euer), spannen, undatiert };
 }
 
 function satzGrund(s, p) {

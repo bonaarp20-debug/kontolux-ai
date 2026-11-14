@@ -68,7 +68,16 @@ function berlinTag(sekunden) {
   const versatz = sekunden >= beginn && sekunden < ende ? 7200 : 3600;
   return datumAusTagen(Math.floor((sekunden + versatz) / 86400));
 }
+// Berliner Kalendertag eines Erfassungszeitpunkts (Firestore-Timestamp, ISO-Text mit oder ohne Versatz, Millisekunden). D4 (Zuruf D3 an KERN,
+// 15.11.2026): Zeitpunkte außerhalb des Datumsbereichs (1e308, -1e20, Infinity, ein Tag vor 0001-01-01 oder nach 9999-12-31, kaputte Timestamp-
+// Objekte) ergeben null wie ein fehlender Zeitpunkt, nie eine Ausnahme (vorher warfen legacyHash, driftStatus und normalisiereAlt, im Worker
+// belegeHash beim Festschreiben: 500). Das Ergebnis ist immer ein gültiges Datum oder null.
 export function tagVonZeit(x) {
+  let t;
+  try { t = tagVonZeitRoh(x); } catch (e) { return null; }
+  return istDatum(t) ? t : null;
+}
+function tagVonZeitRoh(x) {
   if (typeof x === 'string') {
     const t = x.slice(0, 10);
     if (!istDatum(t)) return null;
@@ -90,7 +99,7 @@ export function tagVonZeit(x) {
     const s = Number.isFinite(x.seconds) ? x.seconds : Number.isFinite(x._seconds) ? x._seconds : null;
     if (s !== null) return berlinTag(Math.floor(s));
     if (typeof x.toDate === 'function') {
-      try { return tagVonZeit(x.toDate().toISOString()); } catch (e) { return null; }
+      return tagVonZeitRoh(x.toDate().toISOString());
     }
   }
   return null;

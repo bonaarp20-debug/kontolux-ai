@@ -1,9 +1,9 @@
 {
-  "kern_version": "2026.11.14-4",
+  "kern_version": "2026.11.15-1",
   "dateien": {
-    "VERSION.js": "8d6fa1a94f3118217af9dd14e3db967db0d012d4843f3dda6cdf8c0ccd7cd410",
+    "VERSION.js": "81600d51625a8052170d349d9ee2b06b24fbebb1f099f9212c72e88d93725fc4",
     "auswertung.js": "586901609d362930db40f9c7b24ffe325e86c9b15dd034fb09652534eeb4d939",
-    "beleg.js": "d9c4a09f16eceed9c4f9a54e918bbf987a8b2183a7a823bdcb05a0ec2617bc35",
+    "beleg.js": "475bc8f00546b179c602c53975e4c793c209f182adc0eb4b37626b40fa0883ea",
     "daten.js": "ca7e034d0da8d36c0f67c835038c545f8ae9f7590047ecde75a43791ddf56543",
     "drift.js": "f0acf124bd9a7a41f4a1c5f4519c10c47933b3247df658ae82687f5175af17c4",
     "euer.js": "1ff0111b83cf7f47a408a6501cf9d8df6ffda56f0fa2236cbcd30ef327213c96",
@@ -15,13 +15,13 @@
     "steuerprofil.js": "a4faffc46dfd09d57dee8c78e9b01a9a73c206f36fd7c0d60f995850ce9eb19d",
     "tabellen.js": "e0d76e1bcae58a1afb07131524540da30f8e9d5b81f02100ecbc92c537020964",
     "ustva.js": "c806b03859f71d7a6f8ca6a8807dfcca9c06d988c3b82a3a436666096809e174",
-    "wirkung.js": "1f0cb3cc7a0713c5ec785e43fcfb3dece3c24370e88d867117f40aca36044815",
+    "wirkung.js": "c2d51c8a6f1704ecf158f942a322cced21c17743703b8d04de5b982eca202a0d",
     "zahlenliste.js": "a479f11fceaca6da13435bd1290c381277019fe109947cb61859101e7ab1115c",
-    "golden/beleg-adapter.json": "f0973fc326562b69df3f20f7a83953a512dab2691025ba757ffea62d5f2b19d0",
-    "golden/pruefberichte.json": "75247521d286fa2f9c5f54486a4f5cef3092d52241093601b9cb80cbd112e3f7",
-    "golden/referenzfaelle.json": "2471afe01dfc9d6c6def0b5416cb50d055000bb6a30304d910bd987212b70597"
+    "golden/beleg-adapter.json": "3577ee8ec16f4df445050b0cb6b2238f991c5bb48e29b483e0dbe56dbe435acf",
+    "golden/pruefberichte.json": "a17592281a38b3a60aa51677f3207c795b2207152bcf4ca4bc4f03df3ca7750e",
+    "golden/referenzfaelle.json": "b55610e62cc14538364a9b8c689284455ed11a9df07d69ec38b77f6d4ccd82a0"
   },
-  "erzeugt": "2026-11-14T19:33:35.543Z",
+  "erzeugt": "2026-11-14T23:51:07.270Z",
   "nur_app": [
     "schatten.js"
   ]
