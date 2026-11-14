@@ -1,4 +1,4 @@
-// regel/migration.js: POST /migration, GERÜST (W0, BP-14 Teil 1; migration-rollout.md 2.1 bis 2.5, Konzept 3.8.5).
+// regel/migration.js: POST /migration (W0 Gerüst, Ausbau BP-14; migration-rollout.md 2.1 bis 2.8, Konzept 3.8.2 bis 3.8.6).
 // Je Nutzer, vom Browser gesteuert, in Blöcken von 100 bis 200 Belegen (Standard 150, env KERN_MIGRATION_CHUNK).
 // Additiv: geschrieben werden NUR 'steuer' und 'schema_version' (updateMask), jeweils mit updateTime-Vorbedingung des gelesenen Belegs.
 // Legacy-Felder bleiben byte-gleich. Fortschritt in users/{uid}/migration/{lauf_id}, im SELBEN commit wie die Belege (atomar, Wiederaufnahme
@@ -9,33 +9,64 @@
 // Unteranfragen: Lesen (batchGet) 1, Belege (runQuery) 1, commit 1 (bei Konflikten wenige mehr); das Budget der Schicht (35) hält den Aufruf
 // zusammen mit dem Router unter den 50 Unteranfragen des Free-Plans; ist es erschöpft, endet der Aufruf mit konsistentem Stand und weiter: true.
 //
-// Body: { aktion, lauf_id?, anfrage_id?, trockenlauf?, cursor? }
-//   'start'             { anfrage_id }  legt den Lauf an oder setzt einen offenen fort (Profil muss bestätigt sein)
-//   'block'             { lauf_id }     ein Block; Antwort { weiter, cursor, zaehler, block }
+// Ablauf eines Laufs in drei Phasen (BP-14, Kontext über Blockgrenzen statt Überspringen):
+//   'haupt'             liest alle Belege blockweise; kontextabhängige Belege werden ZURÜCKGESTELLT (Zähler zurueckgestellt, Liste kontext.offen):
+//                       Storno-Dokumente mit Rechnungsnummer, wenn festgeschriebene Monate existieren (Gegenposten hängt am Original, Audit F1),
+//                       und Plattform-Erstattungen (Bezug zur Ursprungszahlung muss über ALLE Belege eindeutig sein, Konzept 3.8.2).
+//   'kontext_suche'     zweiter Durchlauf, nur lesend: sammelt zu jedem zurückgestellten Beleg die Kandidaten (Original bzw. Ursprungszahlungen),
+//                       mit denselben Bedingungen wie der Kern (migration.js eindeutigeNr/ursprung), höchstens so viele, wie die Entscheidung braucht.
+//   'kontext_schreiben' rechnet migrationsPlan über (zurückgestellte Belege + Kandidaten) und schreibt das Ergebnis. Das ist dasselbe Ergebnis wie
+//                       ein Plan über alle Belege (Test test/migration-kontext.test.mjs). uebersprungen_kontext nur, wenn mehr als KONTEXT_MAX
+//                       Belege zurückgestellt werden müssten (wirklich nicht auflösbar im Rahmen der Grenzen).
+// Weitere Regeln:
+//   - Belege ohne Datum und ohne createdAt (rechnungsdatum null) werden nicht geschrieben: Code uebersprungen_validierung mit Blocker
+//     PF_RECHNUNGSDATUM, zusätzlich Zähler ohne_datum und Liste offene_ids.ohne_datum (die Ansicht verlinkt sie zum Nachtragen).
+//   - Wirkungslose Storno-Dokumente (ohne Festschreibung) tragen kein Wirkdatum und werden als wirkungslos geschrieben (Kern, inbox-WORKER).
+//   - Webhook-Einnahmen (3.8.6, steuerfall_herkunft plattform_setting): steuer.migration.evidenz hält fest, welche Integrations-Einstellung
+//     (mwst_setting aus webhook_secrets/{plattform}, nur dieses eine Feld wird gelesen) heute gilt und ob der Satz des Belegs dazu passt.
+//   - Fortschrittsdokument mit Zählern, Kern-Version, Kern-Hash (SHA-256 über das Kern-Manifest) und der Sicherung des Browsers (NP-04).
+//
+// Body: { aktion, lauf_id?, anfrage_id?, trockenlauf?, cursor?, sicherung?, beleg_ids?, antwort? }
+//   'start'             { anfrage_id, sicherung? }  legt den Lauf an oder setzt einen offenen fort (Profil muss bestätigt sein)
+//   'block'             { lauf_id }     ein Block; Antwort { weiter, phase, cursor, zaehler, block }
 //   'block' trocken     { trockenlauf: true, cursor? }  liest und rechnet, schreibt NICHTS (kein Lauf, kein Fortschritt)
-//   'abschluss'         { lauf_id }     nur wenn das Ende erreicht ist; status 'fertig', audit_v2
+//   'abschluss'         { lauf_id }     nur wenn das Ende erreicht ist; status 'fertig', audit_v2 mit Zählern und Kern-Hash
 //   'ruecknahme_start'  { anfrage_id }  Rückweg (Konzept 3.8.5 Schritt 6): entfernt steuer/schema_version bei steuer.herkunft.weg == 'migration';
 //                                       abgelehnt, solange ein Zeitraum festgeschrieben ist; danach 'block'/'abschluss' mit derselben lauf_id
-// Bewusst offen für BP-14 (siehe w0-bericht.md): Kontext über Blockgrenzen (Storno-Gegenposten bei festgeschriebenen Monaten, Erstattungsbezug),
-// Drift-Wächter legacy_hash, Übernahme der Alt-Monatsabschlüsse nach festschreibung, Nachprüfung im Browser, Migrationsansicht.
+//   'klaerung'          { anfrage_id, beleg_ids[<=100], antwort: { steuerwahl } }  Sammelklärung NACH der Migration (Konzept 3.8.5 Schritt 2,
+//                                       migration-rollout.md 2.8): nur migrierte UNBEKANNT-Belege; schreibt nur 'steuer' (Legacy unberührt, damit der
+//                                       Rückweg byte-gleich bleibt), steuerfall_herkunft 'nutzer', steuer.migration.klaerung
+//   'kenntnis'          { lauf_id }     Kenntnisnahme des Einmalvergleichs alt/neu (D4), setzt vergleich_kenntnis_am am fertigen Lauf
 import * as Steuerkern from '../steuerkern/index.js';
+import MANIFEST from '../steuerkern/MANIFEST.json' with { type: 'json' };
 import {
   antwort, fehlerAntwort, grundpruefung, istObjekt, CONFIG_PFAD, configBereinigen, featureAktiv, periodeAusId, jetztIso, schichtFuer, regelFehler,
-  ANFRAGE_ID_MUSTER,
+  ANFRAGE_ID_MUSTER, kanonisch, sha256Hex,
 } from './gemeinsam.js';
 import { schreibe, vorbedingungAus, vollerName, FirestoreFehler, BudgetFehler } from './firestore.js';
-import { auditSchreibvorgaenge, kopfPfad } from './audit.js';
+import { auditSchreibvorgaenge, kopfPfad, AUDIT_AKTIONEN } from './audit.js';
 import { aktuellPfad } from './steuerprofil.js';
 
 export const BLOCK_MIN = 100;
 export const BLOCK_MAX = 200;
 export const BLOCK_STANDARD = 150;
+export const KONTEXT_MAX = 400; // höchstens so viele zurückgestellte Belege je Lauf (Größe des Fortschrittsdokuments)
+export const KONTEXT_SCHREIBEN_JE_BLOCK = 50; // zurückgestellte Belege je Aufruf in der Phase kontext_schreiben (batchGet mit Kandidaten)
+export const KLAERUNG_MAX = 100;
+export const OFFENE_IDS_MAX = 200;
+export const PHASEN = Object.freeze(['haupt', 'kontext_suche', 'kontext_schreiben']);
+export const KLAERUNG_WAHLEN = Object.freeze({
+  eingang: Object.freeze(['inland_19', 'inland_7', 'ohne_ust_ausgewiesen', 'reverse_charge_eu', 'reverse_charge_drittland']),
+  ausgang: Object.freeze(['inland_19', 'inland_7']),
+});
 const LAUF_ID_MUSTER = /^lauf-[A-Za-z0-9_-]{8,64}$/;
 const DOK_ID_MUSTER = /^[A-Za-z0-9_.-]{1,200}$/;
-const AKTIONEN = ['start', 'block', 'abschluss', 'ruecknahme_start'];
+const AKTIONEN = ['start', 'block', 'abschluss', 'ruecknahme_start', 'klaerung', 'kenntnis'];
 const MONATE = ['januar', 'februar', 'märz', 'april', 'mai', 'juni', 'juli', 'august', 'september', 'oktober', 'november', 'dezember'];
 const FEST_MONATE_MAX = 600;
 const BLOCKER_CODES_MAX = 60;
+const PLATTFORM_SAETZE = ['19', '7', 'keine'];
+const PLATTFORM_ID_MUSTER = /^[a-z0-9]{2,30}$/;
 
 const laufPfad = (uid, lauf) => `users/${uid}/migration/${lauf}`;
 const aktivPfad = (uid) => `users/${uid}/migration/_aktiv`;
@@ -45,6 +76,13 @@ export function blockGroesse(env) {
   const n = parseInt(String(env?.KERN_MIGRATION_CHUNK ?? ''), 10);
   if (!Number.isFinite(n)) return BLOCK_STANDARD;
   return Math.min(BLOCK_MAX, Math.max(BLOCK_MIN, n));
+}
+
+// Kern-Hash (NP-04, Konzept 3.8.5 Schritt 4): SHA-256 über die Hashes aller Kern-Dateien im Manifest, also eindeutig je Kern-Stand
+let kernHashCache = null;
+export async function kernHash() {
+  if (!kernHashCache) kernHashCache = await sha256Hex(kanonisch({ kern_version: MANIFEST.kern_version, dateien: MANIFEST.dateien }));
+  return kernHashCache;
 }
 
 // Monatsabschluss-ID 'Oktober-2026' -> '2026-10' (index.html maDocId)
@@ -71,14 +109,91 @@ export function festMonateAus(abschluesse, festschreibungen) {
   return [...s].sort().slice(0, FEST_MONATE_MAX);
 }
 
+// Satz je Plattform aus den Integrations-Einstellungen (users/{uid}/webhook_secrets/{plattform}). Gelesen wird NUR mwst_setting; Geheimnisse
+// und alle übrigen Felder werden verworfen und nie gespeichert. Ohne Eintrag gilt im Worker der Standard '19' (resolveMwstKategorie).
+export function plattformSaetzeAus(dokumente) {
+  const m = {};
+  for (const d of dokumente || []) {
+    const id = String(d?.pfad || '').split('/').pop();
+    if (!PLATTFORM_ID_MUSTER.test(id)) continue;
+    const s = d?.daten?.mwst_setting;
+    m[id] = PLATTFORM_SAETZE.includes(s) ? s : '19';
+  }
+  return m;
+}
+
+// 'stripe_webhook' -> 'stripe', 'digistore24_webhook' -> 'digistore24'
+export function plattformAusQuelle(quelle) {
+  const q = typeof quelle === 'string' ? quelle.trim().toLowerCase() : '';
+  const m = /^([a-z0-9]+)_webhook$/.exec(q);
+  return m ? m[1] : null;
+}
+
+// NP-04: Angaben des Browsers zur Sicherung vor der Migration (nur Zahlen und ein Hash, keine Inhalte)
+export function sicherungPruefen(s) {
+  if (s === undefined || s === null) return { ok: true, wert: null };
+  if (!istObjekt(s)) return { ok: false };
+  const erlaubt = ['art', 'am', 'sha256', 'belege', 'bytes', 'vollexport'];
+  if (Object.keys(s).some((k) => !erlaubt.includes(k))) return { ok: false };
+  if (!['export_json', 'export_zip'].includes(s.art)) return { ok: false };
+  if (typeof s.am !== 'string' || s.am.length > 40 || !/^\d{4}-\d{2}-\d{2}T/.test(s.am)) return { ok: false };
+  if (s.sha256 !== undefined && !(typeof s.sha256 === 'string' && /^[0-9a-f]{64}$/.test(s.sha256))) return { ok: false };
+  for (const k of ['belege', 'bytes']) if (s[k] !== undefined && !(Number.isSafeInteger(s[k]) && s[k] >= 0 && s[k] <= 1e12)) return { ok: false };
+  if (s.vollexport !== undefined && typeof s.vollexport !== 'boolean') return { ok: false };
+  return { ok: true, wert: { art: s.art, am: s.am, sha256: s.sha256 || null, belege: s.belege ?? null, bytes: s.bytes ?? null, vollexport: s.vollexport === true } };
+}
+
 function profilBereit(p) {
   return istObjekt(p) && typeof p.bestaetigt_am === 'string' && Array.isArray(p.status_verlauf) && p.status_verlauf.length > 0;
 }
 
 function zaehle(m, k, n = 1) { m[k] = (m[k] || 0) + n; }
+const nichtLeer = (s) => typeof s === 'string' && s.trim().length > 0;
 
 // ---------------------------------------------------------------------------------------------
-// Je Beleg entscheiden (rein). Ergebnis: Einheiten { id, write|null, code } in Dokumentreihenfolge.
+// Kontext (rein): welche Belege brauchen Belege aus anderen Blöcken, und welche Belege sind Kandidaten
+// ---------------------------------------------------------------------------------------------
+// Schlüssel eines zurückzustellenden Belegs aus den Altfeldern (Bedingungen wie steuerkern/migration.js eindeutigeNr und ursprung)
+export function kontextEintrag(id, daten, steuer, festMonate) {
+  const d = istObjekt(daten) ? daten : {};
+  const s = istObjekt(steuer) ? steuer : {};
+  if (d.typ === 'storno' && festMonate.length) {
+    const nr = nichtLeer(d.storno_rechnungsnummer) ? d.storno_rechnungsnummer : (nichtLeer(d.storniert_rechnungsnr) ? d.storniert_rechnungsnr : null);
+    // Ohne Rechnungsnummer findet auch der Kern kein Original: kontextfrei (wirkungslos), wird direkt geschrieben
+    return nr === null ? null : { id, art: 'storno', nr, k: [] };
+  }
+  const flags = istObjekt(s.migration) && Array.isArray(s.migration.flags) ? s.migration.flags : [];
+  if (flags.includes('plattform_erstattung') || s.unbekannt_detail === 'erstattung_ohne_bezug') {
+    const cent = Steuerkern.euroZuCent(d.betrag);
+    return {
+      id, art: 'erstattung', k: [],
+      quelle: typeof d.quelle === 'string' ? d.quelle : null,
+      cent: Number.isSafeInteger(cent) ? cent : null,
+      datum: Steuerkern.istDatum(d.datum) ? d.datum : null,
+      ursprung_id: nichtLeer(d.ursprung_id) ? d.ursprung_id : null,
+    };
+  }
+  return null;
+}
+
+// Wie viele Kandidaten die Entscheidung des Kerns braucht: Storno nimmt den ersten Treffer (treffer[0]), die Ursprungs-ID ist eindeutig,
+// die Betragssuche verlangt GENAU einen Treffer (zwei reichen, um Mehrdeutigkeit zu erkennen).
+export function kandidatenMax(o) {
+  if (o.art === 'storno' || o.ursprung_id) return 1;
+  return 2;
+}
+
+export function kandidatPasst(o, id, d) {
+  if (!istObjekt(d) || id === o.id) return false;
+  if (o.art === 'storno') return d.typ !== 'storno' && (d.rechnungsnr === o.nr || d.rechnungsnummer === o.nr);
+  if (o.ursprung_id) return id === o.ursprung_id && d.typ === 'rechnung_ausgehend';
+  if (o.cent === null || o.cent <= 0) return false;
+  return d.typ === 'rechnung_ausgehend' && d.deleted !== true && d.storniert !== true && d.quelle === o.quelle
+    && Steuerkern.euroZuCent(d.betrag) === o.cent && (!Steuerkern.istDatum(o.datum) || !Steuerkern.istDatum(d.datum) || d.datum <= o.datum);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Je Beleg entscheiden (rein). Ergebnis: Einheiten { id, write|null, code, offen?, blocker? } in Dokumentreihenfolge.
 // ---------------------------------------------------------------------------------------------
 function migrationsPlanSicher(docs, profil, festMonate) {
   const optionen = { festschreibung: festMonate, kern_version: Steuerkern.KERN_VERSION };
@@ -92,29 +207,81 @@ function migrationsPlanSicher(docs, profil, festMonate) {
   }
 }
 
-export function einheitenMigration(uid, zeilen, profil, festMonate) {
+// steuer für das Schreiben ergänzen: Herkunft (weg 'migration', Kern-Version) und Evidenz für Webhook-Einnahmen (3.8.6)
+export function steuerFuerSchreiben(steuer, daten, plattformSaetze) {
+  const s = { ...steuer, herkunft: { ...(istObjekt(steuer.herkunft) ? steuer.herkunft : {}), weg: 'migration', kern_version: Steuerkern.KERN_VERSION } };
+  if (s.steuerfall_herkunft === 'plattform_setting') {
+    const plattform = plattformAusQuelle(daten.quelle);
+    const satzBeleg = daten.mwst_satz === undefined || daten.mwst_satz === null ? null : String(daten.mwst_satz).trim();
+    const satzEinstellung = plattform && istObjekt(plattformSaetze) && Object.hasOwn(plattformSaetze, plattform) ? plattformSaetze[plattform] : null;
+    const gleich = satzEinstellung === null ? null : satzEinstellung === satzBeleg;
+    const m = istObjekt(s.migration) ? s.migration : { flags: [], hinweise: [] };
+    const hinweise = Array.isArray(m.hinweise) ? m.hinweise.slice() : [];
+    if (gleich === false && !hinweise.includes('PLATTFORM_SATZ_ABWEICHEND')) hinweise.push('PLATTFORM_SATZ_ABWEICHEND');
+    if (satzEinstellung === null && !hinweise.includes('PLATTFORM_EINSTELLUNG_FEHLT')) hinweise.push('PLATTFORM_EINSTELLUNG_FEHLT');
+    s.migration = { ...m, hinweise, evidenz: { art: 'plattform_setting', plattform, satz_beleg: satzBeleg, satz_einstellung: satzEinstellung, gleich } };
+  }
+  return s;
+}
+
+// Ein Plan-Eintrag wird zur Einheit. zurueckstellen: kontextabhängige Belege nicht schreiben, sondern als offen merken (Phase haupt)
+function einheitAusEintrag(uid, z, e, { festMonate, plattformSaetze, zurueckstellen }) {
+  if (!e || e.id !== z.id) return { id: z.id, write: null, code: 'kern_fehler' };
+  if (e.aktion !== 'schreiben') {
+    if (e.grund === 'bereits_v2') return { id: z.id, write: null, code: 'bereits_v2' };
+    if (e.grund === 'validierung') {
+      const blocker = Array.isArray(e.blocker) ? e.blocker : [];
+      return { id: z.id, write: null, code: 'uebersprungen_validierung', blocker, ...(blocker.includes('PF_RECHNUNGSDATUM') ? { ohne_datum: true } : {}) };
+    }
+    return { id: z.id, write: null, code: 'kern_fehler' };
+  }
+  const steuer = e.schreibe && e.schreibe.steuer;
+  if (!istObjekt(steuer)) return { id: z.id, write: null, code: 'kern_fehler' };
+  if (zurueckstellen) {
+    const o = kontextEintrag(z.id, z.daten, steuer, festMonate);
+    if (o) return { id: z.id, write: null, code: 'zurueckgestellt', offen: o };
+  }
+  // Belege ohne Datum gesondert (W0-Zuruf an KERN, migration-rollout.md 1.2): nicht schreiben, zum Nachtragen auflisten
+  if (!Steuerkern.istDatum(steuer.rechnungsdatum)) return { id: z.id, write: null, code: 'uebersprungen_validierung', blocker: ['PF_RECHNUNGSDATUM'], ohne_datum: true };
+  const s = steuerFuerSchreiben(steuer, z.daten, plattformSaetze);
+  try {
+    return { id: z.id, write: schreibe.aendern(dokPfad(uid, z.id), { steuer: s, schema_version: 2 }, ['steuer', 'schema_version'], { updateTime: z.updateTime }), code: 'geschrieben', evidenz: s.migration?.evidenz?.gleich };
+  } catch {
+    return { id: z.id, write: null, code: 'kern_fehler' }; // nicht kodierbar (z. B. NaN)
+  }
+}
+
+export function einheitenMigration(uid, zeilen, profil, festMonate, plattformSaetze = {}) {
   const docs = zeilen.map((z) => ({ ...z.daten, id: z.id }));
   const eintraege = migrationsPlanSicher(docs, profil, festMonate);
-  const blocker = {};
-  const einheiten = zeilen.map((z, i) => {
-    const e = eintraege[i];
-    if (!e || e.id !== z.id) return { id: z.id, write: null, code: 'kern_fehler' };
-    if (e.aktion !== 'schreiben') {
-      if (e.grund === 'validierung') for (const c of e.blocker || []) zaehle(blocker, String(c));
-      return { id: z.id, write: null, code: e.grund === 'bereits_v2' ? 'bereits_v2' : e.grund === 'validierung' ? 'uebersprungen_validierung' : 'kern_fehler' };
+  const einheiten = zeilen.map((z, i) => einheitAusEintrag(uid, z, eintraege[i], { festMonate, plattformSaetze, zurueckstellen: true }));
+  return { einheiten, blocker: blockerAus(einheiten) };
+}
+
+// Phase kontext_schreiben: Plan über zurückgestellte Belege und ihre Kandidaten (aufsteigend nach ID wie der Plan über alle Belege)
+export function einheitenKontext(uid, offen, gelesen, profil, festMonate, plattformSaetze = {}) {
+  const alle = new Map();
+  for (const o of offen) {
+    for (const id of [o.id, ...(o.k || [])]) {
+      const d = gelesen.get(dokPfad(uid, id));
+      if (d && !alle.has(id)) alle.set(id, { id, daten: d.daten, updateTime: d.updateTime });
     }
-    const steuer = e.schreibe && e.schreibe.steuer;
-    if (!istObjekt(steuer)) return { id: z.id, write: null, code: 'kern_fehler' };
-    // Kontext über Blockgrenzen fehlt (Storno-Gegenposten bei festgeschriebenen Monaten, Bezug einer Erstattung): nicht raten, v1 lassen (BP-14)
-    if ((z.daten.typ === 'storno' && festMonate.length) || steuer.unbekannt_detail === 'erstattung_ohne_bezug') return { id: z.id, write: null, code: 'uebersprungen_kontext' };
-    const s = { ...steuer, herkunft: { ...(istObjekt(steuer.herkunft) ? steuer.herkunft : {}), weg: 'migration', kern_version: Steuerkern.KERN_VERSION } };
-    try {
-      return { id: z.id, write: schreibe.aendern(dokPfad(uid, z.id), { steuer: s, schema_version: 2 }, ['steuer', 'schema_version'], { updateTime: z.updateTime }), code: 'geschrieben' };
-    } catch {
-      return { id: z.id, write: null, code: 'kern_fehler' }; // nicht kodierbar (z. B. NaN)
-    }
+  }
+  const zeilen = [...alle.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const eintraege = migrationsPlanSicher(zeilen.map((z) => ({ ...z.daten, id: z.id })), profil, festMonate);
+  const nachId = new Map(zeilen.map((z, i) => [z.id, { z, e: eintraege[i] }]));
+  const einheiten = offen.map((o) => {
+    const t = nachId.get(o.id);
+    if (!t) return { id: o.id, write: null, code: 'fehlt' }; // inzwischen gelöscht
+    return einheitAusEintrag(uid, t.z, t.e, { festMonate, plattformSaetze, zurueckstellen: false });
   });
-  return { einheiten, blocker };
+  return { einheiten, blocker: blockerAus(einheiten) };
+}
+
+function blockerAus(einheiten) {
+  const b = {};
+  for (const e of einheiten) if (e.code === 'uebersprungen_validierung') for (const c of e.blocker || []) zaehle(b, String(c));
+  return b;
 }
 
 export function einheitenRuecknahme(uid, zeilen) {
@@ -132,13 +299,49 @@ export function einheitenRuecknahme(uid, zeilen) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Schreiben mit Halbierung; der Fortschritt reist im selben commit mit (Vorbedingung updateTime des Laufs)
+// Fortschritt je Segment (rein)
 // ---------------------------------------------------------------------------------------------
-async function schreibeBlock(fs, uid, laufDok, einheiten, blocker, { endeErreicht, zeit }) {
-  const lauf = { ...laufDok.daten, zaehler: { ...(laufDok.daten.zaehler || {}) }, blocker_codes: { ...(laufDok.daten.blocker_codes || {}) } };
+function offeneIdsErgaenzen(alt, seg) {
+  const o = istObjekt(alt) ? { ...alt } : {};
+  const add = (k, id) => { const l = Array.isArray(o[k]) ? o[k].slice() : []; if (l.length < OFFENE_IDS_MAX && !l.includes(id)) l.push(id); o[k] = l; };
+  for (const e of seg) {
+    if (e.ohne_datum) add('ohne_datum', e.id);
+    else if (e.code === 'uebersprungen_validierung') add('validierung', e.id);
+    if (e.code === 'uebersprungen_konflikt') add('konflikt', e.id);
+    if (e.code === 'uebersprungen_kontext') add('kontext', e.id);
+    if (e.code === 'kern_fehler') add('kern_fehler', e.id);
+  }
+  return o;
+}
+
+function zaehlerErgaenzen(z, seg, { gelesen }) {
+  for (const e of seg) {
+    zaehle(z, e.code);
+    if (e.ohne_datum) zaehle(z, 'ohne_datum');
+    if (e.evidenz === true) zaehle(z, 'plattform_wie_einstellung');
+    if (e.evidenz === false) zaehle(z, 'plattform_abweichend');
+  }
+  if (gelesen) zaehle(z, 'gelesen', seg.length);
+  return z;
+}
+
+function blockerErgaenzen(alt, seg) {
+  const bc = { ...(alt || {}) };
+  for (const e of seg) {
+    if (e.code !== 'uebersprungen_validierung') continue;
+    for (const c of e.blocker || []) if (c in bc || Object.keys(bc).length < BLOCKER_CODES_MAX) zaehle(bc, String(c));
+  }
+  return bc;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Schreiben mit Halbierung; der Fortschritt reist im selben commit mit (Vorbedingung updateTime des Laufs)
+// fortschritt(lauf, seg, istLetztes) -> neues Laufdokument (rein)
+// ---------------------------------------------------------------------------------------------
+async function schreibeSegmente(fs, uid, laufDok, einheiten, fortschritt) {
+  let lauf = structuredClone(laufDok.daten);
   let laufZeit = laufDok.updateTime;
   const delta = {};
-  let blockerOffen = blocker;
   const warteschlange = [einheiten];
   let laufGeprueft = false;
   let unterbrochen = false;
@@ -146,21 +349,12 @@ async function schreibeBlock(fs, uid, laufDok, einheiten, blocker, { endeErreich
     const seg = warteschlange.shift();
     if (fs.rest < 2) { unterbrochen = true; break; } // eine Unteranfrage Reserve für die Laufprüfung
     const istLetztes = warteschlange.length === 0;
-    const z = { ...lauf.zaehler };
-    for (const e of seg) zaehle(z, e.code);
-    zaehle(z, 'gelesen', seg.length);
-    const bc = { ...lauf.blocker_codes };
-    for (const [k, v] of Object.entries(blockerOffen)) if (k in bc || Object.keys(bc).length < BLOCKER_CODES_MAX) zaehle(bc, k, v);
-    const neu = {
-      ...lauf, zaehler: z, blocker_codes: bc, cursor: seg.length ? seg[seg.length - 1].id : lauf.cursor,
-      ende_erreicht: istLetztes ? !!endeErreicht : false, zuletzt_am: zeit, bloecke: (lauf.bloecke || 0) + (istLetztes ? 1 : 0),
-    };
+    const neu = fortschritt(lauf, seg, istLetztes);
     const writes = seg.filter((e) => e.write).map((e) => e.write);
     try {
       const r = await fs.commit([...writes, schreibe.setzen(laufPfad(uid, lauf.lauf_id), neu, { updateTime: laufZeit })]);
       laufZeit = r.updateTimes[r.updateTimes.length - 1] || laufZeit;
-      Object.assign(lauf, neu);
-      blockerOffen = {};
+      lauf = neu;
       for (const e of seg) zaehle(delta, e.code);
     } catch (err) {
       if (!(err instanceof FirestoreFehler && err.art === 'konflikt')) throw err;
@@ -194,17 +388,27 @@ export async function regelMigration(body, env, cors = {}, deps = {}) {
   const trocken = body.trockenlauf === true;
   if (body.trockenlauf !== undefined && typeof body.trockenlauf !== 'boolean') return fehlerAntwort(400, 'TROCKENLAUF_UNGUELTIG', cors);
   if (trocken && body.aktion !== 'block') return fehlerAntwort(400, 'TROCKENLAUF_NUR_BLOCK', cors);
-  if ((body.aktion === 'start' || body.aktion === 'ruecknahme_start') && !ANFRAGE_ID_MUSTER.test(String(body.anfrage_id || ''))) return fehlerAntwort(400, 'ANFRAGE_ID_UNGUELTIG', cors);
-  if ((body.aktion === 'block' && !trocken) || body.aktion === 'abschluss') {
+  if (['start', 'ruecknahme_start', 'klaerung'].includes(body.aktion) && !ANFRAGE_ID_MUSTER.test(String(body.anfrage_id || ''))) return fehlerAntwort(400, 'ANFRAGE_ID_UNGUELTIG', cors);
+  if ((body.aktion === 'block' && !trocken) || body.aktion === 'abschluss' || body.aktion === 'kenntnis') {
     if (!LAUF_ID_MUSTER.test(String(body.lauf_id || ''))) return fehlerAntwort(400, 'LAUF_ID_UNGUELTIG', cors);
   }
   if (trocken && body.cursor !== undefined && body.cursor !== null && !DOK_ID_MUSTER.test(String(body.cursor))) return fehlerAntwort(400, 'CURSOR_UNGUELTIG', cors);
+  const sich = sicherungPruefen(body.sicherung);
+  if (!sich.ok || (body.sicherung !== undefined && body.sicherung !== null && body.aktion !== 'start')) return fehlerAntwort(400, 'SICHERUNG_UNGUELTIG', cors);
+  if (body.aktion === 'klaerung') {
+    const ids = body.beleg_ids;
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > KLAERUNG_MAX || ids.some((x) => typeof x !== 'string' || !DOK_ID_MUSTER.test(x)) || new Set(ids).size !== ids.length) return fehlerAntwort(400, 'BELEG_IDS_UNGUELTIG', cors);
+    const w = istObjekt(body.antwort) ? body.antwort.steuerwahl : null;
+    if (!KLAERUNG_WAHLEN.eingang.includes(w) && !KLAERUNG_WAHLEN.ausgang.includes(w)) return fehlerAntwort(400, 'ANTWORT_UNGUELTIG', cors);
+  }
   const uid = body.userId;
   const zeit = jetztIso(deps);
   try {
     const fs = await schichtFuer(deps);
-    if (body.aktion === 'start' || body.aktion === 'ruecknahme_start') return await laufStarten(fs, uid, body, zeit, cors);
+    if (body.aktion === 'start' || body.aktion === 'ruecknahme_start') return await laufStarten(fs, uid, body, sich.wert, zeit, cors);
     if (body.aktion === 'abschluss') return await laufAbschliessen(fs, uid, body, zeit, cors);
+    if (body.aktion === 'klaerung') return await klaerungAusfuehren(fs, uid, body, zeit, cors);
+    if (body.aktion === 'kenntnis') return await kenntnisSetzen(fs, uid, body, zeit, cors);
     return await blockAusfuehren(fs, uid, body, env, trocken, zeit, cors);
   } catch (e) {
     if (e instanceof FirestoreFehler && e.klasse === 'PARALLEL') return fehlerAntwort(409, 'PARALLELER_AUFRUF', cors);
@@ -213,7 +417,11 @@ export async function regelMigration(body, env, cors = {}, deps = {}) {
   }
 }
 
-async function laufStarten(fs, uid, body, zeit, cors) {
+function fortsetzung(lauf, art) {
+  return { ok: true, fortgesetzt: true, lauf_id: lauf.lauf_id, art, phase: lauf.phase || 'haupt', zaehler: lauf.zaehler || {}, cursor: lauf.cursor ?? null };
+}
+
+async function laufStarten(fs, uid, body, sicherung, zeit, cors) {
   const art = body.aktion === 'start' ? 'migration' : 'ruecknahme';
   const docs = await fs.batchGet([aktuellPfad(uid), aktivPfad(uid), kopfPfad(uid), CONFIG_PFAD]);
   if (!featureAktiv(configBereinigen(docs.get(CONFIG_PFAD)?.daten), 'migration')) return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
@@ -222,27 +430,31 @@ async function laufStarten(fs, uid, body, zeit, cors) {
     const offen = await fs.get(laufPfad(uid, aktiv.daten.lauf_id));
     if (offen && offen.daten.status === 'laeuft') {
       if (offen.daten.art !== art) return fehlerAntwort(409, 'ANDERER_LAUF_OFFEN', cors, { lauf_id: offen.daten.lauf_id, art: offen.daten.art });
-      return antwort({ ok: true, fortgesetzt: true, lauf_id: offen.daten.lauf_id, art, zaehler: offen.daten.zaehler || {}, cursor: offen.daten.cursor ?? null }, 200, cors);
+      return antwort(fortsetzung(offen.daten, art), 200, cors);
     }
   }
   const profil = docs.get(aktuellPfad(uid))?.daten;
   if (art === 'migration' && !profilBereit(profil)) return fehlerAntwort(409, 'PROFIL_NICHT_BESTAETIGT', cors);
-  const [abschluesse, fest] = await Promise.all([
+  const [abschluesse, fest, plattformen] = await Promise.all([
     art === 'migration' ? fs.list(`users/${uid}/monatsabschluesse`, { pageSize: 300 }) : Promise.resolve({ dokumente: [] }),
     fs.list(`users/${uid}/festschreibung`, { pageSize: 300 }),
+    art === 'migration' ? fs.list(`users/${uid}/webhook_secrets`, { pageSize: 30 }) : Promise.resolve({ dokumente: [] }),
   ]);
   // Rücknahme ist nach einer Festschreibung nicht ohne Entsperren möglich (Konzept 3.8.5 Schritt 6)
   if (art === 'ruecknahme' && fest.dokumente.some((d) => d.daten.status === 'festgeschrieben')) return fehlerAntwort(409, 'FESTSCHREIBUNG_VORHANDEN', cors);
   const laufId = `lauf-${body.anfrage_id}`;
   const lauf = {
-    lauf_id: laufId, art, status: 'laeuft', cursor: null, ende_erreicht: false, bloecke: 0, zaehler: {}, blocker_codes: {},
+    lauf_id: laufId, art, status: 'laeuft', phase: 'haupt', cursor: null, ende_erreicht: false, bloecke: 0, zaehler: {}, blocker_codes: {},
     fest_monate: art === 'migration' ? festMonateAus(abschluesse.dokumente, fest.dokumente) : [],
-    kern_version: Steuerkern.KERN_VERSION, migration_version: Steuerkern.MIGRATION_VERSION, gestartet_am: zeit, zuletzt_am: zeit,
-    profil_version: Number.isSafeInteger(profil?.version) ? profil.version : null, anfrage_id: body.anfrage_id, schema: 1,
+    plattform_saetze: art === 'migration' ? plattformSaetzeAus(plattformen.dokumente) : {},
+    kontext: { offen: [], cursor: null, index: 0 }, offene_ids: {},
+    kern_version: Steuerkern.KERN_VERSION, kern_hash: await kernHash(), migration_version: Steuerkern.MIGRATION_VERSION, gestartet_am: zeit, zuletzt_am: zeit,
+    profil_version: Number.isSafeInteger(profil?.version) ? profil.version : null, anfrage_id: body.anfrage_id, schema: 2,
+    sicherung: art === 'migration' ? sicherung : null,
   };
   const audit = await auditSchreibvorgaenge(uid, docs.get(kopfPfad(uid)), {
     aktion: art === 'migration' ? 'migration_start' : 'migration_ruecknahme', ziel: laufId, vorher: null, nachher: lauf, zeit,
-    details: { art, fest_monate: lauf.fest_monate.length },
+    details: { art, fest_monate: lauf.fest_monate.length, kern_hash: lauf.kern_hash, sicherung: sicherung ? sicherung.art : null },
   });
   lauf.audit_seq_start = audit.seq;
   try {
@@ -255,11 +467,24 @@ async function laufStarten(fs, uid, body, zeit, cors) {
     // Gleiche anfrage_id ein zweites Mal: der Lauf existiert schon, Antwort wie Fortsetzung (idempotent)
     if (e instanceof FirestoreFehler && e.art === 'konflikt') {
       const da = await fs.get(laufPfad(uid, laufId));
-      if (da && da.daten.status === 'laeuft') return antwort({ ok: true, fortgesetzt: true, lauf_id: laufId, art: da.daten.art, zaehler: da.daten.zaehler || {}, cursor: da.daten.cursor ?? null }, 200, cors);
+      if (da && da.daten.status === 'laeuft') return antwort(fortsetzung(da.daten, da.daten.art), 200, cors);
     }
     throw e;
   }
-  return antwort({ ok: true, lauf_id: laufId, art, fest_monate: lauf.fest_monate.length }, 200, cors);
+  return antwort({ ok: true, lauf_id: laufId, art, phase: 'haupt', fest_monate: lauf.fest_monate.length, kern_hash: lauf.kern_hash }, 200, cors);
+}
+
+function dokQuery(uid, n, cursor) {
+  return {
+    from: [{ collectionId: 'dokumente' }],
+    orderBy: [{ field: { fieldPath: '__name__' }, direction: 'ASCENDING' }],
+    limit: n,
+    ...(cursor ? { startAt: { values: [{ referenceValue: vollerName(dokPfad(uid, cursor)) }], before: false } } : {}),
+  };
+}
+
+async function leseBlock(fs, uid, n, cursor) {
+  return (await fs.runQuery(`users/${uid}`, dokQuery(uid, n, cursor))).map((d) => ({ id: String(d.pfad).split('/').pop(), daten: d.daten, updateTime: d.updateTime }));
 }
 
 async function blockAusfuehren(fs, uid, body, env, trocken, zeit, cors) {
@@ -273,29 +498,86 @@ async function blockAusfuehren(fs, uid, body, env, trocken, zeit, cors) {
   const art = laufDok ? laufDok.daten.art : 'migration';
   const profil = docs.get(aktuellPfad(uid))?.daten;
   if (art === 'migration' && !profilBereit(profil)) return fehlerAntwort(409, 'PROFIL_NICHT_BESTAETIGT', cors);
-
   const n = blockGroesse(env);
-  const cursor = trocken ? (body.cursor || null) : (laufDok.daten.cursor || null);
-  const query = {
-    from: [{ collectionId: 'dokumente' }],
-    orderBy: [{ field: { fieldPath: '__name__' }, direction: 'ASCENDING' }],
-    limit: n,
-    ...(cursor ? { startAt: { values: [{ referenceValue: vollerName(dokPfad(uid, cursor)) }], before: false } } : {}),
-  };
-  const zeilen = (await fs.runQuery(`users/${uid}`, query)).map((d) => ({ id: String(d.pfad).split('/').pop(), daten: d.daten, updateTime: d.updateTime }));
-  const endeErreicht = zeilen.length < n;
-  const festMonate = Array.isArray(laufDok?.daten?.fest_monate) ? laufDok.daten.fest_monate : [];
-  const { einheiten, blocker } = art === 'ruecknahme' ? einheitenRuecknahme(uid, zeilen) : einheitenMigration(uid, zeilen, profil, festMonate);
 
   if (trocken) {
+    const cursor = body.cursor || null;
+    const zeilen = await leseBlock(fs, uid, n, cursor);
+    const endeErreicht = zeilen.length < n;
+    const { einheiten, blocker } = einheitenMigration(uid, zeilen, profil, []);
     const zaehler = { gelesen: zeilen.length };
-    for (const e of einheiten) zaehle(zaehler, e.code === 'geschrieben' ? 'wuerde_geschrieben' : e.code);
+    for (const e of einheiten) { zaehle(zaehler, e.code === 'geschrieben' ? 'wuerde_geschrieben' : e.code); if (e.ohne_datum) zaehle(zaehler, 'ohne_datum'); }
     return antwort({ ok: true, trockenlauf: true, weiter: !endeErreicht, cursor: zeilen.length ? zeilen[zeilen.length - 1].id : cursor, zaehler, blocker_codes: blocker }, 200, cors);
   }
-  const r = await schreibeBlock(fs, uid, laufDok, einheiten, blocker, { endeErreicht, zeit });
+
+  const phase = PHASEN.includes(laufDok.daten.phase) ? laufDok.daten.phase : 'haupt';
+  const festMonate = Array.isArray(laufDok.daten.fest_monate) ? laufDok.daten.fest_monate : [];
+  const plattformSaetze = istObjekt(laufDok.daten.plattform_saetze) ? laufDok.daten.plattform_saetze : {};
+  const kontext = istObjekt(laufDok.daten.kontext) ? laufDok.daten.kontext : { offen: [], cursor: null, index: 0 };
+  const offenAlt = Array.isArray(kontext.offen) ? kontext.offen : [];
+  let r;
+
+  if (art === 'ruecknahme' || phase === 'haupt') {
+    const zeilen = await leseBlock(fs, uid, n, laufDok.daten.cursor || null);
+    const endeErreicht = zeilen.length < n;
+    const { einheiten } = art === 'ruecknahme' ? einheitenRuecknahme(uid, zeilen) : einheitenMigration(uid, zeilen, profil, festMonate, plattformSaetze);
+    // Über KONTEXT_MAX hinaus: wirklich nicht auflösbar (Grenze des Fortschrittsdokuments), Beleg bleibt v1
+    let platz = KONTEXT_MAX - offenAlt.length;
+    for (const e of einheiten) if (e.code === 'zurueckgestellt') { if (platz > 0) platz--; else { e.code = 'uebersprungen_kontext'; delete e.offen; } }
+    r = await schreibeSegmente(fs, uid, laufDok, einheiten, (lauf, seg, istLetztes) => {
+      const offen = [...(lauf.kontext?.offen || []), ...seg.filter((e) => e.offen).map((e) => e.offen)];
+      const ende = istLetztes && endeErreicht;
+      const naechste = ende && art === 'migration' && offen.length ? 'kontext_suche' : (lauf.phase || 'haupt');
+      return {
+        ...lauf,
+        zaehler: zaehlerErgaenzen({ ...(lauf.zaehler || {}) }, seg, { gelesen: true }),
+        blocker_codes: blockerErgaenzen(lauf.blocker_codes, seg),
+        offene_ids: offeneIdsErgaenzen(lauf.offene_ids, seg),
+        kontext: { ...(lauf.kontext || {}), offen, cursor: null, index: 0 },
+        cursor: seg.length ? seg[seg.length - 1].id : lauf.cursor,
+        phase: naechste,
+        ende_erreicht: ende && naechste !== 'kontext_suche',
+        zuletzt_am: zeit, bloecke: (lauf.bloecke || 0) + (istLetztes ? 1 : 0),
+      };
+    });
+  } else if (phase === 'kontext_suche') {
+    // Zweiter Durchlauf nur lesend: Kandidaten je zurückgestelltem Beleg, gleiche Bedingungen wie der Kern
+    const zeilen = await leseBlock(fs, uid, n, kontext.cursor || null);
+    const endeErreicht = zeilen.length < n;
+    const offen = offenAlt.map((o) => ({ ...o, k: Array.isArray(o.k) ? o.k.slice() : [] }));
+    for (const z of zeilen) {
+      for (const o of offen) if (o.k.length < kandidatenMax(o) && kandidatPasst(o, z.id, z.daten)) o.k.push(z.id);
+    }
+    r = await schreibeSegmente(fs, uid, laufDok, [], (lauf) => ({
+      ...lauf,
+      kontext: { offen, cursor: zeilen.length ? zeilen[zeilen.length - 1].id : (lauf.kontext?.cursor ?? null), index: 0 },
+      phase: endeErreicht ? 'kontext_schreiben' : 'kontext_suche',
+      zuletzt_am: zeit, bloecke: (lauf.bloecke || 0) + 1,
+    }));
+  } else {
+    const ab = Number.isSafeInteger(kontext.index) && kontext.index >= 0 ? kontext.index : 0;
+    const teil = offenAlt.slice(ab, ab + KONTEXT_SCHREIBEN_JE_BLOCK);
+    const pfadeKontext = [...new Set(teil.flatMap((o) => [o.id, ...(o.k || [])]).map((id) => dokPfad(uid, id)))];
+    const gelesen = pfadeKontext.length ? await fs.batchGet(pfadeKontext) : new Map();
+    const { einheiten } = einheitenKontext(uid, teil, gelesen, profil, festMonate, plattformSaetze);
+    const fertigNach = ab + teil.length >= offenAlt.length;
+    r = await schreibeSegmente(fs, uid, laufDok, einheiten, (lauf, seg, istLetztes) => {
+      const z = zaehlerErgaenzen({ ...(lauf.zaehler || {}) }, seg, { gelesen: false });
+      z.zurueckgestellt = Math.max(0, (z.zurueckgestellt || 0) - seg.length);
+      const index = (lauf.kontext?.index || 0) + seg.length;
+      const ende = istLetztes && fertigNach;
+      return {
+        ...lauf, zaehler: z,
+        blocker_codes: blockerErgaenzen(lauf.blocker_codes, seg),
+        offene_ids: offeneIdsErgaenzen(lauf.offene_ids, seg),
+        kontext: { ...(lauf.kontext || {}), index },
+        ende_erreicht: ende, zuletzt_am: zeit, bloecke: (lauf.bloecke || 0) + (istLetztes ? 1 : 0),
+      };
+    });
+  }
   return antwort({
-    ok: true, lauf_id: body.lauf_id, art, weiter: r.unterbrochen || !endeErreicht, cursor: r.lauf.cursor ?? null,
-    block: r.delta, zaehler: r.lauf.zaehler, unterbrochen: r.unterbrochen,
+    ok: true, lauf_id: body.lauf_id, art, phase: r.lauf.phase || 'haupt', weiter: r.unterbrochen || r.lauf.ende_erreicht !== true,
+    cursor: r.lauf.cursor ?? null, block: r.delta, zaehler: r.lauf.zaehler, unterbrochen: r.unterbrochen,
   }, 200, cors);
 }
 
@@ -310,7 +592,7 @@ async function laufAbschliessen(fs, uid, body, zeit, cors) {
   const neu = { ...laufDok.daten, status: 'fertig', abgeschlossen_am: zeit, zuletzt_am: zeit };
   const audit = await auditSchreibvorgaenge(uid, docs.get(kopfPfad(uid)), {
     aktion: neu.art === 'ruecknahme' ? 'migration_ruecknahme' : 'migration_abschluss', ziel: body.lauf_id, vorher: laufDok.daten, nachher: neu, zeit,
-    details: { art: neu.art, zaehler: neu.zaehler || {} },
+    details: { art: neu.art, zaehler: neu.zaehler || {}, kern_version: neu.kern_version || null, kern_hash: neu.kern_hash || null },
   });
   neu.audit_seq_abschluss = audit.seq;
   const aktiv = docs.get(aktivPfad(uid));
@@ -318,4 +600,94 @@ async function laufAbschliessen(fs, uid, body, zeit, cors) {
   if (aktiv && aktiv.daten.lauf_id === body.lauf_id) writes.push(schreibe.loeschen(aktivPfad(uid), { updateTime: aktiv.updateTime }));
   await fs.commit(writes);
   return antwort({ ok: true, lauf_id: body.lauf_id, status: 'fertig', zaehler: neu.zaehler || {} }, 200, cors);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sammelklärung nach der Migration (rein + Handler)
+// ---------------------------------------------------------------------------------------------
+// Eingabe für normalisiereEingabe aus dem migrierten steuer (Beträge, Daten, Zahlungen bleiben; nur die Steuerwahl kommt vom Nutzer)
+export function klaerungEingabe(id, steuer, steuerwahl) {
+  const s = steuer;
+  const e = {
+    weg: 'migration_klaerung', id, richtung: s.richtung, beleg_art: 'rechnung',
+    betrag: { cent: s.summe && Number.isSafeInteger(s.summe.brutto_cent) ? s.summe.brutto_cent : null, art: 'brutto' },
+    steuerwahl, rechnungsdatum: s.rechnungsdatum, herkunft: 'nutzer',
+    zahlungen: Array.isArray(s.zahlungen) ? s.zahlungen.filter((z) => istObjekt(z) && z.status !== 'rueckgaengig').map((z) => ({ datum: z.datum, betrag_cent: z.betrag_cent, art: z.art || 'zahlung', kanal: z.kanal })) : [],
+  };
+  if (istObjekt(s.leistung)) e.leistung = s.leistung;
+  if (istObjekt(s.gegenpartei)) e.gegenpartei = s.gegenpartei;
+  if (nichtLeer(s.kategorie)) e.kategorie = s.kategorie;
+  if (nichtLeer(s.rechnungsnr)) e.rechnungsnr = s.rechnungsnr;
+  if (istObjekt(s.herkunft) && Steuerkern.istDatum(s.herkunft.erfasst_am)) e.erfasst_am = s.herkunft.erfasst_am;
+  return e;
+}
+
+export function klaerungEinheit(uid, id, dok, profil, steuerwahl, zeit) {
+  if (!dok) return { id, write: null, code: 'fehlt' };
+  const d = dok.daten;
+  const s = istObjekt(d.steuer) ? d.steuer : null;
+  if (!(d.schema_version === 2 && s && istObjekt(s.herkunft) && s.herkunft.weg === 'migration')) return { id, write: null, code: 'nicht_migriert' };
+  if (d.gesperrt === true || s.gesperrt === true) return { id, write: null, code: 'gesperrt' };
+  if (s.steuerfall !== 'UNBEKANNT' || s.wirkungslos === true) return { id, write: null, code: 'nicht_offen' };
+  if (!KLAERUNG_WAHLEN[s.richtung] || !KLAERUNG_WAHLEN[s.richtung].includes(steuerwahl)) return { id, write: null, code: 'wahl_passt_nicht' };
+  let r;
+  try { r = Steuerkern.normalisiereEingabe(klaerungEingabe(id, s, steuerwahl), { profil }); } catch { return { id, write: null, code: 'kern_fehler' }; }
+  const neu = r && (r.beleg || r.entwurf);
+  if (!neu || !istObjekt(neu.steuer) || neu.steuer.steuerfall === 'UNBEKANNT' || (r.pflichtfeld_fehler || []).length) return { id, write: null, code: 'nicht_aufloesbar' };
+  const m = istObjekt(s.migration) ? s.migration : { flags: [], hinweise: [] };
+  const steuer = {
+    ...neu.steuer,
+    steuerfall_herkunft: 'nutzer',
+    herkunft: { ...s.herkunft, weg: 'migration', kern_version: Steuerkern.KERN_VERSION },
+    migration: { ...m, klaerung: { steuerwahl, am: zeit, vorher: s.unbekannt_grund || null } },
+  };
+  try {
+    return { id, write: schreibe.aendern(dokPfad(uid, id), { steuer }, ['steuer'], { updateTime: dok.updateTime }), code: 'geklaert' };
+  } catch { return { id, write: null, code: 'kern_fehler' }; }
+}
+
+async function klaerungAusfuehren(fs, uid, body, zeit, cors) {
+  const ids = body.beleg_ids;
+  const pfade = [aktuellPfad(uid), CONFIG_PFAD, kopfPfad(uid), ...ids.map((id) => dokPfad(uid, id))];
+  const docs = await fs.batchGet(pfade);
+  if (!featureAktiv(configBereinigen(docs.get(CONFIG_PFAD)?.daten), 'migration')) return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
+  const profil = docs.get(aktuellPfad(uid))?.daten;
+  if (!profilBereit(profil)) return fehlerAntwort(409, 'PROFIL_NICHT_BESTAETIGT', cors);
+  const steuerwahl = body.antwort.steuerwahl;
+  let einheiten = ids.map((id) => klaerungEinheit(uid, id, docs.get(dokPfad(uid, id)), profil, steuerwahl, zeit));
+  const writes = einheiten.filter((e) => e.write).map((e) => e.write);
+  // Audit-Eintrag nur, wenn die Aktion in audit.js bekannt ist (Zuruf an den Besitzer von audit.js, bp14-bericht.md)
+  const auditW = AUDIT_AKTIONEN.includes('migration_klaerung') && writes.length ? (await auditSchreibvorgaenge(uid, docs.get(kopfPfad(uid)), {
+    aktion: 'migration_klaerung', ziel: body.anfrage_id, vorher: null, nachher: { steuerwahl, anzahl: writes.length }, zeit, details: { steuerwahl, anzahl: writes.length },
+  })).writes : [];
+  try {
+    if (writes.length) await fs.commit([...writes, ...auditW]);
+  } catch (e) {
+    if (!(e instanceof FirestoreFehler && e.art === 'konflikt')) throw e;
+    // Ein Beleg wurde zwischenzeitlich geändert: einzeln weiter, der geänderte Beleg bleibt, wie er ist
+    const neu = [];
+    for (const x of einheiten) {
+      if (!x.write) { neu.push(x); continue; }
+      if (fs.rest < 1) { neu.push({ id: x.id, write: null, code: 'nicht_bearbeitet' }); continue; }
+      try { await fs.commit([x.write]); neu.push(x); } catch (e2) {
+        if (!(e2 instanceof FirestoreFehler && e2.art === 'konflikt')) throw e2;
+        neu.push({ id: x.id, write: null, code: 'uebersprungen_konflikt' });
+      }
+    }
+    einheiten = neu;
+  }
+  const ergebnis = {};
+  for (const x of einheiten) zaehle(ergebnis, x.code);
+  return antwort({ ok: true, steuerwahl, ergebnis, je_beleg: einheiten.map((x) => ({ id: x.id, code: x.code })) }, 200, cors);
+}
+
+async function kenntnisSetzen(fs, uid, body, zeit, cors) {
+  const docs = await fs.batchGet([laufPfad(uid, body.lauf_id), CONFIG_PFAD]);
+  if (!featureAktiv(configBereinigen(docs.get(CONFIG_PFAD)?.daten), 'migration')) return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
+  const laufDok = docs.get(laufPfad(uid, body.lauf_id));
+  if (!laufDok) return fehlerAntwort(404, 'LAUF_UNBEKANNT', cors);
+  if (laufDok.daten.art !== 'migration' || laufDok.daten.status !== 'fertig') return fehlerAntwort(409, 'LAUF_NICHT_FERTIG', cors);
+  if (typeof laufDok.daten.vergleich_kenntnis_am === 'string') return antwort({ ok: true, idempotent: true, vergleich_kenntnis_am: laufDok.daten.vergleich_kenntnis_am }, 200, cors);
+  await fs.commit([schreibe.setzen(laufPfad(uid, body.lauf_id), { ...laufDok.daten, vergleich_kenntnis_am: zeit }, { updateTime: laufDok.updateTime })]);
+  return antwort({ ok: true, vergleich_kenntnis_am: zeit }, 200, cors);
 }
