@@ -4,7 +4,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as K from '../steuerkern/index.js';
-import { legacyHash } from '../regel/drift.js';
+import { legacyHash, driftStatus } from '../regel/drift.js';
+import { dekodiereFelder } from '../regel/firestore.js';
 import { kodiereFelder } from '../regel/firestore.js';
 import { erzeugeTestEnv, mockExterneDienste, anfrage } from './harness.mjs';
 
@@ -70,15 +71,16 @@ test("BELEG_SPEICHERN (Datei-Zustand): steuer des Formulars wird nach Prüfung �
   const s = f.steuer.mapValue.fields;
   assert.equal(s.herkunft.mapValue.fields.weg.stringValue, 'beleg_formular_v2_datei');
   assert.equal(s.leistung.mapValue.fields.von.stringValue, '2026-09-01', 'Leistungszeitraum geht nicht verloren');
-  assert.ok(s.migration.mapValue.fields.legacy_hash.stringValue.startsWith('v1:'));
+  assert.ok(s.migration.mapValue.fields.legacy_hash.stringValue.startsWith('v2:'), 'D2: Drift-Wächter Version 2 aus dem Kern');
   assert.equal(s.summe.mapValue.fields.brutto_cent.integerValue, '4711');
   assert.deepEqual(ohneV2(f), ohneV2(anlage(ohne.patches).body.fields), 'Doppelschreibung: Legacy-Felder gleich wie ohne steuer');
   assert.equal(f.storage_url.stringValue, STORAGE);
   assert.equal(ohne.json.steuer_gespeichert, undefined, 'ohne steuer im Body: Antwort wie bisher');
   assert.equal(anlage(ohne.patches).body.fields.steuer, undefined);
-  // Drift-Wächter über die tatsächlich geschriebenen Legacy-Felder
-  const legacy = Object.fromEntries(Object.entries(ohneV2(f)).map(([k, v]) => [k, v.stringValue ?? v.doubleValue ?? v.booleanValue ?? v.integerValue]));
-  assert.equal(s.migration.mapValue.fields.legacy_hash.stringValue, legacyHash(legacy));
+  // Drift-Wächter über die tatsächlich geschriebenen Legacy-Felder (D2: Version 2 schließt createdAt als Berliner Tag ein)
+  const gespeichert = dekodiereFelder(f);
+  assert.equal(s.migration.mapValue.fields.legacy_hash.stringValue, legacyHash(gespeichert));
+  assert.equal(driftStatus(gespeichert), 'ok', 'gelesen wie geschrieben: ok');
   // Modus 'an': das geprüfte steuer des Browsers gewinnt (es trägt mehr als die Legacy-Felder), ein PATCH
   const an = await speichern('an', { ...FREI, config: { kern_max: 'an', features: { beleg_formular: 'an' } } }, { steuer: formularSteuer() });
   assert.equal(an.json.steuer_gespeichert, true);

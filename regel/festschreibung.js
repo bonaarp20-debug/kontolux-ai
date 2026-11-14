@@ -323,10 +323,13 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
         const snap = snapshotFuer(zeilen, profil, periodeId);
         const v = vergleicheSnapshot(snap, { zeilen: alt[`snapshot_${alt.art}`] || [], ausgeschlossen_anzahl: alt.ausgeschlossen_anzahl || 0 });
         const neueBelege = snap.beleg_ids.filter((id) => !sperrtSchon(nachId.get(id), periodeId));
+        // Drift-Wächter Version 2 (D2): eine Festschreibung von vor der Umstellung trägt den belege_hash über die alten v1-Fingerabdrücke; er
+        // gilt weiter als gleich, wenn er mit Fassung 1 übereinstimmt (Änderungen der neuen Felder zeigt dann der Snapshot-Vergleich v)
         const hash = await belegeHash(zeilen, snap.beleg_ids);
+        const hashGleich = hash === alt.belege_hash || (typeof alt.belege_hash === 'string' && (await belegeHash(zeilen, snap.beleg_ids, { fassung: 1 })) === alt.belege_hash);
         Object.assign(ergebnis, {
-          unveraendert: v.gleich && hash === alt.belege_hash && neueBelege.length === 0,
-          abweichungen: v.abweichungen, belege_hash_gleich: hash === alt.belege_hash, neue_belege: neueBelege.length,
+          unveraendert: v.gleich && hashGleich && neueBelege.length === 0,
+          abweichungen: v.abweichungen, belege_hash_gleich: hashGleich, neue_belege: neueBelege.length,
           kern_version_damals: alt.kern_version || null, kern_version: Steuerkern.KERN_VERSION,
           // Kern-Version gewechselt: eine Abweichung kann aus einer Regeländerung stammen, nicht aus geänderten Belegen
           kern_gewechselt: (alt.kern_version || null) !== Steuerkern.KERN_VERSION,

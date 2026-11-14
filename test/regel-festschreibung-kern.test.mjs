@@ -95,11 +95,14 @@ test('belege_hash ändert sich bei geänderter Zahlung, Legacy-Betrag oder ander
 test('Drift-Wächter legacy_hash: stabil, Normierung (null/fehlend, Cent-Rundung), erkennt Änderung jedes Legacy-Felds; v2 mit veraltetem Hash rechnet aus den Legacy-Feldern', () => {
   const d = { typ: 'rechnung_eingehend', betrag: 119, betrag_netto: 100, mwst_satz: '19', datum: '2026-03-01', bezahlt: true, bezahlt_am: '2026-03-02', kategorie: 'Büro' };
   const h = legacyHash(d);
-  assert.match(h, /^v1:[0-9a-f]+$/);
+  assert.match(h, /^v2:[0-9a-f]+$/, 'D2: Kern-Fassung 2');
+  assert.equal(LEGACY_FELDER.length, 18);
   assert.equal(legacyHash({ ...d, deleted: null, notiz: 'egal' }), h, 'fehlend = null, Nicht-Legacy-Felder egal');
   assert.equal(legacyHash({ ...d, betrag: 119.000000001 }), h, 'Cent-Rundung');
+  // ust_unklar zählt nur als true, createdAt nur als Berliner Tag (wie normalisiereAlt)
+  const andererWert = (f) => (['bezahlt', 'deleted', 'storniert', 'ust_unklar'].includes(f) ? !d[f] : f === 'createdAt' ? '2026-03-05T10:00:00Z' : (typeof d[f] === 'number' ? d[f] + 1 : 'x'));
   for (const f of LEGACY_FELDER) {
-    const anders = { ...d, [f]: f === 'bezahlt' || f === 'deleted' || f === 'storniert' ? !d[f] : (typeof d[f] === 'number' ? d[f] + 1 : 'x') };
+    const anders = { ...d, [f]: andererWert(f) };
     assert.notEqual(legacyHash(anders), h, f);
   }
   assert.equal(driftStatus({ ...d }), 'ohne');

@@ -15,27 +15,30 @@
 // ohne jedes Datum im Zeitraum kann keine Wirkung im Zeitraum haben (Periodenzuordnung Konzept 4.1/4.2 nimmt immer ein Datum des Belegs).
 // Ein Test vergleicht gefiltert gegen ungefiltert über alle 74 goldenen Referenzfälle.
 import * as Steuerkern from '../steuerkern/index.js';
-import { legacyHash, driftStatus } from './drift.js';
+import { legacyHash, legacyHashV1, steuerGueltig } from './drift.js';
 import { istObjekt, periodeAusId, sha256Hex, kanonisch } from './gemeinsam.js';
 
 const ISO = /^\d{4}-\d{2}-\d{2}/;
 const tag = (v) => (typeof v === 'string' && ISO.test(v) ? v.slice(0, 10) : null);
 
-// Firestore-Zeilen { id, daten } -> Belege für den Kern. v2 (schema_version 2 mit steuer) wird genommen, wie er ist, außer der Drift-Wächter
-// meldet 'veraltet' (dann wie v1 aus den Legacy-Feldern); v1 läuft durch normalisiereAlt mit dem Profil. Kaputte Dokumente werden zum
-// leeren Beleg { id } (Kern: BELEG_UNGUELTIG, unbekannt, nicht in Summen), nie zu einer Ausnahme.
+// Firestore-Zeilen { id, daten } -> Belege für den Kern. v2 (schema_version 2 mit steuer) entscheidet der Kern (regel/drift.js steuerGueltig =
+// Steuerkern.belegFuerKern): Drift 'ok'/'ohne' wie gespeichert; alter v1-Hash ('neu_pruefen', D2) wie gespeichert nur, wenn die neuen Felder
+// (z. B. eine spätere Finanzamt-Wahl fa_art/fa_periode) nichts ändern; sonst und bei 'veraltet' aus den Legacy-Feldern neu (STEUER_VERALTET).
+// v1 läuft durch normalisiereAlt mit dem Profil. Kaputte Dokumente werden zum leeren Beleg { id } (Kern: BELEG_UNGUELTIG, unbekannt, nicht in
+// Summen), nie zu einer Ausnahme. Zähler: veraltet (neu normalisierte v2), neu_geprueft (alte v1-Hashes, gleich ob bestätigt oder verworfen).
 export function belegeFuerKern(zeilen, profil) {
   const belege = [];
   let veraltet = 0;
+  let neuGeprueft = 0;
   for (const z of zeilen || []) {
     const daten = istObjekt(z && z.daten) ? z.daten : {};
     const id = String(z && z.id || '');
     try {
       if (daten.schema_version === 2 && istObjekt(daten.steuer)) {
-        if (driftStatus(daten) === 'veraltet') {
-          veraltet++;
-          belege.push(Steuerkern.normalisiereAlt({ ...daten, id }, profil));
-        } else belege.push({ ...daten, id });
+        const r = steuerGueltig(daten, id, profil);
+        if (r.neu_pruefen) neuGeprueft++;
+        if (r.gueltig) belege.push({ ...daten, id });
+        else if (r.beleg) { veraltet++; belege.push(r.beleg); } else belege.push({ id });
       } else {
         belege.push(Steuerkern.normalisiereAlt({ ...daten, id }, profil));
       }
@@ -43,7 +46,7 @@ export function belegeFuerKern(zeilen, profil) {
       belege.push({ id });
     }
   }
-  return { belege, veraltet };
+  return { belege, veraltet, neu_geprueft: neuGeprueft };
 }
 
 // Alle Tage, die ein Beleg (v1 oder v2) trägt, und Spannen (Leistungszeitraum)
@@ -184,14 +187,17 @@ export function vergleicheSnapshot(server, client) {
 }
 
 // belege_hash (Konzept 3.6): SHA-256 über sortierte (beleg_id, steuer.version, Zahlungs-IDs, legacy_hash). legacy_hash macht auch reine
-// Legacy-Änderungen (v1-Belege) sichtbar, die steuer.version nicht kennen.
-export async function belegeHash(zeilen, ids) {
+// Legacy-Änderungen (v1-Belege) sichtbar, die steuer.version nicht kennen. Seit D2 der Kern-Fingerabdruck Version 2 (18 Felder, also auch eine
+// spätere Finanzamt-Wahl). optionen.fassung 1: Fingerabdruck der alten 10 Felder (Steuerkern.legacyHashV1), nur damit der Konsistenzwächter
+// Festschreibungen von vor D2 nicht fälschlich als geändert meldet (regel/festschreibung.js 'pruefen').
+export async function belegeHash(zeilen, ids, optionen = {}) {
+  const fingerabdruck = optionen && optionen.fassung === 1 ? legacyHashV1 : legacyHash;
   const nachId = new Map((zeilen || []).map((z) => [z.id, z.daten || {}]));
   const teile = [...ids].sort().map((id) => {
     const d = nachId.get(id) || {};
     const s = istObjekt(d.steuer) ? d.steuer : {};
     const zahlungen = (Array.isArray(s.zahlungen) ? s.zahlungen : []).map((z) => (istObjekt(z) ? `${z.id || ''}:${z.status || ''}:${z.betrag_cent ?? ''}:${z.datum || ''}` : '')).sort();
-    return [id, Number.isSafeInteger(s.version) ? s.version : null, zahlungen, legacyHash(d)];
+    return [id, Number.isSafeInteger(s.version) ? s.version : null, zahlungen, fingerabdruck(d)];
   });
   return sha256Hex(kanonisch(teile));
 }

@@ -240,6 +240,7 @@ test('Fremder Steuersatz aus einer E-Rechnung (20 %): Beleg gespeichert, Legacy 
 // ── Beleg-Formular v2 (BP-09, Zuruf inbox-WORKER): mitgeschicktes steuer nur nach Prüfung ──
 import * as KernBF from '../steuerkern/index.js';
 import { STEUER_SCHLUESSEL, clientSteuerPruefen } from '../regel/schreibweg-v2.js';
+import { dekodiereFelder } from '../regel/firestore.js';
 const clientSteuer = (extra = {}) => KernBF.normalisiereEingabe({ weg: 'beleg_formular_v2', richtung: 'eingang', steuerwahl: 'inland_19', betrag: { cent: 11900, art: 'brutto' }, rechnungsdatum: '2026-11-02', leistung: { von: '2026-10-01', bis: '2026-10-31' }, erfasst_am: '2026-11-14', ...extra }, { profil: PROFIL, stichtag: '2026-11-14' }).beleg.steuer;
 
 test('Beleg-Formular v2: steuer vom Client wird mit Freigabe beleg_formular und bestätigtem Profil geprüft übernommen (steuer_gespeichert), sonst ignoriert', async () => {
@@ -250,7 +251,9 @@ test('Beleg-Formular v2: steuer vom Client wird mit Freigabe beleg_formular und 
   const s = r.patches[0].body.fields.steuer.mapValue.fields;
   assert.equal(s.herkunft.mapValue.fields.weg.stringValue, 'beleg_formular_v2', 'Herkunft setzt der Server');
   assert.equal(s.leistung.mapValue.fields.bis.stringValue, '2026-10-31', 'Leistungszeitraum bleibt erhalten');
-  assert.ok(s.migration.mapValue.fields.legacy_hash.stringValue.startsWith('v1:'));
+  // D2: Drift-Wächter Version 2 aus dem Kern; der Hash passt zum tatsächlich geschriebenen Dokument (auch createdAt als Tag)
+  assert.ok(s.migration.mapValue.fields.legacy_hash.stringValue.startsWith('v2:'));
+  assert.equal(KernBF.driftStatus(dekodiereFelder(r.patches[0].body.fields)), 'ok');
   for (const config of [null, { kern_max: 'aus', features: { beleg_formular: 'an' } }, { kern_max: 'an', features: {} }]) {
     const x = await manuell('aus', { config, profil: PROFIL }, { typ: 'rechnung_eingehend', steuer: clientSteuer() });
     assert.equal(x.status, 200);

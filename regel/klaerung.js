@@ -5,8 +5,11 @@
 // Browser nichts außer der Wahl und den Beleg-IDs:
 //   Quelle des Belegs (immer aus Firestore gelesen, nie vom Client):
 //     - v2 mit passendem Drift-Wächter (legacy_hash 'ok' oder 'ohne'): das gespeicherte 'steuer' (Umstellung, Beleg-Formular, Modus 'an', Webhooks)
+//     - v2 mit altem v1-Hash ('neu_pruefen', D2): der Kern prüft nur, was die neuen Felder (fa_*, art, ust_unklar, leistungsdatum, createdAt)
+//       bewirken; passt es, bleibt das gespeicherte 'steuer' (eine frühere Klärung geht nicht verloren), sonst wie veraltet
 //     - v1 (nur Legacy-Felder) oder v2 mit veraltetem legacy_hash: der Kern normalisiert die Legacy-Felder neu (belegFuerKern -> normalisiereAlt);
 //       ein veraltetes 'steuer' wird nie als Grundlage genommen (sonst würde der neue Fingerabdruck die Abweichung verdecken)
+//     Die Entscheidung trifft allein Steuerkern.belegFuerKern (regel/drift.js steuerGueltig), keine eigene Drift-Regel.
 //   Klärbar sind nur offene Rechnungen/Quittungen mit einem Grund, den eine Steuerwahl auflöst (satz_fehlt, mwst_keine_mehrdeutig,
 //   reverse_charge_herkunft, steuerfall_nicht_gewaehlt; nicht: Mahnung, Finanzamt-Kategorie, Auslandskunde, fehlendes Datum oder fehlender
 //   Betrag). Die Wahl muss zur Richtung passen. Danach rechnet der Kern: normalisiereEingabe (Beträge, Daten, Zahlungen, Leistung aus dem Beleg,
@@ -24,7 +27,7 @@
 import * as Steuerkern from '../steuerkern/index.js';
 import { istObjekt } from './gemeinsam.js';
 import { schreibe } from './firestore.js';
-import { legacyHash, driftStatus } from './drift.js';
+import { legacyHash, steuerGueltig } from './drift.js';
 import { wirkPerioden } from './schreibweg-v2.js';
 
 export const KLAERUNG_MAX = 100;
@@ -58,15 +61,17 @@ export function klaerungEingabe(id, steuer, steuerwahl) {
 }
 
 // Grundlage der Klärung aus dem gespeicherten Dokument. Ergebnis { steuer, quelle: 'v2'|'v1'|'v2_veraltet', migriert } oder { code }.
+// neu_geprueft: true, wenn ein alter v1-Hash neu geprüft wurde (der Kern hat den gespeicherten Steuerteil bestätigt oder verworfen).
 export function klaerungsGrundlage(id, daten, profil) {
   const d = istObjekt(daten) ? daten : {};
   const v2 = d.schema_version === 2 && istObjekt(d.steuer);
   const migriert = v2 && istObjekt(d.steuer.herkunft) && d.steuer.herkunft.weg === 'migration';
-  if (v2 && driftStatus(d) !== 'veraltet') return { steuer: d.steuer, quelle: 'v2', migriert };
   let r;
-  try { r = Steuerkern.belegFuerKern({ ...d, id }, profil); } catch { return { code: 'kern_fehler' }; }
-  if (!r || !r.beleg || !istObjekt(r.beleg.steuer)) return { code: 'kern_fehler' };
-  return { steuer: r.beleg.steuer, quelle: v2 ? 'v2_veraltet' : 'v1', migriert };
+  try { r = steuerGueltig(d, id, profil); } catch { return { code: 'kern_fehler' }; }
+  const np = r.neu_pruefen ? { neu_geprueft: true } : {};
+  if (v2 && r.gueltig) return { steuer: d.steuer, quelle: 'v2', migriert, ...np };
+  if (!r.beleg || !istObjekt(r.beleg.steuer)) return { code: 'kern_fehler' };
+  return { steuer: r.beleg.steuer, quelle: v2 ? 'v2_veraltet' : 'v1', migriert, ...np };
 }
 
 // Herkunft nach der Klärung: Umstellung bleibt Umstellung, ein gültiges v2 behält seinen Weg, neu aus Legacy gebildet = 'sammelklaerung'
@@ -86,8 +91,10 @@ export function klaerungEinheit(uid, id, dok, kontext) {
   if (d.gesperrt === true || (gespeichert && gespeichert.gesperrt === true)) return { id, write: null, code: 'gesperrt' };
   // Idempotenz: dieselbe Anfrage hat diesen Beleg schon geklärt
   const k = gespeichert && istObjekt(gespeichert.migration) && istObjekt(gespeichert.migration.klaerung) ? gespeichert.migration.klaerung : null;
-  if (d.schema_version === 2 && k && nichtLeer(anfrageId) && k.anfrage_id === anfrageId && driftStatus(d) !== 'veraltet') return { id, write: null, code: 'geklaert', idempotent: true };
+  // Grundlage zuerst: die Idempotenz gilt nur, solange der Kern das gespeicherte steuer als gültig bestätigt (Drift 'ok'/'ohne' oder
+  // 'neu_pruefen' mit passenden neuen Feldern)
   const g = klaerungsGrundlage(id, d, profil);
+  if (d.schema_version === 2 && k && nichtLeer(anfrageId) && k.anfrage_id === anfrageId && !g.code && g.quelle === 'v2') return { id, write: null, code: 'geklaert', idempotent: true };
   if (g.code) return { id, write: null, code: g.code };
   const s = g.steuer;
   if (s.steuerfall !== 'UNBEKANNT' || s.wirkungslos === true) return { id, write: null, code: 'nicht_offen' };

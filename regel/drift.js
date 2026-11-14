@@ -1,51 +1,23 @@
 // regel/drift.js: Drift-Wächter 'legacy_hash' (migration-rollout.md 2.6, BP-13/NP-05).
 // Rund 35 Schreibstellen der App (und alte PWA-Stände im Cache) ändern nur die Legacy-Felder eines Belegs, nicht 'steuer'. Damit der Kern
-// danach nicht mit einem veralteten 'steuer' rechnet, schreibt jeder Kern-Schreibweg (Worker-Modus 'an', Migration, künftiger Client-Adapter)
+// danach nicht mit einem veralteten 'steuer' rechnet, schreibt jeder Kern-Schreibweg (Worker-Modus 'an', Beleg-Formular v2, Migration, Klärung)
 // in steuer.migration.legacy_hash einen Fingerabdruck der steuerrelevanten Legacy-Felder. Passt er beim Lesen nicht mehr, gilt 'steuer' als
 // veraltet: der Beleg wird aus den Legacy-Feldern neu normalisiert (wie v1) und als Klasse 'Client-Altschreibung' gezählt (STEUER_VERALTET).
 //
-// Absichtlich synchron und ohne crypto.subtle (53-Bit-Hash nach cyrb53), damit dieselbe Funktion im Browser beim Rendern laufen kann. Kein
-// Sicherheitsmerkmal (keine Manipulationssicherheit), nur Erkennung unbeabsichtigter Altschreibungen. Gleiche Funktion im App-Repo:
-// regel/festschreibung-ui.js (legacyHash); ein Test im App-Repo vergleicht beide Implementierungen auf denselben Eingaben.
-export const LEGACY_FELDER = Object.freeze(['typ', 'betrag', 'betrag_netto', 'mwst_satz', 'datum', 'bezahlt', 'bezahlt_am', 'deleted', 'storniert', 'kategorie']);
-export const LEGACY_HASH_VERSION = 1;
+// D2 (Phase 2, 14.11.2026, TR4-kern-001): keine eigene Hash-Rechnung mehr. Alles kommt aus dem Steuerkern (steuerkern/drift.js, Version 2:
+// 18 Felder inkl. fa_art, fa_kategorie, fa_periode, art, ust_unklar, leistungsdatum, createdAt als Berliner Tag, quelle; Präfix 'v2:').
+// Damit schreiben und prüfen Worker, App (regel/selbsttest.js, regel/festschreibung-ui.js) und Kern bitgleich dieselbe Fassung.
+// Alte Hashes 'v1:' (vor D2 geschrieben) meldet driftStatus als 'neu_pruefen', wenn die 10 alten Felder unverändert sind. Dann entscheidet
+// Steuerkern.belegFuerKern (zusatzfelderPassen), ob der gespeicherte Steuerteil weiter gilt (eine Klärung bleibt erhalten) oder ob der Beleg
+// aus den Legacy-Feldern neu normalisiert wird. Aufrufer prüfen deshalb nie selbst auf "!== 'veraltet'", sondern nehmen steuerGueltig().
+export { legacyHash, legacyHashV1, driftStatus, belegFuerKern, LEGACY_FELDER, LEGACY_FELDER_V1, LEGACY_HASH_VERSION } from '../steuerkern/index.js';
+import { belegFuerKern } from '../steuerkern/index.js';
 
-// Normierung: fehlend, null und undefined sind gleich (null); Zahlen auf Cent gerundet (Floats aus alten Clients), Bool strikt, sonst Text.
-function norm(feld, v) {
-  if (v === undefined || v === null) return null;
-  if (feld === 'betrag' || feld === 'betrag_netto') {
-    const n = typeof v === 'number' ? v : parseFloat(String(v).replace(',', '.'));
-    return Number.isFinite(n) ? Math.round(n * 100) : String(v);
-  }
-  if (feld === 'bezahlt' || feld === 'deleted' || feld === 'storniert') return v === true;
-  return String(v);
-}
-
-function cyrb53(text, seed = 0) {
-  let h1 = 0xdeadbeef ^ seed;
-  let h2 = 0x41c6ce57 ^ seed;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507);
-  h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507);
-  h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
-}
-
-// Fingerabdruck 'v1:<hex>' über die Legacy-Felder eines Belegs (Klartext-Objekt, z. B. dekodierte Firestore-Felder)
-export function legacyHash(dok) {
-  const d = dok && typeof dok === 'object' ? dok : {};
-  const text = LEGACY_FELDER.map((f) => JSON.stringify(norm(f, d[f]))).join('|');
-  return `v${LEGACY_HASH_VERSION}:${cyrb53(text).toString(16)}`;
-}
-
-// 'ok' (Hash passt), 'veraltet' (Legacy-Felder nach dem Kern-Schreiben geändert), 'ohne' (kein Hash: Altbestand oder Weg ohne Wächter)
-export function driftStatus(dok) {
-  const h = dok && dok.steuer && dok.steuer.migration && typeof dok.steuer.migration.legacy_hash === 'string' ? dok.steuer.migration.legacy_hash : null;
-  if (!h) return 'ohne';
-  return h === legacyHash(dok) ? 'ok' : 'veraltet';
+// Gilt das gespeicherte 'steuer' eines v2-Belegs (Drift 'ok', 'ohne' oder 'neu_pruefen' mit passenden neuen Feldern)? Kern-Entscheidung,
+// ohne eigene Regel. Ergebnis { gueltig, quelle, neu_pruefen, beleg } (beleg: Kern-Beleg, bei veraltet aus den Legacy-Feldern neu, bei
+// Kern-Fehler null). v1-Belege (ohne schema_version 2) und unlesbare Dokumente: gueltig false.
+export function steuerGueltig(daten, id, profil) {
+  const d = daten !== null && typeof daten === 'object' && !Array.isArray(daten) ? daten : {};
+  const r = belegFuerKern(id === undefined ? d : { ...d, id }, profil);
+  return { gueltig: r.quelle === 'v2', quelle: r.quelle, neu_pruefen: r.neu_pruefen === true, beleg: r.beleg };
 }
