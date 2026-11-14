@@ -366,6 +366,7 @@ const UID_LIMITS = {
   // Regelbesteuerung (W0): Profil selten, Festschreibung je Periode, Migration in Blöcken (5.000 Belege = rund 34 Aufrufe)
   '/steuerprofil':                   { limit: 20, windowMs: 10 * 60 * 1000 },
   '/festschreibung':                 { limit: 30, windowMs: 10 * 60 * 1000 },
+  '/entsperren':                     { limit: 10, windowMs: 10 * 60 * 1000 },
   '/migration':                      { limit: 120, windowMs: 10 * 60 * 1000 },
 };
 
@@ -559,7 +560,7 @@ export default {
       // ✅ /send-verification-email geschützt — E-Mail kommt aus dem verifizierten
       // Token, nie vom Client, sonst könnte jeder Verifizierungsmails an beliebige
       // Adressen auslösen (Spam-Vektor).
-      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/stripe-gebuehren', '/usage', '/abo', '/konto-archivieren', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/auszug-rueckmeldung', '/pruefer-zugang', '/freigabe-status', '/steuerprofil', '/festschreibung', '/migration'];
+      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/stripe-gebuehren', '/usage', '/abo', '/konto-archivieren', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/auszug-rueckmeldung', '/pruefer-zugang', '/freigabe-status', '/steuerprofil', '/festschreibung', '/entsperren', '/migration'];
 
       if (protectedPaths.includes(url.pathname)) {
         try {
@@ -595,7 +596,7 @@ export default {
           // diese Prüfung könnte jeder unverifizierte Account mit gültigem Firebase-
           // Token die kostenpflichtigen Endpoints (Anthropic-API-Aufrufe, E-Mail-Versand)
           // direkt ansprechen und den Block umgehen.
-          const emailVerifiedRequiredPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/steuerprofil', '/festschreibung', '/migration'];
+          const emailVerifiedRequiredPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/steuerprofil', '/festschreibung', '/entsperren', '/migration'];
           if (emailVerifiedRequiredPaths.includes(url.pathname) && !verified.emailVerified) {
             const errorCors = getCORS(origin);
             return new Response(JSON.stringify({ error: 'E-Mail nicht verifiziert', code: 'email-not-verified' }), {
@@ -685,7 +686,7 @@ export default {
       if (url.pathname === '/admin/seed-steuerrecht') return handleSeedSteuerrecht(request, body, env, cors);
       // Regelbesteuerung Phase 2 (W0): Logik in regel/*.js; UID kommt aus dem geprüften Token (protectedPaths), Firestore per Dienstkonto
       if (url.pathname === '/steuerprofil') return regelSteuerprofil(body, env, cors, regelAbhaengigkeiten(env));
-      if (url.pathname === '/festschreibung') return regelFestschreibung(body, env, cors, regelAbhaengigkeiten(env));
+      if (url.pathname === '/festschreibung' || url.pathname === '/entsperren') return handleFestschreiben(url.pathname, body, env, cors);
       if (url.pathname === '/migration') return regelMigration(body, env, cors, regelAbhaengigkeiten(env));
       if (url.pathname === '/admin/features') return regelAdminFeatures(request, authHeader, env, cors, regelAbhaengigkeiten(env));
       // Bewusst NICHT in protectedPaths: ein Betriebsprüfer hat keinen Firebase-Login, der
@@ -6407,6 +6408,13 @@ export function steuerkernWarnung(env, weg, belegRoh, profil = null, optionen = 
     } catch { /* nichts */ }
     return null;
   }
+}
+
+// ── Festschreibung (BP-13, PF-080): /festschreibung (alle Aktionen, regel/festschreibung.js) und /entsperren (Konzept 10.3: Rücknahme mit
+// Grund; gleichbedeutend mit aktion 'ruecknahme', mit aktion 'entsperren' die Fortsetzung der Entsperrblöcke). UID kommt aus dem Token (Router).
+async function handleFestschreiben(pfad, body, env, cors) {
+  const b = pfad === '/entsperren' ? { ...(body || {}), aktion: body && body.aktion === 'entsperren' ? 'entsperren' : 'ruecknahme' } : body;
+  return regelFestschreibung(b, env, cors, regelAbhaengigkeiten(env));
 }
 
 // ── Steuerkern im Modus 'an': Schreibweg v2 (NP-05, BP-13; regel/schreibweg-v2.js, migration-rollout.md 4.2) ─────────────────────────

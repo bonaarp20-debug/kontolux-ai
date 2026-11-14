@@ -60,7 +60,7 @@ test('Eigentümerprüfung: ohne Token 401, unbestätigte E-Mail 403, fremde user
   const { zaehler, zurueck } = installiere(fs);
   try {
     const env = await envMitKvZaehler(zaehler);
-    for (const pfad of ['/steuerprofil', '/festschreibung', '/migration']) {
+    for (const pfad of ['/steuerprofil', '/festschreibung', '/entsperren', '/migration']) {
       assert.equal((await anfrage(env, { path: pfad, body: { aktion: 'start' } })).status, 401, pfad);
       assert.equal((await anfrage(env, { path: pfad, body: { aktion: 'start' }, headers: { Authorization: 'Bearer falsch' } })).status, 401, pfad);
       assert.equal((await anfrage(env, { path: pfad, body: { aktion: 'start' }, headers: { Authorization: 'Bearer tok-unbestaetigt' } })).status, 403, pfad);

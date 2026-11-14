@@ -1,4 +1,4 @@
-// NP-05/BP-13: Worker-Betriebsmodus 'an' (regel/schreibweg-v2.js und Verdrahtung in worker.js).
+// NP-05/BP-13 (PF-084): Kern im Blockmodus STEUERKERN_MODUS=an (regel/schreibweg-v2.js und Verdrahtung in worker.js), Verträge für alle Schreibwege.
 // Zeigt: v2 nur bei env 'an' UND config kern_max 'an'; steuer im selben PATCH wie die unveränderten Legacy-Felder; Profil vor dem Schreiben;
 // D7 (Webhook/Upload nie ablehnen, UNBEKANNT); Ablehnung nur formal oder Zahlung in festgeschriebenem Monat; steuer passt zu den Firestore-Regeln.
 import { test } from 'node:test';
@@ -177,5 +177,62 @@ test("writeBelegAsAdmin (alle Webhooks) im Modus an: steuer im selben PATCH mit 
     assert.deepEqual(f.nach_festschreibung.mapValue.fields.perioden.arrayValue.values.map((v) => v.stringValue), ['euer-2026-11'], 'Webhook in festgeschriebenem Monat: gespeichert und gekennzeichnet');
     assert.equal(f.mwst_satz.stringValue, '19');
     assert.equal(f.betrag.doubleValue, 59.5);
+  } finally { m.restore(); }
+});
+
+// ── Vertrag für alle Schreibwege (scope.md NP-05): 27 Eingabevarianten wie test/tr-integration-schreibwege.test.mjs, jetzt mit Freigabe 'an' ──
+const STORAGE = 'https://firebasestorage.googleapis.com/v0/b/kontolux-ai.firebasestorage.app/o/users%2Fuidtesta1234567%2Fbelege%2Fx.pdf?alt=media&token=t';
+const M = (extra = {}) => ({ Nachricht: 'BELEG_MANUELL', betrag: '119.00', absender: 'Muster GmbH', rechnungsnr: 'RE-1', mwst_satz: '19', datum: '2026-11-01', typ: 'rechnung_ausgehend', ...extra });
+const S = (extra = {}) => ({ Nachricht: 'BELEG_SPEICHERN', storageUrl: STORAGE, name: 'r.pdf', type: 'application/pdf', size: 2048, betrag: '47.11', absender: 'Muster GmbH', mwst_satz: '7', datum: '2026-11-02', ...extra });
+const BATTERIE = [
+  M(), M({ bezahlt: true, bezahlt_am: '2026-11-03' }), M({ typ: 'rechnung_eingehend', mwst_satz: 'keine' }),
+  M({ mwst_satz: 'reverse_charge' }), M({ mwst_satz: '0' }), M({ mwst_satz: '19%' }), M({ mwst_satz: undefined }),
+  M({ betrag: '1.234,56' }), M({ betrag: 119 }), M({ betrag: '119,00' }), M({ betrag_netto: '100' }),
+  M({ betrag_netto: 'abc' }), M({ datum: '2026-02-30' }), M({ datum: undefined }), M({ typ: 'mahnung_ausgehend', bezahlt: true }),
+  M({ typ: 'quatsch' }), M({ bezahlt: true, bezahlt_am: 'gestern' }), M({ kategorie: 'Bewirtung (70%)', typ: 'rechnung_eingehend' }),
+  M({ betrag: '0.01' }), M({ betrag: '9999999.99' }), M({ absender: 'A\nB"C\\' }), M({ mwst_satz: { x: 1 } }), M({ mwst_satz: '20' }),
+  S(), S({ betrag: undefined, mwst_satz: undefined }), S({ typ: 'rechnung_ausgehend', bezahlt: true, bezahlt_am: '2026-11-05' }),
+  S({ mwst_satz: '19', datum: '2026-13-45' }), S({ betrag_netto: '-10' }), S({ mwst_satz: '21' }),
+];
+async function document(modus, mock, body) {
+  const m = firestoreMock(mock);
+  try {
+    const env = await erzeugeTestEnv({ STEUERKERN_MODUS: modus });
+    const r = await anfrage(env, { path: '/document', headers: { Authorization: 'Bearer tok-a' }, ip: `198.51.100.${(ip++ % 200) + 20}`, body });
+    return { status: r.status, text: (await r.text()).replace(/beleg(_manual)?_\d+_[0-9a-f]+/g, 'ID'), patches: m.patches };
+  } finally { m.restore(); }
+}
+
+test("Vertrag aller Schreibwege im Modus an (env 'an' + config kern_max 'an', Profil bestätigt): Status und Antwort wie 'aus', Legacy-Felder byte-gleich, v2 bei jedem gespeicherten Beleg", async () => {
+  const frei = { config: { kern_max: 'an' }, profil: PROFIL };
+  for (const [i, body] of BATTERIE.entries()) {
+    const aus = await document('aus', { config: null, profil: PROFIL }, body);
+    const an = await document('an', frei, body);
+    assert.equal(an.status, aus.status, `Status, Fall ${i}: ${JSON.stringify(body)}`);
+    assert.equal(an.text, aus.text, `Antwort, Fall ${i}`);
+    assert.equal(an.patches.length, aus.patches.length, `Zahl der Schreibvorgänge, Fall ${i}`);
+    for (let k = 0; k < aus.patches.length; k++) {
+      assert.deepEqual(ohneV2(an.patches[k].body.fields), ohneV2(aus.patches[k].body.fields), `Legacy-Felder, Fall ${i}`);
+      if (/\/dokumente\/beleg/.test(an.patches[k].url) && !/updateMask/.test(an.patches[k].url)) { // Anlage, nicht der Buchungsmarker gebuchter_tag
+        assert.ok(an.patches[k].body.fields.steuer, `v2 geschrieben, Fall ${i}`);
+        assert.deepEqual(an.patches[k].body.fields.schema_version, { integerValue: '2' });
+      }
+    }
+  }
+});
+
+test('Fremder Steuersatz aus einer E-Rechnung (20 %): Beleg gespeichert, Legacy keine, Steuerfall UNBEKANNT; Webhook mit Betrag 0: kein Beleg, Erfolg (TR3-sys-003)', async () => {
+  const r = await document('an', { config: { kern_max: 'an' }, profil: PROFIL }, M({ typ: 'rechnung_eingehend', mwst_satz: '20', betrag_netto: '100', betrag: '120' }));
+  assert.equal(r.status, 200);
+  const f = r.patches[0].body.fields;
+  assert.equal(f.mwst_satz.stringValue, 'keine');
+  assert.equal(f.steuer.mapValue.fields.steuerfall.stringValue, 'UNBEKANNT');
+  const m = firestoreMock({ config: { kern_max: 'an' }, profil: PROFIL });
+  try {
+    const env = await erzeugeTestEnv({ STEUERKERN_MODUS: 'an' });
+    const w = await writeBelegAsAdmin(UID, { typ: 'rechnung_ausgehend', betrag: 0, absender: 'Gratis', mwst_satz: '19', quelle: 'shopify_webhook', bezahlt: true, dedupKey: 'evt_0' }, env, 'tok');
+    assert.deepEqual(w, { success: true, skipped: 'betrag_nicht_positiv' });
+    assert.equal(m.patches.length, 0);
+    assert.equal(m.lesen, 0, 'Betrag 0: nicht einmal gelesen');
   } finally { m.restore(); }
 });
