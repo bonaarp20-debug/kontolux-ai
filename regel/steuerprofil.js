@@ -246,6 +246,17 @@ export function neuesProfil(aktion, body, alt, kontext) {
 // schreiben, firestore.rules). Fail-safe: Fehler, Budgetgrenze, unerwartete Antwort oder fehlende Abfragefunktion = KEIN Neukonto (Migrationsweg).
 // Die App (regel/bereitschaft.js) behandelt ein Neukonto als bereit, solange alle Belege originär v2 sind; sonst entscheidet der Selbsttest.
 export const NEUKONTO_FELD = 'neukonto';
+// Felder, die NUR der Worker an steuerprofil/aktuell setzt und die keine Profiländerung anfasst: Neukonto-Merker (N1), Migrationsstand und
+// Gate-Werte (regel/migration.js profilStandSchreiben: migration, kern_anzeige, altbestand_grenze). schreibe.setzen ersetzt das ganze Dokument,
+// deshalb werden sie bei JEDER Änderung unverändert aus dem gelesenen Profil mitgeführt (sonst löschte jede Änderung sie, Zuruf N1/inbox-ORCH).
+// Vom Client kommen sie nie: 'anlegen' und 'stammdaten' haben Whitelists, alle anderen Aktionen bauen nur aus dem Kernprofil.
+export const WORKER_FELDER = Object.freeze([NEUKONTO_FELD, 'migration', 'kern_anzeige', 'altbestand_grenze']);
+export function workerFelderMitfuehren(alt) {
+  const x = {};
+  if (!istObjekt(alt)) return x;
+  for (const k of WORKER_FELDER) if (alt[k] !== undefined && alt[k] !== null) x[k] = alt[k];
+  return x;
+}
 export async function keineBelege(fs, uid) {
   try {
     if (!fs || typeof fs.runQuery !== 'function' || !istText(uid, 128)) return false;
@@ -292,6 +303,7 @@ export async function regelSteuerprofil(body, env, cors = {}, deps = {}) {
     if (r.bestaetigen && !neukonto && await keineBelege(fs, uid)) neukonto = { festgestellt_am: zeit, aktion: body.aktion };
     const neu = {
       ...r.profil,
+      ...workerFelderMitfuehren(alt),
       ...(neukonto ? { [NEUKONTO_FELD]: neukonto } : {}),
       bestaetigt_am: bestaetigtAm,
       aktualisiert_am: zeit,

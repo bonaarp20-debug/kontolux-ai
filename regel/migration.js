@@ -34,9 +34,11 @@
 //   'abschluss'         { lauf_id }     nur wenn das Ende erreicht ist; status 'fertig', audit_v2 mit Zählern und Kern-Hash
 //   'ruecknahme_start'  { anfrage_id }  Rückweg (Konzept 3.8.5 Schritt 6): entfernt steuer/schema_version bei steuer.herkunft.weg == 'migration';
 //                                       abgelehnt, solange ein Zeitraum festgeschrieben ist; danach 'block'/'abschluss' mit derselben lauf_id
-//   'klaerung'          { anfrage_id, beleg_ids[<=100], antwort: { steuerwahl } }  Sammelklärung NACH der Migration (Konzept 3.8.5 Schritt 2,
-//                                       migration-rollout.md 2.8): nur migrierte UNBEKANNT-Belege; schreibt nur 'steuer' (Legacy unberührt, damit der
-//                                       Rückweg byte-gleich bleibt), steuerfall_herkunft 'nutzer', steuer.migration.klaerung
+//   'klaerung'          { anfrage_id, beleg_ids[<=100], antwort: { steuerwahl } }  Sammelklärung offener Steuerfälle (Konzept 3.8.5 Schritt 2,
+//                                       migration-rollout.md 2.8, PF-053): Belege aus der Umstellung UND neu erfasste Belege (v2 anderer Wege,
+//                                       Legacy-Belege bestätigter Konten über den Kern), Prüfung je Beleg in regel/klaerung.js; schreibt nur 'steuer'
+//                                       (bei v1 zusätzlich schema_version 2), Legacy unberührt, steuerfall_herkunft 'nutzer', steuer.migration.klaerung;
+//                                       Freigabe 'migration' ODER 'beleg_formular'
 //   'kenntnis'          { lauf_id }     Kenntnisnahme des Einmalvergleichs alt/neu (D4), setzt vergleich_kenntnis_am am fertigen Lauf
 import * as Steuerkern from '../steuerkern/index.js';
 import MANIFEST from '../steuerkern/MANIFEST.json' with { type: 'json' };
@@ -45,22 +47,20 @@ import {
   ANFRAGE_ID_MUSTER, kanonisch, sha256Hex,
 } from './gemeinsam.js';
 import { schreibe, vorbedingungAus, vollerName, FirestoreFehler, BudgetFehler } from './firestore.js';
-import { auditSchreibvorgaenge, kopfPfad, AUDIT_AKTIONEN } from './audit.js';
+import { auditSchreibvorgaenge, kopfPfad } from './audit.js';
 import { aktuellPfad } from './steuerprofil.js';
 import { legacyHash } from './drift.js';
+import { klaerungEinheit, KLAERUNG_MAX, KLAERUNG_WAHLEN } from './klaerung.js';
+
+export { KLAERUNG_MAX, KLAERUNG_WAHLEN, klaerungEinheit, klaerungEingabe, KLAERBARE_GRUENDE } from './klaerung.js';
 
 export const BLOCK_MIN = 100;
 export const BLOCK_MAX = 200;
 export const BLOCK_STANDARD = 150;
 export const KONTEXT_MAX = 400; // höchstens so viele zurückgestellte Belege je Lauf (Größe des Fortschrittsdokuments)
 export const KONTEXT_SCHREIBEN_JE_BLOCK = 50; // zurückgestellte Belege je Aufruf in der Phase kontext_schreiben (batchGet mit Kandidaten)
-export const KLAERUNG_MAX = 100;
 export const OFFENE_IDS_MAX = 200;
 export const PHASEN = Object.freeze(['haupt', 'kontext_suche', 'kontext_schreiben']);
-export const KLAERUNG_WAHLEN = Object.freeze({
-  eingang: Object.freeze(['inland_19', 'inland_7', 'ohne_ust_ausgewiesen', 'reverse_charge_eu', 'reverse_charge_drittland']),
-  ausgang: Object.freeze(['inland_19', 'inland_7']),
-});
 const LAUF_ID_MUSTER = /^lauf-[A-Za-z0-9_-]{8,64}$/;
 const DOK_ID_MUSTER = /^[A-Za-z0-9_.-]{1,200}$/;
 const AKTIONEN = ['start', 'block', 'abschluss', 'ruecknahme_start', 'klaerung', 'kenntnis'];
@@ -150,6 +150,64 @@ function profilBereit(p) {
 }
 
 function zaehle(m, k, n = 1) { m[k] = (m[k] || 0) + n; }
+
+// ---------------------------------------------------------------------------------------------
+// Migrationsstand und Gate-Werte im Steuerprofil (W1, Zurufe BP-08/F1/N1, migration-rollout.md 2.2 und 2.5)
+// steuerprofil/aktuell trägt (nur vom Worker geschrieben, Rules: steuerprofil/** write false):
+//   migration { status, lauf_id, art, kern_version, migration_version, belege_gelesen, belege_geschrieben, belege_uebersprungen, zuletzt_am }
+//     status: 'ruecknahme_laeuft' (Start des Rückwegs), 'migration_fertig' (Abschluss der Umstellung), 'zurueckgenommen' (Abschluss des Rückwegs)
+//   kern_anzeige 'aus'|'an': Gate-Wert (NP-03). Der Worker setzt hier nur 'aus' (Rückweg immer, Abschluss nur wenn noch nichts gesetzt ist);
+//     'an' setzt er nie, weil das Selbsttest-Ergebnis nur im Browser liegt (bp14-bericht.md Standardentscheidung 2).
+//   altbestand_grenze { v2_gilt_ab_periode, gewaehlt_am, lauf_id }: vom Nutzer beim Start gewählt (Konzept 3.8.4, 3.8.5 Schritt 3), beim Abschluss
+//     der Umstellung ins Profil übernommen.
+// Geschrieben per updateMask NUR auf diese Felder mit Vorbedingung exists (im selben commit wie Lauf und Audit): alle übrigen Profilfelder bleiben
+// unberührt. regelSteuerprofil (regel/steuerprofil.js) führt die Felder bei jeder Profiländerung unverändert mit.
+// Der Start einer Umstellung schreibt nichts ins Profil: ein Konto mit abgeschlossener Umstellung soll bei einem Nachlauf nicht zurückfallen;
+// 'laeuft' liest regel/bereitschaft.js der App aus den Laufdokumenten.
+// ---------------------------------------------------------------------------------------------
+export const PROFIL_STATUS = Object.freeze({ ruecknahme_start: 'ruecknahme_laeuft', migration: 'migration_fertig', ruecknahme: 'zurueckgenommen' });
+const ALTBESTAND_MUSTER = /^\d{4}-(0[1-9]|1[0-2]|Q[1-4])$/;
+
+// Gewählte Altbestand-Grenze prüfen: Voranmeldungszeitraum 'JJJJ-MM' oder 'JJJJ-Qn', ab 2000, nicht nach dem laufenden Zeitraum
+export function altbestandPruefen(g, heute) {
+  if (g === undefined || g === null) return { ok: true, wert: null };
+  if (typeof g !== 'string' || !ALTBESTAND_MUSTER.test(g) || !Steuerkern.istPeriode(g)) return { ok: false };
+  const art = Steuerkern.periodenArt(g);
+  if (art !== 'monat' && art !== 'quartal') return { ok: false };
+  const start = Steuerkern.periodenStart(g);
+  const monatHeute = String(heute || '').slice(0, 7);
+  if (!start || start < '2000-01-01' || !/^\d{4}-\d{2}$/.test(monatHeute)) return { ok: false };
+  const jahr = Number(monatHeute.slice(0, 4));
+  const quartalStart = `${jahr}-${String(Math.floor((Number(monatHeute.slice(5, 7)) - 1) / 3) * 3 + 1).padStart(2, '0')}-01`;
+  if (start > (art === 'monat' ? `${monatHeute}-01` : quartalStart)) return { ok: false };
+  return { ok: true, wert: g };
+}
+
+export function profilStandFelder(profilDaten, lauf, status, zeit) {
+  const z = istObjekt(lauf.zaehler) ? lauf.zaehler : {};
+  const uebersprungen = Object.entries(z).filter(([k, v]) => k.startsWith('uebersprungen') && Number.isSafeInteger(v)).reduce((a, [, v]) => a + v, 0);
+  const migration = {
+    status, lauf_id: lauf.lauf_id, art: lauf.art, kern_version: lauf.kern_version || Steuerkern.KERN_VERSION, migration_version: lauf.migration_version || Steuerkern.MIGRATION_VERSION,
+    belege_gelesen: Number.isSafeInteger(z.gelesen) ? z.gelesen : 0,
+    belege_geschrieben: Number.isSafeInteger(z.geschrieben) ? z.geschrieben : (Number.isSafeInteger(z.zurueckgenommen) ? z.zurueckgenommen : 0),
+    belege_uebersprungen: uebersprungen, zuletzt_am: zeit,
+  };
+  const felder = { migration };
+  const maske = ['migration'];
+  const alt = istObjekt(profilDaten) ? profilDaten.kern_anzeige : undefined;
+  if (status !== 'migration_fertig' || (alt !== 'an' && alt !== 'aus')) { felder.kern_anzeige = 'aus'; maske.push('kern_anzeige'); }
+  if (status === 'migration_fertig' && typeof lauf.altbestand_grenze === 'string') {
+    felder.altbestand_grenze = { v2_gilt_ab_periode: lauf.altbestand_grenze, gewaehlt_am: lauf.gestartet_am || zeit, lauf_id: lauf.lauf_id };
+    maske.push('altbestand_grenze');
+  }
+  return { felder, maske };
+}
+
+function profilStandSchreiben(uid, profilDok, lauf, status, zeit) {
+  if (!profilDok) return [];
+  const { felder, maske } = profilStandFelder(profilDok.daten, lauf, status, zeit);
+  return [schreibe.aendern(aktuellPfad(uid), felder, maske, { exists: true })];
+}
 const nichtLeer = (s) => typeof s === 'string' && s.trim().length > 0;
 
 // ---------------------------------------------------------------------------------------------
@@ -178,20 +236,15 @@ export function kontextEintrag(id, daten, steuer, festMonate) {
   return null;
 }
 
-// Wie viele Kandidaten die Entscheidung des Kerns braucht: Storno nimmt den ersten Treffer (treffer[0]), die Ursprungs-ID ist eindeutig,
-// die Betragssuche verlangt GENAU einen Treffer (zwei reichen, um Mehrdeutigkeit zu erkennen).
+// Wie viele Kandidaten die Entscheidung des Kerns braucht (Storno: erster Treffer, Ursprungs-ID eindeutig, Betragssuche verlangt GENAU einen
+// Treffer, zwei reichen für Mehrdeutigkeit) und ob ein Beleg Kandidat ist: seit Kern 2026.11.14-2 direkt aus dem Kern (Zuruf K-B, inbox-WORKER),
+// keine Nachbildung mehr. Gleichheit Plan über alle Belege = Plan über Blöcke: test/migration-kontext.test.mjs.
 export function kandidatenMax(o) {
-  if (o.art === 'storno' || o.ursprung_id) return 1;
-  return 2;
+  return Steuerkern.kontextKandidatenMax(o);
 }
 
 export function kandidatPasst(o, id, d) {
-  if (!istObjekt(d) || id === o.id) return false;
-  if (o.art === 'storno') return d.typ !== 'storno' && (d.rechnungsnr === o.nr || d.rechnungsnummer === o.nr);
-  if (o.ursprung_id) return id === o.ursprung_id && d.typ === 'rechnung_ausgehend';
-  if (o.cent === null || o.cent <= 0) return false;
-  return d.typ === 'rechnung_ausgehend' && d.deleted !== true && d.storniert !== true && d.quelle === o.quelle
-    && Steuerkern.euroZuCent(d.betrag) === o.cent && (!Steuerkern.istDatum(o.datum) || !Steuerkern.istDatum(d.datum) || d.datum <= o.datum);
+  return Steuerkern.kontextKandidatPasst(o, id, d);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -399,6 +452,8 @@ export async function regelMigration(body, env, cors = {}, deps = {}) {
   if (trocken && body.cursor !== undefined && body.cursor !== null && !DOK_ID_MUSTER.test(String(body.cursor))) return fehlerAntwort(400, 'CURSOR_UNGUELTIG', cors);
   const sich = sicherungPruefen(body.sicherung);
   if (!sich.ok || (body.sicherung !== undefined && body.sicherung !== null && body.aktion !== 'start')) return fehlerAntwort(400, 'SICHERUNG_UNGUELTIG', cors);
+  const grenze = altbestandPruefen(body.altbestand_grenze, jetztIso(deps).slice(0, 10));
+  if (!grenze.ok || (body.altbestand_grenze !== undefined && body.altbestand_grenze !== null && body.aktion !== 'start')) return fehlerAntwort(400, 'ALTBESTAND_GRENZE_UNGUELTIG', cors);
   if (body.aktion === 'klaerung') {
     const ids = body.beleg_ids;
     if (!Array.isArray(ids) || ids.length === 0 || ids.length > KLAERUNG_MAX || ids.some((x) => typeof x !== 'string' || !DOK_ID_MUSTER.test(x)) || new Set(ids).size !== ids.length) return fehlerAntwort(400, 'BELEG_IDS_UNGUELTIG', cors);
@@ -409,7 +464,7 @@ export async function regelMigration(body, env, cors = {}, deps = {}) {
   const zeit = jetztIso(deps);
   try {
     const fs = await schichtFuer(deps);
-    if (body.aktion === 'start' || body.aktion === 'ruecknahme_start') return await laufStarten(fs, uid, body, sich.wert, zeit, cors);
+    if (body.aktion === 'start' || body.aktion === 'ruecknahme_start') return await laufStarten(fs, uid, body, sich.wert, zeit, cors, grenze.wert);
     if (body.aktion === 'abschluss') return await laufAbschliessen(fs, uid, body, zeit, cors);
     if (body.aktion === 'klaerung') return await klaerungAusfuehren(fs, uid, body, zeit, cors);
     if (body.aktion === 'kenntnis') return await kenntnisSetzen(fs, uid, body, zeit, cors);
@@ -425,7 +480,7 @@ function fortsetzung(lauf, art) {
   return { ok: true, fortgesetzt: true, lauf_id: lauf.lauf_id, art, phase: lauf.phase || 'haupt', zaehler: lauf.zaehler || {}, cursor: lauf.cursor ?? null };
 }
 
-async function laufStarten(fs, uid, body, sicherung, zeit, cors) {
+async function laufStarten(fs, uid, body, sicherung, zeit, cors, altbestandGrenze = null) {
   const art = body.aktion === 'start' ? 'migration' : 'ruecknahme';
   const docs = await fs.batchGet([aktuellPfad(uid), aktivPfad(uid), kopfPfad(uid), CONFIG_PFAD]);
   if (!featureAktiv(configBereinigen(docs.get(CONFIG_PFAD)?.daten), 'migration')) return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
@@ -455,6 +510,7 @@ async function laufStarten(fs, uid, body, sicherung, zeit, cors) {
     kern_version: Steuerkern.KERN_VERSION, kern_hash: await kernHash(), migration_version: Steuerkern.MIGRATION_VERSION, gestartet_am: zeit, zuletzt_am: zeit,
     profil_version: Number.isSafeInteger(profil?.version) ? profil.version : null, anfrage_id: body.anfrage_id, schema: 2,
     sicherung: art === 'migration' ? sicherung : null,
+    ...(art === 'migration' && altbestandGrenze ? { altbestand_grenze: altbestandGrenze } : {}),
   };
   const audit = await auditSchreibvorgaenge(uid, docs.get(kopfPfad(uid)), {
     aktion: art === 'migration' ? 'migration_start' : 'migration_ruecknahme', ziel: laufId, vorher: null, nachher: lauf, zeit,
@@ -466,6 +522,8 @@ async function laufStarten(fs, uid, body, sicherung, zeit, cors) {
       schreibe.anlegen(laufPfad(uid, laufId), lauf),
       schreibe.setzen(aktivPfad(uid), { lauf_id: laufId, art, seit: zeit }, vorbedingungAus(aktiv)),
       ...audit.writes,
+      // Rückweg: ab jetzt ist die Umstellung nicht mehr vollständig, das Profil sagt es sofort (Anzeige zurück auf den Altpfad)
+      ...(art === 'ruecknahme' ? profilStandSchreiben(uid, docs.get(aktuellPfad(uid)), lauf, PROFIL_STATUS.ruecknahme_start, zeit) : []),
     ]);
   } catch (e) {
     // Gleiche anfrage_id ein zweites Mal: der Lauf existiert schon, Antwort wie Fortsetzung (idempotent)
@@ -586,7 +644,7 @@ async function blockAusfuehren(fs, uid, body, env, trocken, zeit, cors) {
 }
 
 async function laufAbschliessen(fs, uid, body, zeit, cors) {
-  const docs = await fs.batchGet([laufPfad(uid, body.lauf_id), aktivPfad(uid), kopfPfad(uid), CONFIG_PFAD]);
+  const docs = await fs.batchGet([laufPfad(uid, body.lauf_id), aktivPfad(uid), kopfPfad(uid), CONFIG_PFAD, aktuellPfad(uid)]);
   if (!featureAktiv(configBereinigen(docs.get(CONFIG_PFAD)?.daten), 'migration')) return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
   const laufDok = docs.get(laufPfad(uid, body.lauf_id));
   if (!laufDok) return fehlerAntwort(404, 'LAUF_UNBEKANNT', cors);
@@ -596,89 +654,72 @@ async function laufAbschliessen(fs, uid, body, zeit, cors) {
   const neu = { ...laufDok.daten, status: 'fertig', abgeschlossen_am: zeit, zuletzt_am: zeit };
   const audit = await auditSchreibvorgaenge(uid, docs.get(kopfPfad(uid)), {
     aktion: neu.art === 'ruecknahme' ? 'migration_ruecknahme' : 'migration_abschluss', ziel: body.lauf_id, vorher: laufDok.daten, nachher: neu, zeit,
-    details: { art: neu.art, zaehler: neu.zaehler || {}, kern_version: neu.kern_version || null, kern_hash: neu.kern_hash || null },
+    details: { art: neu.art, zaehler: neu.zaehler || {}, kern_version: neu.kern_version || null, kern_hash: neu.kern_hash || null, ...(typeof neu.altbestand_grenze === 'string' ? { altbestand_grenze: neu.altbestand_grenze } : {}) },
   });
   neu.audit_seq_abschluss = audit.seq;
   const aktiv = docs.get(aktivPfad(uid));
   const writes = [schreibe.setzen(laufPfad(uid, body.lauf_id), neu, { updateTime: laufDok.updateTime }), ...audit.writes];
   if (aktiv && aktiv.daten.lauf_id === body.lauf_id) writes.push(schreibe.loeschen(aktivPfad(uid), { updateTime: aktiv.updateTime }));
+  // Migrationsstand und Gate-Werte ins Profil, im selben commit (atomar mit dem Abschluss des Laufs)
+  writes.push(...profilStandSchreiben(uid, docs.get(aktuellPfad(uid)), neu, neu.art === 'ruecknahme' ? PROFIL_STATUS.ruecknahme : PROFIL_STATUS.migration, zeit));
   await fs.commit(writes);
   return antwort({ ok: true, lauf_id: body.lauf_id, status: 'fertig', zaehler: neu.zaehler || {} }, 200, cors);
 }
 
 // ---------------------------------------------------------------------------------------------
-// Sammelklärung nach der Migration (rein + Handler)
+// Sammelklärung (Entscheidung je Beleg in regel/klaerung.js; hier der Handler)
 // ---------------------------------------------------------------------------------------------
-// Eingabe für normalisiereEingabe aus dem migrierten steuer (Beträge, Daten, Zahlungen bleiben; nur die Steuerwahl kommt vom Nutzer)
-export function klaerungEingabe(id, steuer, steuerwahl) {
-  const s = steuer;
-  const e = {
-    weg: 'migration_klaerung', id, richtung: s.richtung, beleg_art: 'rechnung',
-    betrag: { cent: s.summe && Number.isSafeInteger(s.summe.brutto_cent) ? s.summe.brutto_cent : null, art: 'brutto' },
-    steuerwahl, rechnungsdatum: s.rechnungsdatum, herkunft: 'nutzer',
-    zahlungen: Array.isArray(s.zahlungen) ? s.zahlungen.filter((z) => istObjekt(z) && z.status !== 'rueckgaengig').map((z) => ({ datum: z.datum, betrag_cent: z.betrag_cent, art: z.art || 'zahlung', kanal: z.kanal })) : [],
-  };
-  if (istObjekt(s.leistung)) e.leistung = s.leistung;
-  if (istObjekt(s.gegenpartei)) e.gegenpartei = s.gegenpartei;
-  if (nichtLeer(s.kategorie)) e.kategorie = s.kategorie;
-  if (nichtLeer(s.rechnungsnr)) e.rechnungsnr = s.rechnungsnr;
-  if (istObjekt(s.herkunft) && Steuerkern.istDatum(s.herkunft.erfasst_am)) e.erfasst_am = s.herkunft.erfasst_am;
-  return e;
+// Freigabe der Sammelklärung: Umstellung ('migration') ODER Beleg-Formular ('beleg_formular'); Notaus kern_max 'aus' sperrt beides
+export function klaerungFreigegeben(config) {
+  if (featureAktiv(config, 'migration')) return true;
+  return !!config && config.kern_max !== 'aus' && featureAktiv(config, 'beleg_formular');
 }
 
-export function klaerungEinheit(uid, id, dok, profil, steuerwahl, zeit) {
-  if (!dok) return { id, write: null, code: 'fehlt' };
-  const d = dok.daten;
-  const s = istObjekt(d.steuer) ? d.steuer : null;
-  if (!(d.schema_version === 2 && s && istObjekt(s.herkunft) && s.herkunft.weg === 'migration')) return { id, write: null, code: 'nicht_migriert' };
-  if (d.gesperrt === true || s.gesperrt === true) return { id, write: null, code: 'gesperrt' };
-  if (s.steuerfall !== 'UNBEKANNT' || s.wirkungslos === true) return { id, write: null, code: 'nicht_offen' };
-  if (!KLAERUNG_WAHLEN[s.richtung] || !KLAERUNG_WAHLEN[s.richtung].includes(steuerwahl)) return { id, write: null, code: 'wahl_passt_nicht' };
-  let r;
-  try { r = Steuerkern.normalisiereEingabe(klaerungEingabe(id, s, steuerwahl), { profil }); } catch { return { id, write: null, code: 'kern_fehler' }; }
-  const neu = r && (r.beleg || r.entwurf);
-  if (!neu || !istObjekt(neu.steuer) || neu.steuer.steuerfall === 'UNBEKANNT' || (r.pflichtfeld_fehler || []).length) return { id, write: null, code: 'nicht_aufloesbar' };
-  const m = istObjekt(s.migration) ? s.migration : { flags: [], hinweise: [] };
-  const steuer = {
-    ...neu.steuer,
-    steuerfall_herkunft: 'nutzer',
-    herkunft: { ...s.herkunft, weg: 'migration', kern_version: Steuerkern.KERN_VERSION },
-    migration: { ...m, legacy_hash: legacyHash(d), klaerung: { steuerwahl, am: zeit, vorher: s.unbekannt_grund || null } },
-  };
-  try {
-    return { id, write: schreibe.aendern(dokPfad(uid, id), { steuer }, ['steuer'], { updateTime: dok.updateTime }), code: 'geklaert' };
-  } catch { return { id, write: null, code: 'kern_fehler' }; }
+// Audit der Sammelklärung im selben commit wie die Belege; nach einem Konflikt einzeln weiter, dann der Audit-Eintrag für die geschriebenen
+async function klaerungAudit(uid, kopfDok, body, steuerwahl, einheiten, zeit) {
+  const g = einheiten.filter((e) => e.write);
+  if (!g.length) return [];
+  const details = { steuerwahl, anzahl: g.length, migriert: g.filter((e) => e.migriert).length, neu: g.filter((e) => !e.migriert).length, aus_legacy: g.filter((e) => e.quelle !== 'v2').length };
+  return (await auditSchreibvorgaenge(uid, kopfDok, { aktion: 'migration_klaerung', ziel: body.anfrage_id, vorher: null, nachher: { steuerwahl, ids: g.map((e) => e.id) }, zeit, details })).writes;
 }
 
 async function klaerungAusfuehren(fs, uid, body, zeit, cors) {
   const ids = body.beleg_ids;
   const pfade = [aktuellPfad(uid), CONFIG_PFAD, kopfPfad(uid), ...ids.map((id) => dokPfad(uid, id))];
   const docs = await fs.batchGet(pfade);
-  if (!featureAktiv(configBereinigen(docs.get(CONFIG_PFAD)?.daten), 'migration')) return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
+  if (!klaerungFreigegeben(configBereinigen(docs.get(CONFIG_PFAD)?.daten))) return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
   const profil = docs.get(aktuellPfad(uid))?.daten;
   if (!profilBereit(profil)) return fehlerAntwort(409, 'PROFIL_NICHT_BESTAETIGT', cors);
   const steuerwahl = body.antwort.steuerwahl;
-  let einheiten = ids.map((id) => klaerungEinheit(uid, id, docs.get(dokPfad(uid, id)), profil, steuerwahl, zeit));
+  const kontext = { profil, steuerwahl, zeit, stichtag: zeit.slice(0, 10), anfrage_id: body.anfrage_id, festPerioden: [] };
+  let einheiten = ids.map((id) => klaerungEinheit(uid, id, docs.get(dokPfad(uid, id)), kontext));
+  // Festgeschriebene und gerade gesperrte Zeiträume nur lesen, wenn überhaupt etwas geschrieben würde (eine Unteranfrage)
+  if (einheiten.some((e) => e.write)) {
+    const liste = await fs.list(`users/${uid}/festschreibung`, { pageSize: 300 });
+    kontext.festPerioden = liste.dokumente.filter((d) => ['festgeschrieben', 'sperre_laeuft'].includes(d.daten && d.daten.status)).map((d) => String(d.pfad).split('/').pop());
+    if (kontext.festPerioden.length) einheiten = ids.map((id) => klaerungEinheit(uid, id, docs.get(dokPfad(uid, id)), kontext));
+  }
   const writes = einheiten.filter((e) => e.write).map((e) => e.write);
-  // Audit-Eintrag nur, wenn die Aktion in audit.js bekannt ist (Zuruf an den Besitzer von audit.js, bp14-bericht.md)
-  const auditW = AUDIT_AKTIONEN.includes('migration_klaerung') && writes.length ? (await auditSchreibvorgaenge(uid, docs.get(kopfPfad(uid)), {
-    aktion: 'migration_klaerung', ziel: body.anfrage_id, vorher: null, nachher: { steuerwahl, anzahl: writes.length }, zeit, details: { steuerwahl, anzahl: writes.length },
-  })).writes : [];
   try {
-    if (writes.length) await fs.commit([...writes, ...auditW]);
+    if (writes.length) await fs.commit([...writes, ...await klaerungAudit(uid, docs.get(kopfPfad(uid)), body, steuerwahl, einheiten, zeit)]);
   } catch (e) {
     if (!(e instanceof FirestoreFehler && e.art === 'konflikt')) throw e;
-    // Ein Beleg wurde zwischenzeitlich geändert: einzeln weiter, der geänderte Beleg bleibt, wie er ist
+    // Ein Beleg (oder der Audit-Kopf) wurde zwischenzeitlich geändert: einzeln weiter, der geänderte Beleg bleibt, wie er ist
     const neu = [];
     for (const x of einheiten) {
       if (!x.write) { neu.push(x); continue; }
-      if (fs.rest < 1) { neu.push({ id: x.id, write: null, code: 'nicht_bearbeitet' }); continue; }
+      if (fs.rest < 3) { neu.push({ id: x.id, write: null, code: 'nicht_bearbeitet' }); continue; } // Reserve für den Audit-Eintrag
       try { await fs.commit([x.write]); neu.push(x); } catch (e2) {
         if (!(e2 instanceof FirestoreFehler && e2.art === 'konflikt')) throw e2;
         neu.push({ id: x.id, write: null, code: 'uebersprungen_konflikt' });
       }
     }
     einheiten = neu;
+    // Audit für die tatsächlich geschriebenen Belege; der Kopf wird frisch gelesen (er kann der Grund des Konflikts gewesen sein)
+    if (einheiten.some((x) => x.write)) {
+      const kopf = await fs.get(kopfPfad(uid));
+      await fs.commit(await klaerungAudit(uid, kopf, body, steuerwahl, einheiten, zeit));
+    }
   }
   const ergebnis = {};
   for (const x of einheiten) zaehle(ergebnis, x.code);
