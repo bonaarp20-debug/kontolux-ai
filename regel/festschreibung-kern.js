@@ -13,7 +13,8 @@
 // CPU (Free-Plan, 10 ms): Der Kern rechnet nicht über alle Belege des Kontos, sondern über die Belege, die den Zeitraum überhaupt berühren
 // KÖNNEN (irgendein Datum im Zeitraum), plus alle Korrekturbelege, ihre Originale und alle Geschenke (Kontext über Belege hinweg). Ein Beleg
 // ohne jedes Datum im Zeitraum kann keine Wirkung im Zeitraum haben (Periodenzuordnung Konzept 4.1/4.2 nimmt immer ein Datum des Belegs).
-// Ein Test vergleicht gefiltert gegen ungefiltert über alle 74 goldenen Referenzfälle.
+// Welche Daten das sind, sagt seit D4 der Kern (Steuerkern.belegZeitraumDaten). Tests vergleichen gefiltert gegen ungefiltert über alle 74 goldenen
+// Referenzfälle (test/regel-festschreibung-kern.test.mjs) und 1.200 Zufallsbestände mit allen Datumsfeldern (test/d4-vorfilter.test.mjs).
 import * as Steuerkern from '../steuerkern/index.js';
 import { legacyHash, legacyHashV1, steuerGueltig } from './drift.js';
 import { istObjekt, periodeAusId, sha256Hex, kanonisch } from './gemeinsam.js';
@@ -49,25 +50,6 @@ export function belegeFuerKern(zeilen, profil) {
   return { belege, veraltet, neu_geprueft: neuGeprueft };
 }
 
-// Alle Tage, die ein Beleg (v1 oder v2) trägt, und Spannen (Leistungszeitraum)
-function tageVon(d) {
-  const t = [d.datum, d.bezahlt_am, d.gebuchter_tag, d.createdAt, d.deleted_at, d.storniert_am].map(tag);
-  const spannen = [];
-  const s = istObjekt(d.steuer) ? d.steuer : null;
-  if (s) {
-    for (const v of [s.rechnungsdatum, s.rechnung_erhalt_am, s.wirkdatum]) t.push(tag(v));
-    if (istObjekt(s.leistung)) {
-      const von = tag(s.leistung.von); const bis = tag(s.leistung.bis);
-      if (von || bis) spannen.push([von || bis, bis || von]);
-    }
-    for (const zz of Array.isArray(s.zahlungen) ? s.zahlungen : []) if (istObjekt(zz)) t.push(tag(zz.datum));
-    const rz = Array.isArray(s.rueckzahlung) ? s.rueckzahlung : (istObjekt(s.rueckzahlung) ? [s.rueckzahlung] : []);
-    for (const r of rz) if (istObjekt(r)) t.push(tag(r.datum));
-    if (istObjekt(s.geschenk)) t.push(tag(s.geschenk.ruecknahme_datum));
-  }
-  return { tage: t.filter(Boolean), spannen };
-}
-
 function istKorrektur(d) {
   const s = istObjekt(d.steuer) ? d.steuer : null;
   return (s && Steuerkern.KORREKTUR_ARTEN.includes(s.beleg_art)) || ['storno', 'gutschrift', 'korrektur'].includes(String(d.typ || ''));
@@ -89,10 +71,11 @@ export function relevanteZeilen(zeilen, start, ende) {
     const d = istObjekt(z && z.daten) ? z.daten : {};
     if (istKorrektur(d)) { korrekturen.push(z); drin.add(z.id); continue; }
     if (istObjekt(d.steuer) && istObjekt(d.steuer.geschenk)) { drin.add(z.id); continue; }
-    const { tage, spannen } = tageVon(d);
-    // Ohne jedes Datum ordnet der Kern keine Periode zu (unbekannt); trotzdem aufnehmen, damit die Zahl der nicht berechneten Belege stimmt
-    if (!tage.length && !spannen.length) { drin.add(z.id); continue; }
-    if (tage.some(imZeitraum) || spannen.some(([a, b]) => a <= ende && b >= start)) drin.add(z.id);
+    // D4: Tage und Spannen aus dem Kern (Steuerkern.belegZeitraumDaten, dieselbe Liste wie die Sperrprüfung der App): alle Datumsquellen, die der
+    // Kern für Zeiträume liest (auch das Legacy-Feld leistungsdatum, createdAt als Berliner Tag, Teilleistungen, § 13b Drittland). Dokumente,
+    // deren Wirkung keinen Zeitraum hat (undatiert), zählt der Kern in JEDEM Zeitraum als nicht berücksichtigt: immer aufnehmen.
+    const { tage, spannen, undatiert } = Steuerkern.belegZeitraumDaten(d);
+    if (undatiert || tage.some(imZeitraum) || spannen.some(([a, b]) => a <= ende && b >= start)) drin.add(z.id);
   }
   if (korrekturen.length) {
     const schluessel = new Set(korrekturen.flatMap((z) => bezugsSchluessel(z.daten || {})));
