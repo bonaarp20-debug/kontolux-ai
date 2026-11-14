@@ -276,3 +276,19 @@ test('Konflikt beim Schreiben (paralleler Vorgang am Audit-Kopf): 409, keine hal
   assert.equal(fs.pfade(`users/${UID}/audit_v2/e`).length, 0);
   assert.equal(fs.lies(D('a')).gesperrt, undefined);
 });
+
+test('abgegeben (Zuruf BP-10): nur bei festgeschriebenem Zeitraum, Datum nicht in der Zukunft und nicht vor Periodenbeginn, mit Audit; nach Rücknahme Kz 10', async () => {
+  const { fs, rufe, snapClient, audit } = umgebung();
+  assert.equal((await rufe({ aktion: 'abgegeben', periode_id: 'ust-2026-Q3', datum: '2026-10-09' })).json.fehler[0].code, 'NICHT_FESTGESCHRIEBEN');
+  await rufe({ aktion: 'festschreiben', periode_id: 'ust-2026-Q3', snapshot: snapClient('ust-2026-Q3') });
+  for (const datum of ['2026-11-15', '2026-06-30', '9.10.2026', undefined]) assert.equal((await rufe({ aktion: 'abgegeben', periode_id: 'ust-2026-Q3', datum })).json.fehler[0].code, 'DATUM_UNGUELTIG', String(datum));
+  let r = await rufe({ aktion: 'abgegeben', periode_id: 'ust-2026-Q3', datum: '2026-10-09' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.deepEqual(fs.lies(F('ust-2026-Q3')).abgegeben, { datum: '2026-10-09', am: '2026-11-14T10:00:00.000Z', kz10_berichtigt: false });
+  await rufe({ aktion: 'ruecknahme', periode_id: 'ust-2026-Q3', grund: 'Rechnung vergessen, berichtigen' });
+  await rufe({ aktion: 'festschreiben', periode_id: 'ust-2026-Q3', snapshot: snapClient('ust-2026-Q3') });
+  r = await rufe({ aktion: 'abgegeben', periode_id: 'ust-2026-Q3', datum: '2026-11-10' });
+  assert.equal(fs.lies(F('ust-2026-Q3')).abgegeben.kz10_berichtigt, true, 'erneute Abgabe nach Rücknahme = berichtigte Anmeldung');
+  assert.ok(audit().some((a) => a.aktion === 'festschreibung_abgegeben'));
+  assert.equal((await kettepruefen(audit())).ok, true);
+});

@@ -20,6 +20,7 @@
 //   pruefen            { periode_id }                Konsistenzwächter: Kern neu gegen Snapshot, neue/geänderte Belege im Zeitraum
 //   legacy_uebernehmen {}                            Alt-Monatsabschlüsse -> festschreibung euer-JJJJ-MM (quelle legacy_snapshot), Abgleich entsperrter
 //   sperre_nachholen   { periode_id, bestaetigt: true }  Sperre für einen festgeschriebenen Zeitraum ohne Belegsperre (Alt-Monat, W0-Gerüst)
+//   abgegeben          { periode_id, datum, kz10_berichtigt? }  Abgabe in ELSTER vermerken (Konzept 3.6 Feld abgegeben; Zuruf BP-10)
 // Statusfolge: (neu) -> sperre_laeuft -> festgeschrieben -> entsperrung_laeuft -> entsperrt (-> erneut festschreiben);
 //              sperre_laeuft -> abbruch_laeuft -> abgebrochen
 import * as Steuerkern from '../steuerkern/index.js';
@@ -38,7 +39,7 @@ const SEITE = 300;
 export const SPERR_BLOCK = 400;
 const LEGACY_MAX_JE_AUFRUF = 100;
 const LAUFENDE = ['sperre_laeuft', 'entsperrung_laeuft', 'abbruch_laeuft'];
-const AKTIONEN = ['festschreiben', 'sperren', 'ruecknahme', 'entsperren', 'abbrechen', 'pruefen', 'legacy_uebernehmen', 'sperre_nachholen'];
+const AKTIONEN = ['festschreiben', 'sperren', 'ruecknahme', 'entsperren', 'abbrechen', 'pruefen', 'legacy_uebernehmen', 'sperre_nachholen', 'abgegeben'];
 export const festPfad = (uid, id) => `users/${uid}/festschreibung/${id}`;
 const dokPfad = (uid, id) => `users/${uid}/dokumente/${id}`;
 const profilPfad = (uid) => `users/${uid}/steuerprofil/aktuell`;
@@ -210,6 +211,10 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
     return fehlerAntwort(400, 'GRUND_ZU_KURZ', cors);
   } else if (body.aktion === 'sperre_nachholen' && body.bestaetigt !== true) {
     return fehlerAntwort(400, 'BESTAETIGUNG_FEHLT', cors);
+  } else if (body.aktion === 'abgegeben') {
+    // nicht in der Zukunft, nicht vor Periodenbeginn (Vorschlag BP-10); kz10_berichtigt optional (Konzept 3.6)
+    if (!(typeof body.datum === 'string' && Steuerkern.istDatum(body.datum)) || body.datum > heute || body.datum < Steuerkern.periodenStart(periode.periode)) return fehlerAntwort(400, 'DATUM_UNGUELTIG', cors);
+    if (body.kz10_berichtigt !== undefined && typeof body.kz10_berichtigt !== 'boolean') return fehlerAntwort(400, 'KZ10_UNGUELTIG', cors);
   }
 
   try {
@@ -221,7 +226,7 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
     const alt = festDok ? festDok.daten : null;
     const kopfDok = docs.get(kopfPfad(uid));
     const profil = docs.get(profilPfad(uid))?.daten || null;
-    if (alt && alt.letzte_anfrage_id === body.anfrage_id && ['festschreiben', 'ruecknahme', 'abbrechen', 'sperre_nachholen'].includes(body.aktion)) {
+    if (alt && alt.letzte_anfrage_id === body.anfrage_id && ['festschreiben', 'ruecknahme', 'abbrechen', 'sperre_nachholen', 'abgegeben'].includes(body.aktion)) {
       return antwort({ ok: true, idempotent: true, periode_id: periodeId, status: alt.status, weiter: LAUFENDE.includes(alt.status) }, 200, cors);
     }
     const entsperrt = Array.isArray(alt?.entsperrt) ? alt.entsperrt.slice(-ENTSPERRT_MAX) : [];
@@ -248,6 +253,8 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
         belege_anzahl: snap.beleg_ids.length, belege_gesperrt: false, sperre: { offen, gesamt: snap.beleg_ids.length, erledigt: snap.beleg_ids.length - offen.length },
         ...(periode.art === 'ust' ? { voranmeldung_zeitraum: Steuerkern.periodenArt(periode.periode) } : {}),
         entsperrt, letzte_anfrage_id: body.anfrage_id, schema: 2,
+        // frühere Abgaben bleiben sichtbar (erneute Abgabe nach Rücknahme = berichtigte Anmeldung, Kz 10)
+        ...(alt && (alt.abgegeben || alt.abgegeben_frueher) ? { abgegeben_frueher: [...(Array.isArray(alt.abgegeben_frueher) ? alt.abgegeben_frueher : []), ...(alt.abgegeben ? [alt.abgegeben] : [])].slice(-10) } : {}),
       };
       neu.audit_seq = naechsteSeq(kopfDok);
       const audit = await auditSchreibvorgaenge(uid, kopfDok, {
@@ -331,6 +338,17 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
         try { await fs.commit([schreibe.aendern(pfad, { pruefung }, ['pruefung'], { updateTime: festDok.updateTime })]); } catch (e) { if (!(e instanceof FirestoreFehler)) throw e; }
       }
       return antwort(ergebnis, 200, cors);
+    }
+
+    // ---- abgegeben: Abgabe in ELSTER vermerken (nur Angabe des Nutzers, Kontolux übermittelt nichts) ----
+    if (body.aktion === 'abgegeben') {
+      if (alt.status !== 'festgeschrieben') return fehlerAntwort(409, 'NICHT_FESTGESCHRIEBEN', cors, { status: alt.status });
+      // nach einer Rücknahme ist eine erneute Abgabe eine berichtigte Anmeldung (Kz 10), wenn der Nutzer nichts anderes angibt
+      const berichtigt = body.kz10_berichtigt !== undefined ? body.kz10_berichtigt : (Array.isArray(alt.abgegeben_frueher) && alt.abgegeben_frueher.length > 0);
+      const neu = { ...alt, abgegeben: { datum: body.datum, am: zeit, kz10_berichtigt: berichtigt }, letzte_anfrage_id: body.anfrage_id, audit_seq: naechsteSeq(kopfDok) };
+      const audit = await auditSchreibvorgaenge(uid, kopfDok, { aktion: 'festschreibung_abgegeben', ziel: periodeId, vorher: alt, nachher: neu, zeit, details: { datum: body.datum, kz10_berichtigt: berichtigt } });
+      await fs.commit([schreibe.setzen(pfad, neu, { updateTime: festDok.updateTime }), ...audit.writes]);
+      return antwort({ ok: true, periode_id: periodeId, status: neu.status, abgegeben: neu.abgegeben, audit_seq: audit.seq }, 200, cors);
     }
 
     // ---- sperre_nachholen: festgeschriebener Zeitraum ohne Belegsperre (Alt-Monatsabschluss oder W0-Gerüst), nur nach Bestätigung ----

@@ -236,3 +236,48 @@ test('Fremder Steuersatz aus einer E-Rechnung (20 %): Beleg gespeichert, Legacy 
     assert.equal(m.lesen, 0, 'Betrag 0: nicht einmal gelesen');
   } finally { m.restore(); }
 });
+
+// ── Beleg-Formular v2 (BP-09, Zuruf inbox-WORKER): mitgeschicktes steuer nur nach Prüfung ──
+import * as KernBF from '../steuerkern/index.js';
+import { STEUER_SCHLUESSEL, clientSteuerPruefen } from '../regel/schreibweg-v2.js';
+const clientSteuer = (extra = {}) => KernBF.normalisiereEingabe({ weg: 'beleg_formular_v2', richtung: 'eingang', steuerwahl: 'inland_19', betrag: { cent: 11900, art: 'brutto' }, rechnungsdatum: '2026-11-02', leistung: { von: '2026-10-01', bis: '2026-10-31' }, erfasst_am: '2026-11-14', ...extra }, { profil: PROFIL, stichtag: '2026-11-14' }).beleg.steuer;
+
+test('Beleg-Formular v2: steuer vom Client wird mit Freigabe beleg_formular und bestätigtem Profil geprüft übernommen (steuer_gespeichert), sonst ignoriert', async () => {
+  const frei = { config: { kern_max: 'schatten', features: { beleg_formular: 'an' } }, profil: PROFIL };
+  const r = await manuell('aus', frei, { typ: 'rechnung_eingehend', steuer: clientSteuer() });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.steuer_gespeichert, true);
+  const s = r.patches[0].body.fields.steuer.mapValue.fields;
+  assert.equal(s.herkunft.mapValue.fields.weg.stringValue, 'beleg_formular_v2', 'Herkunft setzt der Server');
+  assert.equal(s.leistung.mapValue.fields.bis.stringValue, '2026-10-31', 'Leistungszeitraum bleibt erhalten');
+  assert.ok(s.migration.mapValue.fields.legacy_hash.stringValue.startsWith('v1:'));
+  for (const config of [null, { kern_max: 'aus', features: { beleg_formular: 'an' } }, { kern_max: 'an', features: {} }]) {
+    const x = await manuell('aus', { config, profil: PROFIL }, { typ: 'rechnung_eingehend', steuer: clientSteuer() });
+    assert.equal(x.status, 200);
+    assert.equal(x.json.steuer_gespeichert, undefined);
+    assert.equal(x.patches[0].body.fields.steuer, undefined, 'ohne Freigabe ignoriert (Legacy-only)');
+  }
+  const ohneProfil = await manuell('aus', { ...frei, profil: { ...PROFIL, bestaetigt_am: undefined } }, { typ: 'rechnung_eingehend', steuer: clientSteuer() });
+  assert.equal(ohneProfil.patches[0].body.fields.steuer, undefined);
+});
+
+test('Beleg-Formular v2: Abweichung zum Legacy-Betrag, fremde Schlüssel, gesperrt/wirkungslos vom Client: 400; Pflichtlücke wird UNBEKANNT', async () => {
+  const frei = { config: { kern_max: 'schatten', features: { beleg_formular: 'an' } }, profil: PROFIL };
+  const falsch = await manuell('aus', frei, { typ: 'rechnung_eingehend', betrag: '200.00', steuer: clientSteuer() });
+  assert.equal(falsch.status, 400);
+  assert.ok(falsch.json.codes.includes('PF_SUMME_LEGACY'));
+  assert.equal(falsch.patches.length, 0);
+  for (const extra of [{ gesperrt: true }, { wirkungslos: true }, { boese: 1 }]) {
+    const r = await manuell('aus', frei, { typ: 'rechnung_eingehend', steuer: { ...clientSteuer(), ...extra } });
+    assert.equal(r.status, 400, JSON.stringify(extra));
+  }
+  const e = clientSteuerPruefen({ steuer: { ...clientSteuer(), rechnungsdatum: null }, legacy: { betrag: 119 }, stichtag: '2026-11-14', profil: PROFIL });
+  assert.equal(e.ablehnen, false);
+});
+
+test('STEUER_SCHLUESSEL entspricht steuerSchluesselErlaubt() in firestore.rules (App-Repo)', () => {
+  const pfad = new URL('../../Kontolux/firestore.rules', import.meta.url);
+  if (!existsSync(pfad)) return;
+  const block = /function steuerSchluesselErlaubt\(\) \{\s*return \[([\s\S]*?)\];/.exec(readFileSync(pfad, 'utf8'))[1];
+  assert.deepEqual([...STEUER_SCHLUESSEL].sort(), [...block.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort());
+});

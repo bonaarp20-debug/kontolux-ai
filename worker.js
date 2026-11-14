@@ -15,7 +15,7 @@ import { regelMigration } from './regel/migration.js';
 import { regelAdminFeatures } from './regel/admin-features.js';
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
-import { v2Vorbereiten } from './regel/schreibweg-v2.js';
+import { v2Vorbereiten, clientSteuerVorbereiten } from './regel/schreibweg-v2.js';
 import { REGEL_SAMMLUNGEN, REGEL_UNTERSAMMLUNGEN, untersammlungenLoeschen, untersammlungenExport, untersammlungLesen } from './regel/archiv.js';
 
 const ALLOWED_ORIGINS = [
@@ -3331,8 +3331,22 @@ async function handleDocument(body, env, cors = {}, ctx) {
         }
       };
 
+      // Beleg-Formular v2 (BP-09): mitgeschicktes steuer nur nach serverseitiger Prüfung (regel/schreibweg-v2.js clientSteuerVorbereiten)
+      let steuerGespeichert = false;
+      let v2 = null;
+      if (body.steuer !== undefined && body.steuer !== null) {
+        try {
+          v2 = await clientSteuerVorbereiten({ uid: userId, token, steuer: body.steuer, felder: metadata.fields, stichtag: berlinDatumAlsString(), fetchFn: (...a) => fetch(...a), zeit: new Date().toISOString() });
+        } catch (e) {
+          console.warn('beleg_formular_v2_fehler ' + JSON.stringify({ fehlerart: String(e?.name || 'Error').replace(/[^A-Za-z0-9_]/g, '').slice(0, 40) }));
+          v2 = null;
+        }
+        if (v2 && !v2.ignoriert) console.log('beleg_formular_v2 ' + JSON.stringify({ ablehnen: !!v2.ablehnen, kern: Steuerkern.KERN_VERSION, codes: (v2.codes || []).slice(0, 30) }));
+        if (v2 && v2.ignoriert) v2 = null;
+        if (v2) v2.clientSteuer = true;
+      }
       // Modus 'an' (NP-05): steuer im selben PATCH; Ablehnung nur bei formalen Fehlern oder Zahlung in festgeschriebenem Monat
-      const v2 = await schreibwegV2(env, 'beleg_manuell', userId, token, { typ, betrag, mwst_satz, datum: metadata.fields.datum.stringValue, bezahlt, bezahlt_am: metadata.fields.bezahlt_am?.stringValue }, metadata.fields);
+      if (!v2) v2 = await schreibwegV2(env, 'beleg_manuell', userId, token, { typ, betrag, mwst_satz, datum: metadata.fields.datum.stringValue, bezahlt, bezahlt_am: metadata.fields.bezahlt_am?.stringValue }, metadata.fields);
       if (v2 && v2.ablehnen) {
         const gesperrt = (v2.codes || []).includes('PF_ZAHLUNG_GESPERRT');
         return new Response(JSON.stringify({ error: gesperrt ? 'Das Zahlungsdatum liegt in einem festgeschriebenen Zeitraum. Bitte den Zeitraum zuerst entsperren oder ein Datum in einem offenen Zeitraum wählen.' : 'Beleg nicht gespeichert: die Angaben sind formal ungültig.', codes: v2.codes }), {
@@ -3341,6 +3355,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
         });
       }
       if (v2 && v2.felder) Object.assign(metadata.fields, v2.felder);
+      // Antwortfeld nur für das Beleg-Formular v2 (BP-09); der Modus 'an' ändert die Antwort nicht
+      steuerGespeichert = !!(v2 && v2.clientSteuer && v2.felder && v2.felder.steuer);
 
       const firestoreRes = await fetch(firestoreUrl, {
         method: 'PATCH',
@@ -3395,6 +3411,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
         name: `Beleg von ${absender}`,
         typ: typ || 'rechnung_eingehend',
         message: 'Beleg erfolgreich gespeichert',
+        ...(steuerGespeichert ? { steuer_gespeichert: true } : {}),
         ...(tagesbewegungWarnung ? { warning: tagesbewegungWarnung } : {})
       }), {
         status: 200,

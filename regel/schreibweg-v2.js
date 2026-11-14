@@ -18,7 +18,7 @@ import * as Steuerkern from '../steuerkern/index.js';
 import { envModus, effektiverKernModus, ablehnungErlaubt, NIE_ABLEHNEN_WEGE } from './kern-modus.js';
 import { erzeugeSchicht, kodiereWert, dekodiereFelder } from './firestore.js';
 import { legacyHash } from './drift.js';
-import { istObjekt, codesBereinigen, CONFIG_PFAD } from './gemeinsam.js';
+import { istObjekt, codesBereinigen, CONFIG_PFAD, configBereinigen, featureAktiv } from './gemeinsam.js';
 
 const FORMAL = /^PF_(SCHEMA|STEUER|CENT|SUMME|BETRAG_ZU_GROSS|DATUM_FORMAT|SATZ|POSITIONEN|BELEG_ART|RICHTUNG|STEUERFALL)/;
 const ZAHLUNG = /^PF_ZAHLUNG_/;
@@ -110,5 +110,57 @@ export async function v2Vorbereiten(deps) {
   const legacy = dekodiereFelder(deps.felder || {});
   const eingabe = deps.eingabeFn(deps.weg, deps.belegRoh, deps.stichtag);
   const e = v2Entscheiden({ weg: deps.weg, eingabe, profil, legacy, stichtag: deps.stichtag, festPerioden, nieAblehnen: deps.nieAblehnen === true });
+  return { ...e, profil, felder: v2RestFelder(e, deps.zeit || new Date().toISOString()) };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Beleg-Formular v2 (BP-09, Zuruf inbox-WORKER 14.11.): BELEG_MANUELL bringt 'steuer' (Ausgabe von normalisiereEingabe im Browser) mit.
+// Der Worker übernimmt es nur nach Prüfung: Freigabe features.beleg_formular 'an' (kern_max nicht 'aus') und bestätigtes Profil, Schlüssel nur
+// aus der Whitelist der Firestore-Regeln, nie gesperrt/wirkungslos, Kern-Prüfung validiereBeleg (formaler Fehler -> Ablehnung, Pflichtlücke ->
+// UNBEKANNT mit entwurf_blocker), Brutto gleich dem Legacy-Betrag. herkunft.weg, kern_version und legacy_hash setzt der Server.
+// Ohne Freigabe oder ohne bestätigtes Profil wird 'steuer' ignoriert (Legacy-only wie bisher, Antwort steuer_gespeichert: false).
+// ---------------------------------------------------------------------------------------------
+// Gleich firestore.rules steuerSchluesselErlaubt() (Test vergleicht)
+export const STEUER_SCHLUESSEL = Object.freeze(['richtung', 'beleg_art', 'steuerfall', 'steuerfall_herkunft', 'positionen', 'summe', 'waehrung', 'rechnungsdatum', 'datum_herkunft',
+  'leistung', 'leistung_flags', 'rechnung_erhalt_am', 'erhalt_angenommen', 'zahlungen', 'gegenpartei', 'bezug', 'kennzeichen', 'ausschluss',
+  'sperrgrund', 'unbekannt_grund', 'unbekannt_detail', 'kleinbetrag', 'version', 'herkunft', 'bewirtung', 'geschenk', 'dialog', 'status_beleg',
+  'versteuerung_beleg', 'wirkdatum', 'korrektur_grund', 'rueckzahlung', 'fa', 'kategorie', 'rechnungsnr', 'status_hinweise', 'legacy_typ',
+  'migration', 'perioden', 'korrektur_notiz', 'entwurf_blocker']);
+
+export function clientSteuerPruefen({ steuer, legacy, stichtag, festPerioden = [], profil = null }) {
+  if (!istObjekt(steuer) || !Object.keys(steuer).every((k) => STEUER_SCHLUESSEL.includes(k)) || typeof steuer.steuerfall !== 'string') return { ablehnen: true, codes: ['PF_SCHEMA'], steuer: null };
+  const s = JSON.parse(JSON.stringify(steuer));
+  delete s.perioden; // reserviert für den Worker
+  const v = Steuerkern.validiereBeleg({ schema_version: 2, steuer: s }, { modus: 'streng', stichtag });
+  const blocker = ((v && v.blocker) || []).map((x) => x && x.code).filter((c) => typeof c === 'string');
+  const formal = blocker.filter((c) => FORMAL.test(c) || ZAHLUNG.test(c));
+  const codes = [...formal];
+  const brutto = Steuerkern.euroZuCent(Number(legacy && legacy.betrag));
+  if (istObjekt(s.summe) && Number.isSafeInteger(s.summe.brutto_cent) && brutto !== null && Math.abs(s.summe.brutto_cent) !== Math.abs(brutto)) codes.push('PF_SUMME_LEGACY');
+  const perioden = wirkPerioden({ steuer: s }, profil);
+  const gesperrt = perioden.filter((p) => festPerioden.includes(p));
+  if (gesperrt.some((p) => p.startsWith('euer-'))) codes.push('PF_ZAHLUNG_GESPERRT');
+  if (codes.length) return { ablehnen: true, codes: codesBereinigen(codes), steuer: null };
+  if (blocker.length) {
+    s.steuerfall = 'UNBEKANNT';
+    s.entwurf_blocker = [...new Set([...(Array.isArray(s.entwurf_blocker) ? s.entwurf_blocker : []), ...blocker])].filter((c) => /^[A-Za-z0-9_]{1,64}$/.test(c)).sort().slice(0, 30);
+  }
+  s.herkunft = { ...(istObjekt(s.herkunft) ? s.herkunft : {}), weg: 'beleg_formular_v2', kern_version: Steuerkern.KERN_VERSION };
+  s.migration = { ...(istObjekt(s.migration) ? s.migration : {}), legacy_hash: legacyHash(legacy) };
+  return { ablehnen: false, codes: codesBereinigen([...blocker, ...(gesperrt.length ? ['W_NACH_FESTSCHREIBUNG'] : [])]), steuer: s, nach_festschreibung: gesperrt };
+}
+
+// deps: { uid, token, steuer, felder, stichtag, fetchFn, zeit }
+export async function clientSteuerVorbereiten(deps) {
+  const schicht = erzeugeSchicht({ token: deps.token, fetchFn: deps.fetchFn, budget: 3 });
+  const pp = `users/${deps.uid}/steuerprofil/aktuell`;
+  const docs = await schicht.batchGet([CONFIG_PFAD, pp]);
+  const roh = docs.get(pp) ? docs.get(pp).daten : null;
+  const profil = istObjekt(roh) && Array.isArray(roh.status_verlauf) ? roh : null;
+  const config = configBereinigen(docs.get(CONFIG_PFAD) ? docs.get(CONFIG_PFAD).daten : null);
+  if (!config || config.kern_max === 'aus' || !featureAktiv(config, 'beleg_formular') || !profilBereit(profil)) return { ignoriert: true, ablehnen: false, codes: [], steuer: null, profil, felder: {} };
+  const liste = await schicht.list(`users/${deps.uid}/festschreibung`, { pageSize: 300 });
+  const festPerioden = liste.dokumente.filter((d) => SPERRENDE.includes(d.daten && d.daten.status)).map((d) => String(d.pfad).split('/').pop());
+  const e = clientSteuerPruefen({ steuer: deps.steuer, legacy: dekodiereFelder(deps.felder || {}), stichtag: deps.stichtag, festPerioden, profil });
   return { ...e, profil, felder: v2RestFelder(e, deps.zeit || new Date().toISOString()) };
 }
