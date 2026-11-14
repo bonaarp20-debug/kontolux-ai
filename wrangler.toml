@@ -25,5 +25,8 @@ crons = ["0 8 1 * *", "15 */3 * * *", "0 3 * * *"]
 
 [vars]
 KI_OPTIMIERUNG_AKTIV = "true"
+# Steuerkern-Schreibweg: "aus" | "warnung" | "an" (steuerkernModus in worker.js). Jede Änderung ist ein eigener Commit plus Deploy
+# (wrangler deploy überschreibt Dashboard-Werte). Release A startet mit "aus" (rollout-drehbuch.md Stolperstein 5, Schritt 2 und 10).
+STEUERKERN_MODUS = "aus"
 # Admin-Konsole: nur diese verifizierten Konten dürfen /admin/* aufrufen
 ADMIN_EMAILS = "johannkorn7@gmail.com"
