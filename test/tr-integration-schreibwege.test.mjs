@@ -32,7 +32,8 @@ async function lauf(modus, body, opt = {}) {
   globalThis.fetch = async (input, init = {}) => {
     const url = typeof input === 'string' ? input : input.url;
     if (!/oauth2\.googleapis|identitytoolkit/.test(url)) unterabfragen++;
-    if (url.startsWith('https://firestore.googleapis.com/') && (init.method === 'PATCH' || init.method === 'POST')) {
+    // :batchGet ist ein Lesezugriff (NP-05: Modus 'an' liest config/features und Profil in EINER Anfrage statt des Profil-GET)
+    if (url.startsWith('https://firestore.googleapis.com/') && (init.method === 'PATCH' || init.method === 'POST') && !url.endsWith(':batchGet')) {
       schreib.push({ methode: init.method, url: url.replace(/beleg(_manual|_webhook)?_[0-9a-f_]+/g, 'ID'), body: String(init.body || '').replace(/"timestampValue":"[^"]+"/g, '"timestampValue":"T"').replace(UUID_RE, 'UUID') });
       if (opt.firestoreFehler) return new Response(opt.firestoreFehler.text, { status: opt.firestoreFehler.status });
     }
@@ -127,7 +128,8 @@ test('Webhook-Schreibweg writeBelegAsAdmin: aus, warnung, an schreiben dasselbe 
         ergebnisse.push({ aufrufe, zeilen });
       } finally { globalThis.fetch = basis; }
     }
-    const ohneProfil = (a) => a.filter((x) => !/\/steuerprofil\/aktuell$/.test(x.url));
+    // Lesezugriffe: Profil-GET (Warnmodus) bzw. ein batchGet aus config/features und Profil (NP-05, env 'an' ohne Freigabe in config)
+    const ohneProfil = (a) => a.filter((x) => !/\/steuerprofil\/aktuell$/.test(x.url) && !/:batchGet$/.test(x.url));
     assert.deepEqual(ohneProfil(ergebnisse[1].aufrufe), ergebnisse[0].aufrufe, `${quelle}: warnung`);
     assert.deepEqual(ohneProfil(ergebnisse[2].aufrufe), ergebnisse[0].aufrufe, `${quelle}: an`);
     assert.ok(ergebnisse[1].aufrufe.length - ergebnisse[0].aufrufe.length <= 1, `${quelle}: höchstens ein Profil-Lesezugriff`);

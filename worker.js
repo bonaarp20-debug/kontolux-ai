@@ -14,6 +14,8 @@ import { regelFestschreibung } from './regel/festschreibung.js';
 import { regelMigration } from './regel/migration.js';
 import { regelAdminFeatures } from './regel/admin-features.js';
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
+// NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
+import { v2Vorbereiten } from './regel/schreibweg-v2.js';
 import { REGEL_SAMMLUNGEN, REGEL_UNTERSAMMLUNGEN, untersammlungenLoeschen, untersammlungenExport, untersammlungLesen } from './regel/archiv.js';
 
 const ALLOWED_ORIGINS = [
@@ -3328,6 +3330,17 @@ async function handleDocument(body, env, cors = {}, ctx) {
         }
       };
 
+      // Modus 'an' (NP-05): steuer im selben PATCH; Ablehnung nur bei formalen Fehlern oder Zahlung in festgeschriebenem Monat
+      const v2 = await schreibwegV2(env, 'beleg_manuell', userId, token, { typ, betrag, mwst_satz, datum: metadata.fields.datum.stringValue, bezahlt, bezahlt_am: metadata.fields.bezahlt_am?.stringValue }, metadata.fields);
+      if (v2 && v2.ablehnen) {
+        const gesperrt = (v2.codes || []).includes('PF_ZAHLUNG_GESPERRT');
+        return new Response(JSON.stringify({ error: gesperrt ? 'Das Zahlungsdatum liegt in einem festgeschriebenen Zeitraum. Bitte den Zeitraum zuerst entsperren oder ein Datum in einem offenen Zeitraum wählen.' : 'Beleg nicht gespeichert: die Angaben sind formal ungültig.', codes: v2.codes }), {
+          status: gesperrt ? 409 : 400,
+          headers: { ...cors, 'Content-Type': 'application/json' }
+        });
+      }
+      if (v2 && v2.felder) Object.assign(metadata.fields, v2.felder);
+
       const firestoreRes = await fetch(firestoreUrl, {
         method: 'PATCH',
         headers: {
@@ -3350,7 +3363,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
       // Erst jetzt zählen — Beleg ist tatsächlich gespeichert
       await incrementUploadLimit(userId, env);
       // Steuerkern-Warnmodus (AP1.8): nur zählen/loggen, ändert nichts (fail-open, bei 'aus' ohne Kernaufruf)
-      steuerkernWarnung(env, 'beleg_manuell', { typ, betrag, mwst_satz, datum, bezahlt, bezahlt_am: bezahlt_am_client }, await steuerkernProfilLaden(env, userId, token));
+      steuerkernWarnung(env, 'beleg_manuell', { typ, betrag, mwst_satz, datum, bezahlt, bezahlt_am: bezahlt_am_client }, v2 ? (v2.profil || null) : await steuerkernProfilLaden(env, userId, token));
 
       // Als bereits bezahlt markiert → direkt als Tageseinnahme/-ausgabe verbuchen, damit der
       // Betrag ohne Umweg über den Chat im Monatsabschluss auftaucht. Mahnungen sind rein
@@ -3499,6 +3512,10 @@ async function handleDocument(body, env, cors = {}, ctx) {
         metadata.fields.betrag_netto = { doubleValue: nettoAusBrutto(parseFloat(betrag), mwst_satz) };
       }
 
+      // Modus 'an' (NP-05): steuer im selben PATCH; Upload-Weg lehnt nie ab (D7), Mängel werden UNBEKANNT
+      const v2 = await schreibwegV2(env, 'beleg_speichern', userId, token, { typ, betrag, mwst_satz, datum: metadata.fields.datum.stringValue, bezahlt, bezahlt_am: metadata.fields.bezahlt_am?.stringValue }, metadata.fields, { nieAblehnen: true });
+      if (v2 && v2.felder) Object.assign(metadata.fields, v2.felder);
+
       const firestoreRes = await fetch(firestoreUrl, {
         method: 'PATCH',
         headers: {
@@ -3522,7 +3539,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
       // Erst jetzt zählen — Beleg ist tatsächlich gespeichert
       await incrementUploadLimit(userId, env);
       // Steuerkern-Warnmodus (AP1.8): nur zählen/loggen, ändert nichts (fail-open, bei 'aus' ohne Kernaufruf)
-      steuerkernWarnung(env, 'beleg_speichern', { typ, betrag, mwst_satz, datum, bezahlt, bezahlt_am: bezahlt_am_client }, await steuerkernProfilLaden(env, userId, token));
+      steuerkernWarnung(env, 'beleg_speichern', { typ, betrag, mwst_satz, datum, bezahlt, bezahlt_am: bezahlt_am_client }, v2 ? (v2.profil || null) : await steuerkernProfilLaden(env, userId, token));
 
       // Als bereits bezahlt markiert UND mit Betrag hochgeladen → direkt als Tageseinnahme/
       // -ausgabe verbuchen, damit der Betrag ohne Umweg über den Chat im Monatsabschluss auftaucht.
@@ -6392,6 +6409,32 @@ export function steuerkernWarnung(env, weg, belegRoh, profil = null, optionen = 
   }
 }
 
+// ── Steuerkern im Modus 'an': Schreibweg v2 (NP-05, BP-13; regel/schreibweg-v2.js, migration-rollout.md 4.2) ─────────────────────────
+// Nur wenn env.STEUERKERN_MODUS = 'an' UND config/features.kern_max = 'an' (strengere Einstellung gewinnt). Sonst null, ohne jeden Lesezugriff
+// bei env 'aus'/'warnung': der Aufrufer schreibt exakt wie bisher. In 'an': Profil VOR dem Schreiben lesen, 'steuer' + 'schema_version' im
+// selben PATCH wie die unveränderten Legacy-Felder, D7 (Webhook/Upload/KI nie ablehnen, UNBEKANNT statt Fehler). Wirft nie: bei einem Fehler
+// null (Beleg wie heute, die Migration erfasst ihn später). Geloggt werden nur Weg, Kern-Version und Codes.
+// Fahrplan: aus -> warnung (1 bis 2 Wochen, Zähler steuerkernZaehler/Log steuerkern_warnung) -> an (config kern_max 'an' zuerst für alle aus,
+// dann env 'an'; Notaus in Sekunden: config kern_max 'aus' oder env zurück); siehe docs/regelbesteuerung/15-phase2/bp13-bericht.md.
+async function schreibwegV2(env, weg, userId, token, belegRoh, felder, { nieAblehnen = false } = {}) {
+  const wegKennung = String(weg || 'unbekannt').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 40) || 'unbekannt';
+  try {
+    if (steuerkernModus(env) !== 'an') return null;
+    const e = await v2Vorbereiten({
+      env, weg: wegKennung, uid: userId, token, felder, belegRoh, eingabeFn: steuerkernEingabeAusBeleg, stichtag: berlinDatumAlsString(),
+      fetchFn: (...a) => fetch(...a), nieAblehnen, zeit: new Date().toISOString(),
+    });
+    if (e && !e.aus) console.log('steuerkern_v2 ' + JSON.stringify({ weg: wegKennung, ablehnen: !!e.ablehnen, v2: !!e.steuer, kern: Steuerkern.KERN_VERSION, codes: (e.codes || []).slice(0, 30) }));
+    return e;
+  } catch (err) {
+    try {
+      steuerkernZaehler.fehler++;
+      console.warn('steuerkern_v2_fehler ' + JSON.stringify({ weg: wegKennung, fehlerart: String(err?.name || 'Error').replace(/[^A-Za-z0-9_]/g, '').slice(0, 40) }));
+    } catch { /* nichts */ }
+    return null;
+  }
+}
+
 /**
  * Legt einen Beleg OHNE aktive Nutzersession an (Aufrufer: Webhook-Handler). Nutzt einen
  * bereits geholten Admin-Token (getGoogleAccessToken(env, FIRESTORE_SCOPE)) statt eines
@@ -6459,6 +6502,10 @@ export async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
     }
   };
 
+  // Modus 'an' (NP-05): steuer im selben PATCH; Webhook-Trichter lehnt nie ab (D7), Mängel werden UNBEKANNT
+  const v2 = await schreibwegV2(env, belegData.quelle || 'webhook', userId, adminToken, { ...belegData, herkunft: 'plattform' }, metadata.fields, { nieAblehnen: true });
+  if (v2 && v2.felder) Object.assign(metadata.fields, v2.felder);
+
   const firestoreRes = await fetch(firestoreUrl, {
     method: 'PATCH',
     headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
@@ -6472,7 +6519,7 @@ export async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
     throw new Error(`writeBelegAsAdmin: Firestore-Write fehlgeschlagen (${firestoreRes.status} ${firestoreFehlerKlasse(errText)})`);
   }
   // Steuerkern-Warnmodus (AP1.8): deckt alle Plattform-Webhooks und den SumUp-Abruf ab; nur zählen/loggen
-  steuerkernWarnung(env, belegData.quelle || 'webhook', { ...belegData, herkunft: 'plattform' }, await steuerkernProfilLaden(env, userId, adminToken));
+  steuerkernWarnung(env, belegData.quelle || 'webhook', { ...belegData, herkunft: 'plattform' }, v2 ? (v2.profil || null) : await steuerkernProfilLaden(env, userId, adminToken));
 
   // Nur bei bezahlten Belegen — und in einem eigenen try/catch, damit ein Fehler hier NICHT
   // den bereits erfolgreich gespeicherten Beleg rückwirkend als Fehler meldet. Exakt dasselbe
