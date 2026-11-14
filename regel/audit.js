@@ -9,7 +9,9 @@ import { schreibe, vorbedingungAus } from './firestore.js';
 
 export const AUDIT_GENESIS = '0'.repeat(64);
 export const AUDIT_AKTIONEN = ['steuerprofil_anlegen', 'steuerprofil_eintrag', 'steuerprofil_jahr', 'steuerprofil_bestaetigen', 'steuerprofil_stammdaten',
-  'festschreibung', 'festschreibung_ruecknahme', 'migration_start', 'migration_abschluss', 'migration_ruecknahme'];
+  'festschreibung', 'festschreibung_ruecknahme', 'migration_start', 'migration_abschluss', 'migration_ruecknahme',
+  // BP-13 Teil 2: Ablauf der Festschreibung in Blöcken, Abbruch, Übernahme der Alt-Monatsabschlüsse, nachgeholte Sperre, Konsistenzwächter
+  'festschreibung_start', 'festschreibung_abbruch', 'festschreibung_entsperrt', 'festschreibung_legacy', 'festschreibung_sperre'];
 
 export function kopfPfad(uid) {
   return `users/${uid}/audit_v2/_kopf`;
@@ -65,4 +67,21 @@ export async function kettepruefen(eintraege) {
     erwartet++;
   }
   return { ok: true, laenge: erwartet - 1 };
+}
+
+// Mehrere Einträge in EINEM commit (z. B. Übernahme vieler Alt-Monatsabschlüsse): Einträge seq, seq+1, ... in Kettenreihenfolge, der Kopf
+// wird einmal mit dem letzten Hash geschrieben (Vorbedingung wie oben). eintraege: [{ aktion, ziel, vorher, nachher, details }]
+export async function auditKette(uid, kopfDok, eintraege, zeit) {
+  let kopf = kopfDok;
+  const writes = [];
+  let letzte = null;
+  for (const e of eintraege) {
+    const r = await auditSchreibvorgaenge(uid, kopf, { ...e, zeit });
+    writes.push(r.writes[1]);
+    letzte = r;
+    kopf = { daten: { seq: r.seq, hash: r.hash }, updateTime: null };
+  }
+  if (!letzte) return { writes: [], seq: naechsteSeq(kopfDok) - 1 };
+  writes.unshift(schreibe.setzen(kopfPfad(uid), { seq: letzte.seq, hash: letzte.hash, zeit }, vorbedingungAus(kopfDok)));
+  return { writes, seq: letzte.seq, hash: letzte.hash };
 }

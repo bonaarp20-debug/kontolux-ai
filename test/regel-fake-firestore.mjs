@@ -1,6 +1,7 @@
 // In-Memory-Firestore (REST v1, nur was regel/*.js nutzt) für die Tests der Endpunkte /steuerprofil, /festschreibung, /migration,
 // /admin/features. Keine Netzanfrage. Unterstützt: GET Dokument, GET Liste, :batchGet, :commit (atomar, updateMask, currentDocument
-// exists/updateTime, delete), :runQuery (collectionId, orderBy __name__, startAt, limit). Zählt jede Anfrage (Free-Plan-Grenze).
+// exists/updateTime, delete, updateTransforms arrayUnion/arrayRemove), :runQuery (collectionId, allDescendants, where fieldFilter EQUAL/
+// ARRAY_CONTAINS, orderBy __name__, startAt, limit), :batchWrite (delete), DELETE Dokument. Zählt jede Anfrage (Free-Plan-Grenze).
 // Haken: vorCommit(writes) für gleichzeitige Änderungen, fehler(url, init) für Fehlerinjektion.
 const PRAEFIX = 'projects/kontolux-ai/databases/(default)/documents/';
 const BASIS = 'https://firestore.googleapis.com/v1/' + PRAEFIX.slice(0, -1);
@@ -58,10 +59,32 @@ export function fakeFirestore() {
             else delete fields[k];
           }
         } else fields = structuredClone(w.update.fields || {});
+        // BP-13: updateTransforms appendMissingElements / removeAllFromArray (arrayUnion/arrayRemove)
+        for (const tr of w.updateTransforms || []) {
+          const vorhanden = fields[tr.fieldPath]?.arrayValue?.values || [];
+          const gleich = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+          if (tr.appendMissingElements) {
+            const neu = [...vorhanden];
+            for (const v of tr.appendMissingElements.values || []) if (!neu.some((x) => gleich(x, v))) neu.push(v);
+            fields[tr.fieldPath] = { arrayValue: { values: neu } };
+          } else if (tr.removeAllFromArray) {
+            fields[tr.fieldPath] = { arrayValue: { values: vorhanden.filter((x) => !(tr.removeAllFromArray.values || []).some((v) => gleich(x, v))) } };
+          }
+        }
         docs.set(p, { fields, createTime: alt ? alt.createTime : t, updateTime: t });
         ergebnisse.push({ updateTime: t });
       }
       return json({ writeResults: ergebnisse, commitTime: t });
+    }
+    if (rest === ':batchWrite' && methode === 'POST') {
+      log.methoden.push('batchWrite');
+      for (const w of body.writes) if (w.delete) docs.delete(pfadVon(w.delete));
+      return json({ writeResults: body.writes.map(() => ({})), status: body.writes.map(() => ({})) });
+    }
+    if (methode === 'DELETE') {
+      log.methoden.push('delete');
+      docs.delete(decodeURIComponent(rest.slice(1).split('?')[0]));
+      return json({});
     }
     const q = rest.indexOf(':runQuery');
     if (q >= 0 && methode === 'POST') {
@@ -70,7 +93,21 @@ export function fakeFirestore() {
       const sq = body.structuredQuery;
       const coll = sq.from[0].collectionId;
       const praefix = (eltern ? eltern + '/' : '') + coll + '/';
-      let treffer = [...docs.keys()].filter((p) => p.startsWith(praefix) && !p.slice(praefix.length).includes('/')).sort();
+      let treffer;
+      if (sq.from[0].allDescendants) {
+        // alle Sammlungen dieses Namens unterhalb des Elternpfads (beliebige Tiefe)
+        const basis = eltern ? eltern + '/' : '';
+        treffer = [...docs.keys()].filter((p) => { if (!p.startsWith(basis)) return false; const seg = p.slice(basis.length).split('/'); return seg.length >= 2 && seg.length % 2 === 0 && seg[seg.length - 2] === coll; }).sort();
+      } else treffer = [...docs.keys()].filter((p) => p.startsWith(praefix) && !p.slice(praefix.length).includes('/')).sort();
+      const ff = sq.where && sq.where.fieldFilter;
+      if (ff) {
+        treffer = treffer.filter((p) => {
+          const f = docs.get(p).fields[ff.field.fieldPath];
+          if (ff.op === 'ARRAY_CONTAINS') return (f?.arrayValue?.values || []).some((x) => JSON.stringify(x) === JSON.stringify(ff.value));
+          if (ff.op === 'EQUAL') return JSON.stringify(f) === JSON.stringify(ff.value);
+          return false;
+        });
+      }
       if (sq.startAt) {
         const ab = pfadVon(sq.startAt.values[0].referenceValue);
         treffer = treffer.filter((p) => (sq.startAt.before ? p >= ab : p > ab));
