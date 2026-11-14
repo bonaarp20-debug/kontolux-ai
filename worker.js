@@ -8,6 +8,11 @@ import { PDFDocument, PDFName, PDFDict, PDFStream, PDFRawStream, decodePDFRawStr
 import { WEGWERF_DOMAINS } from './wegwerf-domains.js';
 import { VPN_NETZE } from './vpn-netze.js';
 import * as Steuerkern from './steuerkern/index.js';
+// Regelbesteuerung Phase 2 (W0): Endpunkte als reine Module mit injizierter Firestore-Schicht (regel/*.js)
+import { regelSteuerprofil } from './regel/steuerprofil.js';
+import { regelFestschreibung } from './regel/festschreibung.js';
+import { regelMigration } from './regel/migration.js';
+import { regelAdminFeatures } from './regel/admin-features.js';
 
 const ALLOWED_ORIGINS = [
   'https://app.kontolux-ai.de',
@@ -354,6 +359,10 @@ const UID_LIMITS = {
   '/auszug-rueckmeldung':            { limit: 5, windowMs: 10 * 60 * 1000 },
   '/send-verification-email':        { limit: 5, windowMs: 10 * 60 * 1000 },
   '/send-email-change-verification': { limit: 5, windowMs: 10 * 60 * 1000 },
+  // Regelbesteuerung (W0): Profil selten, Festschreibung je Periode, Migration in Blöcken (5.000 Belege = rund 34 Aufrufe)
+  '/steuerprofil':                   { limit: 20, windowMs: 10 * 60 * 1000 },
+  '/festschreibung':                 { limit: 30, windowMs: 10 * 60 * 1000 },
+  '/migration':                      { limit: 120, windowMs: 10 * 60 * 1000 },
 };
 
 // ── Haupt-Router ──────────────────────────────────────────
@@ -546,7 +555,7 @@ export default {
       // ✅ /send-verification-email geschützt — E-Mail kommt aus dem verifizierten
       // Token, nie vom Client, sonst könnte jeder Verifizierungsmails an beliebige
       // Adressen auslösen (Spam-Vektor).
-      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/stripe-gebuehren', '/usage', '/abo', '/konto-archivieren', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/auszug-rueckmeldung', '/pruefer-zugang', '/freigabe-status'];
+      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/stripe-gebuehren', '/usage', '/abo', '/konto-archivieren', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/auszug-rueckmeldung', '/pruefer-zugang', '/freigabe-status', '/steuerprofil', '/festschreibung', '/migration'];
 
       if (protectedPaths.includes(url.pathname)) {
         try {
@@ -582,7 +591,7 @@ export default {
           // diese Prüfung könnte jeder unverifizierte Account mit gültigem Firebase-
           // Token die kostenpflichtigen Endpoints (Anthropic-API-Aufrufe, E-Mail-Versand)
           // direkt ansprechen und den Block umgehen.
-          const emailVerifiedRequiredPaths = ['/chat', '/image', '/document', '/frist', '/datev-export'];
+          const emailVerifiedRequiredPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/steuerprofil', '/festschreibung', '/migration'];
           if (emailVerifiedRequiredPaths.includes(url.pathname) && !verified.emailVerified) {
             const errorCors = getCORS(origin);
             return new Response(JSON.stringify({ error: 'E-Mail nicht verifiziert', code: 'email-not-verified' }), {
@@ -670,6 +679,11 @@ export default {
       if (url.pathname === '/send-password-reset') return handleSendPasswordReset(body, env, cors);
       if (url.pathname === '/send-email-change-verification') return handleSendEmailChangeVerification(verifiedEmail, body, env, cors);
       if (url.pathname === '/admin/seed-steuerrecht') return handleSeedSteuerrecht(request, body, env, cors);
+      // Regelbesteuerung Phase 2 (W0): Logik in regel/*.js; UID kommt aus dem geprüften Token (protectedPaths), Firestore per Dienstkonto
+      if (url.pathname === '/steuerprofil') return regelSteuerprofil(body, env, cors, regelAbhaengigkeiten(env));
+      if (url.pathname === '/festschreibung') return regelFestschreibung(body, env, cors, regelAbhaengigkeiten(env));
+      if (url.pathname === '/migration') return regelMigration(body, env, cors, regelAbhaengigkeiten(env));
+      if (url.pathname === '/admin/features') return regelAdminFeatures(request, authHeader, env, cors, regelAbhaengigkeiten(env));
       // Bewusst NICHT in protectedPaths: ein Betriebsprüfer hat keinen Firebase-Login, der
       // Zugriffsnachweis ist der Besitz des Tokens selbst (siehe handlePrueferDaten unten).
       if (url.pathname === '/pruefer-daten') return handlePrueferDaten(body, env, cors, authHeader);
@@ -6251,6 +6265,20 @@ async function firestoreGetDoc(docPath, token) {
 function generateWebhookSecret() {
   const bytes = crypto.getRandomValues(new Uint8Array(24));
   return base64UrlFromBytes(bytes);
+}
+
+// ── Regelbesteuerung Phase 2 (W0): Abhängigkeiten der Endpunkte unter regel/ ─────────────────────────────
+// Die Module unter regel/ kennen worker.js nicht; sie bekommen hier Token, Prüfungen und Datum. Firestore schreiben sie mit dem Dienstkonto
+// (Regeln: steuerprofil, festschreibung, migration, audit_v2 und config schreibt nur der Worker).
+function regelAbhaengigkeiten(env) {
+  return {
+    adminToken: () => getGoogleAccessToken(env, FIRESTORE_SCOPE),
+    verifiziere: (authHeader) => verifyFirebaseToken(authHeader, env),
+    istAdmin: (verified) => istAdmin(verified, env),
+    adminLog: (email, aktion, details) => adminLogEintragen(env, email, aktion, '-', details),
+    storageUrlOk: storageUrlGehoertDemNutzer,
+    heute: () => berlinDatumAlsString(),
+  };
 }
 
 // ── Steuerkern im WARNMODUS (Regelbesteuerung AP1.8, Konzept 2.3/2.5/2.6) ───────────────────────────

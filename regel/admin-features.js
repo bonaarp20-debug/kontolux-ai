@@ -1,0 +1,53 @@
+// regel/admin-features.js: POST /admin/features (W0): liest und setzt den Notausschalter config/features.
+// Muster wie /admin/speicher-umzug: Berechtigung im Worker (verifiziertes Konto, echt bestätigte E-Mail, Adresse in ADMIN_EMAILS), Grund
+// mindestens 5 Zeichen, Eintrag ins Admin-Protokoll. Das Dokument lesen alle angemeldeten Konten (Firestore-Regeln), darum steht darin weder
+// eine E-Mail-Adresse noch der Grund (beides nur im Admin-Protokoll).
+//   { lesen: true }                                                    -> aktueller Stand
+//   { kern_max?: 'aus'|'schatten'|'an', features?: { name: 'aus'|'an'|null }, grund }   null entfernt einen Eintrag
+import { antwort, istObjekt, CONFIG_PFAD, configBereinigen, KERN_MAX_WERTE, FEATURE_WERTE, FEATURE_NAME_MUSTER, FEATURES_MAX, jetztIso, schichtFuer, regelFehler } from './gemeinsam.js';
+import { schreibe, vorbedingungAus } from './firestore.js';
+import { kernModusCacheLeeren } from './kern-modus.js';
+
+// Startdokument, wenn noch keines existiert: alles aus (migration-rollout.md 6.1 Schritt 3, Endpunkte tot geschaltet)
+export const CONFIG_START = Object.freeze({ kern_max: 'aus', features: Object.freeze({ steuerprofil: 'an', migration: 'aus', festschreibung: 'aus' }) });
+
+export async function regelAdminFeatures(request, authHeader, env, cors = {}, deps = {}) {
+  const verified = await deps.verifiziere(authHeader);
+  if (!deps.istAdmin(verified)) return antwort({ error: 'forbidden' }, 403, cors);
+  const body = await request.json().catch(() => null);
+  if (!istObjekt(body)) return antwort({ ok: false, fehler: [{ code: 'BODY_UNGUELTIG' }] }, 400, cors);
+  try {
+    const fs = await schichtFuer(deps);
+    const altDok = await fs.get(CONFIG_PFAD);
+    const alt = configBereinigen(altDok?.daten);
+    if (body.lesen === true) return antwort({ ok: true, vorhanden: !!altDok, config: alt, roh_version: altDok?.daten?.version ?? null }, 200, cors);
+
+    if (!(typeof body.grund === 'string' && body.grund.trim().length >= 5 && body.grund.length <= 500)) return antwort({ ok: false, fehler: [{ code: 'GRUND_ZU_KURZ' }] }, 400, cors);
+    if (Object.keys(body).some((k) => !['kern_max', 'features', 'grund'].includes(k))) return antwort({ ok: false, fehler: [{ code: 'FELD_NICHT_ERLAUBT' }] }, 400, cors);
+    if (body.kern_max !== undefined && !KERN_MAX_WERTE.includes(body.kern_max)) return antwort({ ok: false, fehler: [{ code: 'KERN_MAX_UNGUELTIG' }] }, 400, cors);
+    if (body.features !== undefined && !istObjekt(body.features)) return antwort({ ok: false, fehler: [{ code: 'FEATURES_UNGUELTIG' }] }, 400, cors);
+    const basis = alt || { kern_max: CONFIG_START.kern_max, features: { ...CONFIG_START.features } };
+    const features = { ...basis.features };
+    for (const [k, v] of Object.entries(body.features || {})) {
+      if (!FEATURE_NAME_MUSTER.test(k) || !(v === null || FEATURE_WERTE.includes(v))) return antwort({ ok: false, fehler: [{ code: 'FEATURE_UNGUELTIG', name: String(k).slice(0, 40) }] }, 400, cors);
+      if (v === null) delete features[k]; else features[k] = v;
+    }
+    if (Object.keys(features).length > FEATURES_MAX) return antwort({ ok: false, fehler: [{ code: 'ZU_VIELE_FEATURES' }] }, 400, cors);
+    const zeit = jetztIso(deps);
+    const neu = {
+      kern_max: body.kern_max ?? basis.kern_max, features, geaendert_am: zeit,
+      version: (Number.isSafeInteger(altDok?.daten?.version) ? altDok.daten.version : 0) + 1, schema: 1,
+    };
+    await fs.commit([schreibe.setzen(CONFIG_PFAD, neu, vorbedingungAus(altDok))]);
+    kernModusCacheLeeren();
+    // Protokoll nach dem Schreiben; ein Protokollfehler macht die bereits gespeicherte Änderung nicht rückgängig, wird aber gemeldet
+    let protokoll = true;
+    try {
+      if (deps.adminLog) await deps.adminLog(verified.email, 'features_geaendert', { grund: body.grund.trim(), vorher: alt, nachher: { kern_max: neu.kern_max, features }, version: neu.version });
+    } catch { protokoll = false; console.warn('regel_admin_features_protokoll_fehler'); }
+    if (!protokoll) return antwort({ ok: true, config: { kern_max: neu.kern_max, features }, version: neu.version, protokoll: false }, 200, cors);
+    return antwort({ ok: true, config: { kern_max: neu.kern_max, features }, version: neu.version }, 200, cors);
+  } catch (e) {
+    return regelFehler(e, 'admin_features', cors);
+  }
+}
