@@ -687,7 +687,7 @@ export default {
       // Regelbesteuerung Phase 2 (W0): Logik in regel/*.js; UID kommt aus dem geprüften Token (protectedPaths), Firestore per Dienstkonto
       if (url.pathname === '/steuerprofil') return regelSteuerprofil(body, env, cors, regelAbhaengigkeiten(env));
       if (url.pathname === '/festschreibung' || url.pathname === '/entsperren') return handleFestschreiben(url.pathname, body, env, cors);
-      if (url.pathname === '/migration') return regelMigration(body, env, cors, regelAbhaengigkeiten(env));
+      if (url.pathname === '/migration') return handleMigrationAusfuehren(body, env, cors);
       if (url.pathname === '/admin/features') return regelAdminFeatures(request, authHeader, env, cors, regelAbhaengigkeiten(env));
       // Bewusst NICHT in protectedPaths: ein Betriebsprüfer hat keinen Firebase-Login, der
       // Zugriffsnachweis ist der Besitz des Tokens selbst (siehe handlePrueferDaten unten).
@@ -789,6 +789,27 @@ const DATEI_ERLAUBTE_TYPEN = ['application/pdf', 'image/jpeg', 'image/jpg', 'ima
 // das (j/n)-Gate vor dem Speichern liegt im Client.
 const KI_MWST_ERLAUBT = ['19', '7', '0', 'keine', 'reverse_charge'];
 const KI_DOKUMENT_TYPEN = ['rechnung_eingehend', 'rechnung_ausgehend'];
+// P3 (Konzept 9.1, E1): DOKUMENT_SPEICHERN darf statt mwst_satz die Steuerwahl des Kerns tragen (steuerwahl=...). Der Client kennt nur mwst_satz;
+// deshalb bildet der Filter beide Felder aufeinander ab und schreibt die Zeile mit beiden zurück (Widerspruch: abgelehnt). weiss_nicht heißt
+// Steuerfall offen (mwst_satz entfällt). Reverse Charge nur bei Eingangsrechnungen (Land wählt der Nutzer später, P4 ist BP-22B).
+const KI_STEUERWAHL_ERLAUBT = {
+  inland_19: { mwst: '19' }, inland_7: { mwst: '7' }, inland_0_pv: { mwst: '0', nur: 'rechnung_ausgehend' },
+  ohne_ust_ausgewiesen: { mwst: 'keine' }, reverse_charge_eu: { mwst: 'reverse_charge', nur: 'rechnung_eingehend' },
+  reverse_charge_drittland: { mwst: 'reverse_charge', nur: 'rechnung_eingehend' }, weiss_nicht: { mwst: null },
+};
+// Prüft steuerwahl/mwst_satz einer DOKUMENT_SPEICHERN-Zeile. Ergebnis { ok, rest } (rest = Parameterteil mit abgeglichenen Feldern) oder { ok: false }.
+export function kiSteuerwahlAbgleichen(rest) {
+  const typ = (kiWert(rest, 'typ') || 'rechnung_eingehend');
+  const wahl = kiWert(rest, 'steuerwahl');
+  const satzRoh = kiWert(rest, 'mwst_satz');
+  const satz = satzRoh === null || satzRoh === '' ? null : satzRoh.toLowerCase();
+  if (wahl === null || wahl === '') return { ok: true, rest }; // alter Befehl (nur mwst_satz): unverändert, der Client liest mwst_satz
+  const def = Object.prototype.hasOwnProperty.call(KI_STEUERWAHL_ERLAUBT, wahl) ? KI_STEUERWAHL_ERLAUBT[wahl] : null;
+  if (!def || (def.nur && def.nur !== typ)) return { ok: false };
+  if (satz !== null && satz !== def.mwst) return { ok: false };
+  const ohneSatz = rest.split(',').filter((t) => !/^\s*mwst_satz\s*=/i.test(t)).join(',');
+  return { ok: true, rest: def.mwst === null ? ohneSatz : `${ohneSatz},mwst_satz=${def.mwst}` };
+}
 function kiWert(rest, schluessel) { const m = rest.match(new RegExp('(?:^|,)\\s*' + schluessel + '=([^,]*)', 'i')); return m ? m[1].trim() : null; }
 function kiBetragOk(v) { const n = parseFloat(String(v).replace(',', '.')); return Number.isFinite(n) && n > 0 && n <= BELEG_MAX_BETRAG; }
 
@@ -887,6 +908,10 @@ export function pruefeBetragZeile(line) {
     if (!kategorie) {
       return line.slice(0, dokSpeichernMatch.index) + 'Ich kann dieses Dokument noch nicht buchen — mir fehlt die Kategorie (z.B. Bürobedarf, Software/EDV/SaaS, Werbekosten, Reisekosten). Welche passt hier am besten?';
     }
+    // P3 (E1): steuerwahl neben mwst_satz
+    const sw = kiSteuerwahlAbgleichen(dokSpeichernMatch[1]);
+    if (!sw.ok) return line.slice(0, dokSpeichernMatch.index) + 'Ich kann dieses Dokument nicht buchen: Die Angabe zur Umsatzsteuer ist unzulässig oder widersprüchlich. Bitte prüfe die Angaben im Beleg.';
+    if (sw.rest !== dokSpeichernMatch[1]) return line.slice(0, dokSpeichernMatch.index) + 'DOKUMENT_SPEICHERN:' + sw.rest;
   }
   const profilUpdateMatch = line.match(/PROFIL_UPDATE:(.*)$/i);
   if (profilUpdateMatch) return line.slice(0, profilUpdateMatch.index) + 'PROFIL_UPDATE:' + bereinigeProfilUpdate(profilUpdateMatch[1]);
@@ -6017,6 +6042,11 @@ export function steuerkernWarnung(env, weg, belegRoh, profil = null, optionen = 
 
 // ── Festschreibung (BP-13, PF-080): /festschreibung (alle Aktionen, regel/festschreibung.js) und /entsperren (Konzept 10.3: Rücknahme mit
 // Grund; gleichbedeutend mit aktion 'ruecknahme', mit aktion 'entsperren' die Fortsetzung der Entsperrblöcke). UID kommt aus dem Token (Router).
+// E1 (PF-083, Zuruf BP-14): Hülle für POST /migration (Migration ausführen, Rückweg, Klärung, Kenntnis); Logik in regel/migration.js.
+async function handleMigrationAusfuehren(body, env, cors) {
+  return regelMigration(body, env, cors, regelAbhaengigkeiten(env));
+}
+
 async function handleFestschreiben(pfad, body, env, cors) {
   const b = pfad === '/entsperren' ? { ...(body || {}), aktion: body && body.aktion === 'entsperren' ? 'entsperren' : 'ruecknahme' } : body;
   return regelFestschreibung(b, env, cors, regelAbhaengigkeiten(env));

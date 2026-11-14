@@ -146,6 +146,12 @@ export function neuesProfil(aktion, body, alt, kontext) {
     if (!istText(body.entsperr_grund, 500)) return { fehler: [F('ENTSPERR_GRUND_UNGUELTIG')] };
     opt.entsperrGrund = body.entsperr_grund;
   }
+  // E1 (Zuruf BP-16): Tag der Erklärung des Verzichts nach § 19 Abs. 3 UStG (grund option_19_3). Der Kern (pruefeWechsel) prüft damit die Frist
+  // (OPTION_FRIST_ABGELAUFEN) und setzt option_19_3.erklaert_am; ohne das Datum lehnt profilPruefen den Verzicht ab (OPTION_UNGUELTIG).
+  if (body.erklaerungsdatum !== undefined) {
+    if (!istDatum(body.erklaerungsdatum) || (kontext.heute && body.erklaerungsdatum > kontext.heute)) return { fehler: [F('ERKLAERUNGSDATUM_UNGUELTIG')] };
+    opt.erklaerungsdatum = body.erklaerungsdatum;
+  }
 
   if (aktion === 'anlegen') {
     if (alt && alt.bestaetigt_am) return { fehler: [F('PROFIL_BEREITS_BESTAETIGT')], status: 409 };

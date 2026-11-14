@@ -11,7 +11,9 @@ export const AUDIT_GENESIS = '0'.repeat(64);
 export const AUDIT_AKTIONEN = ['steuerprofil_anlegen', 'steuerprofil_eintrag', 'steuerprofil_jahr', 'steuerprofil_bestaetigen', 'steuerprofil_stammdaten',
   'festschreibung', 'festschreibung_ruecknahme', 'migration_start', 'migration_abschluss', 'migration_ruecknahme',
   // BP-13 Teil 2: Ablauf der Festschreibung in Blöcken, Abbruch, Übernahme der Alt-Monatsabschlüsse, nachgeholte Sperre, Konsistenzwächter
-  'festschreibung_start', 'festschreibung_abbruch', 'festschreibung_entsperrt', 'festschreibung_legacy', 'festschreibung_sperre', 'festschreibung_abgegeben'];
+  'festschreibung_start', 'festschreibung_abbruch', 'festschreibung_entsperrt', 'festschreibung_legacy', 'festschreibung_sperre', 'festschreibung_abgegeben',
+  // E1 (Zuruf BP-14): Sammelklärung unklarer migrierter Belege (regel/migration.js aktion 'klaerung')
+  'migration_klaerung'];
 
 export function kopfPfad(uid) {
   return `users/${uid}/audit_v2/_kopf`;

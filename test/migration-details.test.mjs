@@ -83,7 +83,10 @@ test('Wirkungsloses Storno-Dokument (keine festgeschriebenen Monate): wirkungslo
   assert.equal(m.zaehler.zurueckgestellt || 0, 0, 'ohne Festschreibung kontextfrei');
   const s1 = fs.lies(`users/${UID}/dokumente/s1`).steuer;
   assert.equal(s1.wirkungslos, true); assert.equal(s1.beleg_art, 'storno'); assert.equal(s1.wirkdatum, undefined);
-  assert.equal(fs.lies(`users/${UID}/dokumente/r1`).steuer.wirkungslos, true, 'storniertes Original wirkungslos');
+  // E1 nach K-B (Kern 2026.11.14-2, Standardentscheidung 1): eine BEZAHLTE, stornierte Rechnung ohne erfasste Rückzahlung bleibt stehen
+  const r1 = fs.lies(`users/${UID}/dokumente/r1`).steuer;
+  assert.equal(r1.wirkungslos, undefined, 'bezahltes storniertes Original bleibt in USt und EÜR');
+  assert.ok((r1.status_hinweise || []).includes('W_STORNO_BEZAHLT_OHNE_RUECKZAHLUNG'), 'Hinweis Rückzahlung erfassen');
 });
 
 test('Webhook-Einnahmen 3.8.6: plattform_setting mit Evidenz aus der Integrations-Einstellung (nur mwst_setting gelesen), Abweichung gekennzeichnet', async () => {
