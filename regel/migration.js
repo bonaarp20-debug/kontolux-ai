@@ -112,14 +112,16 @@ export function festMonateAus(abschluesse, festschreibungen) {
 }
 
 // Satz je Plattform aus den Integrations-Einstellungen (users/{uid}/webhook_secrets/{plattform}). Gelesen wird NUR mwst_setting; Geheimnisse
-// und alle übrigen Felder werden verworfen und nie gespeichert. Ohne Eintrag gilt im Worker der Standard '19' (resolveMwstKategorie).
+// und alle übrigen Felder werden verworfen und nie gespeichert. R2: Ohne gewählten Satz (fehlt, 'offen', unbekannt) gibt es keinen Standard
+// mehr (resolveMwstKategorie in worker.js nimmt keinen Satz an); die Plattform fehlt dann in der Liste, die Evidenz zeigt
+// PLATTFORM_EINSTELLUNG_FEHLT statt einer erfundenen Einstellung '19'.
 export function plattformSaetzeAus(dokumente) {
   const m = {};
   for (const d of dokumente || []) {
     const id = String(d?.pfad || '').split('/').pop();
     if (!PLATTFORM_ID_MUSTER.test(id)) continue;
     const s = d?.daten?.mwst_setting;
-    m[id] = PLATTFORM_SAETZE.includes(s) ? s : '19';
+    if (PLATTFORM_SAETZE.includes(s)) m[id] = s;
   }
   return m;
 }

@@ -369,6 +369,8 @@ const UID_LIMITS = {
   '/festschreibung':                 { limit: 30, windowMs: 10 * 60 * 1000 },
   '/entsperren':                     { limit: 10, windowMs: 10 * 60 * 1000 },
   '/migration':                      { limit: 120, windowMs: 10 * 60 * 1000 },
+  // R2: Zustimmungsnachweis (Dialog, Registrierung, Wiederholung beim nächsten Start)
+  '/agb-zustimmung':                 { limit: 10, windowMs: 10 * 60 * 1000 },
 };
 
 // ── Haupt-Router ──────────────────────────────────────────
@@ -561,7 +563,7 @@ export default {
       // ✅ /send-verification-email geschützt — E-Mail kommt aus dem verifizierten
       // Token, nie vom Client, sonst könnte jeder Verifizierungsmails an beliebige
       // Adressen auslösen (Spam-Vektor).
-      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/stripe-gebuehren', '/usage', '/abo', '/konto-archivieren', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/auszug-rueckmeldung', '/pruefer-zugang', '/freigabe-status', '/steuerprofil', '/festschreibung', '/entsperren', '/migration'];
+      const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/stripe-gebuehren', '/usage', '/abo', '/konto-archivieren', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/auszug-rueckmeldung', '/pruefer-zugang', '/freigabe-status', '/steuerprofil', '/festschreibung', '/entsperren', '/migration', '/agb-zustimmung'];
 
       if (protectedPaths.includes(url.pathname)) {
         try {
@@ -597,7 +599,7 @@ export default {
           // diese Prüfung könnte jeder unverifizierte Account mit gültigem Firebase-
           // Token die kostenpflichtigen Endpoints (Anthropic-API-Aufrufe, E-Mail-Versand)
           // direkt ansprechen und den Block umgehen.
-          const emailVerifiedRequiredPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/steuerprofil', '/festschreibung', '/entsperren', '/migration'];
+          const emailVerifiedRequiredPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/steuerprofil', '/festschreibung', '/entsperren', '/migration', '/agb-zustimmung'];
           if (emailVerifiedRequiredPaths.includes(url.pathname) && !verified.emailVerified) {
             const errorCors = getCORS(origin);
             return new Response(JSON.stringify({ error: 'E-Mail nicht verifiziert', code: 'email-not-verified' }), {
@@ -689,6 +691,8 @@ export default {
       if (url.pathname === '/steuerprofil') return handleSteuerprofil(body, env, cors);
       if (url.pathname === '/festschreibung' || url.pathname === '/entsperren') return handleFestschreiben(url.pathname, body, env, cors);
       if (url.pathname === '/migration') return handleMigrationAusfuehren(body, env, cors);
+      // R2: Zustimmungsnachweis zu den Nutzungsbedingungen (Serverzeit, nur Worker schreibt users/{uid}/agb_zustimmung)
+      if (url.pathname === '/agb-zustimmung') return handleAgbZustimmung(body, env, cors);
       if (url.pathname === '/admin/features') return regelAdminFeatures(request, authHeader, env, cors, regelAbhaengigkeiten(env));
       // Bewusst NICHT in protectedPaths: ein Betriebsprüfer hat keinen Firebase-Login, der
       // Zugriffsnachweis ist der Besitz des Tokens selbst (siehe handlePrueferDaten unten).
@@ -4825,6 +4829,8 @@ const ARCHIV_SAMMLUNGEN = [
   'audit_log', 'angebote', 'kunden', 'zeiteintraege', 'reisekosten', 'sammelbelege',
   'stripe_links', 'stripe_rechnungen', 'eigenefristen', 'absender_kategorien',
   'webhook_secrets', 'webhook_processed', 'profil',
+  // R2: Zustimmungsnachweise zu den Nutzungsbedingungen: bleiben mit dem Konto im Archiv und gehen mit dem Löschlauf (r2-bericht.md 4.4)
+  'agb_zustimmung',
   // BP-13: steuerprofil, festschreibung, audit_v2, migration, rechnungsnummern (Regelbesteuerung). Ihre Unterkollektionen
   // steuerprofil/{doc}/verlauf und dokumente/{id}/versionen räumt archivDatenLoeschen eigens ab (regel/archiv.js)
   ...REGEL_SAMMLUNGEN
@@ -6088,6 +6094,68 @@ async function handleSteuerprofil(body, env, cors) {
   return antwortSp;
 }
 
+// ── R2: Zustimmung zu den Nutzungsbedingungen beweisbar speichern (Anwaltsfragen Frage 5, Bedingung 3) ─────────────────────────────────
+// POST /agb-zustimmung { version, quelle: 'dialog'|'registrierung', anfrage_id, unternehmer_bestaetigt? } schreibt mit der Uhr des Workers
+// (nicht der des Browsers) users/{uid}/agb_zustimmung/{id}. Nur der Worker schreibt dort (firestore.rules: write false), die UID kommt aus
+// dem geprüften Token (protectedPaths, E-Mail-Pflicht, UID_LIMITS). Idempotent über anfrage_id: die Dokument-ID ist ein Hash aus UID und
+// anfrage_id, angelegt nur, wenn sie noch nicht existiert (atomar, auch bei zwei gleichzeitigen Wiederholungen nur ein Eintrag).
+// profil/settings.agbVersion setzt weiter die App (Freischaltung im Lader); der Worker ändert es nicht (Begründung r2-bericht.md 4.3).
+// Geprüft wird die Form der Fassung (JJJJ-MM-TT-n, Datum gültig, nicht nach heute); welche Fassung gilt, bestimmt die App (AGB_VERSION).
+export const AGB_ZUSTIMMUNG_QUELLEN = Object.freeze(['dialog', 'registrierung']);
+const AGB_FASSUNG_MUSTER = /^(\d{4})-(\d{2})-(\d{2})-([1-9]\d{0,2})$/;
+const AGB_ANFRAGE_ID_MUSTER = /^[A-Za-z0-9_-]{8,64}$/;
+export function agbZustimmungPruefen(body, heute) {
+  const b = body && typeof body === 'object' ? body : {};
+  const m = typeof b.version === 'string' ? AGB_FASSUNG_MUSTER.exec(b.version) : null;
+  if (!m) return { code: 'VERSION_UNGUELTIG' };
+  const datum = `${m[1]}-${m[2]}-${m[3]}`;
+  const d = new Date(`${datum}T00:00:00Z`);
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== datum || datum > heute) return { code: 'VERSION_UNGUELTIG' };
+  if (!AGB_ZUSTIMMUNG_QUELLEN.includes(b.quelle)) return { code: 'QUELLE_UNGUELTIG' };
+  if (typeof b.anfrage_id !== 'string' || !AGB_ANFRAGE_ID_MUSTER.test(b.anfrage_id)) return { code: 'ANFRAGE_ID_UNGUELTIG' };
+  if (b.unternehmer_bestaetigt !== undefined && typeof b.unternehmer_bestaetigt !== 'boolean') return { code: 'UNTERNEHMER_UNGUELTIG' };
+  if (b.quelle === 'registrierung' && b.unternehmer_bestaetigt !== true) return { code: 'UNTERNEHMER_FEHLT' };
+  return { ok: true, version: b.version, quelle: b.quelle, anfrage_id: b.anfrage_id, unternehmer_bestaetigt: b.quelle === 'registrierung' ? true : undefined };
+}
+export async function handleAgbZustimmung(body, env, cors, deps = {}) {
+  const json = (status, daten) => new Response(JSON.stringify(daten), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
+  const uid = body && typeof body.userId === 'string' ? body.userId : '';
+  if (!uid) return json(401, { error: 'Unauthorized' });
+  const jetzt = deps.jetzt ? deps.jetzt() : new Date();
+  const p = agbZustimmungPruefen(body, berlinDatumAlsString(jetzt));
+  if (!p.ok) return json(400, { error: 'Ungültige Angaben zur Zustimmung.', code: p.code });
+  try {
+    const token = deps.adminToken ? await deps.adminToken() : await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const id = 'z' + (await sha256Hex(`${uid}|${p.anfrage_id}`)).slice(0, 40);
+    const pfad = `users/${encodeURIComponent(uid)}/agb_zustimmung/${id}`;
+    const basis = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/${pfad}`;
+    const zeitpunkt = jetzt.toISOString();
+    const fields = {
+      version: { stringValue: p.version },
+      zeitpunkt: { timestampValue: zeitpunkt },
+      quelle: { stringValue: p.quelle },
+      anfrage_id: { stringValue: p.anfrage_id },
+      zeitquelle: { stringValue: 'worker' },
+      ...(p.unternehmer_bestaetigt === true ? { unternehmer_bestaetigt: { booleanValue: true } } : {}),
+    };
+    const res = await fetch(`${basis}?currentDocument.exists=false`, {
+      method: 'PATCH', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ fields })
+    });
+    if (res.status === 409 || res.status === 412) {
+      // Wiederholung derselben anfrage_id: nur bestätigen, wenn Fassung und Quelle gleich sind (nichts überschreiben)
+      const alt = await firestoreGetDoc(pfad, token);
+      const f = alt?.fields || {};
+      if (firestoreValue(f.version) === p.version && firestoreValue(f.quelle) === p.quelle) return json(200, { ok: true, idempotent: true, id, zeitpunkt: firestoreValue(f.zeitpunkt) || null });
+      return json(409, { error: 'Diese Anfrage wurde schon mit anderen Angaben gespeichert.', code: 'ANFRAGE_ID_KONFLIKT' });
+    }
+    if (!res.ok) throw new Error(`Firestore ${res.status}`);
+    return json(200, { ok: true, id, zeitpunkt });
+  } catch (e) {
+    console.warn('agb_zustimmung_fehler ' + JSON.stringify({ fehlerart: String(e?.name || 'Error').replace(/[^A-Za-z0-9_]/g, '').slice(0, 40) }));
+    return json(500, { error: 'Die Zustimmung konnte gerade nicht gespeichert werden.', code: 'SPEICHERN_FEHLGESCHLAGEN' });
+  }
+}
+
 async function handleFestschreiben(pfad, body, env, cors) {
   const b = pfad === '/entsperren' ? { ...(body || {}), aktion: body && body.aktion === 'entsperren' ? 'entsperren' : 'ruecknahme' } : body;
   return regelFestschreibung(b, env, cors, regelAbhaengigkeiten(env));
@@ -6239,8 +6307,10 @@ function webhookTestmodus(env) {
 // der Verkäufer erhält eine Gutschrift über seinen Anteil. Einnahme des Nutzers ist deshalb NICHT
 // der Kundenpreis, sondern sein Netto-Anteil — bei Regelbesteuerung zuzüglich der USt, die die
 // Plattform auf der Gutschrift ausweist (Kleinunternehmer: netto = Auszahlung).
-function plattformAnteilBrutto(nettoAnteil, mwstSetting) {
-  const faktor = mwstSetting === 'keine' ? 1 : (mwstSetting === '7' ? 1.07 : 1.19);
+// R2: Nur ein ausdrücklich gewählter Satz (19 oder 7) erhöht den Anteil um die USt der Gutschrift. Ohne Wahl ('offen', fehlt, unbekannt)
+// wird der Netto-Anteil gebucht, ohne einen Satz anzunehmen; der Beleg trägt dann den Hinweis SATZ_OFFEN_HINWEIS (resolveMwstKategorie).
+export function plattformAnteilBrutto(nettoAnteil, mwstSetting) {
+  const faktor = mwstSetting === '19' ? 1.19 : (mwstSetting === '7' ? 1.07 : 1);
   return Math.round(Math.abs(nettoAnteil) * faktor * 100) / 100;
 }
 
@@ -6420,6 +6490,9 @@ const WEBHOOK_SECRET_FELDER = {
  * @param {string} requestOrigin - `new URL(request.url).origin`, für die angezeigte
  *   Webhook-URL — bewusst zur Laufzeit ermittelt statt hart codiert.
  */
+// Erlaubte Werte der Integrations-Einstellung (R2): 19, 7, 'keine' (0 %, Kleinunternehmer) und 'offen' (keine Angabe, Beleg bleibt offen)
+export const MWST_SETTINGS_ERLAUBT = Object.freeze(['19', '7', 'keine', 'offen']);
+
 async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin) {
   const { action, plattform, mwstSetting } = body;
   if (!verifiedUid) {
@@ -6468,10 +6541,9 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
         secretPreview: felder[0] ? secretPreviews[felder[0].firestoreFeld] : null,
         secretPreviews,
         webhookUrl: urlSecret ? `${requestOrigin}/webhook/${plattform}/${verifiedUid}/${urlSecret}` : null,
-        // Default '19' (nicht null) — deckt sich mit resolveMwstKategorie()s eigenem Default,
-        // damit die UI schon beim ersten Laden denselben Wert vorausgewählt zeigt, den der
-        // Worker auch tatsächlich verwenden würde, falls nie explizit gespeichert wurde.
-        mwstSetting: firestoreValue(fields.mwst_setting) || '19',
+        // R2: kein Standardwert mehr. null = noch nichts gewählt: die App zeigt "Bitte wählen", der Worker legt Belege
+        // ohne Satz an (resolveMwstKategorie, satz_offen). Gespeicherte Werte werden unverändert geliefert.
+        mwstSetting: firestoreValue(fields.mwst_setting) || null,
         ...(plattform === 'ablefy' ? { verkaufsmodell: firestoreValue(fields.verkaufsmodell) || null } : {}),
         letzterEmpfang: firestoreValue(fields.letzter_empfang)
           ? { zeit: firestoreValue(fields.letzter_empfang), art: firestoreValue(fields.letzter_empfang_art) || 'nachricht', info: firestoreValue(fields.letzter_empfang_info) || '' }
@@ -6545,13 +6617,17 @@ async function handleWebhookSettings(body, env, cors, verifiedUid, requestOrigin
       const now = new Date().toISOString();
       const createdAt = firestoreValue(existing?.fields?.created_at) || now;
       // Gültige Werte wie im Frontend-Select — bei ungültigem/fehlendem Wert den bisher
-      // gespeicherten behalten (PATCH ersetzt das komplette Dokument, siehe Kommentar oben),
-      // sonst Default '19' für einen erstmals gespeicherten Datensatz.
-      const erlaubteMwstSettings = ['19', '7', 'keine'];
+      // gespeicherten behalten (PATCH ersetzt das komplette Dokument, siehe Kommentar oben).
+      // R2 (Anwaltsfragen Frage 2): kein Standard '19' mehr. Ohne gültige Wahl und ohne gespeicherten Satz wird nicht gespeichert
+      // (Pflichtauswahl, 400 MWST_PFLICHT); 'offen' ist eine ausdrückliche Wahl "keine Angabe, Beleg bleibt offen".
+      const erlaubteMwstSettings = MWST_SETTINGS_ERLAUBT;
       const bisherigesMwstSetting = firestoreValue(existing?.fields?.mwst_setting);
       const neuesMwstSetting = erlaubteMwstSettings.includes(mwstSetting)
         ? mwstSetting
-        : (bisherigesMwstSetting || '19');
+        : (erlaubteMwstSettings.includes(bisherigesMwstSetting) ? bisherigesMwstSetting : null);
+      if (!neuesMwstSetting) {
+        return new Response(JSON.stringify({ error: 'Bitte wähle den Umsatzsteuersatz für diese Integration.', code: 'MWST_PFLICHT' }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+      }
 
       const feldWerte = {};
       for (const f of felder) {
@@ -6687,18 +6763,37 @@ function unixToDatumString(unixSeconds) {
 
 /**
  * Wandelt die vom Nutzer in den Integrationen-Settings gewählte MwSt-Einstellung
- * ('19'|'7'|'keine') in das Feldpaar { mwst_satz, kategorie } um, das ein Beleg-Dokument
+ * ('19'|'7'|'keine'|'offen') in das Feldpaar { mwst_satz, kategorie } um, das ein Beleg-Dokument
  * braucht. `kategorie` ist der Schlüssel in SACHKONTO_MAPPING (worker.js oben,
- * resolveSachkonto()) — dieselbe Tabelle wie im DATEV-Export, KEIN eigenes Mapping. Default
- * '19' (Regelsteuersatz) für Bestandsnutzer, die die Integration vor diesem Feature
- * konfiguriert haben und deshalb noch kein mwst_setting gespeichert haben.
+ * resolveSachkonto()) — dieselbe Tabelle wie im DATEV-Export, KEIN eigenes Mapping.
+ * R2 (Anwaltsfragen Frage 2, Fehlstelle 1): Eine fehlende Einstellung ist KEINE Wahl. Ohne
+ * gespeicherten Satz (Bestandsintegrationen aus der Zeit vor der Auswahl), bei 'offen' ("keine
+ * Angabe") und bei jedem unbekannten Wert nimmt der Worker keinen Satz an: mwst_satz 'keine',
+ * keine Kategorie, satz_offen: true. Der Steuerkern macht daraus bei Regelbesteuerten UNBEKANNT
+ * (steuerwahl 'weiss_nicht', steuerkernEingabeAusBeleg), also "nicht berechnet"; der Nutzer wählt
+ * den Satz im Beleg. Bestandsintegrationen mit gespeichertem Satz bleiben unverändert.
  * @param {string|undefined|null} mwstSetting
- * @returns {{mwst_satz: string, kategorie: string}}
+ * @returns {{mwst_satz: string, kategorie: string|null, satz_offen: boolean}}
  */
-function resolveMwstKategorie(mwstSetting) {
-  if (mwstSetting === '7') return { mwst_satz: '7', kategorie: 'Einnahmen 7%' };
-  if (mwstSetting === 'keine') return { mwst_satz: 'keine', kategorie: 'Einnahmen steuerfrei' };
-  return { mwst_satz: '19', kategorie: 'Einnahmen 19%' };
+export function resolveMwstKategorie(mwstSetting) {
+  if (mwstSetting === '19') return { mwst_satz: '19', kategorie: 'Einnahmen 19%', satz_offen: false };
+  if (mwstSetting === '7') return { mwst_satz: '7', kategorie: 'Einnahmen 7%', satz_offen: false };
+  if (mwstSetting === 'keine') return { mwst_satz: 'keine', kategorie: 'Einnahmen steuerfrei', satz_offen: false };
+  return { mwst_satz: 'keine', kategorie: null, satz_offen: true };
+}
+
+// Hinweis im Buchungstext eines Integrationsbelegs ohne gewählten Satz (R2). Steht im Beleg selbst (Belegarchiv, Export), weil ein eigenes
+// Feld an den Regeln für dokumente (Schlüssel-Whitelist bei Änderungen) scheitern könnte. Kurz, damit Längengrenzen nicht greifen.
+export const SATZ_OFFEN_HINWEIS = 'Steuersatz offen: In der Integration ist kein Umsatzsteuersatz gewählt. Bitte im Beleg ergänzen.';
+
+// Setzt mwst_satz, kategorie und bei offenem Satz den Hinweis; liefert die Kategorie (null = offen, dann kein Sachkonto).
+export function mwstSettingAnwenden(belegData, mwstSetting) {
+  const { mwst_satz, kategorie, satz_offen } = resolveMwstKategorie(mwstSetting);
+  belegData.mwst_satz = mwst_satz;
+  if (kategorie) belegData.kategorie = kategorie;
+  else delete belegData.kategorie;
+  if (satz_offen) belegData.buchungstext = belegData.buchungstext ? `${belegData.buchungstext} · ${SATZ_OFFEN_HINWEIS}` : SATZ_OFFEN_HINWEIS;
+  return kategorie;
 }
 
 /**
@@ -7127,9 +7222,7 @@ async function handleStripeWebhook(request, url, env, cors) {
     // bewusst KEINE Einnahmen-Kategorie — die Nutzer-Einstellung "Meine Stripe-EINNAHMEN
     // unterliegen..." bezieht sich nur auf Zahlungseingänge.
     if (belegData.typ === 'rechnung_ausgehend') {
-      const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(fields.mwst_setting));
-      belegData.mwst_satz = mwst_satz;
-      belegData.kategorie = kategorie;
+      const kategorie = mwstSettingAnwenden(belegData, firestoreValue(fields.mwst_setting)); // R2: ohne Wahl kein Satz (satz_offen)
       // sachkonto ist optional und wird von DATEV-Export/Monatsabschluss ohnehin live aus
       // `kategorie` per resolveSachkonto() aufgelöst (siehe worker.js oben) — hier zusätzlich
       // gesetzt nur für die Beleg-Detailanzeige, analog zu BELEG_MANUELL. Scheitert der
@@ -7411,9 +7504,7 @@ async function handleMollieWebhook(request, url, env, cors) {
       const belegData = mollieEventToBeleg(payment);
 
       // ── MwSt-Setting + Sachkonto — identisches Muster wie handleStripeWebhook ──────────
-      const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(fields.mwst_setting));
-      belegData.mwst_satz = mwst_satz;
-      belegData.kategorie = kategorie;
+      const kategorie = mwstSettingAnwenden(belegData, firestoreValue(fields.mwst_setting)); // R2: ohne Wahl kein Satz (satz_offen)
       try {
         const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
         const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
@@ -7593,7 +7684,7 @@ const DIGISTORE24_ERSTATTUNG_EVENTS = new Set(['on_refund', 'on_chargeback', 're
  * @param {Record<string,string>} fields
  * @returns {object}
  */
-function digistore24EventToBeleg(fields, mwstSetting = '19', istErstattung = false) {
+function digistore24EventToBeleg(fields, mwstSetting = null, istErstattung = false) {
   const productName = digistore24FieldValue(fields, 'product_name') || 'Digistore24-Produkt';
   const email = digistore24FieldValue(fields, 'email', 'buyer_email', 'customer_email');
   const orderId = digistore24FieldValue(fields, 'order_id') || '';
@@ -7679,13 +7770,11 @@ async function handleDigistore24Webhook(request, url, env, cors) {
     const dedupKey = istErstattung ? `${transactionId}_${eventRaw}` : transactionId;
     if (await isAlreadyProcessed(userId, dedupKey, adminToken)) return ipnOk(cors);
 
-    const mwstSetting = firestoreValue(configFields.mwst_setting) || '19';
+    const mwstSetting = firestoreValue(configFields.mwst_setting) || null; // R2: kein Standard '19'
     const belegData = digistore24EventToBeleg(fields, mwstSetting, istErstattung);
 
     if (!istErstattung) {
-      const { mwst_satz, kategorie } = resolveMwstKategorie(mwstSetting);
-      belegData.mwst_satz = mwst_satz;
-      belegData.kategorie = kategorie;
+      const kategorie = mwstSettingAnwenden(belegData, mwstSetting); // R2: ohne Wahl kein Satz (satz_offen)
       try {
         const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
         const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
@@ -7766,7 +7855,7 @@ async function verifyCopecartSignature(rawBody, signatureHeader, secret) {
  */
 const COPECART_ERSTATTUNG_EVENTS = new Set(['payment.refunded', 'payment.charged_back']);
 
-function copecartEventToBeleg(event, mwstSetting = '19', istErstattung = false) {
+function copecartEventToBeleg(event, mwstSetting = null, istErstattung = false) {
   const productName = event.product_name || 'CopeCart-Produkt';
   const email = event.buyer_email || null;
   const zahlungsDatum = new Date(event.transaction_date || event.transaction_processed_at || event.order_date || Date.now());
@@ -7854,13 +7943,11 @@ async function handleCopecartWebhook(request, url, env, cors) {
     const dedupKey = `copecart_${transactionId}_${eventType}`.replace(/[^a-zA-Z0-9_.-]/g, '_');
     if (await isAlreadyProcessed(userId, dedupKey, adminToken)) return ipnOk(cors, 200, 'duplikat');
 
-    const mwstSetting = firestoreValue(configFields.mwst_setting) || '19';
+    const mwstSetting = firestoreValue(configFields.mwst_setting) || null; // R2: kein Standard '19'
     const belegData = copecartEventToBeleg(event, mwstSetting, istErstattung);
 
     if (!istErstattung) {
-      const { mwst_satz, kategorie } = resolveMwstKategorie(mwstSetting);
-      belegData.mwst_satz = mwst_satz;
-      belegData.kategorie = kategorie;
+      const kategorie = mwstSettingAnwenden(belegData, mwstSetting); // R2: ohne Wahl kein Satz (satz_offen)
       try {
         const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
         const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
@@ -8154,9 +8241,7 @@ async function handlePaypalWebhook(request, url, env, cors) {
       belegData.buchungstext = `PayPal-Rückerstattung${belegData.absender && belegData.absender !== 'PayPal-Kunde' ? ` an ${belegData.absender}` : ''}`;
     } else {
       // ── MwSt-Setting + Sachkonto — identisches Muster wie bei den anderen Plattformen ────────
-      const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(configFields.mwst_setting));
-      belegData.mwst_satz = mwst_satz;
-      belegData.kategorie = kategorie;
+      const kategorie = mwstSettingAnwenden(belegData, firestoreValue(configFields.mwst_setting)); // R2: ohne Wahl kein Satz (satz_offen)
       try {
         const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
         const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
@@ -8278,9 +8363,10 @@ async function syncSumupFuerNutzer(userId, env, adminToken) {
   if (firestoreValue(f.enabled) !== true || !apiKey || !merchantCode) return { gebucht: 0, uebersprungen: 'nicht_aktiv' };
 
   const seit = firestoreValue(f.sync_cursor) || firestoreValue(f.sync_seit) || new Date().toISOString();
-  const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(f.mwst_setting) || '19');
+  const sumupSatz = firestoreValue(f.mwst_setting) || null; // R2: kein Standard '19', ohne Wahl bleibt der Satz offen
+  const { kategorie } = resolveMwstKategorie(sumupSatz);
   let sachkonto = '';
-  try {
+  if (kategorie) try {
     const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
     sachkonto = resolveSachkonto(kategorie, firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03') || '';
   } catch (e) { /* Sachkonto bleibt leer, Beleg trotzdem buchen */ }
@@ -8301,8 +8387,7 @@ async function syncSumupFuerNutzer(userId, env, adminToken) {
       const dedupKey = `sumup_${item.transaction_id || item.id || item.transaction_code}_${String(item.type || 'PAYMENT').toUpperCase()}`.replace(/[^a-zA-Z0-9_.-]/g, '_');
       if (await isAlreadyProcessed(userId, dedupKey, adminToken)) continue;
       if (belegData.typ === 'rechnung_ausgehend') {
-        belegData.mwst_satz = mwst_satz;
-        belegData.kategorie = kategorie;
+        mwstSettingAnwenden(belegData, sumupSatz);
         if (sachkonto) belegData.sachkonto = sachkonto;
       }
       belegData.dedupKey = dedupKey;
@@ -8519,7 +8604,7 @@ function ablefyBuchungsbetrag(payload, modell, mwstSetting) {
   return netto > 0 ? plattformAnteilBrutto(netto, mwstSetting) : 0;
 }
 
-function ablefyEventToBeleg(payload, istRueckerstattung, modell = 'reseller', mwstSetting = '19') {
+function ablefyEventToBeleg(payload, istRueckerstattung, modell = 'reseller', mwstSetting = null) {
   const productName = payload.product?.name || null;
   const email = payload.payer?.email || payload.email || null;
   const gueltigesDatum = parseAblefyDatum(payload.success_date || payload.created_at);
@@ -8622,7 +8707,7 @@ async function handleAblefyWebhook(request, url, env, cors) {
     }
 
     const ablefyModell = firestoreValue(configFields.verkaufsmodell) === 'eigener_name' ? 'eigener_name' : 'reseller';
-    const belegData = ablefyEventToBeleg(payload, istRueckerstattung, ablefyModell, firestoreValue(configFields.mwst_setting) || '19');
+    const belegData = ablefyEventToBeleg(payload, istRueckerstattung, ablefyModell, firestoreValue(configFields.mwst_setting) || null);
     if (!(belegData.betrag > 0)) {
       return new Response(JSON.stringify({ received: true, ignored: 'kein_betrag' }), {
         status: 200, headers: { ...cors, 'Content-Type': 'application/json', [EMPFANG_HEADER]: 'ohne_betrag' }
@@ -8632,9 +8717,7 @@ async function handleAblefyWebhook(request, url, env, cors) {
     // ── MwSt-Setting + Sachkonto — nur für die Einnahme, nicht für die Rückerstattung, analog
     // zu handleStripeWebhook (charge.refunded bekommt dort ebenfalls keine Einnahmen-Kategorie).
     if (!istRueckerstattung) {
-      const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(configFields.mwst_setting));
-      belegData.mwst_satz = mwst_satz;
-      belegData.kategorie = kategorie;
+      const kategorie = mwstSettingAnwenden(belegData, firestoreValue(configFields.mwst_setting)); // R2: ohne Wahl kein Satz (satz_offen)
       try {
         const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
         const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
@@ -8853,9 +8936,7 @@ async function handleShopifyWebhook(request, url, env, cors) {
     }
 
     if (belegData.typ === 'rechnung_ausgehend') {
-      const { mwst_satz, kategorie } = resolveMwstKategorie(firestoreValue(configFields.mwst_setting));
-      belegData.mwst_satz = mwst_satz;
-      belegData.kategorie = kategorie;
+      const kategorie = mwstSettingAnwenden(belegData, firestoreValue(configFields.mwst_setting)); // R2: ohne Wahl kein Satz (satz_offen)
       try {
         const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
         const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';

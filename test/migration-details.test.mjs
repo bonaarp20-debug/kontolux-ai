@@ -113,7 +113,9 @@ test('Webhook-Einnahmen 3.8.6: plattform_setting mit Evidenz aus der Integration
   assert.equal(JSON.stringify(lauf).includes('whsec'), false, 'kein Geheimnis im Fortschritt');
   assert.equal(plattformAusQuelle('Digistore24_Webhook'), 'digistore24');
   assert.equal(plattformAusQuelle('stripe_gebuehr'), null);
-  assert.deepEqual(plattformSaetzeAus([{ pfad: 'a/b/stripe', daten: { mwst_setting: 'kaputt' } }, { pfad: 'a/b/../x', daten: {} }]), { stripe: '19' });
+  // R2: ohne gültige Wahl kein Standard '19' mehr (fehlt, 'offen', unbekannt): die Plattform fehlt, die Evidenz meldet PLATTFORM_EINSTELLUNG_FEHLT
+  assert.deepEqual(plattformSaetzeAus([{ pfad: 'a/b/stripe', daten: { mwst_setting: 'kaputt' } }, { pfad: 'a/b/../x', daten: {} }]), {});
+  assert.deepEqual(plattformSaetzeAus([{ pfad: 'a/b/stripe', daten: { mwst_setting: 'offen' } }, { pfad: 'a/b/paypal', daten: {} }, { pfad: 'a/b/mollie', daten: { mwst_setting: '7' } }]), { mollie: '7' });
 });
 
 test('NP-04: Lauf trägt Kern-Version, Kern-Hash und die Sicherung des Browsers; Audit des Abschlusses mit Zählern und Kern-Hash', async () => {
