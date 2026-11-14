@@ -132,6 +132,34 @@ export function euerFuer(wirkungen, profil, jahr, optionen) {
   }
 
   if (ueberlauf) ausg.push({ beleg_id: null, status: 'unbekannt', grund: 'summe_ueberlauf' });
+  // BP-07 (R-EUER-37, § 11 EStG, Entscheidungen 3 und 4): Zahlungen dieses Jahres, die in keiner Kennzahl stehen (gesperrter, nicht unterstützter
+  // oder im Steuerfall offener Beleg, EÜR-Seite ausdrücklich nicht gerechnet): die EÜR ist unvollständig, der Gewinn nur ein Zwischenwert und die
+  // Anlage-EÜR-Liste gesperrt. Belege ohne Zahlung im Jahr berühren die EÜR nicht.
+  const fehlend = new Set();
+  let gEin = 0;
+  let gAus = 0;
+  for (const w of imJahr) {
+    // unsichere Beträge (Steuerfall offen, stehen in unsicher{}) und EÜR-Wirkungen, die der Kern ausdrücklich nicht rechnet
+    if (w.unsicher === true || (w.status === 'ausgeschlossen' && w.kz === null)) fehlend.add(String(w.beleg_id));
+  }
+  const gesehenZ = new Set();
+  for (const w of ws) {
+    if (w.welt !== 'ust' || !Array.isArray(w.euer_zahlungen) || (w.status !== 'ausgeschlossen' && w.status !== 'unbekannt')) continue;
+    const k = String(w.beleg_id);
+    if (gesehenZ.has(k)) continue;
+    gesehenZ.add(k);
+    for (const z of w.euer_zahlungen) {
+      if (!z || typeof z.datum !== 'string' || z.datum.slice(0, 4) !== J.padStart(4, '0') || !Number.isSafeInteger(z.betrag_cent)) continue;
+      fehlend.add(k);
+      if (z.spalte === 'einnahme') gEin += z.betrag_cent; else gAus += z.betrag_cent;
+      // Leistung in einem anderen Jahr, Zahlung in diesem: der Beleg fehlt auch in dieser EÜR (nicht berücksichtigt)
+      if (!gesehen.has(w.beleg_id)) { gesehen.add(w.beleg_id); ausg.push({ beleg_id: w.beleg_id, status: w.status, grund: w.hinweis_detail || null }); }
+    }
+  }
+  for (const v of netz.verworfen) if (v.welt === 'euer' && v.periode === J) fehlend.add(String(v.beleg_id));
+  if (ueberlauf) fehlend.add('summe_ueberlauf');
+  const unvollstaendig = fehlend.size > 0;
+  if (unvollstaendig) hinweise.push('W_EUER_UNVOLLSTAENDIG');
   for (const w of imJahr) for (const h of w.hinweise) hinweise.push(h);
   for (const h of profilHinweise(profil, jahr)) hinweise.push(h);
   const alle = eindeutig(hinweise);
@@ -148,7 +176,11 @@ export function euerFuer(wirkungen, profil, jahr, optionen) {
     gewinn_cent: einnahmen - ausgaben,
     regel_id: 'R-EUER-31',
     // Zwischenwert, solange Belege nicht berücksichtigt sind (Prüfbefund N10)
-    status: ausg.length > 0 ? 'zwischenwert' : 'ergebnis',
+    status: ausg.length > 0 || unvollstaendig ? 'zwischenwert' : 'ergebnis',
+    // BP-07: Gewinn "unvollstaendig", solange Zahlungen des Jahres in keiner Kennzahl stehen; dann ist auch die Liste zum Eintragen gesperrt
+    gewinn_status: unvollstaendig ? 'unvollstaendig' : (ausg.length > 0 ? 'zwischenwert' : 'ergebnis'),
+    export_gesperrt: unvollstaendig,
+    gesperrt: { belege: fehlend.size, einnahmen_cent: gEin, ausgaben_cent: gAus, regel_id: 'R-EUER-37' },
     unsicher: { einnahmen_cent: uEin, ausgaben_cent: uAus, belege: uBelege.size, gewinn_inkl_unsicher_cent: einnahmen - ausgaben + uEin - uAus },
     ausgeschlossene: ausg.sort((a, b) => (String(a.beleg_id) < String(b.beleg_id) ? -1 : 1)),
     hinweise: alle,

@@ -12,4 +12,6 @@ export * from './wirkung.js';
 export * from './ustva.js';
 export * from './euer.js';
 export * from './auswertung.js';
+export * from './hinweise.js';
+export * from './zahlenliste.js';
 export * from './migration.js';

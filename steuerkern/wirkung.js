@@ -19,7 +19,7 @@
 // alles andere wird mit Hinweis HN_NOCH_NICHT_UNTERSTUETZT ausgeschlossen, nie stillschweigend falsch gerechnet.
 
 import { istCent, ustAusBrutto, teile, mulDivRund } from './geld.js';
-import { istDatum, jahrVon, addiereMonate, monatsende, periodenEnde, periodenArt, quartalVon, frist10Tag, zehnTageRegelVorjahr } from './daten.js';
+import { istDatum, jahrVon, addiereMonate, monatsende, periodenEnde, periodenArt, quartalVon, frist10Tag, zehnTageRegelVorjahr, ustPeriodeFuer } from './daten.js';
 import { voranmeldungsperiodeFuer, voranmeldungAm, versteuerungAm, statusAm, statusFuerAusgangsumsatz } from './steuerprofil.js';
 import { regelNachId, KATEGORIEN, GRENZEN, USTVA_ZEILEN, EUER_ZEILEN, STEUERSAETZE, BELEG_ARTEN, KORREKTUR_GRUENDE, basisKzFuerSatz } from './tabellen.js';
 import { KORREKTUR_ARTEN } from './beleg.js';
@@ -85,7 +85,19 @@ function mk(ctx, f) {
   if (f.kleinbetrag) { w.kleinbetrag = true; w.brutto_cent = f.brutto_cent; }
   if (f.unsicher) w.unsicher = true;
   if (f.hinweis_detail) w.hinweis_detail = f.hinweis_detail;
+  if (Array.isArray(f.euer_zahlungen) && f.euer_zahlungen.length) w.euer_zahlungen = f.euer_zahlungen; // BP-07: Zahlungen eines nicht berechneten Belegs
+  if (f.ku_anzahlung) w.ku_anzahlung = f.ku_anzahlung;
+  if (f.kz48_offen) w.kz48_offen = true;
   return w;
+}
+
+// BP-07 (R-EUER-37, Entscheidungen 3 und 4, § 11 EStG): Ein nicht berechneter Beleg (Stufe 4, nicht unterstützt, Dialog offen) mit Zahlungen
+// fehlt in den EÜR-Kennzahlen. Die Hinweis-Wirkung des Belegs trägt seine Zahlungen (euer_zahlungen: Datum, Betrag, Spalte), damit euerFuer die
+// Lücke im Zahlungsjahr erkennt (W_EUER_UNVOLLSTAENDIG, Gewinn unvollständig, Liste gesperrt). Kennzahlen und Gewinn ändern sich dadurch nicht.
+function gesperrteZahlungen(s) {
+  if (KORREKTUR_ARTEN.includes(s.beleg_art)) return [];
+  const spalte = s.richtung === 'ausgang' ? 'einnahme' : 'ausgabe';
+  return aktiveZahlungen(s).map((z) => ({ datum: z.datum, betrag_cent: z.betrag_cent, spalte }));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -458,7 +470,7 @@ export function belegWirkungen(beleg, profil, optionen) {
     hinweise.push('HN_NOCH_NICHT_UNTERSTUETZT');
     for (const h of nu.hinweise) if (!hinweise.includes(h)) hinweise.push(h);
     const datum = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : (istDatum(s.wirkdatum) ? s.wirkdatum : null);
-    return [mk(ctx, { welt: 'ust', periode: datum ? ustPeriode(profil, datum, hinweise) : null, datum_wirk: datum, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: nu.grund })];
+    return [mk(ctx, { welt: 'ust', periode: datum ? ustPeriode(profil, datum, hinweise) : null, datum_wirk: datum, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: nu.grund, euer_zahlungen: gesperrteZahlungen(s) })];
   }
   try {
     if (sf === 'SPERRE_STUFE4' || (typeof s.sperrgrund === 'string' && s.sperrgrund !== '' && sf !== 'FA_ZAHLUNG')) {
@@ -466,7 +478,7 @@ export function belegWirkungen(beleg, profil, optionen) {
       if (sf !== 'SPERRE_STUFE4' && !hinweise.includes('W_SPERRGRUND_BEI_STEUERFALL')) hinweise.push('W_SPERRGRUND_BEI_STEUERFALL');
       ctx.beleg_status = 'ausgeschlossen';
       const per = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? ustPeriode(profil, s.leistung.bis, hinweise) : null;
-      out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: s.leistung ? s.leistung.bis : null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: s.sperrgrund || null }));
+      out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: s.leistung ? s.leistung.bis : null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: s.sperrgrund || null, euer_zahlungen: gesperrteZahlungen(s) }));
     } else if (sf === 'UNBEKANNT') {
       ctx.beleg_status = s.unbekannt_grund === 'datum_fehlt' ? 'zuordnung_offen' : 'unbekannt';
       const datum = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null;
@@ -479,7 +491,7 @@ export function belegWirkungen(beleg, profil, optionen) {
     } else if (s.dialog === 'dialog_erforderlich') {
       ctx.beleg_status = 'dialog_erforderlich';
       const datum = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null;
-      out.push(mk(ctx, { welt: 'ust', periode: datum ? ustPeriode(profil, datum, hinweise) : null, datum_wirk: datum, rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-VS-01', hinweis_detail: 'dialog_erforderlich' }));
+      out.push(mk(ctx, { welt: 'ust', periode: datum ? ustPeriode(profil, datum, hinweise) : null, datum_wirk: datum, rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-VS-01', hinweis_detail: 'dialog_erforderlich', euer_zahlungen: gesperrteZahlungen(s) }));
     } else if (STEUERFAELLE_STUFE_NICHT_GERECHNET.includes(sf)) {
       ctx.beleg_status = 'ausgeschlossen';
       hinweise.push('HN_NOCH_NICHT_UNTERSTUETZT');
@@ -566,7 +578,7 @@ function schliesseAus(s, profil, ctx, out, grund, extraHinweise) {
   ctx.beleg_status = 'ausgeschlossen';
   for (const h of ['HN_NOCH_NICHT_UNTERSTUETZT'].concat(extraHinweise || [])) if (!ctx.hinweise.includes(h)) ctx.hinweise.push(h);
   const datum = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null;
-  out.push(mk(ctx, { welt: 'ust', periode: datum ? ustPeriode(profil, datum, ctx.hinweise) : null, datum_wirk: datum, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: grund }));
+  out.push(mk(ctx, { welt: 'ust', periode: datum ? ustPeriode(profil, datum, ctx.hinweise) : null, datum_wirk: datum, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: grund, euer_zahlungen: gesperrteZahlungen(s) }));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -628,9 +640,9 @@ function ausgangWirkungen(s, profil, ctx, out, opt) {
     : (skontoVor ? zahlungsAnteile(skontoAufteilung(gruppen, zahlungen.map((z, zi) => (skontoVorZ[zi] ? z : { ...z, skonto_cent: 0 }))).eff, zahlungen) : zahlungsAnteile(gruppen, zahlungen));
   const istKz = (g) => (s.steuerfall === 'A_INLAND_0_PV' ? 87 : basisKz(g.satz_bp));
   const hinw = [];
-  const ustW = (g, rolle, datum, netto, ust, regel, eid) => {
+  const ustW = (g, rolle, datum, netto, ust, regel, eid, kuAnzahlung) => {
     const per = ustPeriode(profil, datum, hinw);
-    out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: datum, kz: istKz(g), netto_cent: netto, ust_cent: ust, rolle, satz_bp: g.satz_bp, regel_id: regel, hinweise: hinw.slice(), ereignis_id: eid }));
+    out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: datum, kz: istKz(g), netto_cent: netto, ust_cent: ust, rolle, satz_bp: g.satz_bp, regel_id: regel, hinweise: hinw.slice(), ereignis_id: eid, ku_anzahlung: kuAnzahlung || null }));
   };
   // TR-orakel-002: Bei voller Rückgängigmachung vor der Leistung wird die Leistung nie ausgeführt; jede Zahlung ist dann Entgelt für eine nicht ausgeführte
   // Leistung und wirkt wie eine Anzahlung im Zahlungszeitraum (§ 13 Abs. 1 Nr. 1 a S. 4, § 17 Abs. 2 Nr. 2 UStG), nicht als Leistungsposten.
@@ -665,11 +677,27 @@ function ausgangWirkungen(s, profil, ctx, out, opt) {
     // R-ZP-01: Leistungszeitraum; R-ZP-04: Anzahlungen wirken im Zahlungszeitraum, die Leistung wird um sie gekürzt
     const nettoRest = gruppen.map((g) => g.netto_cent);
     const ustRest = gruppen.map((g) => g.ust_cent);
+    // BP-04a (K5, Anleitung USt 1 E Zeile 46): Anzahlungen aus der Kleinunternehmer-Zeit je Satzgruppe (brutto), getrennt nach Vorjahr und
+    // gleichem Jahr. Die Wirkung der Leistung trägt sie als ku_anzahlung, daraus macht ustvaFuer den Vorschlag für Kz 65 (kz65Vorschlag).
+    const kuAnz = gruppen.map(() => ({ brutto_cent: 0, vorjahr_brutto_cent: 0, daten: [] }));
     zahlungen.forEach((z, zi) => {
       if (!vorLeistung(z)) return;
       // F6 (Ausgang): Eine Anzahlung in der Kleinunternehmer-Zeit löst keine Steuer aus (§ 13 Abs. 1 Nr. 1 a S. 4 UStG gilt nur für
       // Regelbesteuerte); die Umsatzsteuer entsteht dann mit der Leistung in voller Höhe.
-      if (statusAm(profil, z.datum).status === 'ku') { if (!ctx.hinweise.includes('W_WECHSEL_DIALOG')) ctx.hinweise.push('W_WECHSEL_DIALOG'); return; }
+      if (statusAm(profil, z.datum).status === 'ku') {
+        if (!ctx.hinweise.includes('W_WECHSEL_DIALOG')) ctx.hinweise.push('W_WECHSEL_DIALOG');
+        if (!teil && !vl) {
+          gruppen.forEach((g, gi) => {
+            const a = anteileAnz[zi][gi];
+            const b = a.netto_cent + a.ust_cent;
+            if (b === 0) return;
+            kuAnz[gi].brutto_cent += b;
+            if (jahrVon(z.datum) < jahrVon(l.bis)) kuAnz[gi].vorjahr_brutto_cent += b;
+            if (!kuAnz[gi].daten.includes(z.datum)) kuAnz[gi].daten.push(z.datum);
+          });
+        }
+        return;
+      }
       gruppen.forEach((g, gi) => {
         const a = anteileAnz[zi][gi];
         if (a.netto_cent === 0 && a.ust_cent === 0) return;
@@ -692,7 +720,7 @@ function ausgangWirkungen(s, profil, ctx, out, opt) {
       // TR3-kern-003: Skonto einer Zahlung vor der Leistung mindert den Leistungsposten (siehe oben)
       zahlungen.forEach((z, zi) => { if (skontoVorZ[zi] && skonto.je[zi]) { nr -= skonto.je[zi][gi].netto_cent; ur -= skonto.je[zi][gi].ust_cent; } });
       if (nr === 0 && ur === 0 && g.netto_cent !== 0) return; // TR-ustva-003: keine Nullwirkung (voll im Voraus bezahlt, Steuer entstand schon bei der Zahlung)
-      ustW(g, 'umsatz', teil ? g.bis : l.bis, nr, ur, teil ? 'R-ZP-03' : 'R-ZP-01', ctx.id);
+      ustW(g, 'umsatz', teil ? g.bis : l.bis, nr, ur, teil ? 'R-ZP-03' : 'R-ZP-01', ctx.id, kuAnz[gi].brutto_cent > 0 ? kuAnz[gi] : null);
     });
     // R-KOR-02 (T-S2-008, -011): Skonto mindert im Zeitraum der Zahlung
     zahlungen.forEach((z, zi) => {
@@ -717,7 +745,11 @@ function ausgangWirkungen(s, profil, ctx, out, opt) {
   });
 }
 
-// Kleinunternehmer (A_KU): keine UStVA-Wirkung, EÜR brutto (Kz 111; nach dem Wechsel in die Regelbesteuerung Kz 103)
+function sortiertVerlauf(verlauf) {
+  return verlauf.filter((e) => istObjekt(e) && istDatum(e.gueltig_ab)).slice().sort((a, b) => (a.gueltig_ab < b.gueltig_ab ? -1 : a.gueltig_ab > b.gueltig_ab ? 1 : 0));
+}
+
+// Kleinunternehmer (A_KU): keine UStVA-Wirkung außer der Information für Kz 48 im Wechseljahr; EÜR brutto (Kz 111; nach dem Wechsel Kz 103)
 function kuWirkungen(s, profil, ctx, out) {
   const zahlungen = aktiveZahlungen(s);
   const gruppen = gruppiere(s);
@@ -740,6 +772,26 @@ function kuWirkungen(s, profil, ctx, out) {
       ctx.beleg_status = 'dialog_erforderlich';
       out.push(mk(ctx, { welt: 'ust', periode: ustPeriode(profil, z.datum, ctx.hinweise), datum_wirk: z.datum, rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-PR-02', hinweis_detail: 'wechsel_vorjahr_leistung_zahlung_nach_ueberschreiten', ereignis_id: z.id }));
       break;
+    }
+  }
+  // BP-04a (R-KU-08, R-KZ-23; Anleitung USt 1 E Zeile 23, UStAE 19.7 Abs. 1): Im Jahr eines unterjährigen Wechsels (Überschreiten der 100.000-EUR-
+  // bzw. 25.000-EUR-Grenze) gehören die steuerfreien Kleinunternehmer-Umsätze bis zum Überschreiten in Zeile 23 (Kz 48), mit dem Gesamtbetrag im
+  // Voranmeldungszeitraum der Leistung. Vor dem Wechsel gibt es keine Voranmeldung (§ 19 Abs. 1 S. 2 UStG); gemeldet wird daher nur im Zeitraum des
+  // Wechsels. Steuerfrei bleibt nur, was vor dem Überschreiten voll bezahlt ist (später vereinnahmte Entgelte sind regelbesteuert, UStAE 19.7
+  // Abs. 1 S. 2 bis 4); offene Umsätze werden als kz48_offen gekennzeichnet (W_KZ48_AUSSENSTAND). Konfidenz B.
+  // Die Wirkung hat status 'information': sie listet keinen Zeitraum (ustvaPerioden) und ändert keine Steuer.
+  if (istObjekt(l) && istDatum(l.bis)) {
+    const w48 = sortiertVerlauf(verlauf).find((e) => e.status === 'regel' && (e.grund === 'laufend_ueber_100k' || e.grund === 'gruendung_ueber_25k') && e.gueltig_ab > l.bis && jahrVon(e.gueltig_ab) === jahrVon(l.bis));
+    if (w48 && !zahlungen.some((z) => z.datum >= w48.gueltig_ab)) {
+      const vz = voranmeldungAm(profil, w48.gueltig_ab).zeitraum || 'quartal';
+      const perW = ustPeriodeFuer(w48.gueltig_ab, vz);
+      if (ustPeriodeFuer(l.bis, vz) === perW) {
+        let brutto = 0;
+        for (const g of gruppen) brutto += g.netto_cent + g.ust_cent;
+        let bezahlt = 0;
+        for (const z of zahlungen) bezahlt += z.betrag_cent;
+        out.push(mk(ctx, { welt: 'ust', periode: perW, datum_wirk: l.bis, kz: 48, netto_cent: brutto, ust_cent: 0, betrag_cent: 0, rolle: 'ku_steuerfrei', status: 'information', regel_id: 'R-KU-08', kz48_offen: bezahlt < brutto }));
+      }
     }
   }
   zahlungen.forEach((z, zi) => {

@@ -87,7 +87,7 @@ const USTVA_2026 = [
   uz(20, 44, null, 'Innergemeinschaftliche Lieferungen neuer Fahrzeuge an Abnehmer ohne USt-IdNr.', 'B', '4', 'R-KZ-19'),
   uz(21, 49, null, 'Innergemeinschaftliche Lieferungen neuer Fahrzeuge außerhalb eines Unternehmens (§ 2a UStG)', 'B', '4', 'R-KZ-19'),
   uz(22, 43, null, 'Weitere steuerfreie Umsätze mit Vorsteuerabzug (z. B. Ausfuhrlieferungen, § 4 Nr. 2 bis 7)', 'B', '4', 'R-KZ-19'),
-  uz(23, 48, null, 'Steuerfreie Umsätze ohne Vorsteuerabzug (z. B. § 4 Nr. 8 bis 29 oder § 19 Abs. 1 UStG)', 'B', '4', 'R-KZ-23', { hinweis: 'vom Kern nicht berechnet (Audit 10 F3): auch im Wechseljahr fehlen die steuerfreien Kleinunternehmer-Umsätze bis zum Überschreiten der Grenze; sie stehen in nicht_berechnet (wechseljahr)' }),
+  uz(23, 48, null, 'Steuerfreie Umsätze ohne Vorsteuerabzug (z. B. § 4 Nr. 8 bis 29 oder § 19 Abs. 1 UStG)', 'B', '4', 'R-KZ-23', { hinweis: 'Im Jahr eines unterjährigen Wechsels (Überschreiten der 100.000-EUR- bzw. 25.000-EUR-Grenze) berechnet der Kern Kz 48 für die steuerfreien Kleinunternehmer-Umsätze im Zeitraum des Wechsels (BP-04a, ustva.js kz48Cent); andere steuerfreie Umsätze ohne Vorsteuerabzug (§ 4 Nr. 8 bis 29) bleiben nicht berechnet (nicht_berechnet)' }),
   uz(24, 91, null, 'Steuerfreie innergemeinschaftliche Erwerbe (§§ 4b, 25c UStG)', 'C', '4', 'R-KZ-24'),
   uz(25, 89, null, 'Steuerpflichtige innergemeinschaftliche Erwerbe zu 19 %', 'C', '4', 'R-KZ-24'),
   uz(26, 93, null, 'Steuerpflichtige innergemeinschaftliche Erwerbe zu 7 %', 'C', '4', 'R-KZ-24'),
@@ -110,7 +110,7 @@ const USTVA_2026 = [
   uz(43, null, 59, 'Vorsteuerabzug für innergemeinschaftliche Lieferungen neuer Fahrzeuge außerhalb eines Unternehmens (§ 2a) sowie von Kleinunternehmern (§ 15 Abs. 4a)', 'F', '4', 'R-KZ-39'),
   uz(44, null, 64, 'Berichtigung des Vorsteuerabzugs (§ 15a UStG)', 'F', '3c', 'R-KZ-44', { hinweis: 'Zurückzuzahlende Vorsteuer mit Minuszeichen (Anleitung Zeile 44)' }),
   uz(45, null, null, 'Verbleibender Betrag (Zeile 37 abzüglich der Zeilen 38 bis 44)', 'G', '1', 'R-KZ-45', { rechenart: 'differenz', formel: 'Z.37 - (Z.38 + Z.39 + Z.40 + Z.41 + Z.42 + Z.43 + Z.44)' }),
-  uz(46, null, 65, 'Steuer infolge des Wechsels der Besteuerungsform sowie Nachsteuer auf versteuerte Anzahlungen', 'G', '2', 'R-KZ-46', { eingabe: true, hinweis: 'Standard K5: Eingabefeld, nicht berechnet; Wechsel-Dialog' }),
+  uz(46, null, 65, 'Steuer infolge des Wechsels der Besteuerungsform sowie Nachsteuer auf versteuerte Anzahlungen', 'G', '2', 'R-KZ-46', { eingabe: true, hinweis: 'K5: Eingabefeld; der Kern liefert einen Vorschlag (kz65Vorschlag, Variante B Standard: Anzahlung brutto mal Satz/(100 + Satz), Kz 81 nur Restentgelt), der Nutzer bestätigt, bis dahin ist Kz 83 Zwischenwert' }),
   uz(47, null, 69, 'In Rechnungen unrichtig oder unberechtigt ausgewiesene Steuerbeträge (§ 14c) sowie weitere Steuerbeträge', 'G', '4', 'R-KZ-47', { eingabe: true }),
   uz(48, null, null, 'Umsatzsteuer-Vorauszahlung/Überschuss (Summe der Zeilen 45 bis 47)', 'H', '1', 'R-KZ-48', { rechenart: 'summe', formel: 'Z.45 + Z.46 + Z.47' }),
   uz(49, null, 39, 'Abzug der festgesetzten Sondervorauszahlung für Dauerfristverlängerung', 'H', '2', 'R-KZ-49'),
@@ -357,7 +357,7 @@ export const GRENZEN = frieren({
 // Einträge aus GRENZEN, die kein Kern-Modul liest (Audit 10, Tabellen Abschnitt 10): sie belegen Wortlaut oder dienen der späteren Verdrahtung
 // (Phase 2). Der Test in test-steuerkern-tabellen.mjs hält diese Liste ehrlich (jeder andere Eintrag wird im Code gelesen).
 export const GRENZEN_UNGENUTZT = Object.freeze([
-  'ERECHNUNG_UEBERGANG_NR1', 'ERECHNUNG_UEBERGANG_NR3', 'PARAGRAPH_15A_JAHRESERKLAERUNG', 'PARAGRAPH_15A_ZEHN_PUNKTE_BP', 'PARAGRAPH_15A_JAHRE_BEWEGLICH',
+  'PARAGRAPH_15A_JAHRESERKLAERUNG', 'PARAGRAPH_15A_ZEHN_PUNKTE_BP', 'PARAGRAPH_15A_JAHRE_BEWEGLICH',
   'VORANMELDUNG_MONAT_STEUER_VORJAHR', 'VORANMELDUNG_BEFREIUNG_STEUER_VORJAHR', 'VORANMELDUNG_WAHLRECHT_MONAT_UEBERSCHUSS',
   'SAMMELPOSTEN_UNTEN', 'SAMMELPOSTEN_OBEN', 'SAMMELPOSTEN_SOFORT',
 ]);
@@ -475,7 +475,7 @@ export const KATEGORIEN = frieren([
 // ---------------------------------------------------------------------------------------------
 export const STANDARDVERHALTEN = frieren({
   K4: 'abschneiden Richtung Null auf volle Euro, Steuer aus gerundeter Basis, Doppelanzeige und Hinweis, bis die ELSTER-Messung vorliegt',
-  K5: 'Kz 65 Eingabefeld, nicht berechnet; Wechsel-Dialog',
+  K5: 'Kz 65 Eingabefeld mit Vorschlag (Variante B: Anzahlung brutto mal Satz/(100 + Satz) in Kz 65, Kz 81 nur Restentgelt; Variante A: alles in Kz 81); Nutzer bestätigt, bis dahin Kz 83 Zwischenwert (K5-Rechtsbericht)',
   K6: 'Fall b2: Gegenposten im Stornoquartal plus Hinweis',
   K7: 'nur manuelle Aktion, Datum und Grund Pflicht',
   K10: 'EU-Kunde ohne USt-IdNr. = Stufe 4 (gesperrt)',
@@ -485,7 +485,7 @@ export const STANDARDVERHALTEN = frieren({
   K2: 'Standard Soll; Ist nur mit Grundlage (Nr. 1/Nr. 3), Genehmigungsdatum und Nachweis; Jahreswechsel-Dialog nicht vorbelegt',
   K8: 'Zahlung nach tatsächlichem Datum; Hinweis 10-Tage-Regel; mit Dauerfrist: neues Jahr',
   K11: 'Gebühren nach Rechnungsinhalt, Nutzer wählt, Stripe-Gebühren bleiben aus',
-  K1: 'öffentliche Veröffentlichung blockiert; Beta nur für Testnutzer, Rahmenhinweis W1 auf jeder Ansicht',
+  K1: 'Release für alle Nutzer (Entscheidung Jona 13.11.2026, ohne Anwaltsantwort); Rahmenhinweis W1 aus dem K1-Bericht auf jeder Kennzahl-, EÜR- und Exportansicht, Wortregeln W1 bis W8, Vorschläge nur mit Bestätigung',
   quelle: 'docs/regelbesteuerung/06-entscheidungen-und-status.md (Abschnitt Standardverhalten)',
 });
 
@@ -641,12 +641,12 @@ export const REGELN_KORREKTUREN = frieren([
   {
     regel_id: 'R-KZ-46',
     felder: {
-      regel: 'Kz 65 (Z.46): Nutzereingabe aus dem Wechsel-Dialog, nicht berechnet. Gehört der Fall "Anzahlung als Kleinunternehmer vor dem Wechsel, Leistung danach" (A, Wortlaut Anleitung Zeile 46). Betragsbasis (brutto oder netto, 19/119) und Verhältnis zu Kz 81 sind in keiner amtlichen Quelle geregelt (C). Standard: Schlussrechnung zeigt das volle Entgelt in Kz 81, Kz 65 leer, Nutzer entscheidet im Dialog.',
-      quelle: 'Anleitung USt 1 E Zeile 46 (docs/quellen/bmf-2025-12-29-ust-voranmeldung-2026-vordruck-und-anleitung.md, Datei-Zeilen 2140-2170); K5 (docs/regelbesteuerung/fragen/gruppe2b-k5-wechsel.md)',
-      konfidenz: 'C',
+      regel: 'Kz 65 (Z.46): Eingabefeld mit Vorschlag aus dem Kern (kz65Vorschlag). Gehört zum Fall "Anzahlung als Kleinunternehmer in einem vorangegangenen Kalenderjahr, Leistung in diesem Jahr regelbesteuert" (A, Wortlaut Anleitung Zeile 46); Zeitraum: Voranmeldung der Leistung. Variante B (Standard des Vorschlags): Kz 65 = Anzahlung brutto mal Satz/(100 + Satz), kaufmännisch auf Cent; Kz 81 bzw. 86 nur das Restentgelt (Leistungsentgelt netto minus Anzahlung netto). Variante A: alles in Kz 81, Kz 65 leer. Die Gesamtsteuer ist in beiden gleich (Steuer auf das volle Entgelt, § 13 Abs. 1 Nr. 1 Buchst. a S. 1 UStG); nie derselbe Betrag in beiden Zeilen. Ohne Bestätigung des Nutzers rechnet der Kern Variante A und kennzeichnet Kz 83 als Zwischenwert (W_KZ65_VORSCHLAG_OFFEN). Anzahlung und Leistung im selben Jahr: kein Kz 65 (UStAE 19.7 Abs. 1 S. 4, R-PR-10). Rechenbeispiel K5: Anzahlung 500,00 brutto (KU 2026), Leistung 2027 netto 1.000,00: Kz 65 = 79,83, Kz 81 = 579,83, Steuer 110,17, Summe 190,00.',
+      quelle: 'Anleitung USt 1 E Zeile 46 (docs/quellen/bmf-2025-12-29-ust-voranmeldung-2026-vordruck-und-anleitung.md, Datei-Zeilen 2140-2170; docs/quellen/elster-hilfe-ustva-2026.md); § 10 Abs. 1 S. 2 UStG; UStAE 10.1 Abs. 3 S. 4 (docs/quellen/uStAE-10-1-abs3-und-13-5-rf.md); K5 (docs/regelbesteuerung/16-rechtsfragen/k5-kz65-wechsel.md)',
+      konfidenz: 'B',
       blockiert_durch: ['K5'],
     },
-    begruendung: 'K5: Erkennung A, Berechnung C; Standard laut 06: Eingabefeld.',
+    begruendung: 'K5-Rechtsbericht 13.11.2026: Erkennung A, Betragsbasis brutto B, Aufteilung zwischen Kz 81 und Kz 65 B- (Standard B); Kz 65 bleibt Eingabe, der Kern macht nur den Vorschlag.',
   },
   {
     regel_id: 'R-ZP-23',
@@ -1126,6 +1126,37 @@ export const REGELN_NEU = frieren([
     quelle: 'JStG 2026, Drucksache 21/9139 (Beschlussempfehlung, Begründung zu § 4 Abs. 5 S. 1 Nr. 14 EStG neu; docs/quellen/jstg-2026-bundestag-drucksachen-auszug.md); gueltig_ab 2027-07-10 unter Vorbehalt',
     konfidenz: 'C', konfidenz_konzept: 'neu aus Testrunde 13.11.2026 (TR-quellen-006)', blockiert_durch: ['JSTG_2026_NICHT_VERKUENDET'], blockiert_konzept: '',
   },
+  // Phase 2 (BP-01, BP-07, Agent K-A 14.11.2026): Regeln, auf die sich Hinweistexte ohne eigene Steuerregel beziehen, und die EÜR-Sperre.
+  {
+    regel_id: 'R-HN-01', abschnitt: '5.4', sachverhalt: 'Steuerangaben aus einem KI-Vorschlag',
+    regel: 'Steuerwahl, Beträge oder Steuerfall mit herkunft "ki" sind ein Vorschlag: Der Beleg bleibt UNBEKANNT (W_KI_UNBESTAETIGT), bis der Nutzer bestätigt (herkunft "nutzer"). Kontolux bucht ohne Bestätigung nichts.',
+    quelle: 'Standardentscheidung 2 (docs/regelbesteuerung/13-testrunde/welle2-zuordnung.md); Konzept 04 Abschnitt 9.4; K1-Bericht 5.1 (docs/regelbesteuerung/16-rechtsfragen/k1-stberg-haftung.md)',
+    konfidenz: 'B', konfidenz_konzept: 'neu aus Phase 2 (BP-01)', blockiert_durch: [], blockiert_konzept: '',
+  },
+  {
+    regel_id: 'R-HN-02', abschnitt: '2.2.1', sachverhalt: 'Technische Prüfung und Fehlerverhalten',
+    regel: 'Datenfehler eines Belegs (Betrag keine ganze Cent-Zahl, doppelte Kennung, unlesbare Felder, Summenüberlauf) führen nie zu einer Ausnahme und nie zu stillem Weglassen: Der Beleg wird nicht berechnet, gezählt und mit Hinweiscode gekennzeichnet (K-4).',
+    quelle: 'Konzept 04 Abschnitt 2.2.1 (K-4); ABWEICHUNGEN.md 5.3, 5.6',
+    konfidenz: 'B', konfidenz_konzept: 'neu aus Phase 2 (BP-01)', blockiert_durch: [], blockiert_konzept: '',
+  },
+  {
+    regel_id: 'R-HN-03', abschnitt: '5.3', sachverhalt: 'Pflichtfelder und Blocker des Belegs',
+    regel: 'Ein Beleg ohne Pflichtangaben (Richtung, Belegart, Datum, Leistungszeitpunkt bei Ausgang, Grund bei Korrektur, gültige Cent-Beträge) wird nicht gespeichert bzw. als Entwurf nicht berechnet (PF_*-Codes aus normalisiereEingabe und validiereBeleg).',
+    quelle: 'Konzept 04 Abschnitt 5.3; § 14 Abs. 4 UStG (docs/quellen/ustg-14.md); § 31 Abs. 4 UStDV (docs/quellen/ustdv-31.md)',
+    konfidenz: 'B', konfidenz_konzept: 'neu aus Phase 2 (BP-01)', blockiert_durch: [], blockiert_konzept: '',
+  },
+  {
+    regel_id: 'R-HN-04', abschnitt: '3.4', sachverhalt: 'Steuerprofil und Zeitstrahl prüfen',
+    regel: 'Einträge im Steuerprofil werden vor dem Schreiben geprüft (gültige Werte, Datum, keine stille Rückdatierung, Festschreibung); Altangaben werden nie geraten (Migration 3.8.3).',
+    quelle: 'Konzept 04 Abschnitte 3.4, 3.8.3; E6',
+    konfidenz: 'B', konfidenz_konzept: 'neu aus Phase 2 (BP-01)', blockiert_durch: [], blockiert_konzept: '',
+  },
+  {
+    regel_id: 'R-EUER-37', abschnitt: '4.5', sachverhalt: 'EÜR mit gesperrten oder nicht berechneten Belegen, die im Jahr bezahlt wurden',
+    regel: 'Nach § 11 EStG gehört jeder Zufluss und Abfluss in die EÜR des Zahlungsjahres. Ist ein im Jahr bezahlter Beleg gesperrt (Stufe 4), nicht unterstützt oder im Steuerfall offen, fehlt er in den Kennzahlen: euerFuer meldet W_EUER_UNVOLLSTAENDIG, gewinn_status "unvollstaendig", export_gesperrt true; die Anlage-EÜR-Liste (zahlenlisteEuer) ist gesperrt. Ohne Zahlung im Jahr bleibt die EÜR unberührt.',
+    quelle: '§ 4 Abs. 3, § 11 EStG (docs/quellen/estg-4.md, estg-11.md); Entscheidungen 3 und 4 (06-entscheidungen-und-status.md, Offen nach Gesamtprüfung), Standard laut 15-phase2/scope.md BP-07',
+    konfidenz: 'B', konfidenz_konzept: 'neu aus Phase 2 (BP-07)', blockiert_durch: [], blockiert_konzept: '',
+  },
 ]);
 
 // ---------------------------------------------------------------------------------------------
@@ -1147,7 +1178,7 @@ export const REGEL_UMSETZUNG = Object.freeze({
   'R-KZ-30': U('noch_nicht', NN3A), 'R-KZ-32': U('noch_nicht', NN3A), 'R-KZ-41': U('noch_nicht', NN3A), 'R-KZ-35': U('noch_nicht', NN3B), 'R-KZ-36': U('noch_nicht', NN3B),
   'R-KZ-51': U('noch_nicht', 'Stufe 2: Kz 50 (Uneinbringlichkeit) wird nicht berechnet, Korrekturen mit Grund uneinbringlich werden ausgeschlossen; noch nicht umgesetzt.'),
   'R-KZ-52': U('noch_nicht', 'Stufe 2: Kz 37 (Uneinbringlichkeit) wird nicht berechnet; noch nicht umgesetzt.'),
-  'R-KZ-23': U('noch_nicht', 'Kz 48 (Z.23) wird nicht berechnet, auch nicht im Wechseljahr; die Zeile steht in nicht_berechnet (wechseljahr: true).'),
+  'R-KZ-23': U('teilweise', 'Kz 48 (Z.23) wird nur im Jahr eines unterjährigen Wechsels für die steuerfreien Kleinunternehmer-Umsätze im Zeitraum des Wechsels berechnet (ustva.js kz48Cent); steuerfreie Umsätze nach § 4 Nr. 8 bis 29 bleiben nicht berechnet (nicht_berechnet).', 'ustva.js:kz48Cent'),
   'R-KZ-10': U('noch_nicht', 'Nutzerhaken "berichtigte Anmeldung" liegt in der Oberfläche, nicht im Kern.'),
   'R-KZ-13': U('umgesetzt', 'Z.13 Kz 81', 'ustva.js:umsatzZeile'), 'R-KZ-14': U('umgesetzt', 'Z.14 Kz 86', 'ustva.js:umsatzZeile'), 'R-KZ-15': U('umgesetzt', 'Z.15 Kz 87', 'ustva.js:zeile15'),
   'R-KZ-16': U('umgesetzt', 'Belege mit anderem Satz werden UNBEKANNT ausgeschlossen', 'wirkung.js:satz_nicht_zulaessig'),
@@ -1156,7 +1187,7 @@ export const REGEL_UMSETZUNG = Object.freeze({
   'R-KZ-37': U('umgesetzt', 'Z.37', 'ustva.js:function summen'), 'R-KZ-45': U('umgesetzt', 'Z.45', 'ustva.js:function summen'), 'R-KZ-48': U('umgesetzt', 'Z.48', 'ustva.js:function summen'),
   'R-KZ-38': U('teilweise', 'Skonto- und Rückgewähr-Korrekturen werden ausgeschlossen.'),
   'R-KZ-39': U('teilweise', 'Kz 61/62/63/59 (Z.39, 40, 42, 43) werden nicht berechnet (Stufe 4, in nicht_berechnet).'),
-  'R-KZ-44': U('umgesetzt', 'Durchreichen der Nutzereingabe Kz 64', 'ustva.js:eingabeCent(64)'), 'R-KZ-46': U('umgesetzt', 'Durchreichen der Nutzereingabe Kz 65', 'ustva.js:eingabeCent(65)'),
+  'R-KZ-44': U('umgesetzt', 'Durchreichen der Nutzereingabe Kz 64', 'ustva.js:eingabeCent(64)'), 'R-KZ-46': U('umgesetzt', 'Nutzereingabe Kz 65 plus Vorschlag nach K5 (Variante B Standard, Bestätigung durch den Nutzer)', 'ustva.js:export function kz65Vorschlag'),
   'R-KZ-47': U('umgesetzt', 'Durchreichen der Nutzereingabe Kz 69', 'ustva.js:eingabeCent(69)'),
   'R-KZ-49': U('teilweise', 'nur Dezember mit Dauerfrist und Profilwert; Einstellung der Tätigkeit und Verzicht auf die Dauerfrist nicht modelliert.'),
   'R-KZ-1H': U('teilweise', 'sondervorauszahlungCent liefert den Vorschlag, nur Anzeige.', 'steuerprofil.js:sondervorauszahlungCent'),
@@ -1176,30 +1207,35 @@ export const REGEL_UMSETZUNG = Object.freeze({
   'R-KOR-12': U('teilweise', 'Anzahlung über zahlungen[]; Absetzposten und Beleg schlussrechnung sind ausgeschlossen.'),
   'R-PLF-01': U('ui_oder_worker', 'außerhalb des Kerns'), 'R-PLF-02': U('ui_oder_worker', 'Worker-Repo (/stripe-gebuehren liefert 410)'), 'R-PLF-03': U('noch_nicht', 'Plattformrechnung nach Anbieterinhalt (K11) nicht im Kern.'),
   'R-PLF-04': U('teilweise', 'auslandskunde nur für Altbelege (normalisiereAlt).'), 'R-PLF-05': U('noch_nicht', 'Plattformrechnung nach Anbieterinhalt (K11) nicht im Kern.'),
-  'R-PR-05': U('teilweise', 'versteuerung_beleg wird nie gesetzt; der Zeitstrahl (versteuerungAm) ersetzt es.'), 'R-PR-06': U('tests_phase2', 'kuUeberschreitung ist nur in Tests aufgerufen, nicht in auswertung.js verdrahtet.', 'steuerprofil.js:kuUeberschreitung'),
+  'R-PR-05': U('teilweise', 'versteuerung_beleg wird nie gesetzt; der Zeitstrahl (versteuerungAm) ersetzt es.'), 'R-PR-06': U('umgesetzt', 'kuUeberschreitung in auswertungFuerJahr (grenzen.ku_laufend.ueberschreitung)', 'auswertung.js:kuUeberschreitung('),
   'R-PR-07': U('teilweise', 'nur Z.12 leer (kz70Datum null); kein Vorschlagsgenerator.'),
   'R-ZP-03': U('umgesetzt', 'Teilleistungen je Position (Soll), sonst ausgeschlossen', 'wirkung.js:istTeilleistung'), 'R-ZP-07': U('umgesetzt', 'Zahlungsdatum je Zahlung', 'wirkung.js:aktiveZahlungen'),
   'R-ZP-16': U('teilweise', 'Zahlung vor Leistung ist Anzahlung (R-ZP-04); der Hinweis "Rechnung vor Leistung" fehlt.'), 'R-ZP-24': U('umgesetzt', 'Aufteilung nach Bruttoanteilen', 'wirkung.js:zahlungsAnteile'),
   'R-ZP-26': U('umgesetzt', 'Kleinunternehmer brutto Kz 111', 'wirkung.js:kuWirkungen'),
   'R-RD-07': U('umgesetzt', 'Minderungen als negative Beträge', 'ustva.js:UMSATZ_ROLLEN'), 'R-RD-08': U('teilweise', 'Fremdwährung wird als Sperre nicht_eur ausgeschlossen, kein EUR-Wert mit Kurs.'),
   'R-RD-09': U('umgesetzt', 'Bewirtung 70 %', 'wirkung.js:BEWIRTUNG_ABZIEHBAR_BP'),
-  'R-KU-01': U('tests_phase2', 'kuGrenzpruefung ist nur in Tests und grenzpruefung aufgerufen, nicht in auswertung.js verdrahtet.', 'steuerprofil.js:kuGrenzpruefung'),
-  'R-KU-02': U('tests_phase2', 'gesamtumsatz19Abs2 ist nur in Tests aufgerufen (Näherung).', 'steuerprofil.js:gesamtumsatz19Abs2'),
-  'R-KU-03': U('teilweise', 'Nutzereingabe Kz 64/65, Hinweise W_WECHSEL_DIALOG, W_15A_HINWEIS.'), 'R-KU-04': U('teilweise', 'Außenstände werden gemeldet, keine Automatik.'),
+  'R-KU-01': U('umgesetzt', 'kuGrenzpruefung über grenzpruefung in auswertungFuerJahr (grenzen.ku_vorjahr, grenzen.ku_laufend)', 'auswertung.js:grenzpruefung('),
+  'R-KU-02': U('umgesetzt', 'gesamtumsatz19Abs2 in auswertungFuerJahr (Näherung aus den Zahlungen, ohne nicht steuerbare, befreite und Anlagevermögen-Umsätze)', 'auswertung.js:gesamtumsatz19Abs2('),
+  'R-KU-03': U('teilweise', 'Nutzereingabe Kz 64/65 mit Vorschlag Kz 65 (kz65Vorschlag), Hinweise W_WECHSEL_DIALOG, W_15A_HINWEIS; Wechsel-Dialog in der Oberfläche (BP-16).'), 'R-KU-04': U('teilweise', 'Außenstände werden gemeldet, keine Automatik.'),
   'R-KU-06': U('teilweise', 'Hinweis und Nutzereingabe Kz 64.'), 'R-KU-07': U('umgesetzt', 'Eingang vom Kleinunternehmer ohne Vorsteuer', 'wirkung.js:E_INLAND_OHNE_VORSTEUER'),
-  'R-KU-08': U('teilweise', 'Kz 48 wird nicht berechnet (nicht_berechnet, wechseljahr: true); die Regelbesteuerung ab dem Überschreiten ist umgesetzt.'),
-  'R-FR-06': U('nur_doku', 'Zusammenfassende Meldung, kein Kern-Code'), 'R-FR-07': U('nur_doku', 'Erklärungspflicht, kein Kern-Code'), 'R-FR-08': U('teilweise', 'nur Warnung W_ERECHNUNG_UEBERGANG_ENDET (grenzpruefung).'),
+  'R-KU-08': U('umgesetzt', 'Regelbesteuerung ab dem überschreitenden Umsatz; Kz 48 für die steuerfreien Kleinunternehmer-Umsätze im Zeitraum des Wechsels (Wirkung rolle ku_steuerfrei)', 'wirkung.js:ku_steuerfrei'),
+  'R-FR-06': U('nur_doku', 'Zusammenfassende Meldung, kein Kern-Code'), 'R-FR-07': U('teilweise', 'nur Hinweis (jahreserklaerungHinweis: Pflicht, Frist § 149 AO, Sondervorauszahlung); die Jahreserklärung selbst wird nicht berechnet.', 'hinweise.js:jahreserklaerungHinweis'), 'R-FR-08': U('umgesetzt', 'eRechnungPflicht (§ 27 Abs. 38 Nr. 1 bis 3) und W_ERECHNUNG_UEBERGANG_ENDET (grenzpruefung)', 'hinweise.js:export function eRechnungPflicht'),
   'R-FR-09': U('nur_doku', 'Rechnungsausstellung, kein Kern-Code'), 'R-FR-10': U('nur_doku', 'Aufbewahrung, kein Kern-Code'),
   'R-VS-01': U('teilweise', 'Bewirtungsnachweis umgesetzt; wirkung.js nutzt die ID auch für den allgemeinen Dialogfall.'),
   'R-VS-03': U('noch_nicht', 'keine Behandlung "unter 10 % Nutzung".'), 'R-VS-04': U('noch_nicht', 'kein HN-VS-RECHNUNG; nur Kleinbetrag über 250 EUR ohne Rechnung wird vom Abzug ausgeschlossen.'),
   'R-VS-05': U('teilweise', 'nur Nutzer-Sperrgrund mischnutzung.', 'wirkung.js:SPERRE_STUFE4'), 'R-VS-06': U('teilweise', 'nur Nutzer-Sperrgrund.', 'wirkung.js:SPERRE_STUFE4'),
   'R-VS-07': U('teilweise', 'GWG-Grenze geprüft; AfA und Sammelposten werden nicht gebucht.'), 'R-VS-08': U('noch_nicht', 'Reisekosten-Sonderfälle nicht im Kern.'),
   'R-VS-09': U('umgesetzt', 'Bankgebühren ohne Vorsteuer', 'wirkung.js:E_INLAND_OHNE_VORSTEUER'),
-  'R-LIM-01': U('tests_phase2', 'grenzpruefung ist nur in Tests aufgerufen, nicht in auswertung.js verdrahtet.', 'steuerprofil.js:function grenzpruefung'),
-  'R-LIM-02': U('tests_phase2', 'wie R-LIM-01', 'steuerprofil.js:function grenzpruefung'), 'R-LIM-03': U('tests_phase2', 'wie R-LIM-01', 'steuerprofil.js:function kuGrenzpruefung'),
-  'R-LIM-04': U('tests_phase2', 'wie R-LIM-01', 'steuerprofil.js:function grenzpruefung'), 'R-LIM-05': U('tests_phase2', 'wie R-LIM-01', 'steuerprofil.js:function grenzpruefung'),
-  'R-LIM-06': U('tests_phase2', 'wie R-LIM-01', 'steuerprofil.js:function grenzpruefung'), 'R-LIM-07': U('noch_nicht', 'Plausibilität des Satzes beim Eingang hat keinen Code (W_UST_ABWEICHUNG deckt es teilweise).'),
+  'R-LIM-01': U('umgesetzt', 'grenzpruefung L2 in auswertungFuerJahr (grenzen.buchfuehrung)', 'auswertung.js:grenzpruefung('),
+  'R-LIM-02': U('umgesetzt', 'grenzpruefung L3 in auswertungFuerJahr (grenzen.ist_800k)', 'auswertung.js:grenzpruefung('), 'R-LIM-03': U('umgesetzt', 'kuGrenzpruefung über grenzpruefung L4 (grenzen.ku_vorjahr, grenzen.ku_laufend)', 'auswertung.js:grenzpruefung('),
+  'R-LIM-04': U('umgesetzt', 'grenzpruefung L8, nur wenn optionen.oss_b2c_vorjahr_cent/oss_b2c_laufend_cent geliefert sind (grenzen.oss)', 'auswertung.js:grenzpruefung('), 'R-LIM-05': U('umgesetzt', 'grenzpruefung L9, nur mit optionen.beleg_13b_nr10_11_summe_cent (grenzen.weitere)', 'auswertung.js:grenzpruefung('),
+  'R-LIM-06': U('umgesetzt', 'grenzpruefung L10, nur mit optionen.anschaffung_vorsteuer_max_cent (grenzen.weitere)', 'auswertung.js:grenzpruefung('), 'R-LIM-07': U('noch_nicht', 'Plausibilität des Satzes beim Eingang hat keinen Code (W_UST_ABWEICHUNG deckt es teilweise).'),
   'R-PR-08': U('umgesetzt', 'Außenstände beim Wechsel zum 1.1.', 'steuerprofil.js:statusFuerAusgangsumsatz'),
+  'R-HN-01': U('umgesetzt', 'KI-Vorschlag ohne Bestätigung bleibt UNBEKANNT', 'beleg.js:W_KI_UNBESTAETIGT'),
+  'R-HN-02': U('umgesetzt', 'Datenfehler: Wirkung unbekannt mit HN_KERN_FEHLER', 'wirkung.js:HN_KERN_FEHLER'),
+  'R-HN-03': U('umgesetzt', 'Pflichtfelder in validiereBeleg und normalisiereEingabe', 'beleg.js:export function validiereBeleg'),
+  'R-HN-04': U('umgesetzt', 'Profilprüfung vor dem Schreiben', 'steuerprofil.js:export function profilPruefen'),
+  'R-EUER-37': U('umgesetzt', 'W_EUER_UNVOLLSTAENDIG, gewinn_status, export_gesperrt in euerFuer; gesperrte Liste in zahlenlisteEuer', 'euer.js:W_EUER_UNVOLLSTAENDIG'),
 });
 
 function baueRegeln() {

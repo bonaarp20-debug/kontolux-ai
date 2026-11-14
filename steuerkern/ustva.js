@@ -90,7 +90,64 @@ const NICHT_BERECHNET_FEST = Object.freeze([
 const KZ_JE_STEUERFALL = Object.freeze({
   E_13B_EU_DL: [46, 47, 67], E_13B_DRITTLAND_DL: [84, 85, 67], A_NICHT_STEUERBAR_EU_B2B_DL: [21], A_NICHT_STEUERBAR_DRITTLAND_B2B_DL: [45],
 });
-function nichtBerechnet(tabelle, steuerfaelle, wechseljahr) {
+// BP-04a (R-KZ-23, R-KU-08): Kz 48 (Z.23) im Jahr eines unterjährigen Wechsels: Summe der steuerfreien Kleinunternehmer-Umsätze, die im Zeitraum des
+// Wechsels vor dem Überschreiten ausgeführt und voll bezahlt wurden (Wirkungen rolle 'ku_steuerfrei', wirkung.js kuWirkungen). Offene Umsätze
+// (kz48_offen) sind nicht enthalten und werden gezählt. Rückgabe { betrag_cent, offen, belege[] }; ohne solche Wirkungen belege = [].
+export function kz48Cent(wirkungen, periode) {
+  const { ok } = pruefeWirkungen(wirkungen);
+  let kz48 = 0;
+  let offen = 0;
+  const belege = [];
+  for (const w of ok) {
+    if (w.welt !== 'ust' || w.rolle !== 'ku_steuerfrei' || w.periode !== periode || !Number.isSafeInteger(w.netto_cent)) continue;
+    if (typeof w.beleg_id === 'string' && !belege.includes(w.beleg_id)) belege.push(w.beleg_id);
+    if (w.kz48_offen === true) { offen++; continue; }
+    const neu = kz48 + w.netto_cent;
+    if (Number.isSafeInteger(neu)) kz48 = neu;
+  }
+  return { betrag_cent: kz48, offen, belege: belege.sort(), regel_id: 'R-KZ-23' };
+}
+
+// BP-04a (R-KZ-46, K5-Rechtsbericht 16-rechtsfragen/k5-kz65-wechsel.md): Vorschlag für Kz 65 (Z.46) im Zeitraum der Leistung, wenn für sie als
+// Kleinunternehmer in einem vorangegangenen Kalenderjahr eine Anzahlung vereinnahmt wurde (Anleitung USt 1 E Zeile 46). Die Anzahlung gilt als
+// Bruttobetrag (§ 10 Abs. 1 S. 2 UStG, UStAE 10.1 Abs. 3 S. 4 entsprechend; Konfidenz B):
+//   Variante B (Standard): Kz 65 = Anzahlung mal Satz/(100 + Satz), kaufmännisch auf Cent; Kz 81/86 nur das Restentgelt (Basis minus Anzahlung netto).
+//   Variante A: alles in Kz 81/86, Kz 65 leer.
+// Die Gesamtsteuer ist gleich (Steuer auf das volle Entgelt), nie steht derselbe Betrag in beiden Zeilen. Anzahlungen im selben Kalenderjahr
+// (unterjähriger Wechsel) sind kein Fall von Kz 65 (UStAE 19.7 Abs. 1 S. 4): sie stehen in nicht_einschlaegig, das volle Entgelt bleibt in Kz 81.
+export function kz65Vorschlag(wirkungen, periode) {
+  const { ok } = pruefeWirkungen(wirkungen);
+  const belege = [];
+  const nichtEinschlaegig = [];
+  const minderung = { 81: 0, 86: 0 };
+  let kz65 = 0;
+  for (const w of ok) {
+    if (w.welt !== 'ust' || w.periode !== periode || w.status !== 'berechnet' || w.rolle !== 'umsatz' || !istObjekt(w.ku_anzahlung)) continue;
+    const a = w.ku_anzahlung;
+    const vj = Number.isSafeInteger(a.vorjahr_brutto_cent) ? a.vorjahr_brutto_cent : 0;
+    const gesamt = Number.isSafeInteger(a.brutto_cent) ? a.brutto_cent : 0;
+    if (gesamt > vj) nichtEinschlaegig.push({ beleg_id: w.beleg_id, anzahlung_brutto_cent: gesamt - vj, grund: 'anzahlung_im_selben_jahr' });
+    if (vj <= 0 || !Number.isSafeInteger(w.satz_bp) || w.satz_bp <= 0 || (w.kz !== 81 && w.kz !== 86)) continue;
+    const steuer = ustAusBrutto(vj, w.satz_bp);
+    const netto = vj - steuer;
+    belege.push({ beleg_id: w.beleg_id, kz: w.kz, satz_bp: w.satz_bp, anzahlung_brutto_cent: vj, anzahlung_netto_cent: netto, kz65_cent: steuer, daten: Array.isArray(a.daten) ? a.daten.slice() : [] });
+    minderung[w.kz] += netto;
+    kz65 += steuer;
+  }
+  return {
+    periode,
+    belege,
+    nicht_einschlaegig: nichtEinschlaegig,
+    standard: 'B',
+    variante_a: { kz65_cent: 0, minderung_cent: { 81: 0, 86: 0 } },
+    variante_b: { kz65_cent: kz65, minderung_cent: minderung },
+    regel_id: 'R-KZ-46',
+    konfidenz: 'B',
+    text: belege.length ? 'Vorschlag: Steuer auf die Anzahlung aus der Kleinunternehmerzeit in Zeile 46 (Kz 65), Kz 81/86 nur das Restentgelt (Variante B). Alternative: alles in Kz 81/86 (Variante A). Die Gesamtsteuer ist gleich; eine amtliche Formel gibt es nicht.' : null,
+  };
+}
+
+function nichtBerechnet(tabelle, steuerfaelle, wechseljahr, kz48Berechnet) {
   const basis = tabelle
     ? tabelle.zeilen.filter((r) => !ZEILEN_BERECHNET.includes(r.z) && (r.kz_basis !== null || r.kz_steuer !== null)).map((r) => ({ z: String(r.z), kz: [r.kz_basis, r.kz_steuer].filter((x) => x !== null), stufe: r.stufe || null }))
     : NICHT_BERECHNET_FEST.map((r) => ({ ...r, stufe: null }));
@@ -98,7 +155,7 @@ function nichtBerechnet(tabelle, steuerfaelle, wechseljahr) {
     ...r,
     hinweis: 'wird von Kontolux nicht berechnet',
     anzahl_belege: steuerfaelle.filter((sf) => !Object.hasOwn(KZ_JE_STEUERFALL, sf) || KZ_JE_STEUERFALL[sf].some((k) => r.kz.includes(k))).length,
-    ...(r.z === '23' ? { wechseljahr: wechseljahr === true, bez: wechseljahr === true ? 'Steuerfreie Kleinunternehmer-Umsätze bis zum Überschreiten der Grenze (Kz 48) sind nicht berechnet, bitte selbst eintragen' : 'Steuerfreie Umsätze ohne Vorsteuerabzug (Kz 48) sind nicht berechnet' } : {}),
+    ...(r.z === '23' ? { wechseljahr: wechseljahr === true, kz48_berechnet: kz48Berechnet === true, bez: kz48Berechnet === true ? 'Kz 48 enthält die steuerfreien Kleinunternehmer-Umsätze bis zum Überschreiten der Grenze; andere steuerfreie Umsätze ohne Vorsteuerabzug (§ 4 Nr. 8 bis 29) sind nicht berechnet' : (wechseljahr === true ? 'Steuerfreie Kleinunternehmer-Umsätze bis zum Überschreiten der Grenze (Kz 48) sind in diesem Zeitraum nicht berechnet, bitte selbst prüfen' : 'Steuerfreie Umsätze ohne Vorsteuerabzug (Kz 48) sind nicht berechnet') } : {}),
   }));
 }
 
@@ -134,11 +191,25 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
   const belege = (liste) => eindeutig(liste.map((w) => w.beleg_id).filter((x) => typeof x === 'string'));
 
   // --- Umsatz-Zeilen 13 bis 15 ---
+  // BP-04a: Vorschlag Kz 65 (K5). Bestätigt der Nutzer Variante B (optionen.wechsel = { variante: 'B', bestaetigt: true }, auch je Zeitraum
+  // optionen.wechsel[periode]), mindert der Anzahlungsteil (netto) die Basis von Kz 81/86 und seine Steuer steht in Kz 65. Ohne Bestätigung rechnet
+  // der Kern Variante A und kennzeichnet Kz 83 als Zwischenwert.
+  const vorschlag65 = kz65Vorschlag(netz.ok, periode);
+  // BP-04a: Kz 48 im Zeitraum des unterjährigen Wechsels (nur Kleinunternehmer-Umsätze, ohne Steuer, ändert Kz 83 nicht)
+  const k48 = kz48Cent(netz.ok, periode);
+  const kz48Cent_ = k48.belege.length ? k48.betrag_cent : null;
+  if (k48.offen > 0) hinweise.push('W_KZ48_AUSSENSTAND');
+  const wo = istObjekt(opt.wechsel) ? (istObjekt(opt.wechsel[periode]) ? opt.wechsel[periode] : opt.wechsel) : {};
+  const hat65 = vorschlag65.belege.length > 0;
+  const bestaetigt65 = hat65 && wo.bestaetigt === true && (wo.variante === 'A' || wo.variante === 'B');
+  const variante65 = bestaetigt65 ? wo.variante : null;
   const umsatzZeile = (z, kz, satz) => {
     const l = berechnet.filter((w) => UMSATZ_ROLLEN.includes(w.rolle) && w.kz === kz);
     let basis = 0;
     let steuerWirkungen = 0;
     for (const w of l) { basis = addSicher(basis, w.netto_cent); steuerWirkungen = addSicher(steuerWirkungen, w.ust_cent); }
+    const minderung65 = variante65 === 'B' ? vorschlag65.variante_b.minderung_cent[kz] || 0 : 0;
+    if (minderung65 !== 0) { basis -= minderung65; steuerWirkungen -= ustAusNetto(minderung65, satz); }
     const steuerExakt = ustAusNetto(basis, satz);
     const basisEuro = basisInEuro(basis, mod);
     const steuerElster = ustAusNetto(basisEuro * 100, satz);
@@ -155,6 +226,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
       rundung_summe_cent: diff,
       rundung_elster_cent: steuerExakt - steuerElster,
       belege: belege(l),
+      ...(minderung65 !== 0 ? { kz65_minderung_cent: minderung65 } : {}),
     });
   };
   const zeile13 = umsatzZeile(13, basisKzFuerSatz(SATZ_REGEL_BP), SATZ_REGEL_BP);
@@ -187,7 +259,14 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
   // --- Eingaben des Nutzers (Kz 64, 65, 69) und Sondervorauszahlung (Kz 39) ---
   const eingabeCent = (kz) => (Number.isSafeInteger(ein[kz]) ? ein[kz] : 0);
   const z44 = eingabeCent(64);
-  const z46 = eingabeCent(65);
+  if (z44 !== 0) hinweise.push('HN_KZ64_EINGABE');
+  const eingabe65 = eingabeCent(65);
+  // K5: nie derselbe Anzahlungsbetrag in Kz 81 und Kz 65. In Variante B gilt der Vorschlag (eine abweichende Eingabe wird gemeldet, nicht addiert);
+  // ohne Bestätigung oder in Variante A steht die Anzahlung in Kz 81, eine Eingabe in Kz 65 könnte sie doppelt enthalten.
+  let z46 = eingabe65;
+  if (hat65 && variante65 === 'B') { if (eingabe65 !== 0 && eingabe65 !== vorschlag65.variante_b.kz65_cent) hinweise.push('W_KZ65_DOPPELT'); z46 = vorschlag65.variante_b.kz65_cent; }
+  else if (hat65 && eingabe65 !== 0) hinweise.push('W_KZ65_DOPPELT');
+  if (hat65 && !bestaetigt65) hinweise.push('W_KZ65_VORSCHLAG_OFFEN');
   const z47 = eingabeCent(69);
   const z41 = 0; // Kz 67 gehört zu Stufe 3a: hier nicht berechnet
   let z49 = 0;
@@ -230,7 +309,14 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
 
   // --- Z.12 (Kz 70): Datum des Wechsels in dem Zeitraum, in den es fällt ---
   const k70 = kz70Datum(profil, jahr);
-  const z12 = k70 && istDatum(k70.datum) && k70.datum >= periodenStart(periode) && k70.datum <= periodenEnde(periode) ? zeile(tabelle, 12, { datum: k70.datum, grund: k70.grund }) : null;
+  const imZ = (d) => istDatum(d) && d >= periodenStart(periode) && d <= periodenEnde(periode);
+  // BP-04a (K5, Anleitung Zeile 12): Kz 70 ist ein Vorschlag aus dem Zeitstrahl; eine Eingabe des Nutzers (optionen.eingaben[70], Datum) hat Vorrang
+  const e70 = ein[70] !== undefined ? ein[70] : ein['70'];
+  let z12 = null;
+  if (imZ(e70)) {
+    z12 = zeile(tabelle, 12, { datum: e70, grund: k70 ? k70.grund : null, eingabe: true, vorschlag_datum: k70 && istDatum(k70.datum) ? k70.datum : null });
+    if (k70 && istDatum(k70.datum) && k70.datum !== e70) hinweise.push('HN_KZ70_ABWEICHEND');
+  } else if (k70 && imZ(k70.datum)) z12 = zeile(tabelle, 12, { datum: k70.datum, grund: k70.grund, vorschlag: true });
 
   // --- Hinweise und Warnungen ---
   for (const w of imZeitraum.concat(ws.filter((x) => x.welt === 'ust' && x.periode === null))) for (const h of w.hinweise) hinweise.push(h);
@@ -239,6 +325,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
   const angenommen = alle.includes('W_VORANMELDUNG_ANGENOMMEN');
   // Gegenprüfung M2/M9: Anzahlung vor dem Überschreiten der Grenze (Zeitraum und Kz 65 nicht ausdrücklich in der Quelle) bleibt Zwischenwert
   const wechselAnzahlung = alle.includes('W_WECHSEL_ANZAHLUNG_KZ65') || alle.includes('W_WECHSEL_VORJAHR_ZAHLUNG');
+  const kz65Offen = alle.includes('W_KZ65_VORSCHLAG_OFFEN') || alle.includes('W_KZ65_DOPPELT');
 
   let frist = null;
   try { const f = fristFuerPeriode(profil, periode); frist = { gesetzlich: f.gesetzlich, faellig: f.faellig, wochentag: f.wochentag, verschoben: f.verschoben, dauerfrist: f.dauerfrist, hinweise: f.hinweise }; } catch (e) { frist = null; }
@@ -247,6 +334,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
   if (z12) zeilen.push(z12);
   zeilen.push(zeile13, zeile14);
   if (zeile15.basis_cent !== 0) zeilen.push(zeile15);
+  if (kz48Cent_ !== null) zeilen.push(zeile(tabelle, 23, { kz_basis: 48, basis_cent: kz48Cent_, basis_euro: basisInEuro(kz48Cent_, mod), steuer_cent: 0, belege: k48.belege, wechseljahr: true, offen: k48.offen, zwischenwert: k48.offen > 0 }));
   zeilen.push(zeile(tabelle, 37, { betrag_cent: primaer.z37_cent }));
   zeilen.push(zeile38);
   if (z44 !== 0) zeilen.push(zeile(tabelle, 44, { betrag_cent: z44, eingabe: true }));
@@ -263,6 +351,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
     '87': zeile15.basis_cent, '66': z38, '39': z49, '65': z46, '64': z44, '69': z47,
     Z37: primaer.z37_cent, Z45: primaer.z45_cent, Z48: primaer.z48_cent, '83': primaer.z50_cent,
   };
+  if (kz48Cent_ !== null) kennzahlen['48'] = kz48Cent_;
 
   return {
     periode, jahr, zeilen, kennzahlen,
@@ -271,13 +360,14 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
     summen_alternativ: alternativ,
     kz83: {
       betrag_cent: primaer.z50_cent,
-      status: unvollstaendig || angenommen || wechselAnzahlung ? 'zwischenwert' : 'ergebnis',
+      status: unvollstaendig || angenommen || wechselAnzahlung || kz65Offen ? 'zwischenwert' : 'ergebnis',
       regel_id: 'R-KZ-50',
-      text: unvollstaendig ? `Zwischenwert (unvollständig): ${ausg.length} Beleg(e) nicht berücksichtigt` : (angenommen ? 'Zwischenwert: Voranmeldungszeitraum im Profil nicht bestätigt (Quartal angenommen)' : (wechselAnzahlung ? 'Zwischenwert: Anzahlung oder Zahlung über das Überschreiten der Umsatzgrenze, Zeitraum und Kz 65 nicht amtlich entschieden (UStAE 19.7 Abs. 1 S. 4)' : null)),
+      text: unvollstaendig ? `Zwischenwert (unvollständig): ${ausg.length} Beleg(e) nicht berücksichtigt` : (angenommen ? 'Zwischenwert: Voranmeldungszeitraum im Profil nicht bestätigt (Quartal angenommen)' : (wechselAnzahlung ? 'Zwischenwert: Anzahlung oder Zahlung über das Überschreiten der Umsatzgrenze, Zeitraum in der Quelle nicht genannt (UStAE 19.7 Abs. 1 S. 4)' : (kz65Offen ? 'Zwischenwert: Anzahlung aus der Kleinunternehmerzeit, Variante für Kz 65 noch nicht bestätigt (K5)' : null))),
     },
     unvollstaendig,
     ausgeschlossene: ausg,
-    nicht_berechnet: nichtBerechnet(tabelle, ausg.map((a) => (a.beleg_id === null || a.beleg_id === undefined ? null : (steuerfallVon.get(a.beleg_id) || null))), alle.includes('W_KU_GRENZE_UEBERSCHRITTEN')),
+    nicht_berechnet: nichtBerechnet(tabelle, ausg.map((a) => (a.beleg_id === null || a.beleg_id === undefined ? null : (steuerfallVon.get(a.beleg_id) || null))), alle.includes('W_KU_GRENZE_UEBERSCHRITTEN'), kz48Cent_ !== null),
+    ...(hat65 ? { kz65_vorschlag: vorschlag65, kz65_variante: variante65 } : {}),
     hinweise: alle,
     warnungen: alle.filter((c) => c.startsWith('W_')),
     frist,

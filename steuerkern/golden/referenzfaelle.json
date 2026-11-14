@@ -1,7 +1,7 @@
 {
  "format": 1,
  "art": "auswertung",
- "kern_version": "2026.11.13-8",
+ "kern_version": "2026.11.14-1",
  "quelle": "docs/regelbesteuerung/05-testfaelle.json (112 Referenzfälle, mit scripts/test-steuerkern-golden-korrekturen.json); Ausgabe = Kern, vom Golden-Runner gegen die Fixture geprüft",
  "ohne_vektor": {
   "gesamt_faelle": 112,
@@ -3691,7 +3691,8 @@
       },
       "warnungen": [
        "W_BELEGE_AUSGESCHLOSSEN",
-       "W_BEWIRTUNG_NACHWEIS"
+       "W_BEWIRTUNG_NACHWEIS",
+       "W_EUER_UNVOLLSTAENDIG"
       ],
       "nicht_beruecksichtigt_anzahl": 1,
       "dashboard": {
@@ -4352,6 +4353,7 @@
       },
       "warnungen": [
        "W_BELEGE_AUSGESCHLOSSEN",
+       "W_EUER_UNVOLLSTAENDIG",
        "W_RECHNUNGSDATUM_FEHLT"
       ],
       "nicht_beruecksichtigt_anzahl": 1,
@@ -8764,6 +8766,7 @@
       },
       "warnungen": [
        "W_BELEGE_AUSGESCHLOSSEN",
+       "W_EUER_UNVOLLSTAENDIG",
        "W_STUFE4_NICHT_BERECHNET",
        "W_ZAHLLAST_UNVOLLSTAENDIG"
       ],
@@ -8940,6 +8943,7 @@
       },
       "warnungen": [
        "W_BELEGE_AUSGESCHLOSSEN",
+       "W_EUER_UNVOLLSTAENDIG",
        "W_STUFE4_NICHT_BERECHNET",
        "W_ZAHLLAST_UNVOLLSTAENDIG"
       ],
@@ -9116,6 +9120,7 @@
       },
       "warnungen": [
        "W_BELEGE_AUSGESCHLOSSEN",
+       "W_EUER_UNVOLLSTAENDIG",
        "W_STUFE4_NICHT_BERECHNET",
        "W_ZAHLLAST_UNVOLLSTAENDIG"
       ],
@@ -9292,6 +9297,7 @@
       },
       "warnungen": [
        "W_BELEGE_AUSGESCHLOSSEN",
+       "W_EUER_UNVOLLSTAENDIG",
        "W_STUFE4_NICHT_BERECHNET",
        "W_ZAHLLAST_UNVOLLSTAENDIG"
       ],
@@ -9468,6 +9474,7 @@
       },
       "warnungen": [
        "W_BELEGE_AUSGESCHLOSSEN",
+       "W_EUER_UNVOLLSTAENDIG",
        "W_STUFE4_NICHT_BERECHNET",
        "W_ZAHLLAST_UNVOLLSTAENDIG"
       ],
@@ -9858,6 +9865,7 @@
       },
       "warnungen": [
        "W_BELEGE_AUSGESCHLOSSEN",
+       "W_EUER_UNVOLLSTAENDIG",
        "W_STUFE4_NICHT_BERECHNET",
        "W_ZAHLLAST_UNVOLLSTAENDIG"
       ],
@@ -10036,6 +10044,7 @@
       },
       "warnungen": [
        "W_BELEGE_AUSGESCHLOSSEN",
+       "W_EUER_UNVOLLSTAENDIG",
        "W_LEISTUNGSORT_NICHT_BERECHNET",
        "W_STUFE4_NICHT_BERECHNET",
        "W_ZAHLLAST_UNVOLLSTAENDIG"
@@ -12592,6 +12601,7 @@
       },
       "warnungen": [
        "W_BELEGE_AUSGESCHLOSSEN",
+       "W_EUER_UNVOLLSTAENDIG",
        "W_STUFE4_NICHT_BERECHNET",
        "W_ZAHLLAST_UNVOLLSTAENDIG"
       ],
