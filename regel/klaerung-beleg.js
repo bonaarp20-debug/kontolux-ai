@@ -31,7 +31,7 @@ import { klaerungFreigegeben } from './migration.js';
 
 export const KLAERUNG_BELEG_AKTION = 'klaerung_beleg';
 const DOK_ID_MUSTER = /^[A-Za-z0-9_.-]{1,200}$/; // wie regel/migration.js
-const SCHLUESSEL = ['userId', 'aktion', 'anfrage_id', 'beleg_ids', 'antwort'];
+const SCHLUESSEL = ['userId', 'aktion', 'anfrage_id', 'beleg_ids', 'antwort', 'token']; // token setzt der Router bei jedem geschützten Pfad (wird hier nicht verwendet)
 const WAHLEN = [...new Set([...KLAERUNG_WAHLEN.eingang, ...KLAERUNG_WAHLEN.ausgang])];
 const dokPfad = (uid, id) => `users/${uid}/dokumente/${id}`;
 const zaehle = (m, k) => { m[k] = (m[k] || 0) + 1; };

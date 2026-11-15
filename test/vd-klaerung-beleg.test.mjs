@@ -271,3 +271,13 @@ test('Einhängestelle KX-VD in worker.js: aktion klaerung_beleg unter /migration
   assert.ok(haken > 0 && migration > 0 && haken < migration, 'Haken steht direkt vor dem Migrations-Handler');
   assert.match(src.slice(haken - 200, haken + 200), /KX-VD/);
 });
+
+// KX-VD Nachtrag: der Router setzt body.token bei jedem geschützten Pfad; die Eingabeprüfung darf daran nicht scheitern
+import { eingabeFehler as eingabeFehlerMitToken } from '../regel/klaerung-beleg.js';
+import test2 from 'node:test';
+import assert2 from 'node:assert/strict';
+test2('klaerung_beleg: vom Router gesetztes token ist erlaubt, fremde Schlüssel weiter nicht', () => {
+  const basis = { userId: 'u1', aktion: 'klaerung_beleg', anfrage_id: 'a-1234567890', beleg_ids: ['b1'], antwort: 'inland_19' };
+  assert2.notEqual(eingabeFehlerMitToken({ ...basis, token: 'x' }), 'SCHLUESSEL_UNBEKANNT');
+  assert2.equal(eingabeFehlerMitToken({ ...basis, token: 'x', fremd: 1 }), 'SCHLUESSEL_UNBEKANNT');
+});
