@@ -6,14 +6,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { KI_FEATURES, KI_FEATURES_AN, KI_FEATURES_AUS, kiFeatureStandKonto, kiZustimmungCacheLeeren } from '../regel/prompts.js';
-import { FEATURES_AGB_RELEASE_B } from '../regel/gemeinsam.js';
+import { FEATURES_AGB_RELEASE_B, FEATURES_AGB_RELEASE_C } from '../regel/gemeinsam.js';
 
 const UID = 'nutzerFIXEB0000000000001';
 const liste = (versionen) => ({ documents: versionen.map((v, i) => ({ name: `projects/p/databases/(default)/documents/users/${UID}/agb_zustimmung/z${i}`, fields: { version: { stringValue: v } } })) });
 const nur = (name) => Object.freeze({ ...KI_FEATURES_AUS, [name]: true });
 
-test('F3: alle Prompt-Features sind Release-B-Funktionen (Zustimmung 15.11. nötig)', () => {
-  for (const n of KI_FEATURES) assert.ok(FEATURES_AGB_RELEASE_B.includes(n), n);
+test('F3: alle Prompt-Features sind Release-B-Funktionen (Zustimmung 15.11. nötig); WORKER-C2: oss ist Release C (zusätzlich Fassung C, wenn gesetzt)', () => {
+  for (const n of KI_FEATURES) assert.ok(FEATURES_AGB_RELEASE_B.includes(n) || FEATURES_AGB_RELEASE_C.includes(n), n);
+  assert.ok(FEATURES_AGB_RELEASE_C.includes('oss'));
 });
 
 test('F3: mit Nachweis 15.11. der globale Stand, ohne (oder nur 14.11.) alles aus, Lesefehler = aus', async () => {

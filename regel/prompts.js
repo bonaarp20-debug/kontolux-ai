@@ -10,10 +10,15 @@
 // Texte: allgemeine Regel mit Norm, Zahlen nur aus KERN_ZAHLEN, Entscheidung beim Nutzer, keine Befehle (Zahlungen und Korrekturen laufen über
 // die Dialoge der App, BP-15). Quellen: kern-b-bericht.md (BP-04b, BP-05a-Kern), app-b-bericht.md (BP-15), worker-b-bericht.md und
 // plattform-klaerung-texte.js (BP-21a), rechnung-b-/-b2-bericht.md (BP-17, BP-18).
-import { CONFIG_PFAD, configBereinigen, agbZustimmungAb, AGB_FASSUNG_RELEASE_B, UID_MUSTER } from './gemeinsam.js';
+// WORKER-C2 (BP-22C, Release C): Feature oss (Abschnitt OSS im Modul integrationen, Wortlaut nach Konzept 2.4 Textmuster), bei oss an die
+// Plattform-Fassung ohne "OSS rechnet Kontolux nicht" (an_mit_oss); oss aus = alle Texte wie vorher. P4: Land im Befehl DOKUMENT_SPEICHERN
+// (kiLandAbgleichen, Text KI_RC_LAND_TEXT), freigeschaltet erst mit KI_RC_LAND_BEFEHL_AKTIV (Filter-Einbindung in worker.js und Client fehlen noch).
+// Release-C-Fassung der AGB: ist AGB_FASSUNG_RELEASE_C gesetzt, bekommt das Konto den OSS-Abschnitt nur mit Zustimmung zu dieser Fassung.
+import * as Steuerkern from '../steuerkern/index.js';
+import { CONFIG_PFAD, configBereinigen, agbFassungenLaden, agbFassungVergleich, AGB_FASSUNG_RELEASE_B, AGB_FASSUNG_RELEASE_C, UID_MUSTER } from './gemeinsam.js';
 import { erzeugeSchicht } from './firestore.js';
 
-export const KI_FEATURES = Object.freeze(['ausland', 'zahlung', 'korrektur', 'anlagegut', 'rechnung', 'erechnung', 'plattform']);
+export const KI_FEATURES = Object.freeze(['ausland', 'zahlung', 'korrektur', 'anlagegut', 'rechnung', 'erechnung', 'plattform', 'oss']);
 export const KI_FEATURES_AUS = Object.freeze(Object.fromEntries(KI_FEATURES.map((n) => [n, false])));
 export const KI_FEATURES_AN = Object.freeze(Object.fromEntries(KI_FEATURES.map((n) => [n, true])));
 
@@ -59,21 +64,57 @@ export const KI_FEATURE_TEXTE = Object.freeze({
   plattform: Object.freeze({
     modul: 'integrationen',
     an: '## KUNDENLAND BEI PLATTFORMVERKÄUFEN\nLiefert die Plattform ein Kundenland außerhalb Deutschlands, rechnet Kontolux die Bestellung nicht mit (kein deutscher Satz, Hinweis "Kunde im Ausland") und zeigt sie zum Klären. Klärbar sind nur Privatkunden in anderen EU-Ländern, mit der Angabe des Nutzers, dass diese Verkäufe im Vorjahr und im laufenden Jahr nicht über 10.000 € liegen (§ 3c Abs. 4 UStG); Drittland, Kunden mit USt-IdNr. und ausländische Sätze bleiben Zwischenwert. Ob die Grenze überschritten ist und ob er OSS nutzt, entscheidet der Nutzer (Infos: BZSt); OSS rechnet Kontolux nicht.',
+    an_mit_oss: '## KUNDENLAND BEI PLATTFORMVERKÄUFEN\nLiefert die Plattform ein Kundenland außerhalb Deutschlands, rechnet Kontolux die Bestellung nicht als Inland (kein deutscher Satz, Hinweis "Kunde im Ausland") und zeigt sie zum Klären je Plattform und Land: Privatkunde im EU-Ausland unter der Grenze (§ 3c Abs. 4 UStG, Angabe des Nutzers) mit deutschem Satz, darüber über OSS (Abschnitt OSS). Kunden mit USt-IdNr., Ware ins Drittland und Fremdwährung bleiben Zwischenwert.',
     aus: 'Das Kundenland wertet Kontolux beim Plattformimport nicht aus: Bestellungen bekommen den Satz aus der Integrationseinstellung, auch bei Kunden im Ausland; solche Belege prüft der Nutzer im Belegarchiv.',
+  }),
+  // BP-22C (KB "OSS"): Normen aus oss-recherche.md 2.4.1 (Konfidenz A), Fristen/Registrierung laut BZSt, keine Handlungsanweisung im Einzelfall.
+  oss: Object.freeze({
+    modul: 'integrationen',
+    an: '## OSS (VERKÄUFE AN PRIVATKUNDEN IN ANDEREN EU-LÄNDERN)\nNach § 3c Abs. 4 S. 1 und § 3a Abs. 5 S. 3 UStG liegt der Ort im Land des Kunden, wenn Warenfernverkäufe und elektronische Leistungen an Privatkunden in anderen EU-Ländern zusammen im Vorjahr oder im laufenden Jahr 10.000 € netto übersteigen (genau 10.000 € = nicht überschritten), ab dem Umsatz, mit dem die Grenze überschritten wird; Verzicht auf die Grenze nach § 3c Abs. 4 S. 2. Kontolux zählt aus den erfassten Belegen (OSS-Karte im Dashboard) und zeigt in der Ansicht OSS die Quartalsliste je Land und Satz mit Berichtigungen und CSV; die Umsätze stehen netto in Kz 45 (Voranmeldung Zeile 36). Registrierung beim BZSt vor Beginn des Quartals, nach dem Überschreiten bis zum 10. Tag des Folgemonats (§ 18j Abs. 1 S. 3 UStG). Meldung und Zahlung bis zum letzten Tag des Monats nach dem Quartal, ohne Verschiebung bei Wochenende oder Feiertag, ohne Umsätze Nullmeldung; Umrechnung zum EZB-Kurs des letzten Quartalstags (§ 16 Abs. 6 S. 4 UStG). Elektronische Leistungen an Privatkunden im Drittland: Kz 45 ohne Grenze (§ 3a Abs. 5 S. 1 UStG). Kontolux übermittelt nichts, der Nutzer meldet selbst im BZSt-Portal (BZStOnline). Grenzstand und Beträge nur aus KERN_ZAHLEN oder der Ansicht OSS, nie selbst rechnen. Ob und wie der Nutzer OSS nutzt, entscheidet er (Infos: BZSt).',
+    aus: null,
   }),
 });
 
+// P4 (BP-22C, worker-b2-bericht 6 Nr. 3/4): Land des Anbieters im Befehl, damit der Kern Reverse-Charge-Belege aus dem Chat rechnet (EU Kz 46/47,
+// Drittland Kz 84/85). Erst aktiv, wenn worker.js pruefeBetragZeile kiLandAbgleichen aufruft und der Client land übernimmt (Zuruf inbox-ORCH).
+export const KI_RC_LAND_BEFEHL_AKTIV = false;
+export const KI_RC_LAND_TEXT = ' Im Befehl DOKUMENT_SPEICHERN nach j zusätzlich land=[Ländercode des Anbieters laut Beleg, z. B. IE; unklar: weglassen], daraus folgt EU oder Drittland.';
+
 // Abschnitt für ein Modul (leer, wenn dort kein Feature steht). stand: { name: true|false }, fehlend = aus.
-export function kiFeatureAbschnitt(modul, stand = KI_FEATURES_AUS) {
+// WORKER-C2: an_mit_oss ersetzt den An-Text, wenn oss an ist; rcLand hängt den Land-Satz an den Abschnitt ausland (Standard KI_RC_LAND_BEFEHL_AKTIV).
+export function kiFeatureAbschnitt(modul, stand = KI_FEATURES_AUS, { rcLand = KI_RC_LAND_BEFEHL_AKTIV } = {}) {
   const teile = [];
+  const ossAn = !!(stand && stand.oss === true);
   for (const name of KI_FEATURES) {
     const def = KI_FEATURE_TEXTE[name];
     if (def.modul !== modul) continue;
     const an = !!(stand && stand[name] === true);
-    const t = an ? def.an : def.aus;
+    let t = an ? (ossAn && def.an_mit_oss ? def.an_mit_oss : def.an) : def.aus;
+    if (t && an && name === 'ausland' && rcLand === true) t += KI_RC_LAND_TEXT;
     if (t) teile.push(t);
   }
   return teile.join('\n');
+}
+
+// P4: Land in einer DOKUMENT_SPEICHERN-Zeile (Parameterteil rest). Ohne land= unverändert. Nur bei Eingangsrechnung mit Reverse Charge; das Land
+// bestimmt EU (reverse_charge_eu) oder Drittland (reverse_charge_drittland) über Steuerkern.istEuLand. Ungültig, DE, unklar (XI) oder ohne
+// Reverse Charge: land= wird entfernt (Beleg bleibt ohne Land, der Kern rechnet ihn nicht). Widerspruch zur genannten steuerwahl: { ok: false }.
+const kiParam = (rest, k) => { const m = String(rest).match(new RegExp('(?:^|,)\\s*' + k + '=([^,]*)', 'i')); return m ? m[1].trim() : null; };
+const ohneParam = (rest, k) => String(rest).split(',').filter((t) => !new RegExp('^\\s*' + k + '\\s*=', 'i').test(t)).join(',');
+export function kiLandAbgleichen(rest) {
+  const roh = kiParam(rest, 'land');
+  if (roh === null) return { ok: true, rest };
+  const land = roh.toUpperCase();
+  const typ = kiParam(rest, 'typ') || 'rechnung_eingehend';
+  const wahl = kiParam(rest, 'steuerwahl');
+  const satz = (kiParam(rest, 'mwst_satz') || '').toLowerCase();
+  const rc = satz === 'reverse_charge' || wahl === 'reverse_charge_eu' || wahl === 'reverse_charge_drittland';
+  const eu = /^[A-Z]{2}$/.test(land) && land !== 'DE' ? Steuerkern.istEuLand(land) : null;
+  if (typ !== 'rechnung_eingehend' || !rc || (eu !== true && eu !== false)) return { ok: true, rest: ohneParam(rest, 'land') };
+  const soll = eu ? 'reverse_charge_eu' : 'reverse_charge_drittland';
+  if (wahl && wahl !== soll) return { ok: false };
+  const basis = ohneParam(ohneParam(rest, 'land'), 'steuerwahl');
+  return { ok: true, rest: `${basis},steuerwahl=${soll},land=${land}` };
 }
 
 // Leser mit Isolate-Cache (60 s; Fehler 10 s). Wirft nie: jeder Fehler (Token, Netz, Status, 404) = alles aus.
@@ -100,7 +141,7 @@ export async function kiFeatureStandLesen({ tokenFn, fetchFn, jetzt = Date.now()
 // FIX-EB (G-EB F3): Prompt-Stand eines Kontos. stand = globaler Stand (kiFeatureStandLesen). Ist dort nichts an, keine Unteranfrage. Sonst eine
 // Unteranfrage (Liste agb_zustimmung) je Konto höchstens alle 60 s (Fehler 10 s). Wirft nie: jeder Fehler = alles aus.
 const ZUSTIMMUNG_CACHE_MAX = 2000;
-const zustimmungCache = new Map(); // uid -> { ok, bis }
+const zustimmungCache = new Map(); // uid -> { ok, okC, bis }
 export function kiZustimmungCacheLeeren() { zustimmungCache.clear(); }
 export async function kiFeatureStandKonto({ uid, stand, tokenFn, fetchFn, jetzt = Date.now() } = {}) {
   try {
@@ -108,15 +149,21 @@ export async function kiFeatureStandKonto({ uid, stand, tokenFn, fetchFn, jetzt 
     if (!UID_MUSTER.test(String(uid || ''))) return KI_FEATURES_AUS;
     const c = zustimmungCache.get(uid);
     let ok;
-    if (c && jetzt < c.bis) ok = c.ok;
+    let okC;
+    if (c && jetzt < c.bis) { ok = c.ok; okC = c.okC; }
     else {
       let bis = jetzt + CACHE_MS;
+      // WORKER-C2: eine Liste agb_zustimmung für beide Fassungen (wie agbZustimmungAb, streng)
       try {
-        ok = await agbZustimmungAb(uid, AGB_FASSUNG_RELEASE_B, { token: await tokenFn(), fetchFn, streng: true });
-      } catch { ok = false; bis = jetzt + FEHLER_CACHE_MS; }
+        const fassungen = await agbFassungenLaden(uid, { token: await tokenFn(), fetchFn, streng: true });
+        const ab = (mindest) => fassungen.some((v) => (agbFassungVergleich(v, mindest) ?? -1) >= 0);
+        ok = ab(AGB_FASSUNG_RELEASE_B);
+        okC = AGB_FASSUNG_RELEASE_C ? ab(AGB_FASSUNG_RELEASE_C) : true;
+      } catch { ok = false; okC = false; bis = jetzt + FEHLER_CACHE_MS; }
       if (zustimmungCache.size >= ZUSTIMMUNG_CACHE_MAX) zustimmungCache.clear();
-      zustimmungCache.set(uid, { ok, bis });
+      zustimmungCache.set(uid, { ok, okC, bis });
     }
-    return ok === true ? stand : KI_FEATURES_AUS;
+    if (ok !== true) return KI_FEATURES_AUS;
+    return okC === true || stand.oss !== true ? stand : Object.freeze({ ...stand, oss: false });
   } catch { return KI_FEATURES_AUS; }
 }

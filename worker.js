@@ -17,6 +17,7 @@ import { regelZaehler, ZAEHLER_PFADE } from './regel/zaehler.js'; // KX-RB (BP-1
 import { regelAdminFeatures } from './regel/admin-features.js';
 import { regelOssMeldung } from './regel/oss-meldung.js'; // WORKER-C (Release C, BP-29)
 import { regelEzbKurs } from './regel/ezb-kurs.js'; // WORKER-C (Release C, BP-29)
+import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // KX-WC2 (Release C, BP-30 DATEV-Teil)
 import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto } from './regel/prompts.js'; // BP-22B
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
@@ -4555,6 +4556,16 @@ async function handleDatevExport(body, env, cors = {}) {
       .sort((a, b) => String(firestoreValue(a.bezahlt_am) || firestoreValue(a.datum) || '').localeCompare(String(firestoreValue(b.bezahlt_am) || firestoreValue(b.datum) || '')))
       .forEach(f => { satzJeQuelle[firestoreValue(f.quelle)] = String(firestoreValue(f.mwst_satz) ?? ''); });
 
+    // KX-WC2 (BP-30): OSS-Umsätze nach dem Fall des Kerns (regel/datev-oss.js). null = Kern-Option oss aus, dann bleibt der Export wie vorher.
+    let ossPlan = null;
+    try {
+      ossPlan = await datevOssPlanLaden(userId, dokDocs, { adminToken: () => getGoogleAccessToken(env, FIRESTORE_SCOPE), fetchFn: (...a) => fetch(...a) });
+    } catch (e) {
+      console.error('DATEV-Export OSS:', e?.message);
+      return new Response(JSON.stringify({ error: 'Export vorübergehend nicht möglich', details: 'Die Angaben zu Verkäufen ins Ausland konnten nicht gelesen werden. Bitte den Export gleich noch einmal starten.' }), { status: 503, headers: { ...cors, 'Content-Type': 'application/json' } });
+    }
+    const ossOffen = [];
+
     // Belege des gewünschten Jahres, tatsächlich bezahlt, mit Betrag > 0
     const buchungen = [];
     const ohneRechnungsnr = [];
@@ -4626,6 +4637,20 @@ async function handleDatevExport(body, env, cors = {}) {
 
       const absender = firestoreValue(fields.absender) || firestoreValue(fields.name) || '';
       const mwstSatz = firestoreValue(fields.mwst_satz);
+
+      // KX-WC2 (BP-30): Beleg mit steuer.oss bei Kern-Option oss: Konto, Schlüssel, Bestimmungsland und Satz aus dem Fall des Kerns; offener Fall = nicht exportiert.
+      const ossEintrag = ossPlan ? ossPlan.get(doc.name?.split('/').pop() || '') : null;
+      if (ossEintrag) {
+        const ossText = firestoreValue(fields.buchungstext) || '';
+        const r = datevOssBuchungen(ossEintrag, {
+          skr, bankkonto, belegDatum, belegfeld1: rechnungsnr, betragCent: Math.round(betrag * 100),
+          buchungstext: (ossText ? `Rechnung ${absender} ${ossText}` : `Rechnung ${absender}`).trim(),
+          diverseAdressnummer: kundenNummerById[firestoreValue(fields.kunde_id) || ''] || ''
+        });
+        if (r.offen) { ossOffen.push(`${rechnungsnr} (${r.grund})`); continue; }
+        buchungen.push(...r.buchungen);
+        continue;
+      }
 
       // Sachkonto wird IMMER frisch aus der gespeicherten Kategorie + der AKTUELLEN SKR03/04-
       // Einstellung aufgelöst statt den zum Speicherzeitpunkt fixierten Rohwert zu übernehmen —
@@ -4749,6 +4774,10 @@ async function handleDatevExport(body, env, cors = {}) {
     if (plattformOhneNr > 0) {
       datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${plattformOhneNr} Plattform-Beleg(e) ohne Rechnungsnummer: Belegfeld 1 enthält dort das Belegdatum.`;
     }
+    // KX-WC2 (BP-30): Verkäufe an Privatkunden im Ausland mit offenem Steuerfall stehen nicht im Stapel (nie raten), mit Belegnummer und Grund.
+    if (ossOffen.length > 0) {
+      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${ossOffen.length} Verkauf/Verkäufe an Privatkunden im Ausland wurden NICHT exportiert (Steuerfall offen): ${ossOffen.slice(0, 10).join(', ')}${ossOffen.length > 10 ? ', …' : ''}. Bitte in der App klären und erneut exportieren.`;
+    }
 
     // Privatentnahmen/-einlagen des Jahres (Storno-Vorgänge bleiben draußen)
     const privatDocs = await firestoreListAll(`${base}/privatvorgaenge`, authHeader).catch(() => []);
@@ -4810,6 +4839,8 @@ async function handleDatevExport(body, env, cors = {}) {
     ];
       // Auf 125 Spalten auffüllen (Spezifikation). Nicht belegte Felder bleiben leer.
       while (zeile.length < DATEV_SPALTEN_125.length) zeile.push('');
+      // KX-WC2 (BP-30): EU-Fenster nur bei OSS-Zeilen, Spalte 40 "EU-Land u. UStID (Bestimmung)" und 41 "EU-Steuersatz (Bestimmung)"
+      if (b.euLand) { zeile[39] = datevText(b.euLand, 15); zeile[40] = b.euSatz; }
       return zeile.join(';');
     });
 

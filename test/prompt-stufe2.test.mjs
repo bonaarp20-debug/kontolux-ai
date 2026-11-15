@@ -59,7 +59,7 @@ test('Funktionsabschnitte: jeder steht in genau einem Modul, bei "aus" kein Vers
   for (const [name, def] of Object.entries(KI_FEATURE_TEXTE)) {
     assert.ok(KI_FEATURES.includes(name), name);
     assert.ok(['steuer', 'euer', 'rechnungen', 'integrationen', 'tools'].includes(def.modul), `${name}: Modul ${def.modul}`);
-    assert.equal(alle.split(def.an).length - 1, 1, `${name}: An-Text genau einmal`);
+    assert.equal(alle.split(def.an_mit_oss || def.an).length - 1, 1, `${name}: An-Text genau einmal`); // WORKER-C2: mit oss an die Fassung an_mit_oss
     assert.ok(def.an.length > 80, name);
     if (def.aus) assert.ok(def.aus.length < 400, `${name}: Aus-Text kurz halten`);
     // An-Text nur bei "an", Aus-Text nur bei "aus"
