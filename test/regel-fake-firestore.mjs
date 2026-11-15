@@ -102,7 +102,9 @@ export function fakeFirestore() {
       const ff = sq.where && sq.where.fieldFilter;
       if (ff) {
         treffer = treffer.filter((p) => {
-          const f = docs.get(p).fields[ff.field.fieldPath];
+          // KERN-C3: verschachtelte Feldpfade (a.b.c) über mapValue, wie Firestore; ein flacher Schlüssel gleichen Namens hat Vorrang (ältere Tests)
+          const felder = docs.get(p).fields;
+          const f = Object.hasOwn(felder, ff.field.fieldPath) ? felder[ff.field.fieldPath] : ff.field.fieldPath.split('.').reduce((w, k) => (w && w.mapValue && w.mapValue.fields ? w.mapValue.fields[k] : undefined), { mapValue: { fields: felder } });
           if (ff.op === 'ARRAY_CONTAINS') return (f?.arrayValue?.values || []).some((x) => JSON.stringify(x) === JSON.stringify(ff.value));
           if (ff.op === 'EQUAL') return JSON.stringify(f) === JSON.stringify(ff.value);
           if (ff.op === 'IN') return f !== undefined && (ff.value?.arrayValue?.values || []).some((x) => JSON.stringify(x) === JSON.stringify(f)); // G1

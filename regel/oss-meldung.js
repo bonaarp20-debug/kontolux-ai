@@ -1,11 +1,12 @@
 // regel/oss-meldung.js (WORKER-C, Release C, BP-29): POST /oss-meldung speichert den Abgabe-Schnappschuss eines OSS-Quartals.
 // Vertrag (docs/regelbesteuerung/13-testrunde/inbox-ORCH.md, APP-C (3a)):
 //   { anfrage_id, aktion: 'abgabe', periode: 'JJJJ-Qn', abgegeben_am: 'JJJJ-MM-TT', schnappschuss }   (UID setzt der Router aus dem Token)
-//   schnappschuss = Steuerkern.ossAbgabeSchnappschuss(ossQuartal(...), abgegeben_am) = { periode, abgegeben_am, kern_version, zeilen[], berichtigungen[] }
+//   schnappschuss = Steuerkern.ossAbgabeSchnappschuss(ossQuartal(...), abgegeben_am) = { periode, abgegeben_am, kern_version, zeilen[], berichtigungen[], kurse[]? }
+//   (kurse ab Kern 2026.11.16-7, KERN-C3: nur bei Fremdwährung, je { waehrung, kurs (Text), datum (tatsächlicher EZB-Tag), quelle|null })
 //   Antwort { ok: true, periode, version } (Wiederholung: idempotent: true; gleicher Inhalt mit neuer anfrage_id: unveraendert: true)
 //
 // Ablage users/{uid}/oss_meldung/{periode} (Firestore-Regeln: Eigentümer liest, niemand schreibt; Rules-Wunsch an E-C in inbox-ORCH):
-//   { periode, abgegeben_am, kern_version, zeilen, berichtigungen, gespeichert_am (Uhr des Workers), anfrage_id, version, inhalt_hash,
+//   { periode, abgegeben_am, kern_version, zeilen, berichtigungen, kurse?, gespeichert_am (Uhr des Workers), anfrage_id, version, inhalt_hash,
 //     aufbewahrung_bis, schema, vorversion?, fruehere_anfragen[] }
 // Warum: Die App rechnet Berichtigungen früherer Quartale (§ 18j Abs. 4 S. 5 UStG, G-OSS-09) gegen die tatsächlich erklärten Werte (ossQuartal
 // optionen.abgaben). Diese Werte sind eine OSS-Aufzeichnung und werden zehn Jahre aufbewahrt (§ 22 Abs. 1 S. 4 UStG, ab Ende des Kalenderjahres der
@@ -34,7 +35,13 @@ const FRUEHERE_MAX = 50;
 const BETRAG_MAX = 1e13; // Cent, weit über jedem realistischen Wert, sicher ganzzahlig
 const PERIODE = /^(\d{4})-Q([1-4])$/;
 const SCHLUESSEL = ['userId', 'token', 'anfrage_id', 'aktion', 'periode', 'abgegeben_am', 'schnappschuss']; // token setzt der Router
-const SCHNAPP_SCHLUESSEL = ['periode', 'abgegeben_am', 'kern_version', 'zeilen', 'berichtigungen'];
+const SCHNAPP_SCHLUESSEL = ['periode', 'abgegeben_am', 'kern_version', 'zeilen', 'berichtigungen', 'kurse'];
+// KERN-C3 (G-OSS F9): genutzte Kurse mit dem tatsächlichen EZB-Tag (§ 16 Abs. 6 S. 4, 5 UStG: letzter Tag des Quartals, sonst der nächste Tag mit Kurs;
+// nie früher, nie nach der Abgabe). Optional; ohne Kurse bleibt der Inhalt (und inhalt_hash) byte-gleich zu vorher.
+export const KURSE_MAX = 30;
+const KURS_SCHLUESSEL = ['waehrung', 'kurs', 'datum', 'quelle'];
+const KURS_TEXT = /^\d{1,7}(\.\d{1,10})?$/;
+const QUELLE_TEXT = /^[A-Za-z0-9 ._-]{1,40}$/;
 const ZEILE_SCHLUESSEL = ['abschnitt', 'land', 'satz_bp', 'bemessung_cent', 'steuer_cent'];
 const BER_SCHLUESSEL = ['zeitraum', 'land', 'bisher_cent', 'berichtigt_cent'];
 const ABSCHNITTE = ['waren', 'dienstleistungen'];
@@ -80,7 +87,25 @@ export function schnappschussPruefen(s, periode, abgegebenAm) {
     if (bschl.has(k)) return 'SCHNAPPSCHUSS_UNGUELTIG';
     bschl.add(k);
   }
+  if (s.kurse !== undefined) {
+    if (!Array.isArray(s.kurse) || s.kurse.length > KURSE_MAX) return 'SCHNAPPSCHUSS_UNGUELTIG';
+    const ende = Steuerkern.periodenEnde(periode);
+    const w = new Set();
+    for (const k of s.kurse) {
+      if (!istObjekt(k) || !nurSchluessel(k, KURS_SCHLUESSEL) || Object.keys(k).length !== KURS_SCHLUESSEL.length) return 'SCHNAPPSCHUSS_UNGUELTIG';
+      if (typeof k.waehrung !== 'string' || !/^[A-Z]{3}$/.test(k.waehrung) || k.waehrung === 'EUR' || w.has(k.waehrung)) return 'SCHNAPPSCHUSS_UNGUELTIG';
+      if (typeof k.kurs !== 'string' || !KURS_TEXT.test(k.kurs) || !(Number(k.kurs) > 0)) return 'SCHNAPPSCHUSS_UNGUELTIG';
+      if (!istDatum(k.datum) || k.datum < ende || k.datum > abgegebenAm) return 'SCHNAPPSCHUSS_UNGUELTIG';
+      if (!(k.quelle === null || (typeof k.quelle === 'string' && QUELLE_TEXT.test(k.quelle)))) return 'SCHNAPPSCHUSS_UNGUELTIG';
+      w.add(k.waehrung);
+    }
+  }
   return null;
+}
+
+// KERN-C3 (G-OSS F10): Kalendertag in Europe/Berlin (der Nutzer trägt sein deutsches Datum ein; der Worker läuft in UTC)
+export function heuteBerlin(jetzt) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit' }).format(jetzt);
 }
 
 // Rein. Eingabefehler des Bodys (nach Grundprüfung und Feature).
@@ -101,6 +126,7 @@ function inhaltAus(body) {
     abgegeben_am: body.abgegeben_am,
     zeilen: s.zeilen.map((z) => ({ abschnitt: z.abschnitt, land: z.land, satz_bp: z.satz_bp, bemessung_cent: z.bemessung_cent, steuer_cent: z.steuer_cent })),
     berichtigungen: (s.berichtigungen || []).map((r) => ({ zeitraum: r.zeitraum, land: r.land, bisher_cent: r.bisher_cent, berichtigt_cent: r.berichtigt_cent })),
+    ...(Array.isArray(s.kurse) && s.kurse.length ? { kurse: s.kurse.map((k) => ({ waehrung: k.waehrung, kurs: k.kurs, datum: k.datum, quelle: k.quelle })) } : {}),
   };
 }
 
@@ -109,7 +135,7 @@ export async function regelOssMeldung(body, env, cors = {}, deps = {}) {
   if (gp) return fehlerAntwort(gp === 'NICHT_ANGEMELDET' ? 401 : 400, gp, cors);
   const uid = body.userId;
   const zeit = jetztIso(deps);
-  const heute = typeof deps.heute === 'function' ? deps.heute() : zeit.slice(0, 10);
+  const heute = typeof deps.heute === 'function' ? deps.heute() : heuteBerlin(new Date(zeit)); // KERN-C3 (G-OSS F10): nicht das UTC-Datum
   try {
     const fs = await schichtFuer(deps);
     const cfg = await fs.get(CONFIG_PFAD);

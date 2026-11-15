@@ -37,6 +37,7 @@ import { legacyHash } from './drift.js';
 import { klaerungEinheit, KLAERUNG_MAX, KLAERUNG_WAHLEN, istPlattformAuslandsbeleg } from './klaerung.js';
 import { klaerungFreigegeben } from './migration.js';
 import { altFestMonate, altMonateSperren } from './klaerung-altmonat.js';
+import { belegeFuerKern } from './festschreibung-kern.js';
 
 // APP-B2 (BP-21a-A, 15.11.2026): Plattformbelege mit Kunde im Ausland (plattform_daten.fall 'auslandskunde', BP-21a-W). Deutsche Steuer nur mit
 // antwort.grundlage 'eu_b2c_unter_grenze' UND der Sammelbestätigung des Nutzers am Steuerprofil für das Belegjahr (eu_b2c_grenze[jahr].unter_grenze
@@ -93,6 +94,28 @@ export const GRUNDLAGE_OSS = 'oss_plattform';
 export const OSS_STEUERWAHL = 'b2c_ausland';
 export const OSS_LEISTUNGSARTEN = Object.freeze(['ware', 'tbe']);
 const OSS_STATUS = Object.freeze(['regel', 'ku']);
+
+// KERN-C3 (G-OSS F1): Belege, die der Nutzer per APP-B2-Sammelbestätigung als "unter der Grenze" geklärt hat (A_INLAND_19/7/A_KU, steuer.migration.klaerung
+// .grundlage 'eu_b2c_unter_grenze_bestaetigt'), sind ab dem Überschreiten der 10.000-EUR-Grenze offene OSS-Fälle (Kern: UNBEKANNT
+// oss_bestaetigung_widerspruch). Die OSS-Klärung darf sie dann auf steuer.oss umstellen. Ob ein Beleg ab dem Überschreiten liegt, prüft der Worker selbst
+// (dem Browser wird nicht geglaubt): er liest die bestätigten und die OSS-EU-Belege des Kontos (zwei runQuery unter users/{geprüfte UID}, je höchstens
+// UMSTELLUNG_KONTEXT_MAX) und rechnet Steuerkern.ossUmstellbareBelege über diese Teilmenge plus die angefragten Belege. Das ist eine Untergrenze der
+// Schwellensumme (alle Beiträge >= 0, Vorjahr aus Profil und Belegen; monoton, Kern-Test test-kern-c3.mjs): was in der Teilmenge umstellbar ist, ist es im
+// Gesamtbestand sicher. Fehlt Kontext (mehr Belege als das Limit, Drift), bleibt der Beleg im Zweifel nicht_offen (vorsichtige Seite: Zwischenwert in
+// Voranmeldung und OSS-Liste bleibt sichtbar). Unteranfragen: +2, nur wenn ein angefragter Beleg bestätigt ist.
+export const UMSTELLUNG_KONTEXT_MAX = 500;
+const kontextAbfrage = (feld, wert) => ({ from: [{ collectionId: 'dokumente' }], where: { fieldFilter: { field: { fieldPath: feld }, op: 'EQUAL', value: { stringValue: wert } } }, limit: UMSTELLUNG_KONTEXT_MAX });
+async function umstellbareIds(fs, uid, profil, angefragt) {
+  const kandidaten = belegeFuerKern(angefragt, profil).belege.filter((b) => b && Steuerkern.ossBestaetigtUnter(b.steuer)).map((b) => b.id);
+  if (!kandidaten.length) return new Set();
+  const best = await fs.runQuery(`users/${uid}`, kontextAbfrage('steuer.migration.klaerung.grundlage', KENNZEICHEN_EU_B2C));
+  const oss = await fs.runQuery(`users/${uid}`, kontextAbfrage('steuer.oss.lage', 'eu'));
+  const zeilen = new Map();
+  for (const d of [...best, ...oss]) { const id = String(d.pfad).split('/').pop(); if (String(d.pfad) === `users/${uid}/dokumente/${id}`) zeilen.set(id, { id, daten: d.daten }); }
+  for (const z of angefragt) zeilen.set(z.id, z);
+  const ids = new Set(Steuerkern.ossUmstellbareBelege(belegeFuerKern([...zeilen.values()], profil).belege, profil).map((x) => x.beleg_id));
+  return new Set(kandidaten.filter((id) => ids.has(id)));
+}
 
 function plattformSatz(pd) {
   const ps = istObjekt(pd.plattform_steuer) ? pd.plattform_steuer : null;
@@ -209,6 +232,16 @@ function einheitFuer(uid, id, dok, kontext) {
     const p = ossPruefung(d, kontext.profil);
     if (!p.ok) return { id, write: null, code: p.code };
     const la = kontext.oss.leistungsart;
+    // KERN-C3 (G-OSS F1): bestätigter Beleg "unter der Grenze": nur nach dem Überschreiten (umstellbareIds), sonst wie bisher nicht_offen
+    const sd = istObjekt(d.steuer) ? d.steuer : null;
+    const bestaetigt = d.schema_version === 2 && Steuerkern.ossBestaetigtUnter(sd);
+    if (bestaetigt && !(kontext.umstellbar instanceof Set && kontext.umstellbar.has(id))) return { id, write: null, code: 'nicht_offen' };
+    const vk = bestaetigt ? sd.migration.klaerung : null;
+    const umstellung = bestaetigt ? {
+      umstellung: true,
+      vorher_steuerfall: sd.steuerfall,
+      vorherige_klaerung: { grundlage: vk.grundlage, steuerwahl: vk.steuerwahl ?? null, grenze_jahr: vk.grenze_jahr ?? null, am: vk.am ?? null, anfrage_id: vk.anfrage_id ?? null },
+    } : null;
     const plattform = {
       gruende: ['auslandskunde'], wahlen: [OSS_STEUERWAHL],
       eingabe: (e) => ({ ...e, leistungsart: la, gegenpartei: { land: p.land }, ...(p.satz_bp !== null ? { satz_bp: p.satz_bp } : {}) }),
@@ -217,7 +250,8 @@ function einheitFuer(uid, id, dok, kontext) {
         return s.steuerfall === 'UNBEKANNT' && s.unbekannt_grund === 'auslandskunde' && !s.sperrgrund && istObjekt(s.oss) && (s.oss.land === p.land || (p.land === 'EL' && s.oss.land === 'GR'))
           && s.oss.lage === 'eu' && s.oss.leistungsart === la && Array.isArray(s.oss.zeilen) && s.oss.zeilen.length > 0;
       },
-      klaerung: { grundlage: GRUNDLAGE_OSS, leistungsart: la },
+      klaerung: { grundlage: GRUNDLAGE_OSS, leistungsart: la, ...(umstellung ? { vorher_steuerfall: umstellung.vorher_steuerfall, vorherige_klaerung: umstellung.vorherige_klaerung } : {}) },
+      ...(umstellung ? { umstellung: true } : {}),
     };
     return legacyErgaenzen(uid, id, dok, klaerungEinheit(uid, id, dok, { ...kontext, plattform }));
   }
@@ -261,6 +295,11 @@ export async function regelKlaerungBeleg(body, env, cors = {}, deps = {}) {
     const profil = docs.get(aktuellPfad(uid))?.daten;
     if (!profilBereit(profil)) return fehlerAntwort(409, 'PROFIL_NICHT_BESTAETIGT', cors);
     const kontext = { profil, steuerwahl, grundlage: body.antwort.grundlage, ...(ossAntwort ? { oss: { leistungsart: body.antwort.leistungsart } } : {}), ...(landAusAntwort(body.antwort) ? { land: landAusAntwort(body.antwort) } : {}), zeit, stichtag: zeit.slice(0, 10), anfrage_id: body.anfrage_id, festPerioden: [], kernOptionen: await kernOptionenFuerKontoLaden(uid, configBereinigen(docs.get(CONFIG_PFAD)?.daten), { fs }) }; // E-B (A1): Kern-Optionen für die Sperrprüfung; FIX-EB (F4): Zustimmung je Konto wie die Festschreibung
+    // KERN-C3 (G-OSS F1): bei der OSS-Klärung bestätigte Belege nach dem Überschreiten bestimmen (Kontext selbst gelesen, siehe umstellbareIds)
+    if (ossAntwort) {
+      const angefragt = ids.map((id) => ({ id, daten: docs.get(dokPfad(uid, id))?.daten })).filter((z) => istObjekt(z.daten));
+      kontext.umstellbar = await umstellbareIds(fs, uid, profil, angefragt);
+    }
     let einheiten = ids.map((id) => einheitFuer(uid, id, docs.get(dokPfad(uid, id)), kontext));
     if (einheiten.some((e) => e.write)) {
       const liste = await fs.list(`users/${uid}/festschreibung`, { pageSize: 300 });

@@ -10,6 +10,8 @@
 //   ossQuartal(belege, profil, jahr, quartal, opt)    Zahlenliste je Abschnitt, Land und Satz, Berichtigungen, Zahlbetrag je Land
 //   ossAbgabeSchnappschuss(ergebnis, abgegebenAm)     abgegebene Werte eines Quartals (für spätere Berichtigungen; speichert die App/der Worker)
 //   ossZahlenlisteCsv(ergebnis)                       CSV zum Selbsteintragen im BZStOnline-Portal (Kontolux übermittelt nichts)
+//   ossUmstellbareBelege(belege, profil)              KERN-C3: APP-B2-bestätigte Belege ab dem Überschreiten (offene OSS-Fälle, OSS-Klärung b2c_ausland)
+//   ossBestaetigtUnter(steuer)                        KERN-C3: Kennzeichen "unter der Grenze bestätigt" am gespeicherten steuer
 //
 // Rechtsgrundlagen und Konfidenz (docs/regelbesteuerung/17-oss/oss-recherche.md, 19-phase3/kern-c-bericht.md):
 //   Grenze: § 3a Abs. 5 S. 3, § 3c Abs. 4 S. 1 UStG (A); Wechsel ab dem überschreitenden Umsatz (BZSt, A); genau 10.000,00 nicht überschritten (A).
@@ -20,6 +22,8 @@
 //   KERN-C2 (Kern 2026.11.16-6, Funde G-KERN-C): Erstattung zu einer bezahlten Rechnung wirkt erst mit der Rückgewähr, ohne erfasste Rückzahlung vorläufig
 //   (wie der Inlandspfad, § 17 Abs. 1, 2 UStG entsprechend, UStAE 17.1 Abs. 2 S. 3; Entscheidung H1, B). Korrekturen später als 31.12. des vierten Jahres nach
 //   dem Original nicht berechnet (G-KC-01, Vorfilter-Spanne). Fehlender Schnappschuss eines Zwischenquartals überschreibt keinen bekannten Stand (G-KC-04).
+//   KERN-C3 (Kern 2026.11.16-7, Funde G-OSS): bestätigte Belege ab dem Überschreiten in ossQuartal.offen (F1, keine falsche Nullmeldung); Kurs nie vor dem
+//   Quartalsende, Schnappschuss mit Kurstag (F9, § 16 Abs. 6 S. 4, 5 UStG, A).
 // Beleg-Daten: steuer.oss = { leistungsart 'ware'|'tbe'|null, land (ISO, GR statt EL), lage 'eu'|'drittland'|'ungeklaert', zeilen [{ netto_cent, ust_cent,
 //   satz_bp }] in der Belegwährung (Korrektur negativ), waehrung, kurs_monat?, versand_von?, satz_bestaetigt? } (beleg.js normalisiereEingabe, steuerwahl
 //   'b2c_ausland'). Profil: profil.oss = { jahre_cent: { 'JJJJ': Cent (Nutzerwert, Summe des Jahres) }, verzicht_ab, registriert_ab } und die
@@ -118,6 +122,8 @@ function bestaetigtUnter(s) {
   if (!k || k.grundlage !== BESTAETIGT_GRUNDLAGE) return false;
   return ['A_INLAND_19', 'A_INLAND_7', 'A_KU'].includes(s.steuerfall);
 }
+// KERN-C3 (G-OSS F1): Kennzeichen am gespeicherten steuer (Worker klaerung_beleg: nur solche Belege dürfen nach dem Überschreiten auf steuer.oss umgestellt werden)
+export function ossBestaetigtUnter(s) { return istObjekt(s) && bestaetigtUnter(s); }
 
 // Plattformbeleg aus Release B ohne OSS-Klärung (UNBEKANNT/auslandskunde, Land EU außer DE): für die Schwelle ein möglicher Betrag (0 bis Brutto)
 function plattformOffen(b) {
@@ -296,6 +302,24 @@ export function ossZuordnung(belege, profil, optionen) {
   return rechneSchwelle(belege, profil).faelle;
 }
 
+// KERN-C3 (G-OSS F1): bestätigte Belege ("unter der Grenze", APP-B2), die ab dem Überschreiten liegen (der Schwellenbeleg selbst eingeschlossen: ab dem
+// Umsatz, mit dem die Grenze überschritten wird, gilt das Kundenland; BZSt, A). Sie sind offene OSS-Fälle (UNBEKANNT oss_bestaetigung_widerspruch), bis
+// der Nutzer sie über die OSS-Klärung (steuerwahl 'b2c_ausland') klärt. Für die UI (Gruppe "bestätigt als unter der Grenze, jetzt darüber") und den
+// Worker (klaerung_beleg). Monoton: wer in einer Teilmenge der Belege umstellbar ist, ist es auch im Gesamtbestand (alle Schwellenbeiträge >= 0,
+// Vorjahr nur aus Profil und Belegen); darauf stützt sich die Worker-Prüfung über eine Untergrenze.
+// Rückgabe [{ beleg_id, datum, jahr, grund, schwellenbeleg }] nach Datum und ID sortiert.
+export function ossUmstellbareBelege(belege, profil) {
+  if (!Array.isArray(belege)) return [];
+  const r = rechneSchwelle(belege, profil);
+  const aus = [];
+  for (const [id, z] of r.faelle) {
+    if (!z.bestaetigt) continue;
+    const d = r.proJahr.get(jahrVon(z.datum));
+    aus.push({ beleg_id: id, datum: z.datum, jahr: jahrVon(z.datum), grund: z.grund, schwellenbeleg: !!(d && d.schwellenbeleg && d.schwellenbeleg.beleg_id === id) });
+  }
+  return aus.sort((a, b) => (a.datum !== b.datum ? (a.datum < b.datum ? -1 : 1) : a.beleg_id < b.beleg_id ? -1 : a.beleg_id > b.beleg_id ? 1 : 0));
+}
+
 export function ossSchwelle(belege, profil, jahr, optionen) {
   const r = rechneSchwelle(belege, profil);
   const J = Number(jahr);
@@ -438,7 +462,11 @@ function kursAus(kurse, periode, waehrung) {
   if (k === undefined || k === null) return null;
   const roh = istObjekt(k) ? k.kurs : k;
   if (fremdInEuroCent(1, typeof roh === 'string' ? Number(roh) : roh) === null) return null;
-  return { kurs: typeof roh === 'string' ? Number(roh) : roh, datum: istObjekt(k) && istDatum(k.datum) ? k.datum : periodenEnde(periode), quelle: istObjekt(k) && typeof k.quelle === 'string' ? k.quelle : null };
+  // KERN-C3 (G-OSS F9): Kurs des letzten Tags des Zeitraums, sonst des nächsten Tags mit Kurs (§ 16 Abs. 6 S. 4, 5 UStG, A): nie ein Kurs von vorher
+  const ende = periodenEnde(periode);
+  const datum = istObjekt(k) && istDatum(k.datum) ? k.datum : ende;
+  if (datum < ende) return null;
+  return { kurs: typeof roh === 'string' ? Number(roh) : roh, datum, quelle: istObjekt(k) && typeof k.quelle === 'string' ? k.quelle : null };
 }
 const ABSCHNITT_RANG = { waren: 0, dienstleistungen: 1 };
 
@@ -513,11 +541,13 @@ export function ossQuartal(belege, profil, jahr, quartal, optionen) {
   const akt = quartalsWerte(liste, faelle, periode, ende, opt.kurse);
   for (const h of akt.hinweise) hinweise.add(h);
   const offen = akt.offen.slice();
-  // Offene Belege des Quartals (Zuordnung unklar), mit Datum im Quartal
+  // Offene Belege des Quartals (Zuordnung unklar), mit Datum im Quartal. KERN-C3 (G-OSS F1): auch bestätigte Belege ("unter der Grenze") ab dem
+  // Überschreiten (ohne steuer.oss, z.bestaetigt): sie sind OSS-Fälle mit offener Angabe, die Liste ist dann ein Zwischenwert, nie eine Nullmeldung.
   for (const b of liste) {
-    if (!istObjekt(b) || !istObjekt(b.steuer) || !istObjekt(b.steuer.oss) || typeof b.id !== 'string') continue;
+    if (!istObjekt(b) || !istObjekt(b.steuer) || typeof b.id !== 'string') continue;
     const z = faelle.get(b.id);
-    if (z && z.fall === 'UNBEKANNT' && istDatum(z.datum) && quartalVon(z.datum) === periode) { offen.push({ beleg_id: b.id, grund: z.grund }); for (const h of z.hinweise) hinweise.add(h); }
+    if (!z || (!istObjekt(b.steuer.oss) && !z.bestaetigt)) continue;
+    if (z.fall === 'UNBEKANNT' && istDatum(z.datum) && quartalVon(z.datum) === periode) { offen.push({ beleg_id: b.id, grund: z.grund }); for (const h of z.hinweise) hinweise.add(h); }
   }
   // Berichtigungen früherer Quartale: je Ursprungsquartal und Land bisher erklärte gegen berichtigte Steuer
   const quartale = new Set();
@@ -612,14 +642,18 @@ export function ossQuartal(belege, profil, jahr, quartal, optionen) {
   };
 }
 
+// KERN-C3 (G-OSS F9): mit Fremdwährung zusätzlich kurse [{ waehrung, kurs, datum (tatsächlicher EZB-Tag), quelle }] (§ 16 Abs. 6 S. 4, 5 UStG; Nachweis,
+// welcher Kurs verwendet wurde); ohne Fremdwährung byte-gleich zu 2026.11.16-6 (kein Feld kurse).
 export function ossAbgabeSchnappschuss(ergebnis, abgegebenAm) {
   if (!istObjekt(ergebnis) || !Array.isArray(ergebnis.zeilen)) return null;
+  const kurse = Array.isArray(ergebnis.kurse) ? ergebnis.kurse.filter(istObjekt).map((k) => ({ waehrung: k.waehrung, kurs: k.kurs, datum: k.datum, quelle: typeof k.quelle === 'string' ? k.quelle : null })) : [];
   return {
     periode: ergebnis.periode,
     abgegeben_am: istDatum(abgegebenAm) ? abgegebenAm : null,
     kern_version: KERN_VERSION,
     zeilen: ergebnis.zeilen.map((z) => ({ abschnitt: z.abschnitt, land: z.land, satz_bp: z.satz_bp, bemessung_cent: z.bemessung_cent, steuer_cent: z.steuer_cent })),
     berichtigungen: (ergebnis.berichtigungen || []).map((r) => ({ zeitraum: r.zeitraum, land: r.land, bisher_cent: r.bisher_cent, berichtigt_cent: r.berichtigt_cent })),
+    ...(kurse.length ? { kurse } : {}),
   };
 }
 

@@ -111,7 +111,11 @@ export function klaerungEinheit(uid, id, dok, kontext) {
   const s = g.steuer;
   // WORKER-C: ein schon als OSS-Fall erfasster Beleg (steuer.oss, bleibt UNBEKANNT bis zur Zuordnung über alle Belege) ist nicht mehr offen; keine
   // Sammelklärung (auch nicht die APP-B2-Grundlage „unter der Grenze“) deutet ihn still um. Ändern nur über den Beleg selbst.
-  if (s.steuerfall !== 'UNBEKANNT' || s.wirkungslos === true || istObjekt(s.oss)) return { id, write: null, code: 'nicht_offen' };
+  // KERN-C3 (G-OSS F1): einzige Ausnahme von "nur UNBEKANNT": pf.umstellung (nur aus regel/klaerung-beleg.js, OSS-Klärung, nachdem der Worker über alle
+  // gelesenen Belege geprüft hat, dass der Kern den Beleg als Widerspruch nach dem Überschreiten sieht) für einen per APP-B2 als "unter der Grenze"
+  // bestätigten Beleg (Steuerkern.ossBestaetigtUnter). Ein Beleg mit steuer.oss bleibt immer nicht_offen.
+  const umstellung = !!(pf && pf.umstellung === true && s.wirkungslos !== true && !istObjekt(s.oss) && Steuerkern.ossBestaetigtUnter(s));
+  if (!umstellung && (s.steuerfall !== 'UNBEKANNT' || s.wirkungslos === true || istObjekt(s.oss))) return { id, write: null, code: 'nicht_offen' };
   if (!KLAERBARE_ARTEN.includes(s.beleg_art)) return { id, write: null, code: 'nicht_aufloesbar' };
   if ((typeof s.unbekannt_grund === 'string' && !KLAERBARE_GRUENDE.includes(s.unbekannt_grund) && !zusatzGruende.includes(s.unbekannt_grund)) || NIE_KLAERBARE_DETAILS.includes(s.unbekannt_detail)) return { id, write: null, code: 'nicht_aufloesbar' };
   if (!KLAERUNG_WAHLEN[s.richtung] || !(KLAERUNG_WAHLEN[s.richtung].includes(steuerwahl) || zusatzWahlen.includes(steuerwahl))) return { id, write: null, code: 'wahl_passt_nicht' };
