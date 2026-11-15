@@ -18,7 +18,7 @@ import * as Steuerkern from '../steuerkern/index.js';
 import { envModus, effektiverKernModus, ablehnungErlaubt, NIE_ABLEHNEN_WEGE } from './kern-modus.js';
 import { erzeugeSchicht, kodiereWert, dekodiereFelder } from './firestore.js';
 import { legacyHash } from './drift.js';
-import { istObjekt, codesBereinigen, CONFIG_PFAD, configBereinigen, featureAktiv } from './gemeinsam.js';
+import { istObjekt, codesBereinigen, CONFIG_PFAD, configBereinigen, featureAktiv, kernOptionenFuer } from './gemeinsam.js';
 
 const FORMAL = /^PF_(SCHEMA|STEUER|CENT|SUMME|BETRAG_ZU_GROSS|DATUM_FORMAT|SATZ|POSITIONEN|BELEG_ART|RICHTUNG|STEUERFALL)/;
 const ZAHLUNG = /^PF_ZAHLUNG_/;
@@ -28,11 +28,12 @@ export function profilBereit(p) {
   return istObjekt(p) && Array.isArray(p.status_verlauf) && p.status_verlauf.length > 0 && (typeof p.bestaetigt_am === 'string' || p.bestaetigt === true);
 }
 
-// Zeiträume, in die ein Beleg v2 wirkt (aus den Kern-Wirkungen): 'ust-<periode>' und 'euer-JJJJ-MM'
-export function wirkPerioden(beleg, profil) {
+// Zeiträume, in die ein Beleg v2 wirkt (aus den Kern-Wirkungen): 'ust-<periode>' und 'euer-JJJJ-MM'. E-B (A1): kernOptionen aus config/features
+// (gemeinsam.js kernOptionenFuer), damit die Sperrprüfung mit denselben Regeln rechnet wie Ansicht und Festschreibung; ohne Angabe wie bisher.
+export function wirkPerioden(beleg, profil, kernOptionen) {
   const s = new Set();
   let ws = [];
-  try { ws = Steuerkern.belegWirkungen(beleg, profil); } catch { ws = []; }
+  try { ws = kernOptionen ? Steuerkern.belegWirkungen(beleg, profil, kernOptionen) : Steuerkern.belegWirkungen(beleg, profil); } catch { ws = []; }
   for (const w of ws) {
     if (w.welt === 'ust' && typeof w.periode === 'string' && w.periode) s.add(`ust-${w.periode}`);
     if (w.welt === 'euer' && typeof w.datum_wirk === 'string' && /^\d{4}-\d{2}/.test(w.datum_wirk)) s.add(`euer-${w.datum_wirk.slice(0, 7)}`);
@@ -42,7 +43,7 @@ export function wirkPerioden(beleg, profil) {
 
 // Reine Entscheidung. legacy: die Legacy-Felder als Klartext genau so, wie der Worker sie schreibt. festPerioden: IDs festgeschriebener Zeiträume.
 // Ergebnis: { ablehnen, codes, steuer|null, nach_festschreibung[] }
-export function v2Entscheiden({ weg, eingabe, profil, legacy, stichtag, festPerioden = [], nieAblehnen = false, erfassung = true }) {
+export function v2Entscheiden({ weg, eingabe, profil, legacy, stichtag, festPerioden = [], nieAblehnen = false, erfassung = true, kernOptionen }) {
   const wegKennung = String(weg || 'unbekannt').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 40) || 'unbekannt';
   const eingangsweg = nieAblehnen || NIE_ABLEHNEN_WEGE.includes(wegKennung) || wegKennung.endsWith('_webhook');
   const r = Steuerkern.normalisiereEingabe(eingabe, { profil, stichtag });
@@ -54,7 +55,7 @@ export function v2Entscheiden({ weg, eingabe, profil, legacy, stichtag, festPeri
   const harte = blocker.filter((c) => FORMAL.test(c) || ZAHLUNG.test(c));
   const richtung = erfassung ? null : (eingabe && eingabe.richtung) || null;
 
-  const perioden = wirkPerioden(kandidat, profil);
+  const perioden = wirkPerioden(kandidat, profil, kernOptionen);
   const gesperrt = perioden.filter((p) => festPerioden.includes(p));
   const zahlungGesperrt = gesperrt.some((p) => p.startsWith('euer-'));
   const ablehnCodes = [...harte, ...(zahlungGesperrt ? ['PF_ZAHLUNG_GESPERRT'] : [])];
@@ -109,7 +110,8 @@ export async function v2Vorbereiten(deps) {
   const festPerioden = liste.dokumente.filter((d) => SPERRENDE.includes(d.daten && d.daten.status)).map((d) => String(d.pfad).split('/').pop());
   const legacy = dekodiereFelder(deps.felder || {});
   const eingabe = deps.eingabeFn(deps.weg, deps.belegRoh, deps.stichtag);
-  const e = v2Entscheiden({ weg: deps.weg, eingabe, profil, legacy, stichtag: deps.stichtag, festPerioden, nieAblehnen: deps.nieAblehnen === true });
+  const kernOptionen = kernOptionenFuer(configBereinigen(docs.get(CONFIG_PFAD) ? docs.get(CONFIG_PFAD).daten : null)); // E-B (A1)
+  const e = v2Entscheiden({ weg: deps.weg, eingabe, profil, legacy, stichtag: deps.stichtag, festPerioden, nieAblehnen: deps.nieAblehnen === true, kernOptionen });
   return { ...e, profil, felder: v2RestFelder(e, deps.zeit || new Date().toISOString()) };
 }
 
@@ -127,7 +129,7 @@ export const STEUER_SCHLUESSEL = Object.freeze(['richtung', 'beleg_art', 'steuer
   'versteuerung_beleg', 'wirkdatum', 'korrektur_grund', 'rueckzahlung', 'fa', 'kategorie', 'rechnungsnr', 'status_hinweise', 'legacy_typ',
   'migration', 'perioden', 'korrektur_notiz', 'entwurf_blocker']);
 
-export function clientSteuerPruefen({ steuer, legacy, stichtag, festPerioden = [], profil = null }) {
+export function clientSteuerPruefen({ steuer, legacy, stichtag, festPerioden = [], profil = null, kernOptionen }) {
   if (!istObjekt(steuer) || !Object.keys(steuer).every((k) => STEUER_SCHLUESSEL.includes(k)) || typeof steuer.steuerfall !== 'string') return { ablehnen: true, codes: ['PF_SCHEMA'], steuer: null };
   const s = JSON.parse(JSON.stringify(steuer));
   delete s.perioden; // reserviert für den Worker
@@ -137,7 +139,7 @@ export function clientSteuerPruefen({ steuer, legacy, stichtag, festPerioden = [
   const codes = [...formal];
   const brutto = Steuerkern.euroZuCent(Number(legacy && legacy.betrag));
   if (istObjekt(s.summe) && Number.isSafeInteger(s.summe.brutto_cent) && brutto !== null && Math.abs(s.summe.brutto_cent) !== Math.abs(brutto)) codes.push('PF_SUMME_LEGACY');
-  const perioden = wirkPerioden({ steuer: s }, profil);
+  const perioden = wirkPerioden({ steuer: s }, profil, kernOptionen);
   const gesperrt = perioden.filter((p) => festPerioden.includes(p));
   if (gesperrt.some((p) => p.startsWith('euer-'))) codes.push('PF_ZAHLUNG_GESPERRT');
   if (codes.length) return { ablehnen: true, codes: codesBereinigen(codes), steuer: null };
@@ -161,6 +163,6 @@ export async function clientSteuerVorbereiten(deps) {
   if (!config || config.kern_max === 'aus' || !featureAktiv(config, 'beleg_formular') || !profilBereit(profil)) return { ignoriert: true, ablehnen: false, codes: [], steuer: null, profil, felder: {} };
   const liste = await schicht.list(`users/${deps.uid}/festschreibung`, { pageSize: 300 });
   const festPerioden = liste.dokumente.filter((d) => SPERRENDE.includes(d.daten && d.daten.status)).map((d) => String(d.pfad).split('/').pop());
-  const e = clientSteuerPruefen({ steuer: deps.steuer, legacy: dekodiereFelder(deps.felder || {}), stichtag: deps.stichtag, festPerioden, profil });
+  const e = clientSteuerPruefen({ steuer: deps.steuer, legacy: dekodiereFelder(deps.felder || {}), stichtag: deps.stichtag, festPerioden, profil, kernOptionen: kernOptionenFuer(config) }); // E-B (A1)
   return { ...e, profil, felder: v2RestFelder(e, deps.zeit || new Date().toISOString()) };
 }

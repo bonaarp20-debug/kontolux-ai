@@ -27,7 +27,7 @@
 // Rest 'nicht_bearbeitet' (die App wiederholt). Budget wie alle regel/*-Endpunkte (REGEL_UNTERANFRAGEN_MAX, unter dem Free-Limit 50).
 import * as Steuerkern from '../steuerkern/index.js';
 import {
-  antwort, fehlerAntwort, grundpruefung, istObjekt, nurSchluessel, CONFIG_PFAD, configBereinigen, jetztIso, schichtFuer, regelFehler, ANFRAGE_ID_MUSTER,
+  antwort, fehlerAntwort, grundpruefung, istObjekt, nurSchluessel, CONFIG_PFAD, configBereinigen, jetztIso, schichtFuer, regelFehler, ANFRAGE_ID_MUSTER, kernOptionenFuer,
 } from './gemeinsam.js';
 import { schreibe, dekodiereFelder, FirestoreFehler, BudgetFehler } from './firestore.js';
 import { auditSchreibvorgaenge, kopfPfad } from './audit.js';
@@ -89,6 +89,17 @@ function profilBereit(p) {
   return istObjekt(p) && typeof p.bestaetigt_am === 'string' && Array.isArray(p.status_verlauf) && p.status_verlauf.length > 0;
 }
 
+// E-B (Zuruf APP-B3, BP-05a-UI): Land des Anbieters bei der Reverse-Charge-Klärung. Nur mit reverse_charge_eu/_drittland, Land als ISO-Code in
+// Großbuchstaben (nicht DE), optional gebiet (GEBIETE_SONDER, z. B. kanaren); die Lage nach Steuerkern.anbieterLage muss zur Wahl passen ('eu'
+// bzw. 'drittland'; Monaco = FR = EU, XI ungeklärt = nie). Ergebnis { land, gebiet? } oder null.
+const LAND_WAHLEN = Object.freeze({ reverse_charge_eu: 'eu', reverse_charge_drittland: 'drittland' });
+export function landAusAntwort(a) {
+  if (!istObjekt(a) || !LAND_WAHLEN[a.steuerwahl] || typeof a.land !== 'string' || !/^[A-Z]{2}$/.test(a.land) || a.land === 'DE') return null;
+  if (a.gebiet !== undefined && !(typeof a.gebiet === 'string' && /^[a-z_]{2,20}$/.test(a.gebiet))) return null;
+  if (Steuerkern.anbieterLage(a.land, a.gebiet) !== LAND_WAHLEN[a.steuerwahl]) return null;
+  return { land: a.land, ...(a.gebiet !== undefined ? { gebiet: a.gebiet } : {}) };
+}
+
 export function eingabeFehler(body) {
   if (body.aktion !== KLAERUNG_BELEG_AKTION) return 'AKTION_UNBEKANNT';
   if (!nurSchluessel(body, SCHLUESSEL)) return 'SCHLUESSEL_UNBEKANNT';
@@ -97,7 +108,8 @@ export function eingabeFehler(body) {
   if (!Array.isArray(ids) || ids.length === 0 || ids.length > KLAERUNG_MAX || ids.some((x) => typeof x !== 'string' || !DOK_ID_MUSTER.test(x)) || new Set(ids).size !== ids.length) return 'BELEG_IDS_UNGUELTIG';
   // Nur eine ausdrückliche Wahl; 'weiss_nicht', leer oder Zusatzangaben sind keine Klärung (nichts raten). grundlage nur mit bekanntem Wert (APP-B2).
   const a = body.antwort;
-  if (!istObjekt(a) || !nurSchluessel(a, ['steuerwahl', 'grundlage'])) return 'ANTWORT_UNGUELTIG';
+  if (!istObjekt(a) || !nurSchluessel(a, ['steuerwahl', 'grundlage', 'land', 'gebiet'])) return 'ANTWORT_UNGUELTIG';
+  if ((a.land !== undefined || a.gebiet !== undefined) && !landAusAntwort(a)) return 'ANTWORT_UNGUELTIG';
   if (a.grundlage !== undefined) {
     if (a.grundlage !== GRUNDLAGE_EU_B2C || ![...PLATTFORM_WAHLEN.regel, ...PLATTFORM_WAHLEN.ku].includes(a.steuerwahl)) return 'ANTWORT_UNGUELTIG';
   } else if (!WAHLEN.includes(a.steuerwahl)) return 'ANTWORT_UNGUELTIG';
@@ -173,7 +185,7 @@ export async function regelKlaerungBeleg(body, env, cors = {}, deps = {}) {
     if (!klaerungFreigegeben(configBereinigen(docs.get(CONFIG_PFAD)?.daten))) return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
     const profil = docs.get(aktuellPfad(uid))?.daten;
     if (!profilBereit(profil)) return fehlerAntwort(409, 'PROFIL_NICHT_BESTAETIGT', cors);
-    const kontext = { profil, steuerwahl, grundlage: body.antwort.grundlage, zeit, stichtag: zeit.slice(0, 10), anfrage_id: body.anfrage_id, festPerioden: [] };
+    const kontext = { profil, steuerwahl, grundlage: body.antwort.grundlage, ...(landAusAntwort(body.antwort) ? { land: landAusAntwort(body.antwort) } : {}), zeit, stichtag: zeit.slice(0, 10), anfrage_id: body.anfrage_id, festPerioden: [], kernOptionen: kernOptionenFuer(configBereinigen(docs.get(CONFIG_PFAD)?.daten)) }; // E-B (A1): Kern-Optionen für die Sperrprüfung
     let einheiten = ids.map((id) => einheitFuer(uid, id, docs.get(dokPfad(uid, id)), kontext));
     if (einheiten.some((e) => e.write)) {
       const liste = await fs.list(`users/${uid}/festschreibung`, { pageSize: 300 });

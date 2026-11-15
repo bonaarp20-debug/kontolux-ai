@@ -17,7 +17,7 @@
 // Referenzfälle (test/regel-festschreibung-kern.test.mjs) und 1.200 Zufallsbestände mit allen Datumsfeldern (test/d4-vorfilter.test.mjs).
 import * as Steuerkern from '../steuerkern/index.js';
 import { legacyHash, legacyHashV1, steuerGueltig } from './drift.js';
-import { istObjekt, periodeAusId, sha256Hex, kanonisch } from './gemeinsam.js';
+import { istObjekt, periodeAusId, sha256Hex, kanonisch, kernOptionenNormieren } from './gemeinsam.js';
 
 const ISO = /^\d{4}-\d{2}-\d{2}/;
 const tag = (v) => (typeof v === 'string' && ISO.test(v) ? v.slice(0, 10) : null);
@@ -160,19 +160,22 @@ export function euerMonatDerWirkung(w) {
 }
 
 // Kern-Snapshot eines Zeitraums. zeilenAlle: alle Belegzeilen { id, daten } des Kontos. Ergebnis enthält die Beleg-IDs mit Wirkung im Zeitraum.
-export function snapshotFuer(zeilenAlle, profil, periodeId, { gefiltert = true } = {}) {
+// E-B (A1): optionen = Kern-Optionen aus config/features (gemeinsam.js kernOptionenFuer; App: Lader kernOptionen). Sie gehen an alleWirkungen,
+// ustvaFuer und euerFuer und stehen vollständig im Ergebnis (kern_optionen), damit die Festschreibung sie vermerkt. Ohne Angabe: alle aus (wie bisher).
+export function snapshotFuer(zeilenAlle, profil, periodeId, { gefiltert = true, optionen } = {}) {
   const p = periodeAusId(periodeId);
   if (!p || (p.art !== 'ust' && p.art !== 'euer')) throw new Error('Periode ungültig');
+  const kernOptionen = kernOptionenNormieren(optionen) || kernOptionenNormieren(null);
   const start = Steuerkern.periodenStart(p.periode);
   const ende = Steuerkern.periodenEnde(p.periode);
   const fenster = vorfilterFenster(periodeId);
   const zeilen = gefiltert ? relevanteZeilen(zeilenAlle, fenster.start, fenster.ende) : (zeilenAlle || []);
   const { belege, veraltet } = belegeFuerKern(zeilen, profil);
-  const wirkungen = Steuerkern.alleWirkungen(belege, profil);
+  const wirkungen = Steuerkern.alleWirkungen(belege, profil, kernOptionen);
   const ids = new Set();
   let snap;
   if (p.art === 'ust') {
-    const u = Steuerkern.ustvaFuer(wirkungen, profil, p.periode);
+    const u = Steuerkern.ustvaFuer(wirkungen, profil, p.periode, kernOptionen);
     for (const w of wirkungen) if (w.welt === 'ust' && w.periode === p.periode && typeof w.beleg_id === 'string' && w.beleg_id) ids.add(w.beleg_id);
     for (const a of u.ausgeschlossene || []) if (typeof a.beleg_id === 'string' && a.beleg_id) ids.add(a.beleg_id);
     const sl = snapshotAusZahlenliste(Steuerkern.zahlenlisteUstva(u));
@@ -187,13 +190,13 @@ export function snapshotFuer(zeilenAlle, profil, periodeId, { gefiltert = true }
     const zahlungImMonat = (w) => (w.status === 'ausgeschlossen' || w.status === 'unbekannt') && Array.isArray(w.euer_zahlungen) && w.euer_zahlungen.some((z) => z && typeof z.datum === 'string'
       && euerMonatDerWirkung({ periode: typeof z.jahr === 'string' ? z.jahr.padStart(4, '0') : z.datum.slice(0, 4), datum_wirk: z.datum }) === p.periode);
     const imMonat = wirkungen.filter((w) => (w && w.welt === 'euer' ? euerMonatDerWirkung(w) === p.periode : (typeof w.datum_wirk === 'string' && w.datum_wirk >= start && w.datum_wirk <= ende) || (w && w.welt === 'ust' && zahlungImMonat(w))));
-    const e = Steuerkern.euerFuer(imMonat, profil, jahr);
+    const e = Steuerkern.euerFuer(imMonat, profil, jahr, kernOptionen);
     for (const w of imMonat) if (w.welt === 'euer' && w.periode === String(jahr) && typeof w.beleg_id === 'string' && w.beleg_id) ids.add(w.beleg_id);
     const z = zeilenAus(e.kennzahlen);
     for (const [kz, v] of [['EINNAHMEN', e.einnahmen_cent], ['AUSGABEN', e.ausgaben_cent], ['GEWINN', e.gewinn_cent]]) if (Number.isSafeInteger(v)) z.push({ kz, betrag_cent: v });
     snap = { zeilen: z, ausgeschlossen_anzahl: (e.ausgeschlossene || []).length, kz83_status: null, unvollstaendig: e.status === 'zwischenwert' };
   }
-  return { ...snap, art: p.art, periode: p.periode, beleg_ids: [...ids].sort(), gelesen: (zeilenAlle || []).length, gerechnet: zeilen.length, veraltet, kern_version: Steuerkern.KERN_VERSION };
+  return { ...snap, art: p.art, periode: p.periode, beleg_ids: [...ids].sort(), gelesen: (zeilenAlle || []).length, gerechnet: zeilen.length, veraltet, kern_version: Steuerkern.KERN_VERSION, kern_optionen: kernOptionen };
 }
 
 // Vergleich Server-Snapshot gegen Client-Snapshot (Konzept 3.6 Schritt 1): exakt je Kennzahl und Feld (basis_cent, steuer_cent, betrag_cent);

@@ -23,7 +23,8 @@ import { schreibe, vorbedingungAus } from './firestore.js';
 import { auditSchreibvorgaenge, kopfPfad, hashVon } from './audit.js';
 
 export const PROFIL_KERN_FELDER = ['version', 'gewinnermittlung', 'beruf_art', 'gruendung', 'status_verlauf', 'option_19_3', 'versteuerung_verlauf',
-  'voranmeldung_verlauf', 'vorjahr', 'limit_bestaetigungen', 'eu_b2c_grenze'];
+  'voranmeldung_verlauf', 'vorjahr', 'limit_bestaetigungen', 'eu_b2c_grenze',
+  'gwg_wahl']; // E-B: GWG-/Sammelposten-/AfA-Wahl je Jahr (BP-04b, Kern profilPruefen GWG_WAHL_UNGUELTIG); ohne Eintrag ginge sie bei jeder Profiländerung verloren
 const VERLAUF_MAX = 50;
 const AKTIONEN = ['anlegen', 'eintrag', 'ist_jahr_bestaetigen', 'bestaetigen', 'stammdaten'];
 const GRUNDLAGEN_EINGABE = ['nr1', 'nr2', 'nr3', 'weiss_nicht']; // K2; Ist nur mit nr1/nr3 (Kern GRUNDLAGEN_IST)

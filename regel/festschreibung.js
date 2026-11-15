@@ -27,6 +27,7 @@
 import * as Steuerkern from '../steuerkern/index.js';
 import {
   antwort, fehlerAntwort, grundpruefung, istObjekt, istText, nurSchluessel, CONFIG_PFAD, configBereinigen, featureAktiv, periodeAusId,
+  kernOptionenFuer, kernOptionenNormieren, kanonisch,
   jetztIso, schichtFuer, regelFehler,
 } from './gemeinsam.js';
 import { schreibe, vorbedingungAus, vollerName, FirestoreFehler, BudgetFehler } from './firestore.js';
@@ -325,6 +326,8 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
     snapshot = snapshotBereinigen(body.snapshot);
     if (!snapshot) return fehlerAntwort(400, 'SNAPSHOT_UNGUELTIG', cors);
     if (body.kern_version !== undefined && !istText(body.kern_version, 40)) return fehlerAntwort(400, 'KERN_VERSION_UNGUELTIG', cors);
+    // E-B (A1): optional die Kern-Optionen, mit denen der Browser gerechnet hat (Lader kernOptionen); kaputte Form = 400
+    if (body.kern_optionen !== undefined && (!kernOptionenNormieren(body.kern_optionen) || JSON.stringify(body.kern_optionen).length > 400)) return fehlerAntwort(400, 'KERN_OPTIONEN_UNGUELTIG', cors);
   } else if (body.aktion === 'ruecknahme' && !(istText(body.grund, 500) && body.grund.trim().length >= 10)) {
     return fehlerAntwort(400, 'GRUND_ZU_KURZ', cors);
   } else if (body.aktion === 'sperre_nachholen' && body.bestaetigt !== true) {
@@ -358,10 +361,14 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
       const pp = periodePruefen(profil, periode);
       if (pp) return fehlerAntwort(409, pp, cors);
       if (body.kern_version !== undefined && body.kern_version !== Steuerkern.KERN_VERSION) return fehlerAntwort(409, 'KERN_VERSION_ABWEICHUNG', cors, { kern_version: Steuerkern.KERN_VERSION });
+      // E-B (A1): Kern-Optionen aus demselben config/features wie die Freigabe; der Browser rechnet mit derselben Abbildung (Lader kernOptionen).
+      // Hat er andere Optionen mitgeschickt (veralteter Zwischenspeicher nach dem Umschalten eines Features), klare Meldung statt ABWEICHUNG.
+      const kernOpt = kernOptionenFuer(configBereinigen(docs.get(CONFIG_PFAD)?.daten));
+      if (body.kern_optionen !== undefined && kanonisch(kernOptionenNormieren(body.kern_optionen)) !== kanonisch(kernOpt)) return fehlerAntwort(409, 'KERN_OPTIONEN_ABWEICHUNG', cors, { kern_optionen: kernOpt });
       const gelesen = await lesen('kern');
       if (!gelesen.fertig) return leseAntwort(periodeId, gelesen, cors);
       const zeilen = gelesen.zeilen;
-      const snap = snapshotFuer(zeilen, profil, periodeId);
+      const snap = snapshotFuer(zeilen, profil, periodeId, { optionen: kernOpt });
       const vergleich = vergleicheSnapshot(snap, snapshot);
       if (!vergleich.gleich) return fehlerAntwort(409, 'ABWEICHUNG', cors, { abweichungen: vergleich.abweichungen, kern_version: snap.kern_version });
       // Konzept 3.6 Schritt 2: mit ausgeschlossenen/unbekannten Belegen nur nach ausdrücklicher Bestätigung (die Zahl rechnet der Server)
@@ -370,7 +377,7 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
       const offen = snap.beleg_ids.filter((id) => !sperrtSchon(nachId.get(id)?.daten, periodeId)).map((id) => offenEintrag(id, nachId.get(id)?.updateTime));
       const neu = {
         art: periode.art, periode: periode.periode, status: 'sperre_laeuft', festgeschrieben_am: zeit, von: 'nutzer', quelle: 'nutzer',
-        kern_version: Steuerkern.KERN_VERSION, [`snapshot_${periode.art}`]: snap.zeilen, ausgeschlossen_anzahl: snap.ausgeschlossen_anzahl,
+        kern_version: Steuerkern.KERN_VERSION, kern_optionen: snap.kern_optionen, [`snapshot_${periode.art}`]: snap.zeilen, ausgeschlossen_anzahl: snap.ausgeschlossen_anzahl,
         unvollstaendig: snap.ausgeschlossen_anzahl > 0, snapshot_quelle: 'kern_geprueft', belege_hash: await belegeHash(zeilen, snap.beleg_ids),
         belege_anzahl: snap.beleg_ids.length, belege_gesperrt: false, sperre: { offen, gesamt: snap.beleg_ids.length, erledigt: snap.beleg_ids.length - offen.length },
         ...(periode.art === 'ust' ? { voranmeldung_zeitraum: Steuerkern.periodenArt(periode.periode) } : {}),
@@ -444,8 +451,12 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
       } else {
         const pp = periodePruefen(profil, periode);
         if (pp) return fehlerAntwort(409, pp, cors);
-        const snap = snapshotFuer(zeilen, profil, periodeId);
+        // E-B (A1): mit den Optionen der Festschreibung nachrechnen (ältere Dokumente ohne Feld: keine Optionen), sonst meldete das spätere
+        // Einschalten eines Features jede Festschreibung als geändert
+        const optDamals = kernOptionenNormieren(alt.kern_optionen) || kernOptionenNormieren(null);
+        const snap = snapshotFuer(zeilen, profil, periodeId, { optionen: optDamals });
         const v = vergleicheSnapshot(snap, { zeilen: alt[`snapshot_${alt.art}`] || [], ausgeschlossen_anzahl: alt.ausgeschlossen_anzahl || 0 });
+        const optHeute = kernOptionenFuer(configBereinigen(docs.get(CONFIG_PFAD)?.daten));
         const neueBelege = snap.beleg_ids.filter((id) => !sperrtSchon(nachId.get(id), periodeId));
         // Drift-Wächter Version 2 (D2): eine Festschreibung von vor der Umstellung trägt den belege_hash über die alten v1-Fingerabdrücke; er
         // gilt weiter als gleich, wenn er mit Fassung 1 übereinstimmt (Änderungen der neuen Felder zeigt dann der Snapshot-Vergleich v)
@@ -457,6 +468,8 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
           kern_version_damals: alt.kern_version || null, kern_version: Steuerkern.KERN_VERSION,
           // Kern-Version gewechselt: eine Abweichung kann aus einer Regeländerung stammen, nicht aus geänderten Belegen
           kern_gewechselt: (alt.kern_version || null) !== Steuerkern.KERN_VERSION,
+          // E-B (A1): heute gelten andere Kern-Optionen als bei der Festschreibung (Feature umgeschaltet); die Zahlen oben sind mit den damaligen gerechnet
+          kern_optionen_damals: optDamals, kern_optionen_gewechselt: kanonisch(optDamals) !== kanonisch(optHeute),
         });
       }
       // Zusammenfassung am Dokument (keine Beträge), damit die Ansicht 'nach der Festschreibung geändert' zeigen kann (kein Audit: abgeleitet)
@@ -489,7 +502,7 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
       else {
         const pp = periodePruefen(profil, periode);
         if (pp) return fehlerAntwort(409, pp, cors);
-        const snap = snapshotFuer(zeilen, profil, periodeId);
+        const snap = snapshotFuer(zeilen, profil, periodeId, { optionen: kernOptionenNormieren(alt.kern_optionen) || kernOptionenNormieren(null) }); // E-B (A1)
         const v = vergleicheSnapshot(snap, { zeilen: alt[`snapshot_${alt.art}`] || [], ausgeschlossen_anzahl: alt.ausgeschlossen_anzahl || 0 });
         if (!v.gleich) return fehlerAntwort(409, 'ABWEICHUNG', cors, { abweichungen: v.abweichungen, hinweis: 'erst ruecknahme, dann neu festschreiben' });
         ids = snap.beleg_ids;

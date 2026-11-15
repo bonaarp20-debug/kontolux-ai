@@ -113,8 +113,18 @@ export function klaerungEinheit(uid, id, dok, kontext) {
   if (!KLAERBARE_ARTEN.includes(s.beleg_art)) return { id, write: null, code: 'nicht_aufloesbar' };
   if ((typeof s.unbekannt_grund === 'string' && !KLAERBARE_GRUENDE.includes(s.unbekannt_grund) && !zusatzGruende.includes(s.unbekannt_grund)) || NIE_KLAERBARE_DETAILS.includes(s.unbekannt_detail)) return { id, write: null, code: 'nicht_aufloesbar' };
   if (!KLAERUNG_WAHLEN[s.richtung] || !(KLAERUNG_WAHLEN[s.richtung].includes(steuerwahl) || zusatzWahlen.includes(steuerwahl))) return { id, write: null, code: 'wahl_passt_nicht' };
+  // E-B (Zuruf APP-B3): kontext.land { land, gebiet? } aus klaerung_beleg (dort geprüft) ergänzt ein fehlendes Anbieterland; ein vorhandenes anderes
+  // Land oder Gebiet wird nie überschrieben (Code land_widerspruch, nichts geschrieben)
+  let sEin = s;
+  if (istObjekt(kontext.land)) {
+    const gp = istObjekt(s.gegenpartei) ? s.gegenpartei : {};
+    const altLand = typeof gp.land === 'string' && gp.land.trim() ? gp.land.trim().toUpperCase() : null;
+    const altGebiet = typeof gp.gebiet === 'string' && gp.gebiet.trim() ? gp.gebiet.trim().toLowerCase() : null;
+    if ((altLand && altLand !== kontext.land.land) || (altGebiet && altGebiet !== (kontext.land.gebiet || null))) return { id, write: null, code: 'land_widerspruch' };
+    sEin = { ...s, gegenpartei: { ...gp, land: kontext.land.land, ...(kontext.land.gebiet ? { gebiet: kontext.land.gebiet } : {}) } };
+  }
   let r;
-  try { r = Steuerkern.normalisiereEingabe(klaerungEingabe(id, s, steuerwahl), { profil, ...(stichtag ? { stichtag } : {}) }); } catch { return { id, write: null, code: 'kern_fehler' }; }
+  try { r = Steuerkern.normalisiereEingabe(klaerungEingabe(id, sEin, steuerwahl), { profil, ...(stichtag ? { stichtag } : {}) }); } catch { return { id, write: null, code: 'kern_fehler' }; }
   const neu = r && r.beleg;
   if (!neu || !istObjekt(neu.steuer) || neu.steuer.steuerfall === 'UNBEKANNT' || (r.pflichtfeld_fehler || []).length) return { id, write: null, code: 'nicht_aufloesbar' };
   if (pf && Array.isArray(pf.steuerfaelle) && !pf.steuerfaelle.includes(neu.steuer.steuerfall)) return { id, write: null, code: 'wahl_passt_nicht' };
@@ -123,8 +133,8 @@ export function klaerungEinheit(uid, id, dok, kontext) {
   if (((v && v.blocker) || []).some((x) => x && typeof x.code === 'string' && FORMAL.test(x.code))) return { id, write: null, code: 'nicht_aufloesbar' };
   // Nie in einen festgeschriebenen oder gerade gesperrten Zeitraum hinein ändern (Konfliktfall wie ein gesperrter Beleg)
   if (festPerioden.length) {
-    const vorher = wirkPerioden({ steuer: s }, profil);
-    const nachher = wirkPerioden(neu, profil);
+    const vorher = wirkPerioden({ steuer: s }, profil, kontext.kernOptionen); // E-B (A1): Kern-Optionen aus config/features
+    const nachher = wirkPerioden(neu, profil, kontext.kernOptionen);
     if ([...vorher, ...nachher].some((p) => festPerioden.includes(p))) return { id, write: null, code: 'gesperrt' };
   }
   const m = istObjekt(s.migration) ? s.migration : { flags: [], hinweise: [] };

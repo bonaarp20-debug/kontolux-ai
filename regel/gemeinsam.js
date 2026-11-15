@@ -52,6 +52,10 @@ const KERN_ABHAENGIG = ['migration', 'festschreibung'];
 // Standard ohne lesbare Konfiguration: Schreibwege auf Belege und Perioden bleiben aus (tot geschaltet bis zur Freigabe,
 // migration-rollout.md 6.1 Schritt 3). Das Steuerprofil ist eine Nutzerangabe ohne Belegwirkung und bleibt an.
 const FEATURE_STANDARD = { steuerprofil: true, migration: false, festschreibung: false };
+// E-B (Release B, Konzept 2.1): neue Feature-Namen. Im Worker gilt jedes fehlende Feature als aus (featureAktiv), in der App als an (Lader):
+// deshalb setzt das Drehbuch B (docs/regelbesteuerung/19-phase3/rollout-drehbuch-b.md) alle Namen ausdrücklich auf 'aus', BEVOR die App deployt wird.
+// Die Liste dient Drehbuch, Vorprüfung und dem Paritätstest gegen regel/loader.js FEATURES (App); sie schaltet nichts.
+export const FEATURES_RELEASE_B = Object.freeze(['korrektur', 'anlagegut', 'auszahlung']);
 
 // Bereinigt ein gelesenes config/features-Dokument. Unbekannte oder kaputte Werte gelten als 'aus' (migration-rollout.md 6.2).
 export function configBereinigen(roh) {
@@ -73,6 +77,23 @@ export function featureAktiv(config, name) {
   if (KERN_ABHAENGIG.includes(name) && config.kern_max === 'aus') return false;
   if (!(name in config.features)) return standard;
   return config.features[name] === 'an';
+}
+
+// E-B (Auflage A1 G-KERN-B, KERN-B2): Kern-Optionen (optionen.regeln) aus config/features, dieselbe Abbildung wie die App (Kern-Index
+// optionenAusFeatures, Lader regel/loader.js kernOptionen). Eingabe: das bereinigte Dokument (configBereinigen) oder null; fehlend, 'aus',
+// kaputt oder kern_max 'aus' = Option aus. Ergebnis immer vollständig ({ regeln: { <alle Kern-Regeln>: true|false } }).
+export function kernOptionenFuer(config) {
+  return Steuerkern.optionenAusFeatures(istObjekt(config) ? config : {});
+}
+// Normiert gespeicherte oder mitgesendete Kern-Optionen auf die vollständige Form (nur bekannte Regeln, nur true zählt); null bei kaputter Form.
+// Fehlt die Angabe (undefined/null, z. B. Festschreibungen vor E-B), gelten alle Regeln als aus.
+export function kernOptionenNormieren(o) {
+  if (o === undefined || o === null) return kernOptionenFuer(null);
+  if (!istObjekt(o) || (o.regeln !== undefined && !istObjekt(o.regeln))) return null;
+  const r = istObjekt(o.regeln) ? o.regeln : {};
+  const regeln = {};
+  for (const name of [...Steuerkern.KERN_REGELN].sort()) regeln[name] = Object.hasOwn(r, name) && r[name] === true;
+  return { regeln };
 }
 
 // ---------------------------------------------------------------------------------------------
