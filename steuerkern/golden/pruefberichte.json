@@ -1,7 +1,7 @@
 {
  "format": 1,
  "art": "pruefberichte",
- "kern_version": "2026.11.16-1",
+ "kern_version": "2026.11.16-2",
  "quelle": "docs/regelbesteuerung/07-*.md und 08-gegenpruefung-phase1.md: Schlüsselzahlen von Hand, Rest Kern-Ausgabe",
  "vektoren": [
   {
@@ -172,6 +172,235 @@
        "ust_an_finanzamt_gezahlt": 0,
        "gewinn_eur": 100000,
        "einnahmen_gesamt": 100000,
+       "ausgaben_gesamt": 0
+      },
+      "dashboard_status": {
+       "ust_zahllast": "zwischenwert",
+       "gewinn": "ergebnis"
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "N5-skonto-ku-anzahlung",
+   "bericht": "18-nacht n5-bericht (K-F Offen 2; § 10 Abs. 1 S. 2, § 13 Abs. 1 Nr. 1 a, § 17 Abs. 1, § 19 Abs. 1 UStG; UStAE 19.7 Abs. 1, 3)",
+   "beschreibung": "KU 2026, Regel ab 01.01.2027: Ausgang und Eingang je 1.000,00 netto zu 19 %, Leistung 10.02.2027, Vorkasse 1.166,20 am 15.09.2026 mit 23,80 Skonto: das Skonto mindert den Leistungsposten (Kz 81 = 980,00, Steuer 186,20; Kz 66 = 186,20 im 1. Quartal 2027), kein (angenommenes) KU-Quartal 2026-Q3",
+   "art": "auswertung",
+   "eingabe": {
+    "profil": {
+     "status_verlauf": [
+      {
+       "gueltig_ab": "2026-01-01",
+       "status": "ku",
+       "grund": "beginn"
+      },
+      {
+       "gueltig_ab": "2027-01-01",
+       "status": "regel",
+       "grund": "vorjahr_ueber_25k"
+      }
+     ],
+     "voranmeldung_verlauf": [
+      {
+       "gueltig_ab": "2027-01-01",
+       "zeitraum": "quartal",
+       "quelle": "elster_bestaetigt"
+      }
+     ]
+    },
+    "jahre": [
+     2026,
+     2027
+    ],
+    "belege_eingaben": [
+     {
+      "weg": "vektor",
+      "id": "KA",
+      "richtung": "ausgang",
+      "steuerwahl": "inland_19",
+      "betrag": {
+       "cent": 100000,
+       "art": "netto"
+      },
+      "rechnungsdatum": "2026-09-10",
+      "leistungsdatum": "2027-02-10",
+      "zahlungen": [
+       {
+        "datum": "2026-09-15",
+        "betrag_cent": 116620,
+        "skonto_cent": 2380
+       }
+      ]
+     },
+     {
+      "weg": "vektor",
+      "id": "KE",
+      "richtung": "eingang",
+      "steuerwahl": "inland_19",
+      "betrag": {
+       "cent": 100000,
+       "art": "netto"
+      },
+      "rechnungsdatum": "2026-09-10",
+      "leistungsdatum": "2027-02-10",
+      "zahlungen": [
+       {
+        "datum": "2026-09-15",
+        "betrag_cent": 116620,
+        "skonto_cent": 2380
+       }
+      ]
+     }
+    ]
+   },
+   "zahlen": [
+    {
+     "jahr": 2027,
+     "periode": "2027-Q1",
+     "feld": "kennzahlen.81",
+     "wert": 98000
+    },
+    {
+     "jahr": 2027,
+     "periode": "2027-Q1",
+     "feld": "kennzahlen.81_steuer",
+     "wert": 18620
+    },
+    {
+     "jahr": 2027,
+     "periode": "2027-Q1",
+     "feld": "kennzahlen.66",
+     "wert": 18620
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q3",
+     "feld": "kennzahlen.81",
+     "wert": null
+    },
+    {
+     "jahr": 2026,
+     "periode": "2026-Q3",
+     "feld": "kennzahlen.66",
+     "wert": null
+    }
+   ],
+   "ausgabe": {
+    "belege": [
+     {
+      "id": "KA",
+      "ist_beleg": true,
+      "steuerfall": "A_INLAND_19",
+      "summe": {
+       "netto_cent": 100000,
+       "ust_cent": 19000,
+       "brutto_cent": 119000
+      },
+      "codes": []
+     },
+     {
+      "id": "KE",
+      "ist_beleg": true,
+      "steuerfall": "E_INLAND_VORSTEUER",
+      "summe": {
+       "netto_cent": 100000,
+       "ust_cent": 19000,
+       "brutto_cent": 119000
+      },
+      "codes": []
+     }
+    ],
+    "jahre": {
+     "2026": {
+      "ustva": [],
+      "euer": {
+       "kennzahlen": {
+        "112": 98000,
+        "140": 18620,
+        "183": 98000,
+        "185": 18620,
+        "gewinn": 0
+       },
+       "gewinn_cent": 0,
+       "ausgeschlossene": []
+      },
+      "warnungen": [
+       "W_WECHSEL_DIALOG"
+      ],
+      "nicht_beruecksichtigt_anzahl": 0,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 98000,
+       "vorsteuer_gezahlt": 18620,
+       "ust_zahllast_summe_ustva": 0,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 0,
+       "einnahmen_gesamt": 116620,
+       "ausgaben_gesamt": 116620
+      },
+      "dashboard_status": {
+       "ust_zahllast": "ergebnis",
+       "gewinn": "ergebnis"
+      }
+     },
+     "2027": {
+      "ustva": [
+       {
+        "periode": "2027-Q1",
+        "kennzahlen": {
+         "39": 0,
+         "64": 0,
+         "65": 0,
+         "66": 18620,
+         "69": 0,
+         "81": 98000,
+         "83": 0,
+         "86": 0,
+         "87": 0,
+         "81_steuer": 18620,
+         "86_steuer": 0,
+         "Z37": 18620,
+         "Z45": 0,
+         "Z48": 0
+        },
+        "kz83": {
+         "betrag_cent": 0,
+         "status": "zwischenwert"
+        },
+        "unvollstaendig": false,
+        "warnungen": [
+         "W_KZ65_VORSCHLAG_OFFEN",
+         "W_TABELLE_VORLAEUFIG",
+         "W_WECHSEL_DIALOG"
+        ],
+        "hinweise": [
+         "W_KZ65_VORSCHLAG_OFFEN",
+         "W_TABELLE_VORLAEUFIG",
+         "W_WECHSEL_DIALOG"
+        ],
+        "ausgeschlossene": []
+       }
+      ],
+      "euer": {
+       "kennzahlen": {
+        "gewinn": 0
+       },
+       "gewinn_cent": 0,
+       "ausgeschlossene": []
+      },
+      "warnungen": [
+       "W_KZ65_VORSCHLAG_OFFEN",
+       "W_TABELLE_VORLAEUFIG",
+       "W_WECHSEL_DIALOG"
+      ],
+      "nicht_beruecksichtigt_anzahl": 0,
+      "dashboard": {
+       "umsatz_netto_vereinnahmt": 0,
+       "vorsteuer_gezahlt": 0,
+       "ust_zahllast_summe_ustva": 0,
+       "ust_an_finanzamt_gezahlt": 0,
+       "gewinn_eur": 0,
+       "einnahmen_gesamt": 0,
        "ausgaben_gesamt": 0
       },
       "dashboard_status": {

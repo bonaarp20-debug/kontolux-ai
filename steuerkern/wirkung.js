@@ -159,13 +159,15 @@ function moeglich13b(s) {
 // K-F (TR5-kern-003): Die Annahme eines Voranmeldungszeitraums (VORANMELDUNG_ANGENOMMEN_QUARTAL, W_VORANMELDUNG_ANGENOMMEN) steht nur an der
 // Wirkung, deren Zeitraum angenommen ist (eigene Hinweisliste statt ctx.hinweise, die belegWirkungen an alle Wirkungen hängt). Tage in der
 // Kleinunternehmerzeit (statusAm 'ku') entfallen: keine Voranmeldung (§ 19 Abs. 1 UStG), eine Anzahlung aus dieser Zeit gehört in den
-// Leistungszeitraum (UStAE 19.7, Kz 65; Kern ku_anzahlung). Ausnahmen: Skonto-Tage (wie der gerechnete Pfad) und möglicher § 13b-Eingang: auch der Kleinunternehmer schuldet die Steuer
+// Leistungszeitraum (UStAE 19.7, Kz 65; Kern ku_anzahlung). Ausnahmen: Skonto-Tage nach der Leistung (wie der gerechnete Pfad, N5) und möglicher § 13b-Eingang: auch der Kleinunternehmer schuldet die Steuer
 // (§ 13b Abs. 5 S. 1, 9 UStG) und meldet sie an (§ 18 Abs. 4a UStG).
 function weitereHinweisWirkungen(s, profil, ctx, out, hauptPeriode, f) {
   const gesehen = new Set(hauptPeriode ? [hauptPeriode] : []);
   const b13 = moeglich13b(s);
-  // Skonto-Tage bleiben auch in der Kleinunternehmerzeit (der gerechnete Pfad bucht die Minderung im Zahlungszeitraum, skontoAufteilung)
-  const skontoTage = new Set(aktiveZahlungen(s).filter((z) => istCent(z.skonto_cent) && z.skonto_cent > 0).map((z) => z.datum));
+  // Skonto-Tage nach der Leistung bleiben auch in der Kleinunternehmerzeit (der gerechnete Pfad bucht die Minderung im Zahlungszeitraum, skontoAufteilung).
+  // N5: Skonto auf eine Zahlung vor der Leistung (Anzahlung) mindert im gerechneten Pfad den Leistungsposten, der Tag in der KU-Zeit entfällt darum.
+  const lbis = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null;
+  const skontoTage = new Set(aktiveZahlungen(s).filter((z) => istCent(z.skonto_cent) && z.skonto_cent > 0 && !(lbis && z.datum < lbis)).map((z) => z.datum));
   for (const t of weitereWirkTage(s, profil)) {
     if (!b13 && !skontoTage.has(t) && statusAm(profil, t).status === 'ku') continue;
     const eigene = [];
@@ -837,7 +839,12 @@ function ausgangWirkungen(s, profil, ctx, out, opt) {
   // TR3-kern-003 (§ 13 Abs. 1 Nr. 1 Buchst. a S. 4 UStG, § 17 Abs. 1 S. 1 UStG; Konfidenz C): Wird das Skonto schon bei der Zahlung vor der Leistung
   // abgezogen, ist das vereinnahmte und vereinbarte Entgelt der Zahlbetrag. Die Anzahlung wird gegen die um dieses Skonto geminderte Rechnung verteilt
   // und das Skonto mindert den Leistungsposten, nicht den Zahlungszeitraum (sonst stünde die Steuer des Skontos zu Unrecht in beiden Zeiträumen).
-  const skontoVorZ = zahlungen.map((z) => !teil && !ist && vorLeistung(z) && statusAm(profil, z.datum).status !== 'ku');
+  // N5 (K-F Offen 2; § 10 Abs. 1 S. 2, § 13 Abs. 1 Nr. 1 Buchst. a S. 1, § 17 Abs. 1, § 19 Abs. 1 UStG; UStAE 19.7 Abs. 1 S. 1, Abs. 3; Konfidenz B):
+  // Gleiches gilt für ein Skonto auf eine Anzahlung aus der Kleinunternehmerzeit, wenn die Leistung in der Regelzeit liegt. Die Anzahlung löst keine
+  // Steuer aus (F6), die Steuer entsteht mit der Leistung aus dem Entgelt, das schon um das Skonto gemindert ist. Eine Berichtigung im Zahlungszeitraum
+  // (§ 17 Abs. 1 S. 8) setzt eine zuvor geschuldete Steuer voraus, und für die KU-Zeit gibt es keine Voranmeldung: kein Kz 81 in einem KU-Quartal.
+  const leistungRegel = statusAm(profil, l.bis).status !== 'ku';
+  const skontoVorZ = zahlungen.map((z) => !teil && !ist && vorLeistung(z) && (leistungRegel || statusAm(profil, z.datum).status !== 'ku'));
   const skontoVor = skontoVorZ.some((x, zi) => x && skonto.je[zi]);
   const anteileAnz = teil || !skonto.je.some((x) => x) ? anteile
     : (skontoVor ? zahlungsAnteile(skontoAufteilung(gruppen, zahlungen.map((z, zi) => (skontoVorZ[zi] ? z : { ...z, skonto_cent: 0 }))).eff, zahlungen) : zahlungsAnteile(gruppen, zahlungen));
@@ -1063,7 +1070,10 @@ function eingangWirkungen(s, profil, ctx, out, opt) {
   const anteile = teil ? anteilErg.anteile : zahlungsAnteile(skonto.eff, zahlungen);
   const vlE = istObjekt(opt) && opt.vorLeistungAbzug instanceof Map && typeof ctx.id === 'string' ? opt.vorLeistungAbzug.get(ctx.id) : null;
   // Anzahlung: Skonto zum Zeitpunkt unbekannt (siehe Ausgang); TR3-kern-003: Skonto bei Zahlung vor der Leistung mindert den Leistungsposten (Zahlbetrag = Entgelt)
-  const skontoVorZ = zahlungen.map((z) => mitVorsteuer && !teil && (z.datum < stichBis || (vlE && vlE.voll)) && statusAm(profil, z.datum).status !== 'ku' && statusAm(profil, z.datum < erhalt ? erhalt : z.datum).status !== 'ku');
+  // N5 (K-F Offen 2, Konfidenz B): auch das Skonto einer Anzahlung aus der Kleinunternehmerzeit mindert den Leistungsposten, wenn der Abzug der
+  // Leistung in die Regelzeit fällt (F6: Vorsteuer aus der KU-Anzahlung erst mit der Leistung, UStAE 15.1 Abs. 5); keine Kz-66-Minderung im KU-Zeitraum
+  const leistungRegelE = statusAm(profil, erhalt > l.bis ? erhalt : l.bis).status !== 'ku';
+  const skontoVorZ = zahlungen.map((z) => mitVorsteuer && !teil && (z.datum < stichBis || (vlE && vlE.voll)) && (leistungRegelE || (statusAm(profil, z.datum).status !== 'ku' && statusAm(profil, z.datum < erhalt ? erhalt : z.datum).status !== 'ku')));
   const skontoVor = skontoVorZ.some((x, zi) => x && skonto.je[zi]);
   const anteileAnz = teil || !skonto.je.some((x) => x) ? anteile
     : (skontoVor ? zahlungsAnteile(skontoAufteilung(gruppen, zahlungen.map((z, zi) => (skontoVorZ[zi] ? z : { ...z, skonto_cent: 0 }))).eff, zahlungen) : zahlungsAnteile(gruppen, zahlungen));
