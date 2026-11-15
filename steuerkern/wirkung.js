@@ -89,6 +89,7 @@ function mk(ctx, f) {
   if (f.ku_anzahlung) w.ku_anzahlung = f.ku_anzahlung;
   if (f.kz48_offen) w.kz48_offen = true;
   if (f.nur_euer) w.nur_euer = true; // TR4-kern-004: Hinweis wirkt nur über euer_zahlungen auf die EÜR, nie auf eine Voranmeldung
+  if (f.nur_ust) w.nur_ust = true; // K-F (TR5-kern-002): weiterer USt-Zeitraum eines nicht berechneten Belegs, zählt nicht in der EÜR
   return w;
 }
 
@@ -107,6 +108,12 @@ function gesperrteZahlungen(s) {
 //   Ist-Versteuerung (Ausgang): jede Zahlung, § 13 Abs. 1 Nr. 1 Buchst. b UStG
 //   Eingang: Rechnungserhalt nach der Leistung (Vorsteuer erst mit der Rechnung, § 15 Abs. 1 S. 1 Nr. 1 S. 2 UStG)
 //   Zahlung mit Skonto: Minderung im Zeitraum der Zahlung (§ 17 Abs. 1 S. 1, 2, 8 UStG; R-KOR-02)
+// K-F (TR5-kern-001): Eingang, bei dem § 13b UStG möglich ist (moeglich13b): der Leistungsempfänger schuldet die Steuer (docs/quellen/ustg-13b.md)
+//   Abs. 2: "mit Ausstellung der Rechnung, spätestens jedoch mit Ablauf des der Ausführung der Leistung folgenden Kalendermonats" (Z. 16)
+//   Abs. 3: Dauerleistung über mehr als ein Jahr: Ablauf jedes Kalenderjahres
+//   Abs. 4 S. 2: Anzahlung "mit Ablauf des Voranmeldungszeitraums, in dem das Entgelt ... vereinnahmt worden ist" (Z. 57); die Vorsteuer dazu ist
+//     abziehbar, "wenn die Zahlung geleistet worden ist" (§ 15 Abs. 1 S. 1 Nr. 4 S. 2, ustg-15.md Z. 25), also ohne Rechnung: der Zahlungstag selbst
+//   Die Tage gelten ohne Prüfung des Restentgelts (b13bEntstehung), denn der Steuerfall ist offen oder gesperrt: im Zweifel gekennzeichnet.
 // Korrekturbelege haben eigene Zeiträume (Wirkdatum). Ergebnis: Tage (ISO), ohne den Leistungstag selbst.
 function weitereWirkTage(s, profil) {
   if (KORREKTUR_ARTEN.includes(s.beleg_art)) return [];
@@ -117,26 +124,55 @@ function weitereWirkTage(s, profil) {
   const eingang = s.richtung === 'eingang';
   const erhalt = istDatum(s.rechnung_erhalt_am) ? s.rechnung_erhalt_am : (istDatum(s.rechnungsdatum) ? s.rechnungsdatum : null);
   if (eingang && erhalt && erhalt > bis) tage.push(erhalt);
+  const b13 = moeglich13b(s);
+  if (b13) {
+    const spaet = monatsende(addiereMonate(bis, 1));
+    tage.push(istDatum(s.rechnungsdatum) && s.rechnungsdatum < spaet ? s.rechnungsdatum : spaet);
+    const von = istDatum(s.leistung.von) && s.leistung.von <= bis ? s.leistung.von : bis;
+    if (bis >= addiereMonate(von, 12)) for (let j = jahrVon(von); j < jahrVon(bis); j++) tage.push(`${String(j).padStart(4, '0')}-12-31`);
+  }
   const ver = s.versteuerung_beleg === 'soll' || s.versteuerung_beleg === 'ist' ? s.versteuerung_beleg : versteuerungAm(profil, bis).art;
   const ist = s.richtung === 'ausgang' && ver === 'ist';
   for (const z of aktiveZahlungen(s)) {
     if (istCent(z.skonto_cent) && z.skonto_cent > 0) tage.push(z.datum);
     if (!(ist || z.datum < bis)) continue;
+    if (b13) tage.push(z.datum);
     // Eingang: Vorsteuer aus der Anzahlung erst, wenn auch die Rechnung vorliegt (§ 15 Abs. 1 S. 1 Nr. 1 S. 3 UStG): der spätere der beiden Tage
     tage.push(eingang && erhalt && erhalt > z.datum ? erhalt : z.datum);
   }
   return tage.filter((t) => t !== bis);
 }
 
+// K-F (TR5-kern-001): Kann der Leistungsempfänger nach § 13b UStG Steuerschuldner sein? Nur Eingänge (keine Korrektur). Ja bei gesetztem Sperrgrund
+// (zum Beispiel Leistungsort mit Sonderregeln) und bei jedem Steuerfall, der nicht ausdrücklich ein Inlandseingang ist (offen, gesperrt, § 13b selbst).
+// Gleiche Prüfung im Vorfilter (belegZeitraumDaten: Spanne bis zum Ende des Folgemonats).
+const STEUERFAELLE_INLAND_EINGANG = Object.freeze(['E_INLAND_VORSTEUER', 'E_INLAND_OHNE_VORSTEUER', 'E_VORSTEUER_NICHT_ABZIEHBAR', 'FA_ZAHLUNG', 'PRIVAT']);
+function moeglich13b(s) {
+  if (!istObjekt(s) || s.richtung !== 'eingang' || KORREKTUR_ARTEN.includes(s.beleg_art)) return false;
+  if (typeof s.sperrgrund === 'string' && s.sperrgrund !== '') return true;
+  return !STEUERFAELLE_INLAND_EINGANG.includes(s.steuerfall);
+}
+
 // Hinweis-Wirkungen (gleicher Status, gleiche Regel) für die weiteren Zeiträume eines nicht berechneten Belegs; ohne euer_zahlungen, damit die
 // EÜR die Zahlungen nur einmal zählt (euerFuer nimmt je Beleg die erste Wirkung mit euer_zahlungen).
+// K-F (TR5-kern-002): nur_ust: true, die EÜR zählt diese Zeiträume nicht (Zu- und Abfluss, § 11 EStG, nur über euer_zahlungen und EÜR-Wirkungen).
+// K-F (TR5-kern-003): Die Annahme eines Voranmeldungszeitraums (VORANMELDUNG_ANGENOMMEN_QUARTAL, W_VORANMELDUNG_ANGENOMMEN) steht nur an der
+// Wirkung, deren Zeitraum angenommen ist (eigene Hinweisliste statt ctx.hinweise, die belegWirkungen an alle Wirkungen hängt). Tage in der
+// Kleinunternehmerzeit (statusAm 'ku') entfallen: keine Voranmeldung (§ 19 Abs. 1 UStG), eine Anzahlung aus dieser Zeit gehört in den
+// Leistungszeitraum (UStAE 19.7, Kz 65; Kern ku_anzahlung). Ausnahmen: Skonto-Tage (wie der gerechnete Pfad) und möglicher § 13b-Eingang: auch der Kleinunternehmer schuldet die Steuer
+// (§ 13b Abs. 5 S. 1, 9 UStG) und meldet sie an (§ 18 Abs. 4a UStG).
 function weitereHinweisWirkungen(s, profil, ctx, out, hauptPeriode, f) {
   const gesehen = new Set(hauptPeriode ? [hauptPeriode] : []);
+  const b13 = moeglich13b(s);
+  // Skonto-Tage bleiben auch in der Kleinunternehmerzeit (der gerechnete Pfad bucht die Minderung im Zahlungszeitraum, skontoAufteilung)
+  const skontoTage = new Set(aktiveZahlungen(s).filter((z) => istCent(z.skonto_cent) && z.skonto_cent > 0).map((z) => z.datum));
   for (const t of weitereWirkTage(s, profil)) {
-    const per = ustPeriode(profil, t, ctx.hinweise);
+    if (!b13 && !skontoTage.has(t) && statusAm(profil, t).status === 'ku') continue;
+    const eigene = [];
+    const per = ustPeriode(profil, t, eigene);
     if (gesehen.has(per)) continue;
     gesehen.add(per);
-    out.push(mk(ctx, { ...f, welt: 'ust', periode: per, datum_wirk: t, rolle: 'hinweis' }));
+    out.push(mk(ctx, { ...f, welt: 'ust', periode: per, datum_wirk: t, rolle: 'hinweis', hinweise: eigene, nur_ust: true }));
   }
 }
 
@@ -399,9 +435,11 @@ function datenFehler(s) {
 // belegTage). Die Liste ist eine Obermenge: jede Wirkung (datum_wirk) liegt an einem Tag aus tage oder in einer Spanne aus spannen, jede EÜR-Wirkung
 // an einem Tag aus euer_tage (Test scripts/test-steuerkern-d4-zeitraum.mjs, Eigenschaft gegen alleWirkungen).
 //   Altfelder (normalisiereAlt; v1, und bei v2 für den Fall 'veraltet'/'neu_pruefen'): datum, leistungsdatum, bezahlt_am (nur bei bezahlt), createdAt
-//     als Berliner Tag (nur wo normalisiereAlt ihn nutzt: kein gültiges datum, Zahlung ohne bezahlt_am, Storno-Wirkdatum).
+//     als Berliner Tag (nur wo normalisiereAlt ihn nutzt: kein gültiges datum, Zahlung ohne bezahlt_am, Storno-Wirkdatum); bei Eingängen je
+//     möglichem Leistungstag die Spanne bis zum Ende des Folgemonats (§ 13b Abs. 2 UStG, K-F).
 //   steuer: rechnungsdatum, rechnung_erhalt_am, wirkdatum, leistung {von, bis} und positionen[].leistung (Teilleistungen) als Spannen (Dauerleistung:
-//     Jahresenden dazwischen, § 13b Abs. 3 UStG), § 13b Abs. 2 Nr. 1 UStG (E_13B_DRITTLAND_DL): Spanne bis zum Ende des Folgemonats, zahlungen[].datum,
+//     Jahresenden dazwischen, § 13b Abs. 3 UStG), § 13b Abs. 2 Nr. 1 UStG (E_13B_DRITTLAND_DL und, K-F TR5-kern-001, jeder Eingang mit möglichem
+//     § 13b: moeglich13b): Spanne bis zum Ende des Folgemonats, zahlungen[].datum,
 //     rueckzahlung, geschenk.ruecknahme_datum.
 //   undatiert: der Kern kann eine Wirkung OHNE Zeitraum erzeugen (periode null; ustvaFuer zählt sie in JEDEM Zeitraum als nicht berücksichtigt):
 //     Altfelder ohne Rechnungs- und Leistungstag, gespeichertes steuer mit Datenfehler oder ohne gültiges leistung.bis. Wer filtert, nimmt solche
@@ -427,6 +465,14 @@ function steuerOhneZeitraum(s) {
   return !STEUERFAELLE_MIT_ZEITRAUM.includes(s.steuerfall) || !bisOk;
 }
 
+// Spanne der Leistung bis zum Ende des Folgemonats (§ 13b Abs. 2 UStG): Drittland (b13bEntstehung) und jeder mögliche § 13b-Eingang, der über
+// weitereWirkTage läuft; ein gerechneter EU-Fall (E_13B_EU_DL ohne Sperre und Dialog) entsteht mit der Leistung (Abs. 1), ohne Folgemonat.
+function spanneBisFolgemonat(s) {
+  if (s.steuerfall === 'E_13B_DRITTLAND_DL') return true;
+  if (!moeglich13b(s)) return false;
+  return s.steuerfall !== 'E_13B_EU_DL' || (typeof s.sperrgrund === 'string' && s.sperrgrund !== '') || s.dialog === 'dialog_erforderlich';
+}
+const ALT_AUSGANG_TYPEN = Object.freeze(['rechnung_ausgehend', 'mahnung_ausgehend', 'reisekosten_weiterberechnung', 'storno']); // wie normalisiereAlt
 export function belegZeitraumDaten(dok) {
   const tage = [];
   const euer = [];
@@ -460,13 +506,18 @@ export function belegZeitraumDaten(dok) {
       tag(euer, zt);
     }
     if (!rechnungstag && !istDatum(d.leistungsdatum)) undatiert = true;
+    // K-F (TR5-kern-001): Eingang im Altbestand (normalisiereAlt: Leistungstag = leistungsdatum, Rechnungsdatum oder bei Plattformen der
+    // Zahlungstag), Steuerfall oft offen: § 13b Abs. 2 möglich, Spanne vom Leistungstag bis zum Ende des Folgemonats
+    if (!ALT_AUSGANG_TYPEN.includes(d.typ)) {
+      for (const lt of [d.leistungsdatum, rechnungstag, bezahlt ? (bezahltAmOk ? d.bezahlt_am : (erfasst || rechnungstag)) : null]) if (istDatum(lt)) spanne({ von: lt, bis: lt }, true);
+    }
     // steuer
     const s = istObjekt(d.steuer) ? d.steuer : null;
     if (s) {
       tag(tage, s.rechnungsdatum);
       tag(tage, s.rechnung_erhalt_am);
       tag(tage, s.wirkdatum);
-      spanne(s.leistung, s.steuerfall === 'E_13B_DRITTLAND_DL');
+      spanne(s.leistung, spanneBisFolgemonat(s));
       for (const p of Array.isArray(s.positionen) ? s.positionen : []) if (istObjekt(p)) spanne(p.leistung, false);
       for (const z of Array.isArray(s.zahlungen) ? s.zahlungen : []) {
         if (!istObjekt(z)) continue;

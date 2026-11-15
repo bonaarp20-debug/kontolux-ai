@@ -110,6 +110,9 @@ export function euerFuer(wirkungen, profil, jahr, optionen) {
   for (const w of ws) {
     if (w.welt !== 'ust' || (w.status !== 'ausgeschlossen' && w.status !== 'unbekannt')) continue;
     if (w.nur_euer === true) continue; // TR4-kern-004: zählt nur in den Jahren seiner euer_zahlungen (unten)
+    // K-F (TR5-kern-002): weitere USt-Zeiträume eines nicht berechneten Belegs (Rechnungserhalt, Teilleistung, Anzahlungszeitraum) sind kein Zu- oder
+    // Abfluss (§ 11 Abs. 1, 2 EStG); die Zahlungen des Belegs zählen über euer_zahlungen (unten) im Zahlungsjahr
+    if (w.nur_ust === true) continue;
     const j = typeof w.periode === 'string' ? Number(w.periode.slice(0, 4)) : null;
     if (j !== null && j !== jahr) continue;
     if (gesehen.has(w.beleg_id)) continue;

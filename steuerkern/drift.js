@@ -14,6 +14,8 @@
 // gehashten Text und im Präfix ('v2:'). Alte Hashes 'v1:' (heute von KontoluxWorker/regel/drift.js, regel/selbsttest.js und
 // regel/festschreibung-ui.js geschrieben) werden nicht pauschal 'veraltet': passt die v1-Prüfung, ist der Status 'neu_pruefen' und
 // belegFuerKern prüft nur die neuen Felder gegen den gespeicherten Steuerteil (zusatzfelderPassen). legacyHashV1 bleibt bitgleich zu den Kopien.
+// K-F (TR5-kern-004, 15.11.2026): zusatzfelderPassen prüft symmetrisch (gesetzt, geändert, gelöscht) und im Zweifel 'veraltet'. Seit D2 schreiben
+// Worker und App-Kopien v2 (Kern-Exporte); v1-Hashes stehen nur noch an Dokumenten, die vor D2 geschrieben wurden.
 
 import { normalisiereAlt, tagVonZeit } from './beleg.js';
 import { istDatum } from './daten.js';
@@ -91,28 +93,59 @@ export function driftStatus(dok) {
   return 'veraltet';
 }
 
-// Neu-Prüfung bei altem v1-Hash: Passt der gespeicherte Steuerteil zu den Feldern, die erst Version 2 abdeckt? Verglichen wird nur, was diese Felder
-// bewirken können (normalisiereAlt), damit eine Klärung oder ein Formular-Steuerteil nicht ohne Not verworfen wird:
-//   fa_art/fa_kategorie/fa_periode: Art und Zeitraum der Finanzamt-Zahlung (wenn gespeichert und neu eine Finanzamt-Zahlung)
-//   art: Privat ja/nein; ust_unklar: DATEV-Kennzeichen ohne Klärung; leistungsdatum: liegt im gespeicherten Leistungszeitraum;
-//   createdAt: Rechnungsdatum, wenn es aus createdAt stammt. quelle wird nach dem Anlegen nicht geändert und ist nur in Version 2 geschützt.
+// Neu-Prüfung bei altem v1-Hash: Passt der gespeicherte Steuerteil zu den Feldern, die erst Version 2 abdeckt? Der v1-Hash sagt nicht, welchen Wert
+// diese Felder beim Schreiben hatten. Darum wird verglichen, was sie im Kern bewirken (normalisiereAlt jetzt gegen den gespeicherten Steuerteil), und
+// zwar symmetrisch: ein gesetztes, geändertes oder GELÖSCHTES Feld fällt auf (K-F, TR5-kern-004). Im Zweifel 'veraltet' (neu aus den Legacy-Feldern),
+// nie den alten Steuerteil behalten. Eine Klärung bleibt nur erhalten, solange keines der Felder anders wirkt.
+// Zwei Arten gespeicherter Steuerteile:
+//   aus den Legacy-Feldern gebildet (Migration, Sammelklärung, auch nach einer Klärung: herkunft.weg 'migration'/'sammelklaerung',
+//     steuerfall_herkunft 'migration'): Rechnungsdatum, Leistungszeitraum, aktive Zahlungen (Tag, Plattform ja/nein) und Storno-Wirkdatum müssen dem
+//     entsprechen, was normalisiereAlt heute daraus macht (leistungsdatum, createdAt, quelle). Nur 'plattform' zählt am Kanal, denn eine Klärung
+//     kann 'import' durch den Standardkanal ersetzen. Ausnahme: zugeordnete Plattform-Erstattung der
+//     Migration (eigener Beleg, Flag plattform_erstattung): nur das Rechnungsdatum.
+//   sonst (Beleg-Formular v2, Worker-Modus 'an', Webhooks): der Leistungszeitraum stammt aus der Eingabe, kein App- oder Worker-Schreibweg setzt das
+//     Legacy-Feld leistungsdatum. Ein gesetztes leistungsdatum muss im gespeicherten Zeitraum liegen; ohne gültiges datum muss das Rechnungsdatum dem
+//     aus createdAt entsprechen.
+// Für alle: Privat ja/nein (art), DATEV-Kennzeichen (ust_unklar, ohne Klärung), Finanzamt-Zahlung ja/nein, Art, Zeitraum und Widerspruch
+// (fa_art, fa_kategorie, fa_periode), Plattformgebühr offen (quelle, ohne Klärung).
+const LEGACY_WEGE = Object.freeze(['migration', 'sammelklaerung']);
+const nv = (x) => (x === undefined ? null : x);
+function aktiveZahlungTage(s) {
+  return (Array.isArray(s.zahlungen) ? s.zahlungen : []).filter((z) => istObjekt(z) && z.status !== 'rueckgaengig')
+    .map((z) => `${nv(z.datum)}|${z.kanal === 'plattform'}`).sort().join(',');
+}
 function zusatzfelderPassen(dok, profil, optionen) {
   const s = dok.steuer;
   let f;
   try { f = normalisiereAlt(dok, profil, optionen).steuer; } catch (e) { return false; }
   const kl = istObjekt(s.migration) && istObjekt(s.migration.klaerung);
-  if (s.beleg_art === 'fa_zahlung' && f.beleg_art === 'fa_zahlung') {
-    const a = istObjekt(s.fa) ? s.fa : {};
-    const b = istObjekt(f.fa) ? f.fa : {};
-    if ((a.fa_art === undefined ? null : a.fa_art) !== (b.fa_art === undefined ? null : b.fa_art)) return false;
-    if ((a.periode === undefined ? null : a.periode) !== (b.periode === undefined ? null : b.periode)) return false;
-  }
+  const mflags = istObjekt(s.migration) && Array.isArray(s.migration.flags) ? s.migration.flags : [];
+  const ausLegacy = (istObjekt(s.herkunft) && LEGACY_WEGE.includes(s.herkunft.weg)) || s.steuerfall_herkunft === 'migration';
+  // art, ust_unklar, fa_*, quelle (Wirkung auf den Steuerfall)
   if ((s.steuerfall === 'PRIVAT' || s.beleg_art === 'privat') !== (f.steuerfall === 'PRIVAT')) return false;
   if (!kl && f.unbekannt_detail === 'ust_unklar_datev' && s.steuerfall !== 'UNBEKANNT') return false;
   if (!kl && s.unbekannt_detail === 'ust_unklar_datev' && f.unbekannt_detail !== 'ust_unklar_datev') return false;
+  if (!kl && (s.unbekannt_detail === 'plattformgebuehr') !== (f.unbekannt_detail === 'plattformgebuehr')) return false;
+  if (ausLegacy && !kl && (s.beleg_art === 'fa_zahlung') !== (f.beleg_art === 'fa_zahlung')) return false;
+  if (s.beleg_art === 'fa_zahlung' && f.beleg_art === 'fa_zahlung') {
+    const a = istObjekt(s.fa) ? s.fa : {};
+    const b = istObjekt(f.fa) ? f.fa : {};
+    if (nv(a.fa_art) !== nv(b.fa_art)) return false;
+    if (nv(a.periode) !== nv(b.periode)) return false;
+  }
+  // leistungsdatum, createdAt, quelle (Wirkung auf die Tage)
   const l = istObjekt(s.leistung) ? s.leistung : null;
-  if (istDatum(dok.leistungsdatum) && l && istDatum(l.von) && istDatum(l.bis) && (dok.leistungsdatum < l.von || dok.leistungsdatum > l.bis)) return false;
-  if (s.datum_herkunft === 'createdAt' && !istDatum(dok.datum) && s.rechnungsdatum !== f.rechnungsdatum) return false;
+  if (istDatum(dok.leistungsdatum) && !(l && istDatum(l.von) && istDatum(l.bis) && dok.leistungsdatum >= l.von && dok.leistungsdatum <= l.bis)) return false;
+  if (!istDatum(dok.datum) && nv(s.rechnungsdatum) !== nv(f.rechnungsdatum)) return false;
+  if (ausLegacy) {
+    if (nv(s.rechnungsdatum) !== nv(f.rechnungsdatum)) return false;
+    if (!mflags.includes('plattform_erstattung')) {
+      if (nv(s.wirkdatum) !== nv(f.wirkdatum)) return false;
+      const fl = istObjekt(f.leistung) ? f.leistung : null;
+      if (nv(l && l.von) !== nv(fl && fl.von) || nv(l && l.bis) !== nv(fl && fl.bis)) return false;
+      if (aktiveZahlungTage(s) !== aktiveZahlungTage(f)) return false;
+    }
+  }
   return true;
 }
 
