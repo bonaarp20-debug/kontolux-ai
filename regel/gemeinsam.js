@@ -90,7 +90,12 @@ export const AGB_FASSUNG_RELEASE_C = null;
 export function kernOptionenFuerKonto(config, zustimmungB, { zustimmungC = false, fassungC = AGB_FASSUNG_RELEASE_C } = {}) {
   const o = kernOptionenFuer(config);
   if (zustimmungB !== true) for (const [regel, feature] of Object.entries(Steuerkern.KERN_OPTION_FEATURES)) if (FEATURES_AGB_RELEASE_B.includes(feature)) o.regeln[regel] = false;
-  if (fassungC && zustimmungC !== true) for (const [regel, feature] of Object.entries(Steuerkern.KERN_OPTION_FEATURES)) if (FEATURES_AGB_RELEASE_C.includes(feature)) o.regeln[regel] = false;
+  // E-C (KERN-C2 H8): Release C über den Kern (KERN_FEATURES_AGB.C, optionenFuerZustimmung), gleich regel/loader.js der App. B wird durchgereicht
+  // (B: true), weil die Release-B-Bindung oben mit der Worker-Liste bleibt (kz39 ist dort Release-A-Regel, im Kern steht es unter B).
+  if (fassungC) {
+    if (typeof Steuerkern.optionenFuerZustimmung === 'function') return { ...o, regeln: Steuerkern.optionenFuerZustimmung(o, { B: true, C: zustimmungC === true }).regeln };
+    if (zustimmungC !== true) for (const [regel, feature] of Object.entries(Steuerkern.KERN_OPTION_FEATURES)) if (FEATURES_AGB_RELEASE_C.includes(feature)) o.regeln[regel] = false;
+  }
   return o;
 }
 function regelAn(config, features) {

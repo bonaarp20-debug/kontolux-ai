@@ -18,7 +18,7 @@ import { regelAdminFeatures } from './regel/admin-features.js';
 import { regelOssMeldung } from './regel/oss-meldung.js'; // WORKER-C (Release C, BP-29)
 import { regelEzbKurs } from './regel/ezb-kurs.js'; // WORKER-C (Release C, BP-29)
 import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // KX-WC2 (Release C, BP-30 DATEV-Teil)
-import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto } from './regel/prompts.js'; // BP-22B
+import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4)
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
 import { v2Vorbereiten, clientSteuerVorbereiten, v2RestFelder } from './regel/schreibweg-v2.js';
@@ -952,8 +952,12 @@ export function pruefeBetragZeile(line) {
     if (!kategorie) {
       return line.slice(0, dokSpeichernMatch.index) + 'Ich kann dieses Dokument noch nicht buchen — mir fehlt die Kategorie (z.B. Bürobedarf, Software/EDV/SaaS, Werbekosten, Reisekosten). Welche passt hier am besten?';
     }
+    // KX-EC (WORKER-C2 Zuruf 1, P4): land= des Anbieters vor dem Steuerwahl-Abgleich (Reverse Charge EU/Drittland aus dem Kern, Widerspruch = ablehnen,
+    // sonst land entfernen). Ohne land= unverändert. Der Satz für das Modell (KI_RC_LAND_BEFEHL_AKTIV) bleibt aus, bis der Client land speichert.
+    const la = kiLandAbgleichen(dokSpeichernMatch[1]);
+    if (!la.ok) return line.slice(0, dokSpeichernMatch.index) + 'Ich kann dieses Dokument nicht buchen: Die Angabe zur Umsatzsteuer ist unzulässig oder widersprüchlich. Bitte prüfe die Angaben im Beleg.';
     // P3 (E1): steuerwahl neben mwst_satz
-    const sw = kiSteuerwahlAbgleichen(dokSpeichernMatch[1]);
+    const sw = kiSteuerwahlAbgleichen(la.rest);
     if (!sw.ok) return line.slice(0, dokSpeichernMatch.index) + 'Ich kann dieses Dokument nicht buchen: Die Angabe zur Umsatzsteuer ist unzulässig oder widersprüchlich. Bitte prüfe die Angaben im Beleg.';
     if (sw.rest !== dokSpeichernMatch[1]) return line.slice(0, dokSpeichernMatch.index) + 'DOKUMENT_SPEICHERN:' + sw.rest;
   }
