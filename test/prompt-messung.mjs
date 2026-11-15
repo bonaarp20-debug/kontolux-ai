@@ -28,16 +28,20 @@ export function wissensbasisText() {
 }
 
 // Misst je Zusammenstellung den statischen Block, den Wissensbasis-Block (so, wie buildSystemBlocks ihn verpackt) und die Summe.
+// BP-22B: Funktionsabschnitte hängen an config/features (regel/prompts.js). Gezählt wird der teurere der beiden Zustände (alle Prompt-Features
+// an oder alle aus); einzelne Kombinationen liegen dazwischen, weil jeder Abschnitt nur in einem Modul steht.
 export function messen() {
   const t = kiPromptTeile();
   const kb = t.systemBloecke('', wissensbasisText(), '')[0].text;
   const kbTok = tokenSchaetzung(kb);
   const zeilen = {};
-  const eintragen = (name, statisch) => {
-    zeilen[name] = { zeichen_statisch: statisch.length, token_statisch: tokenSchaetzung(statisch), token_wissensbasis: kbTok, token_gesamt: tokenSchaetzung(statisch) + kbTok };
+  const eintragen = (name, aus, an) => {
+    const statisch = an.length > aus.length ? an : aus;
+    zeilen[name] = { zeichen_statisch: statisch.length, token_statisch: tokenSchaetzung(statisch), token_wissensbasis: kbTok, token_gesamt: tokenSchaetzung(statisch) + kbTok,
+      token_statisch_aus: tokenSchaetzung(aus), token_statisch_an: tokenSchaetzung(an) };
   };
-  for (const [name, mods] of Object.entries(ZUSAMMENSTELLUNGEN)) eintragen(name, t.bauen(mods));
-  eintragen('bild_dokument', t.bildDokument);
+  for (const [name, mods] of Object.entries(ZUSAMMENSTELLUNGEN)) eintragen(name, t.bauen(mods, t.stand.aus), t.bauen(mods, t.stand.an));
+  eintragen('bild_dokument', t.bildDokumentFuer(t.stand.aus), t.bildDokumentFuer(t.stand.an));
   const module = {};
   for (const [name, text] of Object.entries(t.module)) module[name] = { zeichen: text.length, token: tokenSchaetzung(text) };
   return { methode: `Zeichen/${ZEICHEN_JE_TOKEN}, aufgerundet`, wissensbasis: { zeichen: kb.length, token: kbTok }, module, zusammenstellungen: zeilen };

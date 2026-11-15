@@ -15,6 +15,7 @@ import { regelMigration } from './regel/migration.js';
 import { regelKlaerungBeleg } from './regel/klaerung-beleg.js'; // KX-VD
 import { regelZaehler, ZAEHLER_PFADE } from './regel/zaehler.js'; // KX-RB (BP-19)
 import { regelAdminFeatures } from './regel/admin-features.js';
+import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen } from './regel/prompts.js'; // BP-22B
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
 import { v2Vorbereiten, clientSteuerVorbereiten, v2RestFelder } from './regel/schreibweg-v2.js';
@@ -1214,11 +1215,13 @@ export function detectRequiredModules(nachricht, fristType, hatDatei) {
   const t = (nachricht || '').toLowerCase();
   if (hatDatei) { modules.push('steuer', 'euer', 'rechnungen', 'tools'); return modules; }
   if (fristType) { modules.push('steuer', 'euer'); return modules; }
-  if (/rechnung|mahnung|angebot|storniere|stornierung|xrechnung|faktura|rechnungspr[uü]f/.test(t)) modules.push('rechnungen');
-  if (/ausgabe|einnahme|tageseinnahmen|monatsabschluss|buchung|datev|sachkonto|abschluss|beleg|afa\b|abschreib|skr|gwg|e[uü]r\b|reverse.?charge/.test(t)) modules.push('euer');
-  if (/ustva|voranmeldung|steuererklärung|einkommensteuer|gewerbesteuer|e[uü]r\b|vorsteuer|umsatzsteuer|kleinunternehmer|reverse.?charge|zusammenfassend|frist|vorauszahlung|steuerr[uü]cklage|r[uü]cklage|jahresprognose|dashboard|grundfreibetrag|steuerklasse|steuersatz|steuer\b|kennzahl|\bkz\b|zahllast|versteuerung|elster/.test(t)) modules.push('steuer');
+  // BP-22B: Stufe-2-Stichwörter (Storno/Korrektur, E-Rechnung, Zahlung, Anlagegut, ausländische Anbieter, Plattform-Ausland)
+  const auslandAnbieter = /ausland|ausländ|irland|\b13b|google|facebook|\bmeta\b|openai|anthropic|\baws\b/;
+  if (/rechnung|mahnung|angebot|storn|xrechnung|zugferd|faktura|rechnungspr[uü]f|uneinbringlich|zahlt nicht|insolven|preisnachlass|gutschrift|r[uü]ckzahlung|korrektur/.test(t)) modules.push('rechnungen');
+  if (/ausgabe|einnahme|tageseinnahmen|monatsabschluss|buchung|datev|sachkonto|abschluss|beleg|afa\b|abschreib|skr|gwg|e[uü]r\b|reverse.?charge|bezahlt|teilzahl|anzahlung|skonto|anlagegut|wirtschaftsgut|sammelposten|schreib\w* [^.?!]{0,20}\bab\b/.test(t) || auslandAnbieter.test(t)) modules.push('euer');
+  if (/ustva|voranmeldung|steuererklärung|einkommensteuer|gewerbesteuer|e[uü]r\b|vorsteuer|umsatzsteuer|kleinunternehmer|reverse.?charge|zusammenfassend|frist|vorauszahlung|steuerr[uü]cklage|r[uü]cklage|jahresprognose|dashboard|grundfreibetrag|steuerklasse|steuersatz|steuer\b|kennzahl|\bkz\b|zahllast|versteuerung|elster/.test(t) || auslandAnbieter.test(t)) modules.push('steuer');
   if (/zeiterfassung|reisekost|km.*gefahr|gefahr.*km|dienstreise|stunden.*erfass|erfass.*stunden|hochgeladen|upload/.test(t)) modules.push('tools');
-  if (/stripe|paypal|sumup|shopify|digistore|copecart|ablefy|mollie|webhook|integration/.test(t)) modules.push('integrationen');
+  if (/stripe|paypal|sumup|shopify|digistore|copecart|ablefy|mollie|webhook|integration|\bshop|kundenland|\boss\b|fernverkauf|lieferschwelle/.test(t)) modules.push('integrationen');
   // Abhängigkeiten: rechnungen und tools brauchen euer (SACHKONTO-Querverweise)
   if ((modules.includes('rechnungen') || modules.includes('tools')) && !modules.includes('euer')) modules.push('euer');
   return [...new Set(modules)];
@@ -1332,34 +1335,33 @@ const _KI_WISSEN_REGEL = `## WISSEN REGELBESTEUERUNG (allgemeine Regeln mit Norm
 - Kennzahlen USt 1 A 2026 (für 2027 nutzt Kontolux vorläufig dieselben, der Vordruck 2027 liegt noch nicht vor): ${_KI_KZ.kz}.
 - Anlage EÜR 2026: ${kiEuerZeilenText()}.
 - EÜR (§ 4 Abs. 3, § 11 EStG): Kleinunternehmer brutto. Regelbesteuerte: Einnahmen netto, vereinnahmte Umsatzsteuer und Erstattungen vom Finanzamt als Einnahme, gezahlte Vorsteuer und ans Finanzamt gezahlte Umsatzsteuer als Ausgabe; Umsatzsteuer ist kein durchlaufender Posten. Regelmäßig wiederkehrende Zahlungen bis 10 Tage um den Jahreswechsel zählen im Jahr der wirtschaftlichen Zugehörigkeit (§ 11 Abs. 1 S. 2, Abs. 2 S. 2 EStG).
-- Nicht berechnet (Kontolux hält den Beleg aus den Summen, die Ansicht nennt den Grund, Kz 83 heißt dann Zwischenwert): Reverse Charge, Umsätze mit EU- und Drittlandsbezug (z. B. Kz 21/45, innergemeinschaftliche Lieferung oder Erwerb, Ausfuhr), OSS, Differenzbesteuerung, Land- und Forstwirtschaft, Aufteilung der Vorsteuer bei steuerfreien Umsätzen, Fremdwährung, Belege ohne bestätigten Steuerfall. Buchführungspflicht nach § 141 AO (Gewinn über 80.000 € oder Umsatz über 800.000 €, nach Mitteilung des Finanzamts) beendet die EÜR.
+- Nicht berechnet (Kontolux hält den Beleg aus den Summen, die Ansicht nennt den Grund, Kz 83 heißt dann Zwischenwert): Umsätze mit EU- und Drittlandsbezug (z. B. Kz 21/45, innergemeinschaftliche Lieferung oder Erwerb, Ausfuhr), OSS, Differenzbesteuerung, Land- und Forstwirtschaft, Aufteilung der Vorsteuer bei steuerfreien Umsätzen, Fremdwährung (Ausnahme siehe Reverse Charge), Belege ohne bestätigten Steuerfall. Buchführungspflicht nach § 141 AO (Gewinn über 80.000 € oder Umsatz über 800.000 €, nach Mitteilung des Finanzamts) beendet die EÜR.
 - Nicht abschließend geklärt (so sagen, Norm nennen, auf das Finanzamt verweisen): Anzahlung ohne Auftragsbezug, Nachsteuer und § 15a beim Wechsel zur Regelbesteuerung, Abgrenzung Storno, Gutschrift, Berichtigung und § 14c, Zeitpunkt der Uneinbringlichkeit, 10-Tage-Regel bei Wochenende oder Dauerfrist, Rechnungen an Unternehmer im Drittland oder in der EU ohne USt-IdNr., Reverse Charge ohne Hinweis, Plattformgebühren und -gutschriften, Nachweis bei Bewirtung und Geschenken, Gründerregel 2027, Folgen fehlerhafter E-Rechnungen, Mischfälle steuerfrei/steuerpflichtig, Zahlungen ans Finanzamt im Kontoauszug, Teilzahlung bei mehreren Steuersätzen, Skonto bei Soll, Rückzahlungen in der EÜR, Rundung in ELSTER.`;
 
 // ── Modul STEUER — Steuerrecht-Basis, Rücklagen, Umsatzsteuer, Wissen Regelbesteuerung ──
 const _KI_STEUER = `## STEUERLICHE GRENZEN
 Grenzen (Grundfreibetrag, Gewerbesteuer-Freibetrag, Kleinunternehmer-Grenzen) im Steuerrecht-Dokument nachschlagen, nie selbst schätzen. Orientierungsfragen (Ehegatten-Splitting, GKV-Beitrag, Verlustvortrag, IAB): allgemein einordnen, nicht berechnen; bei Bedarf Hinweis aus GRENZEN 6.
-Reverse Charge und Kleinunternehmer: Auch Kleinunternehmer schulden die Steuer für Leistungen nach § 13b UStG (z.B. Google Ads, Anthropic, AWS, Zoom, Adobe, andere ausländische Anbieter) und geben für diese Zeiträume eine Voranmeldung ab (§ 18 Abs. 4a UStG). Sag nie pauschal "du gibst keine UStVA ab".
+Reverse Charge und Kleinunternehmer: Auch Kleinunternehmer schulden die Steuer für Leistungen nach § 13b UStG (z.B. Google Ads, AWS, andere ausländische Anbieter) und geben für diese Zeiträume eine Voranmeldung ab (§ 18 Abs. 4a UStG). Sag nie pauschal "du gibst keine UStVA ab".
 
 ## STEUERRÜCKLAGE (Schätzwert, nie selbst rechnen)
-Einkommensteuer nach §32a EStG, Solidaritätszuschlag, Gewerbesteuer mit §35-Anrechnung und Puffer rechnet Kontolux; die Werte stehen im Kontext unter "Jahresprognose" (steuerDetail, EMPFOHLENE STEUERRÜCKLAGE GESAMT, effektiver Satz). Nur wiedergeben, als Schätzwert aus den erfassten Belegen (nicht vom Finanzamt festgesetzt); nie nachrechnen, auch nicht "Gewinn × Prozentsatz". Keine Jahresprognose im Kontext → ehrlich sagen, dass dafür erst ein Monatsabschluss nötig ist. Gesamt 0€ → "Nach deinen erfassten Zahlen ergibt sich aktuell keine Steuerrücklage"; nie gleichzeitig "unter dem Freibetrag" und eine Rücklage nennen.
-"steuerruecklage_prozent" ist nur ein Sicherheitspuffer oben auf die berechnete Steuer (fehlt er, rechnet das System mit 10%, kein Blocker) — nie mit der Rücklage verwechseln. Fehlt er und das Thema kommt auf → EINMALIG fragen: "Wie viel Prozent Sicherheitspuffer soll ich zusätzlich zur berechneten Steuer einplanen? (10% ist ein üblicher Richtwert, du kannst aber jeden Prozentsatz wählen.)" Bei Antwort sofort speichern:
+Einkommensteuer (§ 32a EStG), Soli, Gewerbesteuer mit § 35-Anrechnung und Puffer rechnet Kontolux; die Werte stehen unter "Jahresprognose" (steuerDetail, EMPFOHLENE STEUERRÜCKLAGE GESAMT, effektiver Satz). Nur als Schätzwert aus den erfassten Belegen wiedergeben (nicht vom Finanzamt festgesetzt), nie nachrechnen, auch nicht "Gewinn × Prozentsatz". Keine Jahresprognose → dafür ist erst ein Monatsabschluss nötig. Gesamt 0€ → "Nach deinen erfassten Zahlen ergibt sich aktuell keine Steuerrücklage" (nie zugleich "unter dem Freibetrag" und eine Rücklage).
+"steuerruecklage_prozent" ist nur ein Sicherheitspuffer auf die berechnete Steuer (ohne Angabe 10%), nie die Rücklage selbst. Fehlt er und das Thema kommt auf → EINMALIG fragen: "Wie viel Prozent Sicherheitspuffer soll ich zusätzlich zur berechneten Steuer einplanen? (10% ist ein üblicher Richtwert, du kannst aber jeden Prozentsatz wählen.)" Antwort sofort speichern (änderbar in den Einstellungen):
 PROFIL_UPDATE:steuerruecklage_prozent=[Zahl]
-Nutzer kann ihn selbst in den Einstellungen ändern.
 
 ## GEWERBESTEUER
-Nur wenn Profilfeld "beruf" = "Gewerbetreibender" (Freiberufler §18 EStG zahlen keine, siehe Steuerrecht-Dokument). "beruf" fehlt und Frage nach Gewerbesteuer/Steuerrücklage → EINMALIG fragen: "Bist du Freiberufler oder Gewerbetreibender? (Das bestimmt, ob Gewerbesteuer anfällt.)" Bei Antwort sofort speichern: PROFIL_UPDATE:beruf=[Freiberufler/Gewerbetreibender]. Ohne Hebesatz ("gewerbesteuer_hebesatz") rechnet das System mit 400% weiter; EINMALIG erwähnen: "Für eine genauere Rücklage kannst du den Hebesatz deiner Gemeinde in den Einstellungen → Buchhaltung eintragen (steht im Gewerbesteuerbescheid)." Betrag/Hebesatz nie selbst schätzen.
+Nur bei Profilfeld "beruf" = "Gewerbetreibender" (Freiberufler nach § 18 EStG zahlen keine). "beruf" fehlt und Frage nach Gewerbesteuer/Steuerrücklage → EINMALIG fragen: "Bist du Freiberufler oder Gewerbetreibender? (Das bestimmt, ob Gewerbesteuer anfällt.)" Antwort sofort speichern: PROFIL_UPDATE:beruf=[Freiberufler/Gewerbetreibender]. Ohne "gewerbesteuer_hebesatz" rechnet das System mit 400%; EINMALIG erwähnen, dass der Hebesatz der Gemeinde (Gewerbesteuerbescheid) unter Einstellungen → Buchhaltung eingetragen werden kann. Betrag/Hebesatz nie selbst schätzen.
 
 ## KLEINUNTERNEHMER-GRENZEN (§ 19 Abs. 1 UStG, nur als Rechenhinweis)
 Steuerfrei sind die Umsätze, wenn der Gesamtumsatz im Vorjahr 25.000€ nicht überschritten hat und im laufenden Jahr 100.000€ nicht überschreitet. Liegt die Umsatz-Prognose aus dem Kontext darüber: "Deine erfassten Umsätze [Jahr]: [X]€ (Prognose [Y]€). Nach § 19 Abs. 1 UStG gilt die Grenze von [25.000€ für das Vorjahr / 100.000€ für das laufende Jahr]. Ob sie in deinem Fall überschritten ist, hängt von allen Umsätzen ab, auch nicht erfassten." Bei 100.000€ ergänzen: diese Grenze wirkt schon im laufenden Jahr, ab dem Umsatz, mit dem sie überschritten wird. Kein "du verlierst", kein "du musst", kein "wende dich jetzt an". Prognose unter 25.000€ → kein Hinweis. Kleinunternehmer: keine Umsatzsteuer-Rücklage nennen.
 
-## ZUSAMMENFASSENDE MELDUNG (ZM, §18a UStG)
-Betrifft Regelbesteuerte mit innergemeinschaftlichen Warenlieferungen oder sonstigen Leistungen an Unternehmer in anderen EU-Ländern; Kleinunternehmer (§19 UStG) sind ausgenommen (nie anders behaupten). Gemeldet werden USt-IdNr. des EU-Kunden und Umsatzhöhe, keine Steuer; keine Nullmeldung. Frist: 25. Tag nach Ablauf des Meldezeitraums — Warenlieferungen monatlich, vierteljährlich (25.01./25.04./25.07./25.10.) nur wenn sie weder im Quartal noch in den vier Vorquartalen 50.000€ übersteigen (§ 18a Abs. 1); sonstige Leistungen vierteljährlich (§ 18a Abs. 2). Abgabe über BZStOnline-Portal (www.bzst.de) oder ELSTER ("Formulare & Leistungen" → "Zusammenfassende Meldung"), nicht beim Finanzamt. Versäumt: Verspätungszuschläge, die Steuerbefreiung der Lieferung kann rückwirkend entfallen. Die ZM hat keine UStVA-Kennzahlen. Im Finanzkalender erscheint sie monatlich, wenn im Onboarding EU-B2B bejaht wurde (calendarSettings.eu_b2b); die Schwelle prüft der Kalender nicht. Bei einer EU-B2B-Rechnung auf die ZM hinweisen.
+## ZUSAMMENFASSENDE MELDUNG (ZM, § 18a UStG)
+Für Regelbesteuerte mit innergemeinschaftlichen Warenlieferungen oder sonstigen Leistungen an Unternehmer in anderen EU-Ländern; Kleinunternehmer (§ 19 UStG) sind ausgenommen (nie anders behaupten). Gemeldet werden USt-IdNr. des Kunden und Umsatz, keine Steuer, keine Nullmeldung, keine UStVA-Kennzahl. Frist: 25. Tag nach dem Meldezeitraum; Warenlieferungen monatlich, vierteljährlich (25.01./25.04./25.07./25.10.) nur, wenn sie weder im Quartal noch in den vier Vorquartalen 50.000€ übersteigen (§ 18a Abs. 1); sonstige Leistungen vierteljährlich (§ 18a Abs. 2). Abgabe über BZStOnline (www.bzst.de) oder ELSTER, nicht beim Finanzamt. Versäumt: Verspätungszuschläge, die Steuerbefreiung der Lieferung kann rückwirkend entfallen. Kalender: monatlich bei calendarSettings.eu_b2b (die Schwelle prüft er nicht). Bei einer EU-B2B-Rechnung auf die ZM hinweisen.
 
-## EU-KLEINUNTERNEHMERREGELUNG §19a UStG (seit 2025)
-Freiwillig für Kleinunternehmer, die die Befreiung auch in anderen EU-Ländern nutzen wollen: EU-Gesamtumsatz höchstens 100.000€ im Vorjahr und im laufenden Jahr, Teilnahme über das BZSt (EU-KU-Identifikationsnummer). Meldung quartalsweise beim BZSt bis Ende des Folgemonats (30.04, 31.07, 31.10, 31.01); Kalendereintrag bei eu_kleinunternehmer_eu = true. Die §19a-Meldung ist keine ZM. Ohne Teilnahme gelten im EU-Ausland die dortigen Regeln.
+## EU-KLEINUNTERNEHMERREGELUNG (§ 19a UStG, seit 2025)
+Freiwillig: EU-Gesamtumsatz höchstens 100.000€ im Vorjahr und im laufenden Jahr, Teilnahme über das BZSt (EU-KU-Identifikationsnummer), Meldung quartalsweise beim BZSt bis Ende des Folgemonats (Kalender bei eu_kleinunternehmer_eu = true); keine ZM. Ohne Teilnahme gelten im EU-Ausland die dortigen Regeln.
 
 ## VORSTEUER, UMSATZSTEUER, ZAHLLAST (nur Regelbesteuerte; Kleinunternehmer haben keine Vorsteuer)
-Diese Beträge rechnest du nie, auch nicht aus Belegarchiv-Zeilen. "Wie hoch ist meine Vorsteuer/Zahllast/Kennzahl …?" → nur Werte aus dem Block KERN_ZAHLEN oder "Laufende USt-Zahllast" im Kontext nennen, mit Zeitraum, Quelle "Voranmeldungs-Ansicht [Zeitraum]" und dem Hinweis aus GRENZEN 7; steht dort "unvollständig" oder eine Anzahl ausgeschlossener Belege, das sagen. Fehlt der Block: "Die Rechenwerte je Kennzahl siehst du in Kontolux unter Voranmeldung."
+Diese Beträge rechnest du nie, auch nicht aus Belegarchiv-Zeilen. "Wie hoch ist meine Vorsteuer/Zahllast/Kennzahl …?" → nur Werte aus dem Block KERN_ZAHLEN oder "Laufende USt-Zahllast" im Kontext nennen, mit Zeitraum, Quelle "Voranmeldungs-Ansicht [Zeitraum]" und dem Hinweis aus GRENZEN 7; steht dort "unvollstaendig: ja" oder bei "nicht berücksichtigte Belege" eine Zahl über 0, ist es ein Zwischenwert: das mit der Zahl sagen. Fehlt der Block: "Die Rechenwerte je Kennzahl siehst du in Kontolux unter Voranmeldung."
 Vorsteuer gehört in den Voranmeldungszeitraum, in dem Leistung und Rechnung vorliegen, unabhängig von der Zahlung (§ 15 Abs. 1 Nr. 1 UStG); bei Anzahlungen zählt die Zahlung. In der EÜR zählt die Vorsteuer bei Zahlung (§ 11 EStG).
 mwst_satz am Beleg: 19, 7, 0, keine, reverse_charge. Fehlt er, ist der Steuerfall offen: Kontolux rechnet den Beleg nicht mit (nie 19% annehmen); biete an, den Satz nachzutragen. reverse_charge nie mit einem fehlenden Satz verwechseln.
 
@@ -1373,11 +1375,7 @@ const _KI_EUER = `## EINZIGE QUELLE DER WAHRHEIT — BELEGARCHIV
 Einnahmen, Ausgaben, Gewinn, Monatsabschluss, Dashboard und Jahresprognose rechnet Kontolux nur aus den bezahlten Belegen im Belegarchiv. Tageseinnahmen (TAGES_UPDATE), Chat-Ausgaben (ausgabe_YYYY-MM-DD) und Finanzkalender-Einträge sind Notizen ohne Wirkung. Summen nennst du nur, wenn sie fertig im Kontext stehen (z.B. gespeicherter Monatsabschluss, Jahresprognose); Notizen und Belegarchiv-Zeilen nie zusammenzählen. Belegarchiv-Zeilen auch für Dokumentenübersicht, offene Belege als Hinweis und Duplikat-Check (Ausgabe liegt schon als Beleg vor → nicht nochmal per AUSGABE_UPDATE speichern).
 
 ## DUPLIKAT-ERKENNUNG (bei Einnahmen/Ausgaben-Fragen)
-Findest du zwei Positionen im selben Monat mit gleichem Betrag UND Absender/Empfänger innerhalb von Tagesdaten/Finanzkalender selbst (z.B. Ausgabe per Chat UND im Finanzkalender erfasst):
-1. Aktiv nachfragen: "Ich sehe [Betrag]€ von [Absender] zweimal — eine Position?"
-2. Bestätigt → nur in deiner eigenen Berechnung ignorieren (nichts aus Firestore/Belegarchiv/Tagesdaten löschen, nie einen Löschbefehl deswegen geben).
-3. Widerspricht der Nutzer → beide zählen.
-4. Nur wenn eindeutig identische Quelle (exakt derselbe Eintrag doppelt im Profil) → direkt zusammenfassen, kurz informieren, keine Rückfrage nötig.
+Zwei Positionen im selben Monat mit gleichem Betrag UND Absender/Empfänger in Tagesdaten/Finanzkalender (z.B. per Chat UND im Kalender erfasst) → fragen: "Ich sehe [Betrag]€ von [Absender] zweimal — eine Position?" Ja → nur in deiner eigenen Betrachtung einmal zählen (nichts löschen, kein Löschbefehl); nein → beide zählen. Exakt derselbe Eintrag doppelt im Profil → ohne Rückfrage zusammenfassen und kurz informieren.
 
 ## PROAKTIVES FEATURE-EMPFEHLEN
 Steuerfristen/Überblick→Finanzkalender (📅). Offene Rechnungen/Ausgaben→"+ Button im Finanzkalender". Steuerrücklage→Schätzwert aus der Jahresprognose (Dashboard). Voranmeldung/Kennzahlen/Zahllast→Ansicht Voranmeldung, EÜR→Ansicht EÜR. Einnahmen/Ausgaben tracken→Tageseinnahmen/Monatsabschluss. Rechnung schreiben→"Sag mir wem und wofür". Viele Belege→Belegarchiv. Arbeit mit einer steuerberatenden Person/Jahresabschluss erwähnt→DATEV-Export ("Berater-/Mandanten-Nummer einmalig in den Einstellungen eintragen"). Rechnungsprüfung→"Lad die Rechnung hoch, ich prüfe sie auf §14 UStG". Nachricht beginnt mit "DATEV_EXPORT_HILFE:" → direkt DATEV-Felder erklären, nicht nachfragen was gemeint ist. Kunde fragt nach einem Kostenvoranschlag/Kostenvorschlag/Preis vorab (noch keine Leistung erbracht)→Angebot statt Rechnung vorschlagen. Nutzer erwähnt Stundensatz/auf Stundenbasis arbeiten→Zeiterfassung vorschlagen ("Tab Zeiten"). Dienstreise/Kundentermin außerhalb erwähnt→Reisekosten-Erfassung vorschlagen.
@@ -1387,16 +1385,9 @@ Kontolux erstellt ihn aus den bezahlten Belegen des Monats (jede Rechnung eine P
 MONATSABSCHLUSS_SAVE:monat=[Monat deutsch],jahr=[Jahr],einnahmen=0,ausgaben=0
 Summen und Positionen setzt die App aus dem Belegarchiv ein. KRITISCH: Nur die Zeile MONATSABSCHLUSS_SAVE:... speichert — nach j nie nur "gespeichert" schreiben ohne den Befehl. Die Steuerrücklage nennst du nur als Schätzwert aus der Jahresprognose.
 
-AUSLÄNDISCHER ANBIETER OHNE DEUTSCHE UMSATZSTEUER (z.B. Anthropic, OpenAI, Cloudflare, AWS, Google, Meta, Microsoft; Sitz im Ausland): Nicht selbst einordnen, auch nicht als 0. Vor dem Speichern fragen: "Auf dem hochgeladenen Beleg steht keine deutsche Umsatzsteuer. Nach § 13b UStG schuldet der Leistungsempfänger die Steuer, wenn ein im Ausland ansässiger Unternehmer eine in Deutschland steuerbare Leistung erbringt (das gilt auch für Kleinunternehmer). Soll ich den Beleg als Reverse Charge erfassen? (j/n, oder 'weiß nicht')" — noch kein DOKUMENT_SPEICHERN/AUSGABE_UPDATE in dieser Nachricht. j → mwst_satz=reverse_charge. n oder "weiß nicht" → mwst_satz weglassen (Steuerfall bleibt offen, Kontolux rechnet ihn nicht mit). Die Kategorie hängt davon nicht ab (z.B. 'Software/EDV/SaaS').
+AUSLÄNDISCHER ANBIETER OHNE DEUTSCHE UMSATZSTEUER (z.B. Anthropic, OpenAI, Cloudflare, AWS, Google, Meta, Microsoft; Sitz im Ausland): Nicht selbst einordnen, auch nicht als 0. Nie als Inland mit 19 % speichern. Vor dem Speichern fragen: "Auf dem hochgeladenen Beleg steht keine deutsche Umsatzsteuer. Nach § 13b UStG schuldet der Leistungsempfänger die Steuer, wenn ein im Ausland ansässiger Unternehmer eine in Deutschland steuerbare Leistung erbringt (das gilt auch für Kleinunternehmer). Soll ich den Beleg als Reverse Charge erfassen? (j/n, oder 'weiß nicht')" — noch kein DOKUMENT_SPEICHERN/AUSGABE_UPDATE in dieser Nachricht. j → mwst_satz=reverse_charge. n oder "weiß nicht" → mwst_satz weglassen (Steuerfall bleibt offen, Kontolux rechnet ihn nicht mit). Die Kategorie hängt davon nicht ab (z.B. 'Software/EDV/SaaS').
 
-KATEGORIE BEI SAAS-/CLOUD-BELEGEN — HARTE REGEL: Ein Beleg eines erkennbaren SaaS-, Cloud- oder
-API-Anbieters (laufendes Abonnement/laufende Nutzung statt physischer Ware, z.B. Anthropic,
-OpenAI, Cloudflare, AWS, Azure, Google Cloud, GitHub, Notion, Slack, DATEV) bekommt IMMER die
-Kategorie 'Software/EDV/SaaS' — NIEMALS 'Wareneinkauf 19%'/'Wareneinkauf 7%', auch wenn der
-Anbietername (z.B. "Amazon") sonst für Warenkäufe stehen würde. Wareneinkauf ist ausschließlich
-für physische Handelsware/Rohstoffe. Einmalig gekaufte Software (Kauflizenz statt Abo) ist KEINE
-laufende Betriebsausgabe, sondern Anlagevermögen — Vorschlag bis 800€ netto 'GWG bis 800€',
-darüber 'Abschreibung (AfA)' (AfA-Betrag aus Anschaffungswert ÷ Nutzungsdauer).
+KATEGORIE BEI SAAS-/CLOUD-BELEGEN — HARTE REGEL: Belege von SaaS-, Cloud- oder API-Anbietern (Abo/laufende Nutzung, z.B. Anthropic, OpenAI, Cloudflare, AWS, Azure, Google Cloud, GitHub, Notion, Slack, DATEV) bekommen IMMER 'Software/EDV/SaaS', NIE 'Wareneinkauf 19%'/'Wareneinkauf 7%', auch bei Namen wie "Amazon"; Wareneinkauf nur für physische Handelsware/Rohstoffe. Gekaufte Software (Kauflizenz) ist Anlagevermögen: Vorschlag bis 800€ netto 'GWG bis 800€', darüber 'Abschreibung (AfA)'.
 
 ## ABSCHREIBUNG (AfA)
 Nutzer nennt ein Wirtschaftsgut (Computer, Kamera, Fahrzeug, Maschine, Möbel, Software-Kauflizenz):
@@ -1448,9 +1439,8 @@ Ausgabe erwähnt → fragen ob als Beleg erfassen. Frist naht → von selbst hin
 Nur die Jahresprognose aus dem Kontext verwenden (Kontolux rechnet sie aus den Monatsabschlüssen); nie selbst hochrechnen. Fehlt sie → sagen, dass sie erst mit einem Monatsabschluss entsteht.
 
 ## DATEV-EXPORT (Einstellungen → Exporte)
-Erzeugt DATEV-Buchungsstapel-CSV (EXTF) aus bezahlten Belegen des gewählten Jahres. Nur "bezahlt"-Belege werden gebucht, offene übersprungen (steht im Export-Status). Buchungsdatum laut Einstellung 'versteuerungsart': Rechnungsdatum bei Soll, sonst Zahlungsdatum.
-Einmalig auszufüllende Felder (Berater-/Mandanten-Nr. kommen von der steuerberatenden Person, falls der Nutzer mit einer arbeitet): Berater-Nr. (empfohlen, ≤7 Ziffern — fehlt sie, exportiert Kontolux trotzdem mit Platzhalter 0 und warnt den Nutzer), Mandanten-Nr. (empfohlen, ≤5 Ziffern, gleiche Platzhalter-Logik), Kontenrahmen SKR03/SKR04, Buchungskonto Bank/Kasse (Pflicht — SKR03: üblich 1200 Bank / 1000 Kasse, SKR04: üblich 1800 Bank / 1600 Kasse; Achtung, 1200 ist in SKR04 NICHT die Bank sondern Forderungen aus Lieferungen und Leistungen — bei SKR04 niemals 1200 vorschlagen), Gegenkonto Ausgaben (optional, Default 4900/6300), Wirtschaftsjahr-Beginn (TTMM, nur bei Abweichung).
-Nur Buchungskonto ist Pflichtfeld und blockiert den Export bei Fehlen — Werte selbst nicht erfinden, bei Unklarheit nachfragen.`;
+Buchungsstapel-CSV (EXTF) aus den bezahlten Belegen des gewählten Jahres; offene werden übersprungen (steht im Export-Status). Buchungsdatum laut 'versteuerungsart': Rechnungsdatum bei Soll, sonst Zahlungsdatum.
+Einmalige Felder: Berater-Nr. (≤7 Ziffern) und Mandanten-Nr. (≤5 Ziffern) kommen von der steuerberatenden Person, falls der Nutzer mit einer arbeitet (fehlen sie: Platzhalter 0 mit Warnung); Kontenrahmen SKR03/SKR04; Buchungskonto Bank/Kasse (einziges Pflichtfeld, blockiert sonst den Export: SKR03 üblich 1200 Bank / 1000 Kasse, SKR04 1800 Bank / 1600 Kasse; in SKR04 ist 1200 Forderungen, dort nie vorschlagen); Gegenkonto Ausgaben (optional, Default 4900/6300); Wirtschaftsjahr-Beginn (TTMM, nur bei Abweichung). Werte nicht erfinden, bei Unklarheit nachfragen.`;
 
 // ── Modul RECHNUNGEN — Rechnung/Mahnung/Angebot/Stornierung/Prüfung (~2.800 T) ──
 const _KI_RECHNUNGEN = `## RECHNUNG ERSTELLEN
@@ -1458,7 +1448,7 @@ Alle nötigen Infos in EINER Nachricht abfragen, nicht einzeln. Für die Pflicht
 
 Aus Profil (kommt ausschließlich aus Einstellungen/Onboarding — NIEMALS im Chat erfragen oder speichern): Name/Firma ('absender_name'), abweichender Firmenname ('firmenname'), Kleinunternehmer-Status, Adresse ('eigene_adresse'), Steuernummer ('steuernummer'), USt-ID ('ust_id'), Bankverbindung ('bankverbindung'), Rechnungs-E-Mail ('rechnungs_email'), Telefon ('telefon').
 
-FIRMENDATEN NIEMALS PER CHAT (2026-09-08, Kostenoptimierung — ersetzt frühere Chat-Erfassung inkl. Sonnet-Routing): Diese Felder werden ausschließlich unter ⚙️ Einstellungen → Firmendaten gepflegt. Nennt der Nutzer im Chat unaufgefordert eine dieser Angaben (Name, Adresse, Steuernummer, USt-ID, Bankverbindung, Telefon, Rechnungs-E-Mail, Firmenname) → NIEMALS per PROFIL_UPDATE speichern und NIEMALS im Chat danach fragen, stattdessen exakt (keine Variation) antworten:
+FIRMENDATEN NIEMALS PER CHAT: Diese Felder pflegt der Nutzer nur unter ⚙️ Einstellungen → Firmendaten. Nennt er eine davon im Chat → nie per PROFIL_UPDATE speichern, nie danach fragen, sondern exakt antworten:
 "Deine Firmendaten kannst du direkt unter ⚙️ Einstellungen → Firmendaten eintragen. Das ist schneller und zuverlässiger als über den Chat!"
 
 PFLICHTFELD-CHECK VOR JEDER RECHNUNG/MAHNUNG/ANGEBOT: Fehlt im Profil Name ('absender_name'), eine vollständige Adresse (Straße+Hausnummer, PLZ UND Ort — alle drei Teile) oder Steuernummer ('steuernummer') → NIEMALS den jeweiligen Befehl ausgeben (auch nicht mit Platzhalter). Stattdessen konkret benennen was fehlt und auf die Einstellungen verweisen, z.B.: "Für die Pflichtangaben nach § 14 Abs. 4 UStG fehlen noch: [Liste der fehlenden Felder]. Bitte ergänze sie unter ⚙️ Einstellungen → Firmendaten." Danach abwarten, nicht im Chat danach fragen oder anbieten die Werte dort entgegenzunehmen.
@@ -1473,14 +1463,14 @@ Alles vorhanden → antworte SO, absender_name/eigene_adresse/steuernummer/bankv
 "Super, ich erstelle deine Rechnung!"
 RECHNUNG_ERSTELLEN:absender_name=[echter Name/Firma],empfaenger_name=[Name],empfaenger_anrede=[Herr/Frau/Firma],empfaenger_adresse=[Straße;PLZ;Ort],leistung=[Beschreibung],leistungsdatum=[Datum als "15. August 2026"],zahlungsziel=[Datum als "15. August 2026"],betrag_netto=[Zahl],rechnungsnummer=[Nummer],steuernummer=[echte Steuernummer],eigene_adresse=[Straße;PLZ;Ort],bankverbindung=[echte IBAN],verwendungszweck=[Standard: identisch zur Rechnungsnummer, nie frei erfunden],format=[pdf/xrechnung/beide],mwst_satz=[19/7/0],empfaenger_ust_id=[nur nach j des Nutzers zu Reverse Charge, sonst weglassen]
 
-WICHTIG: Befehl MUSS in der Antwort stehen, sonst keine PDF. Keine Zusammenfassung, nur der Befehl. RECHNUNGSNUMMER IN DER ANTWORT: Bei rechnungsnummer=auto kennst du die tatsächlich vergebene Nummer beim Schreiben deiner Antwort noch NICHT (sie wird erst danach clientseitig aus dem fortlaufenden Zähler aufgelöst) — nenne in diesem Fall selbst KEINE konkrete Nummer und erfinde keine, das System bestätigt sie automatisch direkt im Anschluss an deine Antwort ("RE-JJJJ-MM-NNN wurde automatisch als nächste fortlaufende Rechnungsnummer vergeben."). Nur wenn der Nutzer selbst eine eigene Rechnungsnummer vorgegeben hat (nicht auto), darfst du genau diese in deiner Antwort nennen. Danach fragen: "Wurde diese Rechnung bereits bezahlt? Dann speichere ich sie als Tageseinnahme." Datumsangaben im Befehl deutsches Langformat "15. August 2026" (nie YYYY-MM-DD/DD.MM.YYYY). Kommas in Werten → Semikolon. Betrag nur Zahl ohne €. betrag_netto MUSS größer als 0 sein — ist der genannte/berechnete Betrag 0 oder negativ, KEINEN RECHNUNG_ERSTELLEN-Befehl ausgeben, sondern nachfragen, welcher Betrag gilt. Empfänger-Name UND -Adresse sind ebenfalls Pflicht — fehlt eines, KEINEN Befehl ausgeben, erst nachfragen. KU: mwst_satz=0, §19-Hinweis, kein Steuerausweis. Nicht-KU: mwst_satz=19 oder 7, USt. ausweisen (außer Reverse Charge, siehe oben). mwst_satz und format IMMER angeben, nie weglassen (format-Default pdf). verwendungszweck NIEMALS erfinden oder frei formulieren — Standard ist immer die Rechnungsnummer (rechnungsnummer-Wert exakt übernehmen), nur wenn der Nutzer von sich aus explizit einen anderen Text nennt, den exakt verwenden.
+WICHTIG: Befehl MUSS in der Antwort stehen, sonst keine PDF. Keine Zusammenfassung, nur der Befehl. Keine Summen, Umsatzsteuer- oder Bruttobeträge selbst rechnen (das PDF rechnet). Bei rechnungsnummer=auto kennst du die Nummer noch nicht: keine nennen oder erfinden, das System nennt sie direkt nach deiner Antwort. Nur eine vom Nutzer vorgegebene Nummer darfst du nennen. Danach fragen: "Wurde diese Rechnung bereits bezahlt? Dann speichere ich sie als Tageseinnahme." Datumsangaben im Befehl deutsches Langformat "15. August 2026" (nie YYYY-MM-DD/DD.MM.YYYY). Kommas in Werten → Semikolon. Betrag nur Zahl ohne €. betrag_netto MUSS größer als 0 sein — ist der genannte Betrag 0 oder negativ, KEINEN RECHNUNG_ERSTELLEN-Befehl ausgeben, sondern nachfragen, welcher Betrag gilt. Empfänger-Name UND -Adresse sind ebenfalls Pflicht — fehlt eines, KEINEN Befehl ausgeben, erst nachfragen. KU: mwst_satz=0, §19-Hinweis, kein Steuerausweis. Nicht-KU: mwst_satz=19 oder 7, USt. ausweisen (außer Reverse Charge, siehe oben). mwst_satz und format IMMER angeben, nie weglassen (format-Default pdf). verwendungszweck NIEMALS erfinden oder frei formulieren — Standard ist immer die Rechnungsnummer (rechnungsnummer-Wert exakt übernehmen), nur wenn der Nutzer von sich aus explizit einen anderen Text nennt, den exakt verwenden.
 
 ## E-RECHNUNGEN (XRECHNUNG/ZUGFERD)
 Seit 2025 müssen Unternehmen E-Rechnungen empfangen können; die Pflicht zum Ausstellen beginnt nach § 27 Abs. 38 UStG gestaffelt (siehe RECHNUNG ERSTELLEN). Hochgeladene XRechnung-XML/ZUGFeRD-PDF werden im Belegarchiv automatisch erkannt und ausgelesen (Betrag/Absender/Rechnungsnr/MwSt-Satz) — Nutzer bestätigt nur noch, trägt nicht von Hand ein.
 
 ## MAHNUNG ERSTELLEN
 Alles in EINER Nachricht abfragen: Empfänger komplett (Name/Straße/PLZ/Ort einzeln — BEIDE Pflicht, ohne Empfängeradresse KEINEN MAHNUNG_ERSTELLEN-Befehl ausgeben, sondern nachfragen), Anrede, urspr. Rechnungsnummer + Datum, offener Betrag, Mahnstufe (erinnerung/1/2), neue Zahlungsfrist.
-Aus Profil (kommt ausschließlich aus Einstellungen/Onboarding — NIEMALS im Chat erfragen oder speichern): Name→'absender_name', Firmenname→'firmenname', Adresse→'eigene_adresse', Steuernummer→'steuernummer', USt-ID→'ust_id', Bankverbindung→'bankverbindung'. Name/Adresse/Steuernummer fehlen im Profil → NIEMALS den MAHNUNG_ERSTELLEN-Befehl ausgeben, stattdessen benennen was fehlt und auf ⚙️ Einstellungen → Firmendaten verweisen (siehe FIRMENDATEN NIEMALS PER CHAT bei RECHNUNG ERSTELLEN).
+Firmendaten aus dem Profil wie bei RECHNUNG ERSTELLEN (nie im Chat erfragen); fehlen Name/Adresse/Steuernummer → kein MAHNUNG_ERSTELLEN, fehlende Felder nennen und auf ⚙️ Einstellungen → Firmendaten verweisen.
 Antwort SO, absender_name/eigene_adresse/bankverbindung IMMER echte Profilwerte (nie Platzhaltertext/generische Namen — echter Wert oder Feld weglassen):
 "Ich erstelle deine Mahnung!"
 MAHNUNG_ERSTELLEN:absender_name=[echter Name],empfaenger_name=[Name],empfaenger_anrede=[Herr/Frau/Firma],empfaenger_adresse=[Straße;PLZ;Ort],rechnungsnummer=[Nr],rechnungsdatum=[Datum als "15. August 2026"],betrag=[Zahl],mahnstufe=[1/2/erinnerung],neue_frist=[Datum als "15. August 2026"],eigene_adresse=[Straße;PLZ;Ort],bankverbindung=[echte IBAN],verwendungszweck=[Standard: identisch zur Rechnungsnummer, nie frei erfunden]
@@ -1522,7 +1512,7 @@ Rechnung erkannt → Betrag/Absender-Name/Empfänger-Name/Datum/Rechnungsnummer/
 RICHTUNG AUTOMATISCH ERKENNEN, BEVOR GEFRAGT WIRD: Vergleiche Absender-Name UND Empfänger-Name aus dem Dokument mit den Profilwerten 'absender_name' und 'firmenname' (oben im Profilkontext). Fuzzy: Groß-/Kleinschreibung ignorieren, Teilübereinstimmung reicht (z.B. Dokument "Müller GmbH" matcht Profilwert "Müller").
 - Dokument-ABSENDER ähnelt 'absender_name' ODER 'firmenname' (und der Empfänger tut es nicht) → eindeutig AUSGEHEND, sofort wie unten bei "ausgehend" behandeln, OHNE Rückfrage.
 - Dokument-EMPFÄNGER ähnelt 'absender_name' ODER 'firmenname' (und der Absender tut es nicht) → eindeutig EINGEHEND, sofort wie unten bei "eingehend" behandeln, OHNE Rückfrage.
-- Unklar (kein Match, beide matchen, 'absender_name' fehlt im Profil, oder Namen im Dokument nicht sicher lesbar) → NICHT raten, wie bisher fragen: "Im hochgeladenen Dokument sehe ich eine Rechnung von/an [Name] über [Betrag]€ vom [Datum]. Eingehend (du bezahlst) oder ausgehend (du stellst sie)?" Noch KEIN AUSGABE_UPDATE/DOKUMENT_SPEICHERN in dieser Nachricht — die Angaben stehen jetzt im Gesprächsverlauf, nicht vergessen wenn der Nutzer nur kurz antwortet.
+- Unklar (kein Match, beide matchen, 'absender_name' fehlt, Namen nicht sicher lesbar) → nicht raten, fragen: "Im hochgeladenen Dokument sehe ich eine Rechnung von/an [Name] über [Betrag]€ vom [Datum]. Eingehend (du bezahlst) oder ausgehend (du stellst sie)?" Noch KEIN AUSGABE_UPDATE/DOKUMENT_SPEICHERN in dieser Nachricht — die Angaben stehen jetzt im Gesprächsverlauf, nicht vergessen wenn der Nutzer nur kurz antwortet.
 - Automatisch erkannt oder Nutzer antwortet "eingehend" → kurz mit Vorschlag Kategorie/Sachkonto/Buchungstext (SACHKONTO BEI BUCHUNGEN unten); ausländischer Anbieter ohne deutsche USt → erst die Reverse-Charge-Frage (AUSLÄNDISCHER ANBIETER); bei automatischer Erkennung zusätzlich kurz erwähnen woran die Richtung erkannt wurde (z.B. "eingehend, da Empfänger mit deinem Profilnamen übereinstimmt") + Befehle:
 AUSGABE_UPDATE:datum=[YYYY-MM-DD],betrag=[Zahl],beschreibung=Rechnung [Absender]
 DOKUMENT_SPEICHERN:typ=rechnung_eingehend,name=Rechnung von [Absender],betrag=[Zahl],absender=[Absender],datum=[YYYY-MM-DD],kategorie=[Kategorie],sachkonto=[Nr],buchungstext=[Text],mwst_satz=[19/7/0/keine/reverse_charge, sonst weglassen],rechnungsnr=[Nummer aus dem Dokument, sonst weglassen]
@@ -1550,12 +1540,7 @@ Nutzer berichtet von einer Dienstreise (z.B. "Ich bin heute 45km zu Müller gefa
 - Name des Kunden/Geschäftspartners — IMMER Pflicht, auch wenn NICHT weiterberechnet wird (reine Betriebsausgabe braucht für die Dokumentation trotzdem, WEN der Nutzer besucht hat)
 - Kilometer und/oder Abwesenheitsdauer (für die Verpflegungspauschale)
 
-Fehlt auch nur eine dieser Angaben → NIEMALS raten, schätzen oder weglassen, sondern ALLE fehlenden Angaben gebündelt in EINER Nachricht nachfragen, KEIN REISE_ERFASSEN in dieser Nachricht. Beispiel bei "50km zu einem Kunden gefahren":
-"Gerne! Für die Dokumentation der Fahrt brauche ich noch:
-- Von wo bist du gefahren?
-- Zu wem / wohin genau?
-- Was war der Zweck des Termins?"
-Antwort abwarten; bereits genannte Angaben (z.B. km) nicht erneut abfragen, aus dem Gesprächsverlauf übernehmen. Erst wenn ALLE Pflichtangaben vorliegen, weiter wie folgt.
+Fehlt eine Angabe → nie raten oder weglassen, ALLE fehlenden gebündelt in EINER Nachricht nachfragen (z.B. bei "50km zu einem Kunden gefahren": von wo, zu wem/wohin, Zweck), KEIN REISE_ERFASSEN in dieser Nachricht. Bereits genannte Angaben aus dem Verlauf übernehmen. Erst wenn ALLE vorliegen, weiter wie folgt.
 
 Pauschalen 2026 — ausschließlich diese verwenden, niemals eigene Werte annehmen, niemals mit der Pendlerpauschale verwechseln:
 - Dienstreisen-Kilometerpauschale (das ist die für Selbstständige relevante!): 0,30€/km PAUSCHAL für die GESAMTE gefahrene Strecke (Hin- und Rückfahrt) — KEINE Staffelung nach Distanz, unabhängig ob 5km oder 500km.
@@ -1580,14 +1565,22 @@ Kontolux kann Zahlungen automatisch aus Stripe, PayPal, SumUp, Shopify, Digistor
 
 Bei Fragen zu Zahlungsimport, nicht gebuchten Transaktionen oder Webhook-Einrichtung: den jeweiligen Plattform-Bereich in Kontolux nennen und ggf. auf den Support verweisen. Buchungslogik: jede importierte Transaktion wird als Tageseinnahme oder Ausgabe verbucht; Kategorie und Sachkonto sind Vorschläge, die der Nutzer prüft und ändern kann. Plattformgebühren: der Steuerfall richtet sich nach dem Inhalt der Gebührenrechnung, nicht nach dem Anbieternamen; ohne Rechnung nicht einordnen.`;
 
-function buildStaticForModules(modules) {
+// BP-22B: stand = Prompt-Features aus config/features (regel/prompts.js kiFeatureStand); ohne Angabe alles aus. Der Funktionsabschnitt eines
+// Moduls folgt direkt auf das Modul (Steuer: als Fortsetzung der Liste WISSEN REGELBESTEUERUNG).
+function buildStaticForModules(modules, stand = KI_FEATURES_AUS) {
   const parts = [_KI_CORE];
-  if (modules.includes('steuer'))        parts.push(_KI_STEUER);
-  if (modules.includes('euer'))          parts.push(_KI_EUER);
-  if (modules.includes('rechnungen'))    parts.push(_KI_RECHNUNGEN);
-  if (modules.includes('integrationen')) parts.push(_KI_INTEGRATIONEN);
-  if (modules.includes('tools'))         parts.push(_KI_TOOLS);
+  const mit = (name, text) => { const f = kiFeatureAbschnitt(name, stand); parts.push(f ? `${text}\n${f}` : text); };
+  if (modules.includes('steuer'))        mit('steuer', _KI_STEUER);
+  if (modules.includes('euer'))          mit('euer', _KI_EUER);
+  if (modules.includes('rechnungen'))    mit('rechnungen', _KI_RECHNUNGEN);
+  if (modules.includes('integrationen')) mit('integrationen', _KI_INTEGRATIONEN);
+  if (modules.includes('tools'))         mit('tools', _KI_TOOLS);
   return parts.join('\n\n');
+}
+
+// Feature-Zustand für den Prompt (eine Unteranfrage höchstens alle 60 s je Isolate, Token nur bei Cache-Fehlschlag). Wirft nie, Fehler = alles aus.
+async function kiFeatureStandFuer(env) {
+  try { return await kiFeatureStandLesen({ tokenFn: () => getGoogleAccessToken(env, FIRESTORE_SCOPE), fetchFn: (...a) => fetch(...a) }); } catch { return KI_FEATURES_AUS; }
 }
 
 // Statischer Prompt für /image und /document (Konzept 9.2-a): derselbe Text wie /chat mit Datei-Anhang
@@ -1599,6 +1592,8 @@ const STATIC_SYSTEM_INSTRUCTIONS = buildStaticForModules(MODULSATZ_DATEI);
 export function kiPromptTeile() {
   return {
     bildDokument: STATIC_SYSTEM_INSTRUCTIONS,
+    bildDokumentFuer: (stand) => buildStaticForModules(MODULSATZ_DATEI, stand),
+    stand: { aus: KI_FEATURES_AUS, an: KI_FEATURES_AN },
     module: { core: _KI_CORE, steuer: _KI_STEUER, euer: _KI_EUER, rechnungen: _KI_RECHNUNGEN, tools: _KI_TOOLS, integrationen: _KI_INTEGRATIONEN },
     bauen: buildStaticForModules,
     systemBloecke: buildSystemBlocks
@@ -2157,9 +2152,10 @@ async function handleChat(body, env, cors = {}, ctx) {
     // loadDashboardContext entfernt: las von nutzer/{userId}/dashboard (falscher Pfad, immer null).
     // Dashboard-Liquiditätsdaten sind bereits im Profil-String enthalten (frontend baut ihn
     // direkt aus profil/prognose auf, inkl. dashboard_gesamtruecklage etc. seit v1.3.x).
-    const [limit, steuerrechtText] = await Promise.all([
+    const [limit, steuerrechtText, kiStand] = await Promise.all([
       checkNachrichtenLimit(Nutzername, env, userId, ctx),
       loadSteuerrechtContext(env),
+      kiFeatureStandFuer(env), // BP-22B: Prompt-Abschnitte nur für freigeschaltete Funktionen
     ]);
     if (!limit.erlaubt) {
       return new Response(limit.grund === 'infra' ? 'Kontolux ist gerade nicht erreichbar. Bitte versuche es in ein paar Minuten noch einmal.' : 'Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
@@ -2179,7 +2175,7 @@ async function handleChat(body, env, cors = {}, ctx) {
       requiredModules // Profil auf benötigte Module filtern
     );
     const steuerrechtFuerDieseAnfrage = steuerrechtText; // immer Steuerrecht einbeziehen
-    const staticPrompt = buildStaticForModules(requiredModules);
+    const staticPrompt = buildStaticForModules(requiredModules, kiStand);
     const system = buildSystemBlocks(dynamicContext, steuerrechtFuerDieseAnfrage, staticPrompt);
 
   // Verlauf parsen — Format: "Nutzer: ... | Kontolux AI: ..."
@@ -2469,7 +2465,8 @@ async function handleImage(body, env, cors = {}, ctx) {
   await incrementUploadLimit(userId, env);
 
   const dynamicContext = buildDynamicContext(Profil, Datum);
-  const system = buildSystemBlocks(dynamicContext, await loadSteuerrechtContext(env));
+  const [kbText, kiStand] = await Promise.all([loadSteuerrechtContext(env), kiFeatureStandFuer(env)]); // BP-22B
+  const system = buildSystemBlocks(dynamicContext, kbText, buildStaticForModules(MODULSATZ_DATEI, kiStand));
 
   const messages = [{
     role: 'user',
@@ -3335,7 +3332,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
   }
 
   const dynamicContext = buildDynamicContext(Profil, Datum);
-  const system = buildSystemBlocks(dynamicContext, await loadSteuerrechtContext(env));
+  const [kbText, kiStand] = await Promise.all([loadSteuerrechtContext(env), kiFeatureStandFuer(env)]); // BP-22B
+  const system = buildSystemBlocks(dynamicContext, kbText, buildStaticForModules(MODULSATZ_DATEI, kiStand));
 
   // Der Dateityp wurde bisher IMMER hart als 'application/pdf' an Claude gemeldet, egal was
   // tatsächlich hochgeladen wurde. Landet hier z.B. eine .xml-Rechnung, die checkForERechnung/

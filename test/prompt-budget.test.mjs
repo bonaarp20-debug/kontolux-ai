@@ -31,3 +31,12 @@ test('auch mit der alten Wissensbasis (Firestore vor dem neuen Seed) höchstens 
 test('Wissensbasis (immer geladen) wird nicht größer; neues Wissen kommt auf Abruf mit dem Modul steuer', () => {
   assert.ok(jetzt.wissensbasis.token <= basis.wissensbasis.token, `${basis.wissensbasis.token} -> ${jetzt.wissensbasis.token}`);
 });
+
+test('BP-22B: gemessen wird der teurere Zustand (alle Prompt-Features an oder aus), beide liegen im Budget', () => {
+  for (const [name, z] of Object.entries(jetzt.zusammenstellungen)) {
+    const b = basis.zusammenstellungen[name];
+    assert.ok(Number.isInteger(z.token_statisch_an) && Number.isInteger(z.token_statisch_aus), name);
+    assert.equal(z.token_statisch, Math.max(z.token_statisch_an, z.token_statisch_aus), name);
+    for (const t of [z.token_statisch_an, z.token_statisch_aus]) assert.ok(t + z.token_wissensbasis <= Math.floor(b.token_gesamt * BUDGET_FAKTOR), `${name}: ${t}`);
+  }
+});

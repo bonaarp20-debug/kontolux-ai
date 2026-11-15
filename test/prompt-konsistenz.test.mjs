@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { kiPromptTeile, detectRequiredModules, pruefeBetragZeile } from '../worker.js';
 import * as Steuerkern from '../steuerkern/index.js';
 import { ZUSAMMENSTELLUNGEN, wissensbasisText } from './prompt-messung.mjs';
+import { VERBOTEN, ohneVerbotsAnweisungen } from './prompt-wortliste.mjs';
 
 const T = kiPromptTeile();
 const FASSUNGEN = Object.fromEntries(Object.entries(ZUSAMMENSTELLUNGEN).map(([n, m]) => [n, T.bauen(m)]));
@@ -13,24 +14,7 @@ FASSUNGEN.bild_dokument = T.bildDokument;
 const ALLES = T.bauen(['steuer', 'euer', 'rechnungen', 'integrationen', 'tools']);
 const KB = wissensbasisText();
 
-// Stellen, an denen Tabu-Wörter absichtlich als Verbot an das Modell stehen, werden vor der Prüfung entfernt.
-function ohneVerbotsAnweisungen(s) {
-  return s.split('\n').filter((z) => !z.startsWith('2. Verboten:')).join('\n')
-    .replace('Nicht sagen: Kontierung, Buchungsanweisung, korrekt zugeordnet.', '')
-    .replace('Kein "du verlierst", kein "du musst", kein "wende dich jetzt an".', '')
-    .replace('(kein Gesamturteil wie "konform")', '');
-}
-
-const VERBOTEN = [
-  /nur BEZAHLTE eingehende Belege zählen/i, /Vorsteuer aus deinen bezahlten Belegen/i, /Ist annehmen/i, /mwst_satz=unbekannt/i, /"unbekannt"/, /NETTO, also ohne Umsatzsteuer/,
-  /Vorsteuer AUTOMATISCH berechnen/i, /\/1,19×0,19/, /ersetzt den Steuerberater/i, /KI-Steuerberater/i, /wie ein Steuerberater/i,
-  /Steuerberatung per Chat/i, /rechtssicher/i, /garantiert/i, /\bamtlich/i, /\bbeta\b/i, /\bgeprüft\b/i, /\bkorrekt(e|er|es|en)?\b/i,
-  /rechtskonform/i, /-konform/i, /Kontierung/i, /Buchungsanweisung/i,
-  // K1-Bericht Abschnitt 4 Punkt 6: Einzelfallaussagen und Steuerberater als Pflicht
-  /wende dich (jetzt )?an einen Steuerberater/i, /empfehle ich einen Steuerberater/i, /Steuerberater zu konsultieren/i,
-  /an einen Steuerberater verweisen/i, /an Steuerberater verweisen/i, /einen Steuerberater fragen/i, /beim Steuerberater erfragen/i,
-  /Damit verlierst du/i, /musst ab dann Umsatzsteuer/i, /Kleinunternehmer-Status entfällt sofort/i
-];
+// Verbotsliste und das Entfernen absichtlicher Verbotsstellen: gemeinsam mit BP-22B in test/prompt-wortliste.mjs.
 
 test('(a) Verbotsliste: kein Prompt-Baustein und keine Fassung enthält Tabu-Wörter oder Einzelfallsätze', () => {
   for (const [name, text] of Object.entries({ ...FASSUNGEN, wissensbasis: KB })) {
