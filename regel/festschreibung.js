@@ -33,7 +33,7 @@ import { schreibe, vorbedingungAus, vollerName, FirestoreFehler, BudgetFehler } 
 import { auditSchreibvorgaenge, auditKette, kopfPfad, naechsteSeq } from './audit.js';
 import {
   snapshotFuer, vergleicheSnapshot, belegeHash, periodePruefen, legacySnapshot, legacyBelegIds, monatAusAbschlussId,
-  zeileKannZeitraumBeruehren, legacyBelegRelevant, korrekturSchluessel,
+  zeileKannZeitraumBeruehren, legacyBelegRelevant, korrekturSchluessel, vorfilterFenster,
 } from './festschreibung-kern.js';
 
 const ZEILEN_MAX = 120;
@@ -163,8 +163,7 @@ export async function belegeFuerZeitraumLesen(fs, uid, { periodeId, periode, akt
     ? { marke: alt.marke, cursor: typeof alt.cursor === 'string' ? alt.cursor : null, fertigGelesen: alt.fertig_gelesen === true, kandidaten: new Set(Array.isArray(alt.kandidaten) ? alt.kandidaten : []), gelesen: Number.isSafeInteger(alt.gelesen) ? alt.gelesen : 0, gestartet: alt.gestartet }
     : { marke: neueMarke(), cursor: null, fertigGelesen: false, kandidaten: new Set(), gelesen: 0, gestartet: zeit };
   const abschlussZuBeginn = st.fertigGelesen;
-  const start = Steuerkern.periodenStart(periode.periode);
-  const ende = Steuerkern.periodenEnde(periode.periode);
+  const { start, ende } = vorfilterFenster(periodeId); // gleiches Fenster wie snapshotFuer (EÜR-Monate mit Zehn-Tage-Rand)
   const kandidat = modus === 'legacy' ? (d) => legacyBelegRelevant(d, periode.periode) : (d) => zeileKannZeitraumBeruehren(d, start, ende);
 
   const imSpeicher = new Map();

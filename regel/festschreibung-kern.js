@@ -132,13 +132,39 @@ function zeilenAus(kennzahlen) {
   return Object.keys(kennzahlen || {}).sort().filter((k) => Number.isSafeInteger(kennzahlen[k])).map((k) => ({ kz: String(k), betrag_cent: kennzahlen[k] }));
 }
 
+// Fenster des Vorfilters (Tage) für einen Zeitraum. EÜR-Monate (G1, Zusatz G-KERN2): eine Zahlung im Zehn-Tage-Fenster um den Jahreswechsel kann
+// der Kern dem Nachbarjahr zuordnen (§ 11 Abs. 1 S. 2, Abs. 2 S. 2 EStG; Wirkung periode '2026' mit datum_wirk '2027-01-08'), sie gehört dann zum
+// Dezember bzw. Januar des zugeordneten Jahres (euerMonatDerWirkung). Darum nimmt der Vorfilter um EÜR-Monate EUER_FENSTER_TAGE mehr mit
+// (Obermenge; ob ein Beleg zählt, entscheidet allein der Kern). Auch regel/festschreibung.js (fortsetzbares Lesen) nutzt dieses Fenster.
+const EUER_FENSTER_TAGE = 15;
+export function vorfilterFenster(periodeId) {
+  const p = periodeAusId(periodeId);
+  if (!p || (p.art !== 'ust' && p.art !== 'euer')) throw new Error('Periode ungültig');
+  const start = Steuerkern.periodenStart(p.periode);
+  const ende = Steuerkern.periodenEnde(p.periode);
+  if (p.art !== 'euer') return { start, ende };
+  return { start: Steuerkern.addiereTage(start, -EUER_FENSTER_TAGE), ende: Steuerkern.addiereTage(ende, EUER_FENSTER_TAGE) };
+}
+
+// Monat (JJJJ-MM) einer EÜR-Wirkung: das Jahr kommt aus der Kern-Wirkung (periode, nach der Zehn-Tage-Regel ggf. das Nachbarjahr des Zahlungstags),
+// der Monat aus datum_wirk; liegt datum_wirk außerhalb des zugeordneten Jahres, der Rand dieses Jahres (Zahlung bis 10.01. fürs Vorjahr: Dezember;
+// Zahlung kurz vor dem 31.12. fürs Folgejahr: Januar). So ergeben die zwölf Monate zusammen genau die Jahres-EÜR des Kerns (euerFuer).
+export function euerMonatDerWirkung(w) {
+  if (!w || typeof w.datum_wirk !== 'string' || !/^\d{4}-\d{2}-\d{2}/.test(w.datum_wirk) || typeof w.periode !== 'string' || !/^\d{4}$/.test(w.periode)) return null;
+  const j = w.periode;
+  const t = w.datum_wirk.slice(0, 10);
+  if (t.slice(0, 4) === j) return t.slice(0, 7);
+  return t < j ? `${j}-01` : `${j}-12`;
+}
+
 // Kern-Snapshot eines Zeitraums. zeilenAlle: alle Belegzeilen { id, daten } des Kontos. Ergebnis enthält die Beleg-IDs mit Wirkung im Zeitraum.
 export function snapshotFuer(zeilenAlle, profil, periodeId, { gefiltert = true } = {}) {
   const p = periodeAusId(periodeId);
   if (!p || (p.art !== 'ust' && p.art !== 'euer')) throw new Error('Periode ungültig');
   const start = Steuerkern.periodenStart(p.periode);
   const ende = Steuerkern.periodenEnde(p.periode);
-  const zeilen = gefiltert ? relevanteZeilen(zeilenAlle, start, ende) : (zeilenAlle || []);
+  const fenster = vorfilterFenster(periodeId);
+  const zeilen = gefiltert ? relevanteZeilen(zeilenAlle, fenster.start, fenster.ende) : (zeilenAlle || []);
   const { belege, veraltet } = belegeFuerKern(zeilen, profil);
   const wirkungen = Steuerkern.alleWirkungen(belege, profil);
   const ids = new Set();
@@ -151,8 +177,9 @@ export function snapshotFuer(zeilenAlle, profil, periodeId, { gefiltert = true }
     snap = { zeilen: sl.zeilen, ausgeschlossen_anzahl: sl.ausgeschlossen_anzahl, kz83_status: u.kz83 ? u.kz83.status : null, unvollstaendig: u.unvollstaendig === true };
   } else {
     const jahr = Number(p.periode.slice(0, 4));
-    // Nur Wirkungen mit Wirkdatum im Monat. Wirkungen ohne Wirkdatum gehören zu keinem Monat (sie stehen in der Jahres-EÜR als nicht berechnet)
-    const imMonat = wirkungen.filter((w) => typeof w.datum_wirk === 'string' && w.datum_wirk >= start && w.datum_wirk <= ende);
+    // EÜR-Wirkungen nach ihrem Monat im zugeordneten Jahr (euerMonatDerWirkung, Zehn-Tage-Regel), übrige Wirkungen (USt-Welt, nur für die Liste
+    // der nicht berücksichtigten Belege) mit Wirkdatum im Monat. Wirkungen ohne Wirkdatum gehören zu keinem Monat (Jahres-EÜR: nicht berechnet)
+    const imMonat = wirkungen.filter((w) => (w && w.welt === 'euer' ? euerMonatDerWirkung(w) === p.periode : typeof w.datum_wirk === 'string' && w.datum_wirk >= start && w.datum_wirk <= ende));
     const e = Steuerkern.euerFuer(imMonat, profil, jahr);
     for (const w of imMonat) if (w.welt === 'euer' && w.periode === String(jahr) && typeof w.beleg_id === 'string' && w.beleg_id) ids.add(w.beleg_id);
     const z = zeilenAus(e.kennzahlen);
