@@ -13,7 +13,7 @@ import { istDatum, monatsende, monatsanfang, datumAusTagen, tageSeitEpoche, form
 import { statusAm, statusFuerAusgangsumsatz, vorsteuerAbziehbar } from './steuerprofil.js';
 import {
   STEUERFAELLE, SPERRGRUENDE, BELEG_ARTEN, KORREKTUR_GRUENDE, FA_ARTEN, KATEGORIEN, STEUERSAETZE, GRENZEN, SATZ_REGEL_BP, SATZ_ERMAESSIGT_BP, SATZ_NULL_BP,
-  FA_ALT_KATEGORIEN, FA_KATEGORIE_ZU_ART,
+  FA_ALT_KATEGORIEN, FA_KATEGORIE_ZU_ART, anbieterLage,
 } from './tabellen.js';
 
 const istObjekt = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -189,6 +189,8 @@ function baueZahlungen(e, belegId, leistungBis, richtung, vorschlaege) {
       rabatt_cent: istCent(z.rabatt_cent) ? z.rabatt_cent : 0,
       kanal: z.kanal || 'manuell',
       status: z.status === 'rueckgaengig' ? 'rueckgaengig' : 'aktiv',
+      // KERN-B2 F-2: Anzahlung in fremder Währung (§ 16 Abs. 6 S. 1 UStG), nur wenn fremdVorbereiten sie gesetzt hat
+      ...(istCent(z.rc_basis_cent) ? { rc_basis_cent: z.rc_basis_cent, fremd_betrag_cent: z.fremd_betrag_cent } : {}),
     });
   });
   return out;
@@ -225,6 +227,42 @@ export function fremdInEuroCent(betragCent, kurs) {
   if (!Number.isSafeInteger(k) || k <= 0) return null;
   return mulDivRund(betragCent, 1000000, k);
 }
+// KERN-B2 (F-2 der Gegenprüfung G-KERN-B): Anzahlung vor der Leistung (§ 13b Abs. 4 S. 2 UStG) in fremder Währung. § 16 Abs. 6 S. 1 UStG: umzurechnen
+// nach dem Kurs des Monats, in dem "ein Teil des Entgelts vor Ausführung der Leistung ... vereinnahmt wird" (docs/quellen/ustg-16.md Z. 28, Konfidenz A).
+// Eingabe je Anzahlung: zahlungen[i].fremd_betrag_cent (gezahlter Betrag in der Fremdwährung) und fremd.kurse { 'JJJJ-MM': kurs } für den Zahlungsmonat.
+// Basis der Anzahlung = fremd_betrag (höchstens der noch offene Fremdbetrag) zum Kurs des Zahlungsmonats (zahlungen[i].rc_basis_cent), Rest zum Kurs des
+// Leistungsmonats (fremd.kurs); Beleg-Netto = Summe der Teile. Fehlt der Fremdbetrag oder der Kurs einer Anzahlung: Sperre fremdwaehrung_ohne_kurs
+// (nie mit dem Bank-Euro-Betrag geraten). Zahlungen ab dem Leistungstag brauchen keinen Kurs (die Steuer entsteht mit der Leistung bzw. Rechnung).
+function kursGueltig(k) {
+  return fremdInEuroCent(1, k) !== null;
+}
+function fremdAnzahlungen(e, f) {
+  const l = leistungAus(e);
+  const bis = l ? l.bis : (istDatum(e.rechnungsdatum) ? e.rechnungsdatum : null);
+  const roh = Array.isArray(e.zahlungen) ? e.zahlungen : (istObjekt(e.zahlung) ? [e.zahlung] : null);
+  if (!roh || !bis) return { zahlungen: null, fehlt: false, anzahlung: false, basis: 0, rest: f.betrag_cent };
+  const kurse = istObjekt(f.kurse) ? f.kurse : {};
+  const out = roh.slice();
+  // Reihenfolge wie im Kern (wirkung.js aktiveZahlungen: nach Datum, bei Gleichstand Eingabereihenfolge)
+  const idx = roh.map((z, i) => ({ z, i }))
+    .filter(({ z }) => istObjekt(z) && z.status !== 'rueckgaengig' && istDatum(z.datum) && istCent(z.betrag_cent) && z.betrag_cent > 0 && z.datum < bis)
+    .sort((a, b) => (a.z.datum < b.z.datum ? -1 : a.z.datum > b.z.datum ? 1 : a.i - b.i));
+  let rest = f.betrag_cent;
+  let basis = 0;
+  let fehlt = false;
+  for (const { z, i } of idx) {
+    if (rest <= 0) break;
+    const monat = z.datum.slice(0, 7);
+    const k = Object.hasOwn(kurse, monat) ? kurse[monat] : null;
+    if (!istCent(z.fremd_betrag_cent) || z.fremd_betrag_cent <= 0 || !kursGueltig(k)) { fehlt = true; break; }
+    const teil = z.fremd_betrag_cent < rest ? z.fremd_betrag_cent : rest;
+    rest -= teil;
+    const b = fremdInEuroCent(teil, k);
+    basis += b;
+    out[i] = { ...z, rc_basis_cent: b };
+  }
+  return { zahlungen: out, fehlt, anzahlung: idx.length > 0, basis, rest };
+}
 function fremdVorbereiten(e) {
   if (!istObjekt(e.fremd)) return { e, hinweis: null, sperre: null };
   const f = e.fremd;
@@ -232,7 +270,11 @@ function fremdVorbereiten(e) {
   const cent = fremdInEuroCent(f.betrag_cent, f.kurs);
   if (!rc) return { e: { ...e, fremd: undefined }, hinweis: 'W_WAEHRUNG_KURS', sperre: 'nicht_eur' };
   if (cent === null) return { e: { ...e, fremd: undefined, betrag: { cent: istCent(f.betrag_cent) ? f.betrag_cent : 0, art: 'netto' } }, hinweis: 'W_WAEHRUNG_KURS', sperre: 'fremdwaehrung_ohne_kurs' };
-  return { e: { ...e, fremd: undefined, positionen: undefined, betrag: { cent, art: 'netto' } }, hinweis: 'W_WAEHRUNG_KURS', sperre: null };
+  const a = fremdAnzahlungen(e, f);
+  if (a.fehlt) return { e: { ...e, fremd: undefined, positionen: undefined, betrag: { cent, art: 'netto' } }, hinweis: 'W_WAEHRUNG_KURS', sperre: 'fremdwaehrung_ohne_kurs' };
+  if (!a.anzahlung) return { e: { ...e, fremd: undefined, positionen: undefined, betrag: { cent, art: 'netto' } }, hinweis: 'W_WAEHRUNG_KURS', sperre: null };
+  const netto = a.basis + fremdInEuroCent(a.rest, f.kurs);
+  return { e: { ...e, fremd: undefined, positionen: undefined, betrag: { cent: netto, art: 'netto' }, zahlungen: a.zahlungen, zahlung: undefined }, hinweis: 'W_WAEHRUNG_KURS', sperre: null };
 }
 
 export function normalisiereEingabe(eingabe, kontext) {
@@ -456,10 +498,13 @@ export function normalisiereEingabe(eingabe, kontext) {
   }
   if (AUSLANDS_STEUERFAELLE.includes(steuerfall)) {
     const euFall = steuerfall === 'E_13B_EU_DL' || steuerfall === 'A_NICHT_STEUERBAR_EU_B2B_DL';
+    // KERN-B2 F-1: Lage aus Land und Gebiet (Monaco = FR, Sondergebiete); ohne gültigen Code bleibt die Hilfsliste maßgeblich
+    const lageGp = gpLand ? anbieterLage(gpLand, gp.gebiet) : null;
     if (!gpLand) unsicherheiten.push(hin('W_GEGENPARTEI_LAND_FEHLT', 'gegenpartei.land', 'Land der Gegenpartei fehlt (Pflichtfeld des Steuerfalls)'));
-    else if (gpLand === 'DE') unsicherheiten.push(hin('W_GEGENPARTEI_LAND_WIDERSPRUCH', 'gegenpartei.land', 'Land DE passt nicht zu einem Auslands-Steuerfall'));
+    else if (gpLand === 'DE' && lageGp !== 'drittland') unsicherheiten.push(hin('W_GEGENPARTEI_LAND_WIDERSPRUCH', 'gegenpartei.land', 'Land DE passt nicht zu einem Auslands-Steuerfall'));
     else if (gpLand === 'XI') unsicherheiten.push(hin('W_NORDIRLAND_UNGEKLAERT', 'gegenpartei.land', 'Nordirland (XI): Waren Mitgliedstaat-ähnlich, Leistungen Drittland; Konfidenz C, die App erstellt dort keine Rechnung ohne USt'));
-    else if (euFall !== EU_PRAEFIXE_HILFSLISTE.includes(gpLand)) unsicherheiten.push(hin('W_GEGENPARTEI_LAND_WIDERSPRUCH', 'gegenpartei.land', `Land ${gpLand} passt nicht zur gewählten ${euFall ? 'EU' : 'Drittland'}-Behandlung (Konfidenz C)`));
+    else if (lageGp === null && anbieterLage(gpLand) !== null) unsicherheiten.push(hin('W_GEBIET_UNGEKLAERT', 'gegenpartei.gebiet', `Gebiet ${String(gp.gebiet)} unbekannt oder passt nicht zum Land ${gpLand}`));
+    else if (euFall !== (lageGp === null ? EU_PRAEFIXE_HILFSLISTE.includes(gpLand) : lageGp === 'eu')) unsicherheiten.push(hin('W_GEGENPARTEI_LAND_WIDERSPRUCH', 'gegenpartei.land', `Land ${gpLand} passt nicht zur gewählten ${euFall ? 'EU' : 'Drittland'}-Behandlung (Konfidenz C)`));
     if (hatUstAusweis) unsicherheiten.push(hin('W_UST_AUSGEWIESEN_14C', 'betrag', 'USt auf der Rechnung ausgewiesen: § 14c Abs. 1 UStG prüfen, die Steuer wird bei diesem Steuerfall nicht gerechnet'));
     // K10 (06): EU-Kunde ohne USt-IdNr. ist Stufe 4 (gesperrt)
     if (steuerfall === 'A_NICHT_STEUERBAR_EU_B2B_DL' && !gpUstId) {
@@ -537,6 +582,24 @@ export function normalisiereEingabe(eingabe, kontext) {
     }
   }
 
+  // KERN-B2 (F-3 der Gegenprüfung G-KERN-B): § 13b-Beleg. Die Rechnung weist keine Steuer aus, der Satz richtet sich nach § 12 UStG (§ 13b Abs. 8 nur
+  // für Kleinunternehmer ausdrücklich, UStAE 13b.13 Abs. 4). Eine eingegebene 7-%-Position bleibt als satz_bp 700 erhalten (Wirkung: 7 % mit
+  // W_RC_SATZ_ERMAESSIGT, Konfidenz B); 19 % oder kein Satz bleibt satz_bp null (Standard 19 %, wie bisher). Jeder andere ausdrücklich eingegebene Satz
+  // (0 %, 16 % ...) ist nicht rechenbar: UNBEKANNT (satz_nicht_zulaessig), nie still 19 %.
+  if (steuerfall === 'E_13B_EU_DL' || steuerfall === 'E_13B_DRITTLAND_DL') {
+    const saetze = Array.isArray(e.positionen) && e.positionen.length
+      ? e.positionen.filter(istObjekt).map((p) => (satzGueltig(p.satz_bp) ? p.satz_bp : (satzGueltig(e.satz_bp) ? e.satz_bp : null)))
+      : [satzGueltig(e.satz_bp) ? e.satz_bp : null];
+    const fremd = saetze.find((x) => x !== null && x !== SATZ_REGEL_BP && x !== SATZ_ERMAESSIGT_BP);
+    if (fremd !== undefined) {
+      steuerfall = 'UNBEKANNT';
+      unbekanntGrund = 'satz_fehlt';
+      unbekanntDetail = 'satz_nicht_zulaessig';
+      unsicherheiten.push(hin('SATZ_NICHT_ZULAESSIG', 'satz_bp', `${fremd} Basispunkte: bei § 13b erlaubt sind 1900 und 700 (§ 12 UStG)`));
+    }
+  }
+  const rc13bSatz = (p) => ((steuerfall === 'E_13B_EU_DL' || steuerfall === 'E_13B_DRITTLAND_DL') && ((istObjekt(p) && satzGueltig(p.satz_bp) ? p.satz_bp : (satzGueltig(e.satz_bp) ? e.satz_bp : null)) === SATZ_ERMAESSIGT_BP));
+
   // --- Beträge (Schritt 5) ---
   let positionen = [];
   const vorz = istKorrektur ? -1 : 1;
@@ -573,6 +636,7 @@ export function normalisiereEingabe(eingabe, kontext) {
       else if (kuSatz && istCent(o.netto_cent)) { const u = istCent(p.ust_cent) ? p.ust_cent : ustAusNetto(o.netto_cent, satz); o.netto_cent += u; o.ust_enthalten_cent = u; }
       if (keinSatz) { o.ust_cent = 0; delete o.ust_ausgewiesen; if (o.brutto_basis) { o.netto_cent = o.brutto_cent; delete o.brutto_basis; delete o.brutto_cent; } }
       if (istObjekt(p.leistung) && istDatum(p.leistung.von) && istDatum(p.leistung.bis)) o.leistung = { von: p.leistung.von, bis: p.leistung.bis };
+      if (rc13bSatz(p)) o.rc_satz_7 = true;
       positionen.push(o);
     });
   } else if (istObjekt(e.betrag) && istCent(e.betrag.cent)) {
@@ -599,6 +663,7 @@ export function normalisiereEingabe(eingabe, kontext) {
     else if (art === 'netto' || art === undefined) o.netto_cent = c;
     else fehler.push(hin('PF_BETRAG_ART', 'betrag.art', String(art)));
     if (!keinSatz && art === undefined) unsicherheiten.push(hin('BETRAG_ART_FEHLT', 'betrag.art', 'Netto oder Brutto ausdrücklich wählen (5.2)'));
+    if (rc13bSatz(null)) o.rc_satz_7 = true;
     positionen.push(o);
   } else if (!istFa && !istPrivat) {
     fehler.push(hin('PF_BETRAG', 'betrag', 'Betrag fehlt oder ist kein Cent-Wert'));
@@ -611,6 +676,8 @@ export function normalisiereEingabe(eingabe, kontext) {
   }
   const ustAbweichung = [];
   positionen = verteileUst(positionen, richtung, ustAbweichung);
+  // KERN-B2 F-3: Satz der § 13b-Position erst nach der Steuerverteilung setzen (keine Steuer im Beleg, die Steuer entsteht beim Empfänger)
+  for (const p of positionen) if (p.rc_satz_7 === true) { delete p.rc_satz_7; p.satz_bp = SATZ_ERMAESSIGT_BP; }
   if (ustAbweichung.length) {
     unsicherheiten.push(hin('W_UST_ABWEICHUNG', 'positionen', 'ausgewiesene Steuer weicht vom Steuersatz ab'));
     hinweise.push('W_UST_ABWEICHUNG');

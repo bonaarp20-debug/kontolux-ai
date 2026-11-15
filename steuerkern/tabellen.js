@@ -372,25 +372,58 @@ export function grenze(id) {
 // Länderübersicht der EU und Präfixliste der finnischen Steuerverwaltung, Konfidenz B). Griechenland führt in der USt-IdNr. das Präfix EL:
 // istEuLand('EL') und istEuLand('GR') liefern beide true. Nordirland (XI): für Waren mitgliedstaatsähnlich, für Dienstleistungen Drittland;
 // istEuLand('XI') liefert null (ungeklärt, Nutzerklärung), nie geraten. DE ist Mitgliedstaat (istEuLand('DE') true), für § 13b aber
-// Inland (anbieterLage('DE') = 'inland'). Sondergebiete (§ 1 Abs. 2a UStG, Art. 6 MwStSystRL: Kanaren, Ceuta, Melilla, Åland, Berg Athos u. a.) haben keinen eigenen
-// Code; der Nutzer klärt sie am Beleg.
+// Inland (anbieterLage('DE') = 'inland').
+// KERN-B2 (F-1 der Gegenprüfung G-KERN-B): maßgeblich ist das Gemeinschaftsgebiet im Sinne des UStG, nicht die Mitgliedschaft. Monaco gilt als Gebiet
+// Frankreichs (§ 1 Abs. 2a S. 2 UStG, docs/quellen/ustg-1.md Z. 32; Art. 7 Abs. 1 MwStSystRL), also istEuLand('MC') true und anbieterLage('MC') 'eu'
+// (Konfidenz A). Die Insel Man (IM) gilt als Gebiet des Vereinigten Königreichs: Drittland. Gebiete eines Mitgliedstaats, die nicht zum
+// Gemeinschaftsgebiet gehören (Art. 6 MwStSystRL: Kanarische Inseln, Ceuta, Melilla, Åland, Berg Athos, Livigno, Campione d'Italia, Büsingen; Helgoland
+// siehe unten) haben meist keinen eigenen ISO-Code: der Nutzer klärt sie am Beleg (gegenpartei.gebiet, Tabelle GEBIETE_SONDER). Eigene Codes
+// (AX Åland, IC Kanaren, EA Ceuta/Melilla, GP/GF/MQ/RE/YT/BL/MF französische Gebiete nach Art. 349 AEUV) stehen nicht in der Liste und sind damit Drittland.
 // ---------------------------------------------------------------------------------------------
 export const EU_LAENDER = frieren({
   id: 'EU_LAENDER',
   wert: 27,
   laender: ['AT', 'BE', 'BG', 'CY', 'CZ', 'DE', 'DK', 'EE', 'ES', 'FI', 'FR', 'GR', 'HR', 'HU', 'IE', 'IT', 'LT', 'LU', 'LV', 'MT', 'NL', 'PL', 'PT', 'RO', 'SE', 'SI', 'SK'],
-  aliase: { EL: 'GR' },
+  aliase: { EL: 'GR', MC: 'FR' },
   ungeklaert: ['XI'],
-  sonderfaelle_ungeklaert: ['Nordirland', 'Kanarische Inseln', 'Ceuta', 'Melilla', 'Helgoland', 'Büsingen', 'Monaco', 'Insel Man'],
-  hinweis_monaco_man: 'Monaco gilt als Gebiet Frankreichs, die Insel Man als Gebiet des Vereinigten Königreichs (UStG § 1 Abs. 2a S. 2, docs/quellen/ustg-1.md Z. 32).',
-  quelle: 'docs/quellen/eu-mitgliedstaaten-2026-11-15-rf.md (european-union.europa.eu, vero.fi); UStG § 1 Abs. 2a (docs/quellen/ustg-1.md Z. 32), § 13b Abs. 7 UStG (docs/quellen/ustg-13b.md)',
+  sonderfaelle_ungeklaert: ['Nordirland'],
+  hinweis_monaco_man: 'Monaco gilt als Gebiet Frankreichs (MC = FR), die Insel Man als Gebiet des Vereinigten Königreichs (UStG § 1 Abs. 2a S. 2, docs/quellen/ustg-1.md Z. 32; Art. 7 Abs. 1 MwStSystRL).',
+  quelle: 'docs/quellen/eu-mitgliedstaaten-2026-11-15-rf.md (european-union.europa.eu, vero.fi); UStG § 1 Abs. 2a (docs/quellen/ustg-1.md Z. 32), Art. 6 und 7 MwStSystRL (docs/quellen/mwstsystrl-art-6-7-gebiete-2026-11-15-rf.md), § 13b Abs. 7 UStG (docs/quellen/ustg-13b.md)',
   abruf: '2026-11-15',
   gueltig_von: null,
   gueltig_bis: null,
   konfidenz: 'B',
 });
 
-// true: EU-Mitgliedstaat (einschließlich DE), false: Drittland, null: ungeklärt (XI) oder kein Code. Kleinschreibung und Leerzeichen werden toleriert.
+// KERN-B2 (F-1): Sondergebiete, die der Nutzer am Beleg wählt (gegenpartei.gebiet). land: zu welchem Ländercode das Gebiet gehört (passt das
+// gewählte Land nicht, bleibt der Fall ungeklärt). lage: 'drittland' (Art. 6 MwStSystRL, § 1 Abs. 2a S. 3 UStG: nicht Gemeinschaftsgebiet) oder 'inland'
+// (Helgoland: nicht Inland nach § 1 Abs. 2, aber nach § 13b Abs. 7 S. 1 UStG ist ein dort ansässiger Unternehmer nicht "im Ausland ansässig":
+// kein § 13b nach Abs. 2 Nr. 1). Büsingen ist nicht Inland (§ 1 Abs. 2 S. 1) und in § 13b Abs. 7 nicht ausgenommen: Drittland.
+// Ausdrücklich 'festland' (oder leer) heißt: kein Sondergebiet. Jeder andere Text: ungeklärt (null), nie geraten. Konfidenz A (Normtext).
+export const GEBIETE_SONDER = frieren({
+  id: 'GEBIETE_SONDER',
+  wert: 10,
+  gebiete: {
+    kanaren: { land: 'ES', lage: 'drittland', name: 'Kanarische Inseln', norm: 'Art. 6 Abs. 1 Buchst. b MwStSystRL' },
+    ceuta: { land: 'ES', lage: 'drittland', name: 'Ceuta', norm: 'Art. 6 Abs. 2 MwStSystRL' },
+    melilla: { land: 'ES', lage: 'drittland', name: 'Melilla', norm: 'Art. 6 Abs. 2 MwStSystRL' },
+    aland: { land: 'FI', lage: 'drittland', name: 'Åland-Inseln', norm: 'Art. 6 Abs. 1 Buchst. d MwStSystRL' },
+    athos: { land: 'GR', lage: 'drittland', name: 'Berg Athos', norm: 'Art. 6 Abs. 1 Buchst. a MwStSystRL' },
+    livigno: { land: 'IT', lage: 'drittland', name: 'Livigno', norm: 'Art. 6 Abs. 2 MwStSystRL' },
+    campione: { land: 'IT', lage: 'drittland', name: "Campione d'Italia", norm: 'Art. 6 Abs. 1 Buchst. f MwStSystRL' },
+    buesingen: { land: 'DE', lage: 'drittland', name: 'Büsingen', norm: '§ 1 Abs. 2 S. 1, Abs. 2a S. 3 UStG; Art. 6 Abs. 2 MwStSystRL' },
+    helgoland: { land: 'DE', lage: 'inland', name: 'Helgoland', norm: '§ 13b Abs. 7 S. 1 UStG' },
+    festland: { land: null, lage: null, name: 'kein Sondergebiet', norm: null },
+  },
+  quelle: 'docs/quellen/mwstsystrl-art-6-7-gebiete-2026-11-15-rf.md; docs/quellen/ustg-1.md Z. 31/32; docs/quellen/ustg-13b.md Abs. 7',
+  abruf: '2026-11-15',
+  gueltig_von: null,
+  gueltig_bis: null,
+  konfidenz: 'A',
+});
+
+// true: Gemeinschaftsgebiet (Mitgliedstaat einschließlich DE, und Monaco als Gebiet Frankreichs), false: Drittland, null: ungeklärt (XI) oder kein Code.
+// Kleinschreibung und Leerzeichen werden toleriert.
 export function istEuLand(code) {
   if (typeof code !== 'string') return null;
   const c = code.trim().toUpperCase();
@@ -400,12 +433,21 @@ export function istEuLand(code) {
   return EU_LAENDER.laender.includes(iso);
 }
 
-// § 13b UStG (R-13B-06): Lage des Anbieters aus seinem Land. 'eu' (übriges Gemeinschaftsgebiet, Abs. 1), 'drittland' (Abs. 2 Nr. 1, Abs. 7),
-// 'inland' (DE, kein § 13b nach Abs. 1/2 Nr. 1), null (Land fehlt oder ungeklärt).
-export function anbieterLage(code) {
+// § 13b UStG (R-13B-06): Lage des Anbieters aus seinem Land und (KERN-B2, F-1) dem optionalen Sondergebiet. 'eu' (übriges Gemeinschaftsgebiet, Abs. 1),
+// 'drittland' (Abs. 2 Nr. 1, Abs. 7), 'inland' (DE oder Helgoland, kein § 13b nach Abs. 1/2 Nr. 1), null (Land fehlt, ungeklärt, Gebiet unbekannt
+// oder passt nicht zum Land).
+export function anbieterLage(code, gebiet) {
   const eu = istEuLand(code);
   if (eu === null) return null;
   const c = code.trim().toUpperCase();
+  const iso = Object.hasOwn(EU_LAENDER.aliase, c) ? EU_LAENDER.aliase[c] : c;
+  if (gebiet !== undefined && gebiet !== null && gebiet !== '') {
+    if (typeof gebiet !== 'string') return null;
+    const g = gebiet.trim().toLowerCase();
+    if (!Object.hasOwn(GEBIETE_SONDER.gebiete, g)) return null;
+    const e = GEBIETE_SONDER.gebiete[g];
+    if (e.land !== null) return e.land === iso ? e.lage : null;
+  }
   if (c === 'DE') return 'inland';
   return eu ? 'eu' : 'drittland';
 }
@@ -1215,7 +1257,7 @@ export const REGEL_UMSETZUNG = Object.freeze({
   'R-13B-03': U('umgesetzt', RC + 'Drittland Kz 84/85', 'wirkung.js:function reverseChargeWirkung'),
   'R-13B-04': U('teilweise', 'Ausländische USt: Steuerfall E_VORSTEUER_NICHT_ABZIEHBAR bleibt ausgeschlossen; Erkennung nur in normalisiereEingabe (W_UST_AUSGEWIESEN_14C).'),
   'R-13B-05': U('umgesetzt', RC + 'Rechnung ohne Hinweis: gerechnet nach dem gewählten Steuerfall (UStAE 13b.14 Abs. 1 S. 4, 13b.15 Abs. 2).', 'wirkung.js:function reverseChargeWirkung'),
-  'R-13B-06': U('umgesetzt', 'EU_LAENDER mit 27 Codes, EL = GR, XI ungeklärt; anbieterLage prüft das Land gegen den Steuerfall.', 'wirkung.js:anbieterLage(land)'),
+  'R-13B-06': U('umgesetzt', 'EU_LAENDER mit 27 Codes, EL = GR, MC = FR (§ 1 Abs. 2a S. 2 UStG), XI ungeklärt; Sondergebiete über gegenpartei.gebiet (GEBIETE_SONDER, Art. 6 MwStSystRL, Helgoland § 13b Abs. 7); anbieterLage prüft das Land gegen den Steuerfall.', 'wirkung.js:anbieterLage(land, gebiet)'),
   'R-13B-07': U('umgesetzt', RC + 'Kleinunternehmer Kz 46/47 bzw. 84/85 ohne Kz 67 (W_RC_KU_KEIN_VORSTEUERABZUG, HN_RC_KU_VORANMELDUNG).', 'wirkung.js:W_RC_KU_KEIN_VORSTEUERABZUG'),
   'R-13B-08': U('teilweise', 'Sperrgrund ig_erwerb/einfuhr nur per Nutzerwahl (UI), keine Erkennung im Kern.'),
   'R-13B-09': U('teilweise', 'Sperrgrund 13b_inland (SPERRE_STUFE4) nur per Nutzerwahl, keine Stichwort-Erkennung im Kern.'), 'R-13B-10': U('umgesetzt', RC + 'EÜR: Zahlung als Ausgabe, nichts in Kz 185', 'wirkung.js:R-13B-10'),

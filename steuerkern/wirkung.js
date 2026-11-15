@@ -22,21 +22,50 @@ import { istCent, ustAusBrutto, ustAusNetto, teile, mulDivRund } from './geld.js
 import { istDatum, jahrVon, addiereMonate, monatsende, periodenEnde, periodenArt, quartalVon, frist10Tag, zehnTageRegelVorjahr, ustPeriodeFuer } from './daten.js';
 import { voranmeldungsperiodeFuer, voranmeldungAm, versteuerungAm, statusAm, statusFuerAusgangsumsatz, gwgWahlFuer } from './steuerprofil.js';
 import { regelNachId, KATEGORIEN, GRENZEN, USTVA_ZEILEN, EUER_ZEILEN, STEUERSAETZE, BELEG_ARTEN, KORREKTUR_GRUENDE, basisKzFuerSatz, anbieterLage, SATZ_REGEL_BP, SATZ_ERMAESSIGT_BP } from './tabellen.js';
-import { KORREKTUR_ARTEN, tagVonZeit } from './beleg.js';
+import { KORREKTUR_ARTEN, tagVonZeit, normalisiereAlt } from './beleg.js';
 
 const istObjekt = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 
 // KERN-B (Phase 3, Konzept 2.0 Q-2): Regeln mit Zahlenwirkung hinter Kern-Optionen. optionen.regeln.<name> === true schaltet die Regel ein,
-// alles andere (fehlend, false) lässt das Verhalten von Kern 2026.11.16-2 unverändert. Die App setzt die Optionen aus config/features.
+// alles andere (fehlend, false) lässt das Verhalten von Kern 2026.11.16-2 unverändert. App und Worker setzen die Optionen aus config/features
+// über optionenAusFeatures (KERN-B2, A1).
 //   uneinbringlichkeit           (Feature korrektur)  § 17 Abs. 2 Nr. 1 UStG, Kz 50/37 (BP-04b)
 //   anlagegut_vorsteuer_sofort   (Feature anlagegut)  Vorsteuer aus Anlagegütern sofort, EÜR nach GWG-/Sammelposten-/AfA-Wahl (BP-04b)
-//   kz39_verzicht                (Integrator)         Kz 39 im letzten Monat mit Dauerfrist bei Verzicht im Jahr (BP-04b)
+//   kz39_verzicht                (Feature voranmeldung) Kz 39 im letzten Monat mit Dauerfrist bei Verzicht im Jahr (BP-04b)
 //   rc_eingang                   (Feature ausland)    § 13b UStG Eingang: Kz 46/47, 84/85, 67 (BP-05a)
 export const KERN_REGELN = Object.freeze(['uneinbringlichkeit', 'anlagegut_vorsteuer_sofort', 'kz39_verzicht', 'rc_eingang']);
 export function regelAn(optionen, name) {
   return istObjekt(optionen) && istObjekt(optionen.regeln) && optionen.regeln[name] === true;
 }
 const nurRegeln = (opt) => (istObjekt(opt) && istObjekt(opt.regeln) ? { regeln: opt.regeln } : {});
+
+// KERN-B2 (Auflage A1 der Gegenprüfung G-KERN-B): EINE Abbildung Feature → Kern-Option für App und Worker. Jede Aufrufstelle (alleWirkungen,
+// auswertungFuerJahr, ustvaPerioden, ustvaFuer, euerFuer, Dialog-Vorschau, Worker snapshotFuer/Festschreibung) bekommt dieselben Optionen aus
+// optionenAusFeatures(config/features). Eingabe: die features-Map ({ ausland: 'an' }) oder das ganze Dokument config/features
+// ({ kern_max, features }); Werte wie regel/loader.js und KontoluxWorker/regel/gemeinsam.js: 'an' oder true = an, alles andere ('aus', false,
+// fehlend, Tippfehler) = aus. kern_max 'aus' schaltet alle Optionen aus. Nur eigene Eigenschaften zählen. Ergebnis immer vollständig und neu
+// ({ regeln: { <alle vier>: true|false } }, Schlüssel alphabetisch), damit Snapshot und Vergleich deterministisch sind.
+export const KERN_OPTION_FEATURES = Object.freeze({
+  rc_eingang: 'ausland',
+  uneinbringlichkeit: 'korrektur',
+  anlagegut_vorsteuer_sofort: 'anlagegut',
+  kz39_verzicht: 'voranmeldung',
+});
+export function optionenAusFeatures(features) {
+  let f = istObjekt(features) ? features : {};
+  let kernAus = false;
+  if (Object.hasOwn(f, 'features') || Object.hasOwn(f, 'kern_max')) {
+    kernAus = f.kern_max === 'aus';
+    f = istObjekt(f.features) ? f.features : {};
+  }
+  const regeln = {};
+  for (const name of Object.keys(KERN_OPTION_FEATURES).sort()) {
+    const feat = KERN_OPTION_FEATURES[name];
+    const v = Object.hasOwn(f, feat) ? f[feat] : undefined;
+    regeln[name] = !kernAus && (v === 'an' || v === true);
+  }
+  return { regeln };
+}
 
 export const STEUERFAELLE_STUFE_NICHT_GERECHNET = Object.freeze([
   'A_NICHT_STEUERBAR_EU_B2B_DL', 'A_NICHT_STEUERBAR_DRITTLAND_B2B_DL', 'A_WERTABGABE', 'E_13B_EU_DL', 'E_13B_DRITTLAND_DL', 'E_VORSTEUER_NICHT_ABZIEHBAR',
@@ -544,13 +573,42 @@ function steuerOhneZeitraum(s) {
 }
 
 // Spanne der Leistung bis zum Ende des Folgemonats (§ 13b Abs. 2 UStG): Drittland (b13bEntstehung) und jeder mögliche § 13b-Eingang, der über
-// weitereWirkTage läuft; ein gerechneter EU-Fall (E_13B_EU_DL ohne Sperre und Dialog) entsteht mit der Leistung (Abs. 1), ohne Folgemonat.
+// weitereWirkTage läuft. Ein gerechneter EU-Fall entsteht zwar mit der Leistung (Abs. 1), ein ausgeschlossener aber kann im Folgemonat einen
+// Hinweis tragen (siehe unten).
+// KERN-B2 (Zusatzfund ZF-2, Paritätstest App/Worker mit Kern-Optionen): Mit rc_eingang schließt reverseChargeWirkung einen EU-Fall bei ungeklärtem
+// Land, Teilleistung, Skonto usw. über schliesseAus aus, und weitereHinweisWirkungen setzt den Hinweis auch in den Folgemonat (moeglich13b). Ob die
+// Option an ist, weiß der Vorfilter nicht: darum bekommt jeder E_13B_EU_DL die Spanne bis zum Ende des Folgemonats (Obermenge).
 function spanneBisFolgemonat(s) {
-  if (s.steuerfall === 'E_13B_DRITTLAND_DL') return true;
-  if (!moeglich13b(s)) return false;
-  return s.steuerfall !== 'E_13B_EU_DL' || (typeof s.sperrgrund === 'string' && s.sperrgrund !== '') || s.dialog === 'dialog_erforderlich';
+  if (s.steuerfall === 'E_13B_DRITTLAND_DL' || s.steuerfall === 'E_13B_EU_DL') return true;
+  return moeglich13b(s);
 }
 const ALT_AUSGANG_TYPEN = Object.freeze(['rechnung_ausgehend', 'mahnung_ausgehend', 'reisekosten_weiterberechnung', 'storno']); // wie normalisiereAlt
+// KERN-B2 (F-5 der Gegenprüfung G-KERN-B): Anlagegut mit Kern-Option anlagegut_vorsteuer_sofort. Die EÜR-Wirkungen (Kz 132/137) tragen datum_wirk =
+// Anschaffungstag (leistung.bis); ein Sammelposten wirkt mit je einem Fünftel in den vier Folgejahren (§ 6 Abs. 2a S. 2 EStG), datum_wirk bleibt der
+// Anschaffungstag (euerMonatDerWirkung ordnet ihn dem Januar des Folgejahres zu). Ohne Profil (gwg_wahl unbekannt) gilt die Obermenge: jede Position, die
+// bei Wahl 'sammelposten' ein Sammelposten wäre, liefert die Folgejahre. Geprüft werden das gespeicherte steuer und (für Altbelege und veraltete
+// v2-Dokumente) die Altfelder über normalisiereAlt, wie belegFuerKern sie lesen kann.
+// Ergebnis: { anschaffung: [Tage], folgejahre: [Jahre] }.
+function anlagegutTage(d, s) {
+  const kandidaten = [];
+  if (s) kandidaten.push(s);
+  if (!ALT_AUSGANG_TYPEN.includes(d.typ) && typeof d.kategorie === 'string') {
+    try { const a = normalisiereAlt(d); if (a && istObjekt(a.steuer)) kandidaten.push(a.steuer); } catch (e) { /* Altfelder unlesbar: nur steuer */ }
+  }
+  const anschaffung = [];
+  const folgejahre = [];
+  for (const st of kandidaten) {
+    const bis = istObjekt(st.leistung) && istDatum(st.leistung.bis) ? st.leistung.bis : null;
+    if (!bis) continue;
+    const y = jahrVon(bis);
+    let plan = null;
+    try { plan = anlagegutPlan(st, { gwg_wahl: { [String(y)]: 'sammelposten' } }); } catch (e) { plan = null; }
+    if (!plan || !plan.positionen.some((x) => x.art !== 'normal')) continue;
+    anschaffung.push(bis);
+    if (plan.positionen.some((x) => x.art === 'sammelposten')) for (let n = 1; n <= 4; n++) folgejahre.push(y + n);
+  }
+  return { anschaffung, folgejahre };
+}
 export function belegZeitraumDaten(dok) {
   const tage = [];
   const euer = [];
@@ -608,6 +666,12 @@ export function belegZeitraumDaten(dok) {
       // Nur so liest belegFuerKern das gespeicherte steuer (sonst: Altfelder)
       if (d.schema_version === 2 && steuerOhneZeitraum(s)) undatiert = true;
     }
+    // KERN-B2 F-5: Anschaffungstag (euer_tage) und Sammelposten-Folgejahre (je der 01.01. in tage und euer_tage). tage bekommt die Folgejahre auch,
+    // weil der Worker-Vorfilter (KontoluxWorker/regel/festschreibung-kern.js zeileKannZeitraumBeruehren) nur tage und spannen liest; für die
+    // Voranmeldung ist das eine harmlose Obermenge.
+    const ag = anlagegutTage(d, s);
+    for (const t of ag.anschaffung) tag(euer, t);
+    for (const j of ag.folgejahre) { const t = `${String(j).padStart(4, '0')}-01-01`; tag(tage, t); tag(euer, t); }
   } catch (e) {
     undatiert = true;
   }
@@ -774,6 +838,16 @@ export function belegWirkungen(beleg, profil, optionen) {
       const perD = datum ? ustPeriode(profil, datum, hinweise) : null;
       out.push(mk(ctx, { welt: 'ust', periode: perD, datum_wirk: datum, rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-VS-01', hinweis_detail: 'dialog_erforderlich', euer_zahlungen: gesperrteZahlungen(s) }));
       if (perD) weitereHinweisWirkungen(s, profil, ctx, out, perD, { status: 'unbekannt', regel_id: 'R-VS-01', hinweis_detail: 'dialog_erforderlich' });
+    } else if ((sf === 'E_13B_EU_DL' || sf === 'E_13B_DRITTLAND_DL') && regelAn(opt, 'rc_eingang') && KORREKTUR_ARTEN.includes(s.beleg_art)) {
+      // KERN-B2 (Zusatzfund ZF-1): Korrektur oder Storno eines § 13b-Belegs mit Option rc_eingang. Vorher lief sie in reverseChargeWirkung und warf
+      // (Korrektur ohne Leistung: "Cannot read properties of null"), Ergebnis war ein Kern-Fehler-Hinweis. Jetzt ausdrücklich ausgeschlossen
+      // (Zwischenwert im Zeitraum des Wirkdatums, § 17 Abs. 1 S. 5 UStG rechnet der Kern nicht), Grund rc_korrektur.
+      ctx.beleg_status = 'ausgeschlossen';
+      if (!hinweise.includes('HN_NOCH_NICHT_UNTERSTUETZT')) hinweise.push('HN_NOCH_NICHT_UNTERSTUETZT');
+      const datum = istDatum(s.wirkdatum) ? s.wirkdatum : (istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null);
+      const perK = datum ? ustPeriode(profil, datum, hinweise) : null;
+      out.push(mk(ctx, { welt: 'ust', periode: perK, datum_wirk: datum, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: 'rc_korrektur', euer_zahlungen: gesperrteZahlungen(s) }));
+      if (perK) weitereHinweisWirkungen(s, profil, ctx, out, perK, { status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: 'rc_korrektur' });
     } else if ((sf === 'E_13B_EU_DL' || sf === 'E_13B_DRITTLAND_DL') && regelAn(opt, 'rc_eingang')) {
       reverseChargeWirkung(s, profil, ctx, out);
     } else if (STEUERFAELLE_STUFE_NICHT_GERECHNET.includes(sf)) {
@@ -1309,7 +1383,8 @@ const rundeHalbAufCent = (a, n) => mulDivRund(a, 1, n);
 //   R-13B-07 Kleinunternehmer: schuldet die Steuer trotzdem (§ 13b Abs. 5 S. 1, § 13b Abs. 8 und UStAE 13b.13 Abs. 4 S. 2: Satz nach § 12 auch bei
 //            § 19), kein Vorsteuerabzug (§ 19 Abs. 1 S. 4 UStG), Voranmeldung für diese Zeiträume (§ 18 Abs. 4a, A): Kz 46/47 bzw. 84/85 ohne Kz 67,
 //            W_RC_KU_KEIN_VORSTEUERABZUG und HN_RC_KU_VORANMELDUNG.
-//   R-13B-06 Land: gegenpartei.land über anbieterLage (EU_LAENDER); fehlt, ungeklärt (XI) oder passt nicht zum Steuerfall: nicht gerechnet.
+//   R-13B-06 Land: gegenpartei.land und gegenpartei.gebiet über anbieterLage (EU_LAENDER, Monaco = FR, GEBIETE_SONDER; KERN-B2 F-1); fehlt, ungeklärt
+//            (XI, unbekanntes oder nicht passendes Gebiet) oder passt nicht zum Steuerfall: nicht gerechnet.
 //   R-13B-10 EÜR: Ausgabe in Höhe der Zahlung (keine Umsatzsteuer darin), nichts in Kz 185; die § 13b-Steuer erscheint nicht in der EÜR (Regel:
 //            verrechnet; Kleinunternehmer: Zahlung ans Finanzamt später als Kz 186 über die Finanzamt-Zahlung).
 //   Satz: Standard 19 % (R-13B-01); eine Position mit satz_bp 700 rechnet 7 % mit Warnung W_RC_SATZ_ERMAESSIGT.
@@ -1323,7 +1398,8 @@ function reverseChargeWirkung(s, profil, ctx, out) {
   const sf = s.steuerfall;
   const eu = sf === 'E_13B_EU_DL';
   const land = istObjekt(s.gegenpartei) && typeof s.gegenpartei.land === 'string' ? s.gegenpartei.land : null;
-  const lage = land === null ? null : anbieterLage(land);
+  const gebiet = land !== null && s.gegenpartei.gebiet !== undefined ? s.gegenpartei.gebiet : null;
+  const lage = land === null ? null : anbieterLage(land, gebiet); // KERN-B2 F-1: Monaco = FR, Sondergebiete (GEBIETE_SONDER)
   const zahlungen = aktiveZahlungen(s);
   const l = s.leistung;
   const bis = l.bis;
@@ -1341,7 +1417,7 @@ function reverseChargeWirkung(s, profil, ctx, out) {
     const extra = [];
     if (grund === 'rc_land_fehlt') extra.push('W_GEGENPARTEI_LAND_FEHLT');
     if (grund === 'rc_land_widerspruch') extra.push('W_GEGENPARTEI_LAND_WIDERSPRUCH');
-    if (grund === 'rc_land_ungeklaert') extra.push('W_NORDIRLAND_UNGEKLAERT');
+    if (grund === 'rc_land_ungeklaert') extra.push(anbieterLage(land) === null ? 'W_NORDIRLAND_UNGEKLAERT' : 'W_GEBIET_UNGEKLAERT');
     schliesseAus(s, profil, ctx, out, grund, extra);
     for (const z of aktiveZahlungen(s)) {
       out.push(mk(ctx, { welt: 'euer', periode: String(jahrVon(z.datum)), datum_wirk: z.datum, kz: null, betrag_cent: z.betrag_cent, netto_cent: z.betrag_cent, rolle: 'ausgabe', spalte: 'ausgabe', status: 'unbekannt', regel_id: 'R-EUER-35', unsicher: true, ereignis_id: z.id }));
@@ -1365,7 +1441,8 @@ function reverseChargeWirkung(s, profil, ctx, out) {
   let vorab = 0;
   for (const z of zahlungen) {
     if (z.datum >= bis || vorab >= gesamt) continue;
-    const b = Math.min(z.betrag_cent, gesamt - vorab);
+    // KERN-B2 F-2: Anzahlung in fremder Währung mit eigenem Kurs des Zahlungsmonats (rc_basis_cent aus normalisiereEingabe), sonst der Euro-Betrag
+    const b = Math.min(istCent(z.rc_basis_cent) ? z.rc_basis_cent : z.betrag_cent, gesamt - vorab);
     if (b <= 0) continue;
     vorab += b;
     teileTage.push({ datum: z.datum, betrag: b, eid: z.id, regel: 'R-ZP-14' });

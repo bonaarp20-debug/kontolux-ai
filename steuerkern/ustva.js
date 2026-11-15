@@ -163,11 +163,39 @@ function nichtBerechnet(tabelle, steuerfaelle, wechseljahr, kz48Berechnet, zusat
   }));
 }
 
+// KERN-B2 (F-4 der Gegenprüfung G-KERN-B): Die Kern-Optionen, mit denen die Wirkungen berechnet wurden, wandern in die Voranmeldung. Wirkungen aus
+// § 13b-Eingang (rolle rc_umsatz/rc_vorsteuer oder Ausschluss mit Grund rc_*) zeigen rc_eingang, Wirkungen aus Uneinbringlichkeit (uneinbringlich bzw.
+// R-KOR-06) zeigen uneinbringlichkeit: die Zeilen 30/32/41 bzw. 51/52 gelten dann als berechnet, auch wenn die Optionen hier fehlen. Umgekehrt (Option
+// hier an, die Wirkungen tragen aber den Ausschluss ohne Option: hinweis_detail E_13B_* bzw. korrektur_grund_uneinbringlich) lehnt die Funktion die
+// Kombination ab: die Zeilen bleiben in nicht_berechnet, W_KERN_OPTIONEN_WIDERSPRUCH, Kz 83 Zwischenwert. kz39_verzicht hinterlässt keine Spur in den
+// Wirkungen; dafür sorgt die gemeinsame Abbildung optionenAusFeatures (A1).
+const RC_OHNE_OPTION = Object.freeze(['E_13B_EU_DL', 'E_13B_DRITTLAND_DL']);
+export function kernOptionenAusWirkungen(wirkungen, optionen) {
+  const ws = Array.isArray(wirkungen) ? wirkungen : [];
+  const opt = istObjekt(optionen) ? optionen : {};
+  const det = (w) => (istObjekt(w) && typeof w.hinweis_detail === 'string' ? w.hinweis_detail : '');
+  const rcMit = ws.some((w) => istObjekt(w) && (w.rolle === 'rc_umsatz' || w.rolle === 'rc_vorsteuer' || (w.status === 'ausgeschlossen' && det(w).startsWith('rc_'))));
+  const rcOhne = ws.some((w) => istObjekt(w) && w.rolle === 'hinweis' && RC_OHNE_OPTION.includes(det(w)));
+  const unMit = ws.some((w) => istObjekt(w) && (w.uneinbringlich === true || w.regel_id === 'R-KOR-06'));
+  const unOhne = ws.some((w) => istObjekt(w) && w.rolle === 'hinweis' && det(w) === 'korrektur_grund_uneinbringlich');
+  const rcOpt = regelAn(opt, 'rc_eingang');
+  const unOpt = regelAn(opt, 'uneinbringlichkeit');
+  const widerspruch = [];
+  if (rcOpt && rcOhne) widerspruch.push('rc_eingang');
+  if (unOpt && unOhne) widerspruch.push('uneinbringlichkeit');
+  return {
+    rc_eingang: rcMit || (rcOpt && !rcOhne),
+    uneinbringlichkeit: unMit || (unOpt && !unOhne),
+    widerspruch,
+  };
+}
+
 export function ustvaFuer(wirkungen, profil, periode, optionen) {
   const opt = istObjekt(optionen) ? optionen : {};
   const ein = istObjekt(opt.eingaben) ? opt.eingaben : {};
   const netz = pruefeWirkungen(wirkungen);
   const ws = netz.ok;
+  const kernOpt = kernOptionenAusWirkungen(ws, opt); // KERN-B2 F-4
   // N3: Summen nie über die sichere Ganzzahlgrenze hinaus (sonst stiller Genauigkeitsverlust oder Ausnahme in geld.js). Bei Überlauf
   // bleibt die Summe 0 und der Zeitraum wird als unvollständig gekennzeichnet.
   const ueberlauf = { an: false };
@@ -361,6 +389,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
   // --- Hinweise und Warnungen ---
   for (const w of imZeitraum.concat(ws.filter((x) => x.welt === 'ust' && x.periode === null && x.nur_euer !== true))) for (const h of w.hinweise) hinweise.push(h);
   for (const h of profilHinweise(profil, jahr)) hinweise.push(h);
+  if (kernOpt.widerspruch.length) hinweise.push('W_KERN_OPTIONEN_WIDERSPRUCH');
   const alle = eindeutig(hinweise);
   const angenommen = alle.includes('W_VORANMELDUNG_ANGENOMMEN');
   // Gegenprüfung M2/M9: Anzahlung vor dem Überschreiten der Grenze (Zeitraum und Kz 65 nicht ausdrücklich in der Quelle) bleibt Zwischenwert
@@ -407,13 +436,13 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
     summen_alternativ: alternativ,
     kz83: {
       betrag_cent: primaer.z50_cent,
-      status: unvollstaendig || angenommen || wechselAnzahlung || kz65Offen ? 'zwischenwert' : 'ergebnis',
+      status: unvollstaendig || angenommen || wechselAnzahlung || kz65Offen || kernOpt.widerspruch.length ? 'zwischenwert' : 'ergebnis',
       regel_id: 'R-KZ-50',
       text: unvollstaendig ? `Zwischenwert (unvollständig): ${ausg.length} Beleg(e) nicht berücksichtigt` : (angenommen ? 'Zwischenwert: Voranmeldungszeitraum im Profil nicht bestätigt (Quartal angenommen)' : (wechselAnzahlung ? 'Zwischenwert: Anzahlung oder Zahlung über das Überschreiten der Umsatzgrenze, Zeitraum in der Quelle nicht genannt (UStAE 19.7 Abs. 1 S. 4)' : (kz65Offen ? 'Zwischenwert: Anzahlung aus der Kleinunternehmerzeit, Variante für Kz 65 noch nicht bestätigt (K5)' : null))),
     },
     unvollstaendig,
     ausgeschlossene: ausg,
-    nicht_berechnet: nichtBerechnet(tabelle, ausg.map((a) => (a.beleg_id === null || a.beleg_id === undefined ? null : (steuerfallVon.get(a.beleg_id) || null))), alle.includes('W_KU_GRENZE_UEBERSCHRITTEN'), kz48Cent_ !== null, [...(regelAn(opt, 'rc_eingang') ? [30, 32, 41] : []), ...(regelAn(opt, 'uneinbringlichkeit') ? [51, 52] : [])]),
+    nicht_berechnet: nichtBerechnet(tabelle, ausg.map((a) => (a.beleg_id === null || a.beleg_id === undefined ? null : (steuerfallVon.get(a.beleg_id) || null))), alle.includes('W_KU_GRENZE_UEBERSCHRITTEN'), kz48Cent_ !== null, [...(kernOpt.rc_eingang ? [30, 32, 41] : []), ...(kernOpt.uneinbringlichkeit ? [51, 52] : [])]),
     ...(hat65 ? { kz65_vorschlag: vorschlag65, kz65_variante: variante65 } : {}),
     hinweise: alle,
     warnungen: alle.filter((c) => c.startsWith('W_')),
