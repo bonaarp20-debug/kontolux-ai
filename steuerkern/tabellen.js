@@ -453,6 +453,91 @@ export function anbieterLage(code, gebiet) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// KERN-C (Phase 3, Release C, BP-26): Mehrwertsteuersätze der 27 Mitgliedstaaten für die OSS-Satzprüfung. Quelle: EU-Kommission, Taxes in Europe
+// Database (TEDB), SOAP-Abfrage situationOn 2026-11-15 (docs/quellen/tedb-mwst-saetze-2026-11-15-rf.md); die Angaben stammen von den Mitgliedstaaten,
+// Konfidenz B (Datenbank, kein Rechtsakt). Je Land: { satz_bp, typ, gueltig_von, gueltig_bis, gebiet? }. typ: normal (STANDARD), ermaessigt (reduced),
+// stark_ermaessigt (super_reduced), zwischensatz (parking), befreit (0 % exempted/out_of_scope/not_applicable: kein Satz einer OSS-Zeile).
+// gueltig_von: das von TEDB je Land gelieferte situationOn (Beginn des Datenstands); vor diesem Tag macht der Kern keine Aussage (W_OSS_SATZ_STAND).
+// gebiet: true = Satz mit vermutetem Gebietsbezug (AT 19 % Jungholz/Mittelberg, ES 7 % unter STANDARD, PT 16/22 % Azoren/Madeira, GR 17 % Inseln,
+// FR 0,9/1,05/8,5/13 % Korsika und Überseegebiete); TEDB führt sie als eigene Einträge, die Zuordnung ist eigene Beobachtung (Konfidenz C):
+// sie gelten in der Satzprüfung nicht als Hauptsatz (W_OSS_SATZ_GEBIET, Bestätigung nötig). Kontolux sagt nie, welcher ermäßigte Satz für eine
+// Ware gilt (K1), es prüft nur, ob der Satz des Belegs in der Satzmenge des Kundenlands liegt. Griechenland: TEDB-Code EL, hier ISO GR.
+// Jahreswechsel-Checkliste: Tabelle jährlich (und bei Satzänderungen) neu aus TEDB abrufen (scripts/tedb-abruf.mjs schreibt nur eine Prüfdatei).
+// ---------------------------------------------------------------------------------------------
+function eus(von, normal, weitere, gebiet) {
+  const g = gebiet || [];
+  const l = [];
+  for (const bp of normal) l.push({ satz_bp: bp, typ: 'normal', gueltig_von: von, gueltig_bis: null, ...(g.includes(bp) ? { gebiet: true } : {}) });
+  for (const [bp, typ] of weitere) l.push({ satz_bp: bp, typ, gueltig_von: von, gueltig_bis: null, ...(typ !== 'befreit' && g.includes(bp) ? { gebiet: true } : {}) });
+  return l;
+}
+const E = 'ermaessigt';
+const SE = 'stark_ermaessigt';
+const ZW = 'zwischensatz';
+const BF = 'befreit';
+const J1 = '2026-01-01';
+const J7 = '2026-07-01';
+export const EU_SAETZE = frieren({
+  id: 'EU_SAETZE',
+  wert: 27,
+  laender: {
+    AT: eus(J7, [2000], [[0, BF], [490, SE], [1000, E], [1300, E], [1900, E]], [1900]),
+    BE: eus(J7, [2100], [[0, BF], [600, E], [1200, ZW], [1200, E]]),
+    BG: eus(J7, [2000], [[900, E]]),
+    CY: eus(J1, [1900], [[0, BF], [300, SE], [500, E], [900, E]]),
+    CZ: eus(J7, [2100], [[0, BF], [1200, E]]),
+    DE: eus(J7, [1900], [[0, BF], [700, E]]),
+    DK: eus(J7, [2500], [[0, BF]]),
+    EE: eus(J7, [2400], [[900, E], [1300, E]]),
+    ES: eus(J7, [2100, 700], [[400, SE], [1000, E]], [700]),
+    FI: eus(J7, [2550], [[1000, E], [1350, E]]),
+    FR: eus(J7, [2000], [[0, BF], [90, E], [105, E], [210, SE], [550, E], [850, E], [1000, E], [1300, E]], [90, 105, 850, 1300]),
+    GR: eus(J1, [2400], [[0, BF], [400, SE], [600, E], [1300, ZW], [1300, E], [1700, E]], [1700]),
+    HR: eus(J7, [2500], [[500, E], [1300, E]]),
+    HU: eus(J7, [2700], [[0, BF], [500, E], [1800, E]]),
+    IE: eus(J7, [2300], [[0, BF], [900, E], [1350, E]]),
+    IT: eus(J7, [2200], [[400, SE], [500, E], [1000, E]]),
+    LT: eus(J7, [2100], [[500, E], [1200, E]]),
+    LU: eus(J7, [1700], [[0, BF], [300, SE], [800, SE], [800, E], [1400, ZW], [1400, E]]),
+    LV: eus(J7, [2100], [[0, BF], [500, E], [1200, E]]),
+    MT: eus(J7, [1800], [[0, BF], [500, E], [700, E], [1200, ZW]]),
+    NL: eus(J7, [2100], [[0, BF], [900, E]]),
+    PL: eus(J7, [2300], [[500, E], [800, SE], [800, E]]),
+    PT: eus(J1, [2300], [[600, SE], [600, E], [1300, ZW], [1300, E], [1600, E], [2200, E]], [1600, 2200]),
+    RO: eus(J7, [2100], [[0, BF], [1100, E]]),
+    SE: eus(J7, [2500], [[600, E], [1200, E]]),
+    SI: eus(J7, [2200], [[500, E], [950, E]]),
+    SK: eus(J7, [2300], [[500, E], [1900, E]]),
+  },
+  tedb_codes: { GR: 'EL' },
+  quelle: 'docs/quellen/tedb-mwst-saetze-2026-11-15-rf.md (EU-Kommission TEDB, SOAP retrieveVatRates, situationOn 2026-11-15)',
+  abruf: '2026-11-15',
+  gueltig_von: null,
+  gueltig_bis: null,
+  konfidenz: 'B',
+  hinweis: 'Angaben der Mitgliedstaaten in der Datenbank der Kommission, ohne Gewähr; Gebietsbezug (gebiet: true) eigene Beobachtung, Konfidenz C.',
+});
+
+// KERN-C (BP-27): OSS-Erklärungsfristen. Erklärung und Zahlungseingang bis zum letzten Tag des Monats nach dem Quartal (§ 18j Abs. 4 S. 1, 3 UStG,
+// docs/quellen/ustg-18j.md; BZSt: 30.04., 31.07., 31.10., 31.01.), KEINE Verschiebung auf den nächsten Werktag (Kommission: "There is no change to the
+// deadline ... weekend or on a public holiday", docs/quellen/oss-portal-kommission-at-2026-11-15-rf.md; Konfidenz A als Verwaltungsangabe). Nullmeldung
+// ist abzugeben (BZSt). Registrierung nach dem Überschreiten bis zum 10. Tag des Folgemonats (BZSt, Art. 57d MwSt-DVO).
+export const OSS_FRISTEN = frieren({
+  id: 'OSS_FRISTEN',
+  monate_nach_quartal: 1,
+  tag: 'letzter',
+  verschiebung: false,
+  nullmeldung: true,
+  registrierung_tag_folgemonat: 10,
+  berichtigung_jahre: 3,
+  quelle: 'UStG § 18j Abs. 4 (docs/quellen/ustg-18j.md); BZSt One-Stop-Shop EU-Regelung (docs/quellen/bzst-oss-eu-regelung-2026-11-15-rf.md); Kommission und ELSTER/BOP-Hilfe (docs/quellen/oss-portal-kommission-at-2026-11-15-rf.md)',
+  abruf: '2026-11-15',
+  gueltig_von: null,
+  gueltig_bis: null,
+  konfidenz: 'A',
+});
+
+// ---------------------------------------------------------------------------------------------
 // Steuerfall-Enum (Konzept 3.3). stufe: 1, 2, 3a, 3b, 3c, 4. "ust": Kz der Voranmeldung 2026, "euer": Kz der Anlage EÜR.
 // ---------------------------------------------------------------------------------------------
 function sf(code, richtung, stufe, ust, euer, pflichtfelder, norm, bem) {
@@ -472,15 +557,21 @@ export const STEUERFAELLE = frieren({
   E_VORSTEUER_NICHT_ABZIEHBAR: sf('E_VORSTEUER_NICHT_ABZIEHBAR', 'eingang', '2', { vorsteuer_kz: null }, { ausgabe: 'brutto', geschenk_kz: 164 }, ['ausschluss.grund'], '§ 15 Abs. 1a, Abs. 1 S. 2 UStG; ausländische USt'),
   E_13B_EU_DL: sf('E_13B_EU_DL', 'eingang', '3a', { basis_kz: 46, steuer_kz: 47, vorsteuer_kz: 67 }, { ausgabe: 'netto', vorsteuer_kz: null }, ['gegenpartei.land'], '§ 13b Abs. 1, 5; § 15 Abs. 1 Nr. 4 UStG', 'K11'),
   E_13B_DRITTLAND_DL: sf('E_13B_DRITTLAND_DL', 'eingang', '3a', { basis_kz: 84, steuer_kz: 85, vorsteuer_kz: 67 }, { ausgabe: 'netto', vorsteuer_kz: null }, ['gegenpartei.land'], '§ 13b Abs. 2 Nr. 1 UStG'),
+  // KERN-C (BP-26): Verkäufe an Privatkunden im EU-Ausland (Fernverkauf Ware § 3c, elektronische Leistung § 3a Abs. 5) und Drittland-TBE. Die Zuordnung
+  // trifft der Kern erst über alle Belege (oss.js ossZuordnung, Kern-Option oss); gespeichert bleibt der Beleg als UNBEKANNT/auslandskunde mit steuer.oss.
+  A_EU_B2C_UNTER_SCHWELLE: sf('A_EU_B2C_UNTER_SCHWELLE', 'ausgang', '2', { basis_kz: 81, basis_kz_ermaessigt: 86, steuer_zeile: 13 }, { netto_kz: 112, ust_kz: 140 }, ['gegenpartei.land', 'leistungsart'], '§ 3a Abs. 5 S. 3, § 3c Abs. 4 S. 1 UStG; Anleitung USt 1 E Zeile 36 (Ausnahme)', 'deutsche Steuer bis zur Schwelle; Kleinunternehmer: wie A_KU'),
+  A_OSS_EU_B2C: sf('A_OSS_EU_B2C', 'ausgang', '3b', { basis_kz: 45, steuer_zeile: null }, { netto_kz: 112, ust_kz: 140 }, ['gegenpartei.land', 'leistungsart', 'oss.zeilen'], '§ 3c Abs. 1, § 3a Abs. 5 S. 1, § 18j UStG; Anleitung USt 1 E Zeile 36', 'Kz 45 netto; Steuer des Kundenlands in der OSS-Erklärung (BZSt); EÜR-Zeilen O-3 (Konfidenz C, gewinnneutral)'),
+  A_DRITTLAND_B2C_TBE: sf('A_DRITTLAND_B2C_TBE', 'ausgang', '3b', { basis_kz: 45, steuer_zeile: null }, { netto_kz: 112 }, ['gegenpartei.land', 'leistungsart'], '§ 3a Abs. 5 S. 1 UStG; Anleitung USt 1 E Zeile 36', 'Ort beim Empfänger, keine 10.000-EUR-Schwelle; im Land des Kunden können Pflichten bestehen'),
+  A_KU_EU_B2C_UEBER_SCHWELLE: sf('A_KU_EU_B2C_UEBER_SCHWELLE', 'ausgang', '4', { }, { }, ['gegenpartei.land', 'leistungsart'], '§ 19 Abs. 1, § 19a UStG; § 3c Abs. 4, § 3a Abs. 5 S. 3 UStG', 'Sperre mit Weiche OSS / EU-Kleinunternehmerregelung / Registrierung im Land; der Nutzer wählt'),
   FA_ZAHLUNG: sf('FA_ZAHLUNG', 'beide', '2', { }, { ust_zahlung_kz: 186, zinsen_kz: 234, zuschlag_kz: 183, erstattung_kz: 141 }, ['fa_art'], 'K16'),
   PRIVAT: sf('PRIVAT', null, null, { }, { }, [], 'Privatvorgänge bleiben in privatvorgaenge', 'keine Wirkung'),
   SPERRE_STUFE4: sf('SPERRE_STUFE4', 'beide', '4', { }, { }, ['sperrgrund'], 'Konzept 1.5 L7', 'keine Wirkung in Summen; Beleg bleibt im Archiv; Schlusssumme nur als Zwischenwert'),
   UNBEKANNT: sf('UNBEKANNT', 'beide', null, { }, { ausgabe_oder_einnahme: 'brutto_unsicher' }, ['unbekannt_grund'], 'Entscheidung 3.3-a', 'nicht in USt-Summen; EÜR-Betrag getrennt als unsicher'),
 });
 
-export const SPERRGRUENDE = Object.freeze(['ig_lieferung', 'ausfuhr', 'dreieck', 'ig_erwerb', 'einfuhr', '13b_inland', 'oss_b2c', 'differenzbesteuerung', 'landwirt_24', 'steuerfrei_nr_8_29', 'option_9', 'mischnutzung', 'gebaeude_15_1b', 'ust_ausgewiesen_ku_14c', 'ausland_vorsteuer', 'fremdwaehrung_ohne_kurs', 'nicht_eur', 'leistungsort_sonderregeln']);
+export const SPERRGRUENDE = Object.freeze(['ig_lieferung', 'ausfuhr', 'dreieck', 'ig_erwerb', 'einfuhr', '13b_inland', 'oss_b2c', 'differenzbesteuerung', 'landwirt_24', 'steuerfrei_nr_8_29', 'option_9', 'mischnutzung', 'gebaeude_15_1b', 'ust_ausgewiesen_ku_14c', 'ausland_vorsteuer', 'fremdwaehrung_ohne_kurs', 'nicht_eur', 'leistungsort_sonderregeln', 'lager_ausland', 'ioss_einfuhr']);
 
-export const UNBEKANNT_GRUENDE = Object.freeze(['satz_fehlt', 'mwst_keine_mehrdeutig', 'reverse_charge_herkunft', 'auslandskunde', 'datum_fehlt', 'netto_fehlt', 'steuerfall_nicht_gewaehlt']);
+export const UNBEKANNT_GRUENDE = Object.freeze(['satz_fehlt', 'mwst_keine_mehrdeutig', 'reverse_charge_herkunft', 'auslandskunde', 'datum_fehlt', 'netto_fehlt', 'steuerfall_nicht_gewaehlt', 'land_widerspruch', 'b2b_status_unklar']);
 
 export const BELEG_ARTEN = Object.freeze(['rechnung', 'kleinbetrag', 'anzahlung', 'schlussrechnung', 'gutschrift_erteilt', 'gutschrift_erhalten', 'korrektur', 'storno', 'quittung', 'fa_zahlung', 'privat', 'sonstig']);
 
@@ -1238,6 +1329,66 @@ export const REGELN_NEU = frieren([
     quelle: '§ 4 Abs. 3, § 11 EStG (docs/quellen/estg-4.md, estg-11.md); Entscheidungen 3 und 4 (06-entscheidungen-und-status.md, Offen nach Gesamtprüfung), Standard laut 15-phase2/scope.md BP-07',
     konfidenz: 'B', konfidenz_konzept: 'neu aus Phase 2 (BP-07)', blockiert_durch: [], blockiert_konzept: '',
   },
+  {
+    regel_id: 'R-OSS-01', abschnitt: '2.4', sachverhalt: 'OSS: Steuersatz des Belegs gegen die Satzliste des Kundenlands',
+    regel: 'Der Kern übernimmt den Steuersatz vom Beleg bzw. von der Plattform und prüft nur, ob er in der Satzliste des Kundenlands am Leistungstag liegt (EU_SAETZE aus TEDB). Deutscher Satz bei Ort im Ausland: W_OSS_SATZ_DEUTSCH, Gebietssatz: W_OSS_SATZ_GEBIET, sonst fremd: W_OSS_SATZ_FREMD; bis zur Bestätigung keine Wirkung in Kz 45 und OSS-Liste. Welcher ermäßigte Satz gilt, entscheidet der Kern nie (K1).',
+    quelle: 'docs/quellen/tedb-mwst-saetze-2026-11-15-rf.md; § 3c Abs. 1, § 3a Abs. 5 UStG; K1',
+    konfidenz: 'B', konfidenz_konzept: 'neu aus Phase 3 (KERN-C, OSS)', blockiert_durch: [], blockiert_konzept: '',
+  },
+  {
+    regel_id: 'R-OSS-02', abschnitt: '2.4', sachverhalt: 'OSS: Grenze 10.000 EUR und Schwellenbeleg',
+    regel: 'Summe der Entgelte (netto) aus Fernverkäufen von Waren und elektronischen Leistungen an Privatkunden in anderen EU-Ländern, ein Topf über alle Länder, Vorjahr und laufendes Jahr. Der Ort wechselt ab dem Beleg, der die Summe über 10.000,00 EUR hebt; genau 10.000,00 EUR ist nicht überschritten; Vorjahr über 10.000 EUR: ab 1. Januar. Unsichere Belege (Land, Leistungsart, Kurs offen) zählen mit 0 bis Betrag; ist das Ergebnis dadurch offen, bleibt der Beleg unberechnet. Spätere Erstattungen mindern den Zähler nicht (Standard, C).',
+    quelle: '§ 3a Abs. 5 S. 3, § 3c Abs. 4 S. 1 UStG (docs/quellen/ustg-3a.md, ustg-3c.md); BZSt One-Stop-Shop (docs/quellen/bzst-oss-eu-regelung-2026-11-15-rf.md)',
+    konfidenz: 'A', konfidenz_konzept: 'neu aus Phase 3 (KERN-C, OSS)', blockiert_durch: [], blockiert_konzept: '',
+  },
+  {
+    regel_id: 'R-OSS-03', abschnitt: '2.4', sachverhalt: 'OSS: Zuordnung unter der Grenze, über der Grenze, Verzicht, Registrierung',
+    regel: 'Unter der Grenze: deutsche Steuer wie Inland (Kz 81/86, Kleinunternehmer A_KU), nur mit deutschem Satz auf dem Beleg. Über der Grenze, ab dem Verzicht (§ 3c Abs. 4 S. 2) oder ab der OSS-Registrierung (konkludenter Verzicht laut BZSt): A_OSS_EU_B2C. Versand aus einem anderen Mitgliedstaat oder dem Drittland, B2B mit USt-IdNr., Land DE oder ungeklärt: nicht berechnet.',
+    quelle: '§ 3c Abs. 1, 4, § 3a Abs. 5 UStG; BZSt; oss-recherche 1.2, 3.1',
+    konfidenz: 'B', konfidenz_konzept: 'neu aus Phase 3 (KERN-C, OSS)', blockiert_durch: [], blockiert_konzept: '',
+  },
+  {
+    regel_id: 'R-OSS-04', abschnitt: '2.4', sachverhalt: 'OSS: Kz 45 in der Voranmeldung',
+    regel: 'OSS-Umsätze und elektronische Leistungen an Privatkunden im Drittland stehen netto in Zeile 36 (Kz 45), ohne deutsche Steuer; Minderungen (Erstattungen) im Zeitraum der Minderung. Fremdwährung: Durchschnittskurs des Monats nach § 16 Abs. 6 S. 1 UStG aus der Eingabe, sonst Zwischenwert.',
+    quelle: 'Anleitung USt 1 E 2026 Zeile 36 (docs/quellen/bmf-2025-12-29-ust-voranmeldung-2026-vordruck-und-anleitung.md); § 16 Abs. 6 S. 1 UStG',
+    konfidenz: 'A', konfidenz_konzept: 'neu aus Phase 3 (KERN-C, OSS)', blockiert_durch: [], blockiert_konzept: '',
+  },
+  {
+    regel_id: 'R-OSS-05', abschnitt: '2.4', sachverhalt: 'OSS: Quartalsliste je Land und Satz, EZB-Kurs',
+    regel: 'Je Abschnitt (Waren aus Deutschland, Dienstleistungen), Land und Satz die Bemessungsgrundlage (Summe der Cent-Beträge) und die Steuer (Bemessung mal Satz, kaufmännisch auf Cent, C). Quartal nach Liefer- bzw. Leistungsdatum, auch bei Ist-Versteuerung (B). Fremdwährung je Land, Satz und Währung zum EZB-Kurs des letzten Quartalstags (übergeben, sonst unvollständig).',
+    quelle: '§ 16 Abs. 1d, Abs. 6 S. 4, 5 UStG (docs/quellen/ustg-16.md); BZSt; USP Österreich (docs/quellen/oss-portal-kommission-at-2026-11-15-rf.md)',
+    konfidenz: 'B', konfidenz_konzept: 'neu aus Phase 3 (KERN-C, OSS)', blockiert_durch: [], blockiert_konzept: '',
+  },
+  {
+    regel_id: 'R-OSS-06', abschnitt: '2.4', sachverhalt: 'OSS: Berichtigungen früherer Quartale',
+    regel: 'Änderungen eines früheren Quartals (Erstattung, nachgetragener Beleg) erscheinen in der Liste des laufenden Quartals als Berichtigung je Ursprungsquartal und Land mit bisher erklärter und berichtigter Steuer; bisher erklärt aus dem Abgabe-Schnappschuss, sonst gerechnet (W_OSS_ABGABE_FEHLT). Zahlbetrag je Land saldiert, Guthaben eines Landes erstattet dieses Land. Nur innerhalb von drei Jahren.',
+    quelle: '§ 18j Abs. 4 S. 5 UStG; BZSt (Beispiel Guthaben); ELSTER/BOP-Hilfe OSS (docs/quellen/oss-portal-kommission-at-2026-11-15-rf.md)',
+    konfidenz: 'A', konfidenz_konzept: 'neu aus Phase 3 (KERN-C, OSS)', blockiert_durch: [], blockiert_konzept: '',
+  },
+  {
+    regel_id: 'R-OSS-07', abschnitt: '2.4', sachverhalt: 'OSS: Fristen und Nullmeldung',
+    regel: 'Erklärung und Zahlungseingang bis zum letzten Tag des Monats nach dem Quartal (30.04., 31.07., 31.10., 31.01.), ohne Verschiebung an Wochenenden und Feiertagen; Nullmeldung bei Registrierung. Kontolux übermittelt nichts.',
+    quelle: '§ 18j Abs. 4 UStG (docs/quellen/ustg-18j.md); BZSt; Kommission OSS-Portal',
+    konfidenz: 'A', konfidenz_konzept: 'neu aus Phase 3 (KERN-C, OSS)', blockiert_durch: [], blockiert_konzept: '',
+  },
+  {
+    regel_id: 'R-OSS-08', abschnitt: '2.4', sachverhalt: 'OSS: Kleinunternehmer über der Grenze',
+    regel: 'Über der Grenze gilt § 19 UStG für diese Umsätze nicht (Ort im Ausland). Der Kern sperrt die Belege (A_KU_EU_B2C_UEBER_SCHWELLE) und nennt die Wege OSS, EU-Kleinunternehmerregelung (§ 19a) und Registrierung im Land, ohne Empfehlung; mit OSS-Registrierung rechnet er sie wie A_OSS_EU_B2C.',
+    quelle: '§ 19 Abs. 1, § 19a UStG (docs/quellen/ustg-19a-rf.md); BZSt EU-KU-Regelung',
+    konfidenz: 'B', konfidenz_konzept: 'neu aus Phase 3 (KERN-C, OSS)', blockiert_durch: [], blockiert_konzept: '',
+  },
+  {
+    regel_id: 'R-OSS-09', abschnitt: '2.4', sachverhalt: 'OSS: EÜR-Zeilen',
+    regel: 'Standard bis zur Antwort O-3: Entgelt netto Zeile 15 (Kz 112), vereinnahmte ausländische Steuer Zeile 17 (Kz 140); die Zahlung an die Bundeskasse erfasst der Nutzer als Zahlung. Gewinnneutral.',
+    quelle: 'Anleitung Anlage EÜR 2026 Zeilen 15 bis 17, 59 (docs/quellen/bmf-2026-09-01-anlage-euer-2026.md)',
+    konfidenz: 'C', konfidenz_konzept: 'neu aus Phase 3 (KERN-C, OSS)', blockiert_durch: ['O-3'], blockiert_konzept: '',
+  },
+  {
+    regel_id: 'R-OSS-10', abschnitt: '2.4', sachverhalt: 'Elektronische Leistung an Privatkunden im Drittland',
+    regel: 'Ort beim Empfänger (§ 3a Abs. 5 S. 1 UStG), keine 10.000-EUR-Grenze: Kz 45 netto, zählt nicht zur Grenze; Hinweis auf mögliche Pflichten im Land des Kunden. Ware ins Drittland: Ausfuhr, gesperrt.',
+    quelle: '§ 3a Abs. 5 S. 1 UStG; Anleitung USt 1 E Zeile 36',
+    konfidenz: 'A', konfidenz_konzept: 'neu aus Phase 3 (KERN-C, OSS)', blockiert_durch: [], blockiert_konzept: '',
+  },
 ]);
 
 // ---------------------------------------------------------------------------------------------
@@ -1251,7 +1402,14 @@ const U = (status, text, stelle) => Object.freeze({ status, text, stelle: stelle
 const NN3A = 'Stufe 3a: Reverse Charge wird vom Kern nicht gerechnet (E_13B_* werden mit HN_NOCH_NICHT_UNTERSTUETZT ausgeschlossen, Kz 83 Zwischenwert); umgesetzt ab Stufe 3a.';
 const RC = 'Hinter der Kern-Option rc_eingang (Feature ausland): ';
 const NN3B = 'Stufe 3b/4: nicht berechnet (Beleg ausgeschlossen, in nicht_berechnet genannt); noch nicht umgesetzt.';
+const OSS = 'Hinter der Kern-Option oss (Feature oss): ';
 export const REGEL_UMSETZUNG = Object.freeze({
+  // KERN-C (BP-26/BP-27): OSS hinter der Kern-Option oss; ohne Option bleiben b2c-Belege UNBEKANNT (auslandskunde)
+  'R-OSS-01': U('umgesetzt', OSS + 'Satzprüfung gegen EU_SAETZE', 'oss.js:export function ossSatzPruefung'), 'R-OSS-02': U('umgesetzt', OSS + 'Schwelle mit Schwellenbeleg', 'oss.js:export function ossSchwelle'),
+  'R-OSS-03': U('umgesetzt', OSS + 'Zuordnung je Beleg', 'oss.js:export function ossZuordnung'), 'R-OSS-04': U('umgesetzt', OSS + 'Z.36 Kz 45', 'ustva.js:kz45'),
+  'R-OSS-05': U('umgesetzt', OSS + 'Quartalsliste', 'oss.js:export function ossQuartal'), 'R-OSS-06': U('umgesetzt', OSS + 'Berichtigungen aus Abgabe-Schnappschüssen', 'oss.js:berichtigungen'),
+  'R-OSS-07': U('umgesetzt', OSS + 'Frist ohne Verschiebung', 'oss.js:export function ossFrist'), 'R-OSS-08': U('umgesetzt', OSS + 'Sperre mit Weiche', 'oss.js:A_KU_EU_B2C_UEBER_SCHWELLE'),
+  'R-OSS-09': U('umgesetzt', OSS + 'EÜR Kz 112/140 mit W_OSS_EUER_ZUORDNUNG', 'wirkung.js:W_OSS_EUER_ZUORDNUNG'), 'R-OSS-10': U('umgesetzt', OSS + 'Drittland-TBE Kz 45', 'oss.js:A_DRITTLAND_B2C_TBE'),
   // KERN-B (BP-05a): Reverse Charge Eingang gerechnet hinter der Kern-Option rc_eingang (Feature ausland); ohne Option wie bisher ausgeschlossen
   'R-13B-01': U('umgesetzt', RC + 'EU-Dienstleister Kz 46/47', 'wirkung.js:function reverseChargeWirkung'), 'R-13B-02': U('umgesetzt', RC + 'Kz 67 aus derselben Basis, nur Status Regel', 'wirkung.js:rc_vorsteuer'),
   'R-13B-03': U('umgesetzt', RC + 'Drittland Kz 84/85', 'wirkung.js:function reverseChargeWirkung'),
@@ -1262,7 +1420,7 @@ export const REGEL_UMSETZUNG = Object.freeze({
   'R-13B-08': U('teilweise', 'Sperrgrund ig_erwerb/einfuhr nur per Nutzerwahl (UI), keine Erkennung im Kern.'),
   'R-13B-09': U('teilweise', 'Sperrgrund 13b_inland (SPERRE_STUFE4) nur per Nutzerwahl, keine Stichwort-Erkennung im Kern.'), 'R-13B-10': U('umgesetzt', RC + 'EÜR: Zahlung als Ausgabe, nichts in Kz 185', 'wirkung.js:R-13B-10'),
   'R-ZP-12': U('umgesetzt', RC + '§ 13b Abs. 1: Zeitraum der Leistung', 'wirkung.js:function reverseChargeWirkung'), 'R-ZP-13': U('umgesetzt', RC + '§ 13b Abs. 2 Nr. 1: Rechnung, spätestens Ablauf des Folgemonats', 'wirkung.js:function reverseChargeWirkung'), 'R-ZP-14': U('umgesetzt', RC + '§ 13b Abs. 4 S. 2: Anzahlung im Zeitraum der Zahlung', 'wirkung.js:function reverseChargeWirkung'), 'R-ZP-15': U('teilweise', 'Dauerleistung über ein Jahr (§ 13b Abs. 3) wird auch mit rc_eingang nicht gerechnet (Ausschluss rc_dauerleistung, Zwischenwert).'),
-  'R-KZ-30': U('umgesetzt', RC + 'Z.30', 'ustva.js:rc46'), 'R-KZ-32': U('umgesetzt', RC + 'Z.32', 'ustva.js:rc84'), 'R-KZ-41': U('umgesetzt', RC + 'Z.41', 'ustva.js:rc67'), 'R-KZ-35': U('noch_nicht', NN3B), 'R-KZ-36': U('noch_nicht', NN3B),
+  'R-KZ-30': U('umgesetzt', RC + 'Z.30', 'ustva.js:rc46'), 'R-KZ-32': U('umgesetzt', RC + 'Z.32', 'ustva.js:rc84'), 'R-KZ-41': U('umgesetzt', RC + 'Z.41', 'ustva.js:rc67'), 'R-KZ-35': U('noch_nicht', NN3B), 'R-KZ-36': U('teilweise', OSS + 'Kz 45 aus A_OSS_EU_B2C und A_DRITTLAND_B2C_TBE (ustva.js kz45); B2B-Leistungen ins Drittland (A_NICHT_STEUERBAR_DRITTLAND_B2B_DL) weiter nicht berechnet (Stufe 3b).'),
   'R-KZ-51': U('umgesetzt', 'Kz 50 aus Uneinbringlichkeit (positiv), hinter der Kern-Option uneinbringlichkeit (Feature korrektur).', 'ustva.js:kz50'),
   'R-KZ-52': U('umgesetzt', 'Kz 37 aus Uneinbringlichkeit (positiv), hinter der Kern-Option uneinbringlichkeit (Feature korrektur).', 'ustva.js:kz37'),
   'R-KZ-23': U('teilweise', 'Kz 48 (Z.23) wird nur im Jahr eines unterjährigen Wechsels für die steuerfreien Kleinunternehmer-Umsätze im Zeitraum des Wechsels berechnet (ustva.js kz48Cent); steuerfreie Umsätze nach § 4 Nr. 8 bis 29 bleiben nicht berechnet (nicht_berechnet).', 'ustva.js:kz48Cent'),

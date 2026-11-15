@@ -13,7 +13,7 @@ import { istDatum, monatsende, monatsanfang, datumAusTagen, tageSeitEpoche, form
 import { statusAm, statusFuerAusgangsumsatz, vorsteuerAbziehbar } from './steuerprofil.js';
 import {
   STEUERFAELLE, SPERRGRUENDE, BELEG_ARTEN, KORREKTUR_GRUENDE, FA_ARTEN, KATEGORIEN, STEUERSAETZE, GRENZEN, SATZ_REGEL_BP, SATZ_ERMAESSIGT_BP, SATZ_NULL_BP,
-  FA_ALT_KATEGORIEN, FA_KATEGORIE_ZU_ART, anbieterLage,
+  FA_ALT_KATEGORIEN, FA_KATEGORIE_ZU_ART, anbieterLage, istEuLand, EU_LAENDER,
 } from './tabellen.js';
 
 const istObjekt = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -266,6 +266,15 @@ function fremdAnzahlungen(e, f) {
 function fremdVorbereiten(e) {
   if (!istObjekt(e.fremd)) return { e, hinweis: null, sperre: null };
   const f = e.fremd;
+  if (e.steuerwahl === 'b2c_ausland') {
+    // KERN-C: Fremdwährung bei Verkauf ins Ausland bleibt für steuer.oss erhalten (OSS-Liste rechnet zum EZB-Kurs des Quartalsendes); der Beleg selbst
+    // trägt den Euro-Betrag zum Monatskurs, falls angegeben, sonst die Summe der Euro-Zahlungen (brutto) bzw. 0 (Beleg bleibt ohnehin UNBEKANNT)
+    const euro = fremdInEuroCent(f.betrag_cent, f.kurs);
+    const zs = Array.isArray(e.zahlungen) ? e.zahlungen : (istObjekt(e.zahlung) ? [e.zahlung] : []);
+    const gez = zs.filter((z) => istObjekt(z) && istCent(z.betrag_cent) && z.betrag_cent > 0).reduce((a, z) => a + z.betrag_cent, 0);
+    const betrag = euro !== null ? { cent: euro, art: f.art === 'brutto' ? 'brutto' : 'netto' } : { cent: gez, art: 'brutto' };
+    return { e: { ...e, fremd: undefined, positionen: undefined, betrag }, hinweis: 'W_WAEHRUNG_KURS', sperre: null, ossFremd: f };
+  }
   const rc = RC_WAHLEN.includes(e.steuerwahl);
   const cent = fremdInEuroCent(f.betrag_cent, f.kurs);
   if (!rc) return { e: { ...e, fremd: undefined }, hinweis: 'W_WAEHRUNG_KURS', sperre: 'nicht_eur' };
@@ -275,6 +284,89 @@ function fremdVorbereiten(e) {
   if (!a.anzahlung) return { e: { ...e, fremd: undefined, positionen: undefined, betrag: { cent, art: 'netto' } }, hinweis: 'W_WAEHRUNG_KURS', sperre: null };
   const netto = a.basis + fremdInEuroCent(a.rest, f.kurs);
   return { e: { ...e, fremd: undefined, positionen: undefined, betrag: { cent: netto, art: 'netto' }, zahlungen: a.zahlungen, zahlung: undefined }, hinweis: 'W_WAEHRUNG_KURS', sperre: null };
+}
+
+// ---------------------------------------------------------------------------------------------
+// KERN-C (Phase 3, Release C, BP-26/BP-27): Verkauf an Privatkunden im Ausland (steuerwahl 'b2c_ausland'). Eingabe zusätzlich:
+//   leistungsart 'ware' (innergemeinschaftlicher Fernverkauf, § 3c Abs. 1 UStG) | 'tbe' (Telekommunikation, Rundfunk, elektronische Leistung,
+//   § 3a Abs. 5 S. 2 UStG); gegenpartei { land (ISO, Lieferland vor Rechnungsland), ust_id, unternehmer, gebiet }; Satz wie auf dem Beleg bzw. von der
+//   Plattform berechnet (satz_bp, positionen[].satz_bp, ust_cent); fremd { waehrung, betrag_cent (netto, oder art 'brutto'), kurs (Monatskurs § 16 Abs. 6
+//   S. 1 UStG, optional) }; versand_von (Land, aus dem die Ware versandt wird; fehlt: Deutschland angenommen); oss_satz_bestaetigt true.
+// Der Beleg selbst bleibt immer UNBEKANNT mit unbekannt_grund 'auslandskunde' (so wie Plattformbelege seit BP-21a), damit ohne Kern-Option oss alles
+// beim Alten bleibt. steuer.oss trägt die Daten für die Zuordnung, die erst über alle Belege möglich ist (oss.js ossZuordnung, Schwelle Vorjahr und
+// laufendes Jahr). Nicht OSS: Land fehlt (auslandskunde ohne oss), Kunde mit USt-IdNr. oder Unternehmer (b2b_status_unklar), Land DE oder Helgoland
+// (land_widerspruch), Ware ins Drittland (Sperre ausfuhr), Versand aus einem anderen Mitgliedstaat (lager_ausland) oder dem Drittland (ioss_einfuhr).
+// Zeilen: je Position bzw. Gesamtbetrag { netto_cent, ust_cent, satz_bp } in der Belegwährung, Korrekturen negativ.
+function ossZeilen(e, fremd, vorz) {
+  const zeile = (netto, brutto, ustIn, satz, art) => {
+    let n = 0;
+    let u = 0;
+    if (art === 'brutto' || (netto === null && brutto !== null)) {
+      const b = brutto !== null ? brutto : netto;
+      u = istCent(ustIn) ? ustIn : (satz !== null ? ustAusBrutto(b, satz) : 0);
+      n = b - u;
+    } else {
+      n = netto;
+      u = istCent(ustIn) ? ustIn : (satz !== null ? ustAusNetto(n, satz) : 0);
+    }
+    return { netto_cent: vorz * n, ust_cent: vorz * u, satz_bp: satz };
+  };
+  const satzBeleg = satzGueltig(e.satz_bp) ? e.satz_bp : null;
+  if (fremd) {
+    if (!istCent(fremd.betrag_cent) || fremd.betrag_cent < 0) return null;
+    return [zeile(fremd.art === 'brutto' ? null : fremd.betrag_cent, fremd.art === 'brutto' ? fremd.betrag_cent : null, fremd.ust_cent, satzBeleg, fremd.art === 'brutto' ? 'brutto' : 'netto')];
+  }
+  if (Array.isArray(e.positionen) && e.positionen.length) {
+    const out = [];
+    for (const p of e.positionen) {
+      if (!istObjekt(p)) continue;
+      const satz = satzGueltig(p.satz_bp) ? p.satz_bp : satzBeleg;
+      const n = istCent(p.netto_cent) && p.netto_cent >= 0 ? p.netto_cent : null;
+      const b = istCent(p.brutto_cent) && p.brutto_cent >= 0 ? p.brutto_cent : null;
+      if (n === null && b === null) return null;
+      out.push(zeile(n, b, p.ust_cent, satz, n === null ? 'brutto' : 'netto'));
+    }
+    return out.length ? out : null;
+  }
+  if (istObjekt(e.betrag) && istCent(e.betrag.cent) && e.betrag.cent >= 0) {
+    const art = e.betrag.art;
+    if (art === 'ust_ausgewiesen') return [zeile(e.betrag.cent, null, istCent(e.betrag.ust_cent) ? e.betrag.ust_cent : 0, satzBeleg, 'netto')];
+    return [zeile(art === 'brutto' ? null : e.betrag.cent, art === 'brutto' ? e.betrag.cent : null, undefined, satzBeleg, art === 'brutto' ? 'brutto' : 'netto')];
+  }
+  return null;
+}
+function ossEingabe(e, fremd, istKorrektur) {
+  const gp = istObjekt(e.gegenpartei) ? e.gegenpartei : {};
+  const land = nichtLeer(gp.land) ? gp.land.trim().toUpperCase() : null;
+  const ustId = nichtLeer(gp.ust_id) ? gp.ust_id : null;
+  const r = { steuerfall: 'UNBEKANNT', unbekanntGrund: 'auslandskunde', unbekanntDetail: null, sperrgrund: null, oss: null, hinweis: null };
+  if (!land) { r.unbekanntDetail = 'land_fehlt'; r.hinweis = 'W_GEGENPARTEI_LAND_FEHLT'; return r; }
+  if (ustId || gp.unternehmer === 'ja' || gp.unternehmer === true) { r.unbekanntGrund = 'b2b_status_unklar'; return r; }
+  const lage = anbieterLage(land, gp.gebiet);
+  if (lage === 'inland') { r.unbekanntGrund = 'land_widerspruch'; r.unbekanntDetail = 'land_inland'; return r; }
+  const la = e.leistungsart === 'ware' || e.leistungsart === 'tbe' ? e.leistungsart : null;
+  if (lage === 'drittland' && la === 'ware') { r.steuerfall = 'SPERRE_STUFE4'; r.sperrgrund = 'ausfuhr'; r.unbekanntGrund = null; return r; }
+  const versand = nichtLeer(e.versand_von) ? e.versand_von.trim().toUpperCase() : null;
+  if (la === 'ware' && versand && versand !== 'DE') {
+    r.steuerfall = 'SPERRE_STUFE4'; r.unbekanntGrund = null;
+    r.sperrgrund = istEuLand(versand) === true ? 'lager_ausland' : 'ioss_einfuhr';
+    return r;
+  }
+  const zeilen = ossZeilen(e, fremd, istKorrektur ? -1 : 1);
+  if (!zeilen) { r.unbekanntGrund = 'netto_fehlt'; return r; }
+  const iso = Object.hasOwn(EU_LAENDER.aliase, land) ? EU_LAENDER.aliase[land] : land;
+  const waehrung = fremd && nichtLeer(fremd.waehrung) ? fremd.waehrung.trim().toUpperCase() : 'EUR';
+  r.oss = {
+    leistungsart: la,
+    land: iso,
+    lage: lage === 'eu' ? 'eu' : lage === 'drittland' ? 'drittland' : 'ungeklaert',
+    zeilen,
+    waehrung,
+  };
+  if (fremd && fremdInEuroCent(1, fremd.kurs) !== null) r.oss.kurs_monat = String(fremd.kurs);
+  if (versand) r.oss.versand_von = versand;
+  if (e.oss_satz_bestaetigt === true) r.oss.satz_bestaetigt = true;
+  return r;
 }
 
 export function normalisiereEingabe(eingabe, kontext) {
@@ -395,6 +487,7 @@ export function normalisiereEingabe(eingabe, kontext) {
   let satzBp = satzGueltig(e.satz_bp) ? e.satz_bp : (wahl && Object.hasOwn(SATZ_ID, wahl) ? SATZ_ID[wahl] : null);
   let ausschluss = null;
   let dialog = null;
+  let ossDaten = null;
 
   if (istPrivat) {
     steuerfall = 'PRIVAT';
@@ -432,6 +525,17 @@ export function normalisiereEingabe(eingabe, kontext) {
     unbekanntGrund = 'steuerfall_nicht_gewaehlt';
     unbekanntDetail = 'ki_unbestaetigt';
     unsicherheiten.push(hin('W_KI_UNBESTAETIGT', 'herkunft', 'KI-Vorschlag: Steuerwahl bestätigen'));
+  } else if (wahl === 'b2c_ausland') {
+    // KERN-C: Verkauf an Privatkunden im Ausland, Zuordnung erst über alle Belege (oss.js); hier immer UNBEKANNT/auslandskunde plus steuer.oss
+    const oe = ossEingabe(eingabe, fv.ossFremd || null, istKorrektur);
+    steuerfall = oe.steuerfall;
+    unbekanntGrund = oe.unbekanntGrund;
+    if (oe.unbekanntDetail) unbekanntDetail = oe.unbekanntDetail;
+    sperrgrund = oe.sperrgrund;
+    ossDaten = oe.oss;
+    if (oe.hinweis) unsicherheiten.push(hin(oe.hinweis, 'gegenpartei.land', 'Land des Kunden fehlt'));
+    satzBp = null;
+    herkunft = herkunft === 'nutzer' ? 'beleg' : herkunft;
   } else if (!istKorrektur && status === 'unbekannt') {
     steuerfall = 'UNBEKANNT';
     unbekanntGrund = 'steuerfall_nicht_gewaehlt';
@@ -718,6 +822,7 @@ export function normalisiereEingabe(eingabe, kontext) {
     herkunft: { weg: e.weg || 'unbekannt', erfasst_am: istDatum(e.erfasst_am) ? e.erfasst_am : null, erfasst_von: e.herkunft || 'nutzer', kern_version: ctx.kern_version || null },
   };
   if (unbekanntDetail) steuer.unbekannt_detail = unbekanntDetail;
+  if (ossDaten) steuer.oss = ossDaten;
   if (erhaltAngenommen) steuer.erhalt_angenommen = true;
   if (bewirtung) steuer.bewirtung = bewirtung;
   if (geschenk) steuer.geschenk = geschenk;

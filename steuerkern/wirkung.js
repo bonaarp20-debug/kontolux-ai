@@ -23,6 +23,7 @@ import { istDatum, jahrVon, addiereMonate, monatsende, periodenEnde, periodenArt
 import { voranmeldungsperiodeFuer, voranmeldungAm, versteuerungAm, statusAm, statusFuerAusgangsumsatz, gwgWahlFuer } from './steuerprofil.js';
 import { regelNachId, KATEGORIEN, GRENZEN, USTVA_ZEILEN, EUER_ZEILEN, STEUERSAETZE, BELEG_ARTEN, KORREKTUR_GRUENDE, basisKzFuerSatz, anbieterLage, SATZ_REGEL_BP, SATZ_ERMAESSIGT_BP } from './tabellen.js';
 import { KORREKTUR_ARTEN, tagVonZeit, normalisiereAlt } from './beleg.js';
+import { ossBelegeVorbereiten, ossSatzPruefung, ossNettoEuro, ossSchwellenSpanne, OSS_FAELLE } from './oss.js';
 
 const istObjekt = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 
@@ -31,9 +32,11 @@ const istObjekt = (x) => x !== null && typeof x === 'object' && !Array.isArray(x
 // über optionenAusFeatures (KERN-B2, A1).
 //   uneinbringlichkeit           (Feature korrektur)  § 17 Abs. 2 Nr. 1 UStG, Kz 50/37 (BP-04b)
 //   anlagegut_vorsteuer_sofort   (Feature anlagegut)  Vorsteuer aus Anlagegütern sofort, EÜR nach GWG-/Sammelposten-/AfA-Wahl (BP-04b)
-//   kz39_verzicht                (Feature voranmeldung) Kz 39 im letzten Monat mit Dauerfrist bei Verzicht im Jahr (BP-04b)
+//   kz39_verzicht                (Feature kz39)       Kz 39 im letzten Monat mit Dauerfrist bei Verzicht im Jahr (BP-04b); KERN-C nach G-EB F2: eigenes Feature
+//                                                     kz39 (Standard aus) statt voranmeldung, das für alle Release-A-Konten an ist und sonst Zahlen ändern würde
 //   rc_eingang                   (Feature ausland)    § 13b UStG Eingang: Kz 46/47, 84/85, 67 (BP-05a)
-export const KERN_REGELN = Object.freeze(['uneinbringlichkeit', 'anlagegut_vorsteuer_sofort', 'kz39_verzicht', 'rc_eingang']);
+//   oss                          (Feature oss)        KERN-C: Verkäufe an Privatkunden im EU-Ausland (Schwelle, Kz 45, OSS-Liste) (BP-26/BP-27)
+export const KERN_REGELN = Object.freeze(['uneinbringlichkeit', 'anlagegut_vorsteuer_sofort', 'kz39_verzicht', 'rc_eingang', 'oss']);
 export function regelAn(optionen, name) {
   return istObjekt(optionen) && istObjekt(optionen.regeln) && optionen.regeln[name] === true;
 }
@@ -49,7 +52,8 @@ export const KERN_OPTION_FEATURES = Object.freeze({
   rc_eingang: 'ausland',
   uneinbringlichkeit: 'korrektur',
   anlagegut_vorsteuer_sofort: 'anlagegut',
-  kz39_verzicht: 'voranmeldung',
+  kz39_verzicht: 'kz39', // KERN-C (G-EB F2): eigenes Feature, voranmeldung schaltet keine Kern-Option
+  oss: 'oss',
 });
 export function optionenAusFeatures(features) {
   let f = istObjekt(features) ? features : {};
@@ -391,7 +395,7 @@ function belegHinweise(s, profil) {
     if (s.sperrgrund === '13b_inland') add('W_13B_INLAND_STICHWORT');
     if (s.sperrgrund === 'leistungsort_sonderregeln') add('W_LEISTUNGSORT_NICHT_BERECHNET');
   }
-  for (const c of Array.isArray(s.status_hinweise) ? s.status_hinweise : []) if (typeof c === 'string' && (c.startsWith('W_') || c === 'HN_RC_OHNE_RECHNUNG')) add(c);
+  for (const c of Array.isArray(s.status_hinweise) ? s.status_hinweise : []) if (typeof c === 'string' && (c.startsWith('W_') || c === 'HN_RC_OHNE_RECHNUNG' || /^HN_OSS_/.test(c))) add(c);
   if (anlagegutHinweis(s)) add('W_ANLAGEGUT_PRUEFEN');
   return h;
 }
@@ -405,8 +409,8 @@ const STEUERFAELLE_GERECHNET = Object.freeze(['A_KU', 'A_INLAND_19', 'A_INLAND_7
 // Kategorien, unter denen üblicherweise Anlagegüter (Computer, Möbel, Software-Lizenz) landen (wie AFA_HINWEIS_KATEGORIEN im Altpfad)
 const ANLAGEGUT_VERDAECHTIG = Object.freeze(['Bürobedarf', 'Software/EDV/SaaS']);
 const KORREKTUR_GRUENDE_NICHT_UNTERSTUETZT = Object.freeze(['uneinbringlich', 'ust_falsch_ausgewiesen', 'geschenk_nachtraeglich', 'skonto']);
-const UST_ROLLEN_MIT_KZ = Object.freeze(['umsatz', 'anzahlung', 'minderung', 'vorsteuer', 'vorsteuer_minderung', 'rc_umsatz', 'rc_vorsteuer']);
-const UST_KZ_BEKANNT = Object.freeze([81, 86, 87, 66, 46, 84, 67]); // 46/84/67 nur aus reverseChargeWirkung (Kern-Option rc_eingang)
+const UST_ROLLEN_MIT_KZ = Object.freeze(['umsatz', 'anzahlung', 'minderung', 'vorsteuer', 'vorsteuer_minderung', 'rc_umsatz', 'rc_vorsteuer', 'nst_umsatz']);
+const UST_KZ_BEKANNT = Object.freeze([81, 86, 87, 66, 46, 84, 67, 45]); // 46/84/67 nur aus reverseChargeWirkung (Kern-Option rc_eingang), 45 nur aus ossWirkungen (Kern-Option oss)
 const satzOk = (x) => x === null || x === undefined || (Number.isSafeInteger(x) && x >= 0 && x <= 10000);
 
 // TR3-kern (Entscheidung 13.11.2026, Welle 3, offene Frage "Software/SaaS über 800 EUR"): Cloud- und Software-Abonnements sind regelmäßig laufende
@@ -654,6 +658,9 @@ export function belegZeitraumDaten(dok) {
       tag(tage, s.rechnung_erhalt_am);
       tag(tage, s.wirkdatum);
       spanne(s.leistung, spanneBisFolgemonat(s));
+      // KERN-C: Verkauf an Privatkunden im EU-Ausland wirkt über die Schwelle (Kern-Option oss) bis zum Ende des Folgejahres (Vorjahreswert, Obermenge)
+      const os = ossSchwellenSpanne(s);
+      if (os) spannen.push(os);
       for (const p of Array.isArray(s.positionen) ? s.positionen : []) if (istObjekt(p)) spanne(p.leistung, false);
       for (const z of Array.isArray(s.zahlungen) ? s.zahlungen : []) {
         if (!istObjekt(z)) continue;
@@ -815,7 +822,9 @@ export function belegWirkungen(beleg, profil, optionen) {
     return o0;
   }
   try {
-    if (sf === 'SPERRE_STUFE4' || (typeof s.sperrgrund === 'string' && s.sperrgrund !== '' && sf !== 'FA_ZAHLUNG')) {
+    if (OSS_FAELLE.includes(sf) && regelAn(opt, 'oss')) {
+      ossWirkungen(s, profil, ctx, out);
+    } else if (sf === 'SPERRE_STUFE4' || (typeof s.sperrgrund === 'string' && s.sperrgrund !== '' && sf !== 'FA_ZAHLUNG')) {
       // TR-ausland-014: ein gesetzter Sperrgrund sperrt den Beleg auch an einem sonst gerechneten Steuerfall (W_SPERRGRUND_BEI_STEUERFALL)
       if (sf !== 'SPERRE_STUFE4' && !hinweise.includes('W_SPERRGRUND_BEI_STEUERFALL')) hinweise.push('W_SPERRGRUND_BEI_STEUERFALL');
       ctx.beleg_status = 'ausgeschlossen';
@@ -827,6 +836,8 @@ export function belegWirkungen(beleg, profil, optionen) {
       const datum = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null;
       const per = datum ? ustPeriode(profil, datum, hinweise) : null;
       out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: datum, rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-ZP-11', hinweis_detail: s.unbekannt_grund || null }));
+      // KERN-C: Beleg mit steuer.oss, ohne Kern-Option oss gerechnet (keine Zuordnung): Spur für kernOptionenAusWirkungen (W_KERN_OPTIONEN_WIDERSPRUCH)
+      if (istObjekt(s.oss) && !istObjekt(s.oss.zuordnung)) out[out.length - 1].oss_ohne_option = true;
       if (per) weitereHinweisWirkungen(s, profil, ctx, out, per, { status: 'unbekannt', regel_id: 'R-ZP-11', hinweis_detail: s.unbekannt_grund || null });
       // EÜR: Brutto der Zahlungen als "unsicher" (Entscheidung 3.3-a), getrennt von den Kennzahlen
       for (const z of aktiveZahlungen(s)) {
@@ -1112,6 +1123,59 @@ function ausgangWirkungen(s, profil, ctx, out, opt) {
     out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: z.datum, kz: 112, netto_cent: nettoS, betrag_cent: nettoS, rolle: 'einnahme', spalte: 'einnahme', regel_id: 'R-EUER-02', ereignis_id: z.id }));
     if (ustS !== 0) out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: z.datum, kz: 140, netto_cent: ustS, betrag_cent: ustS, rolle: 'einnahme', spalte: 'einnahme', regel_id: 'R-EUER-04', ereignis_id: z.id }));
   });
+}
+
+// ---------------------------------------------------------------------------------------------
+// KERN-C (BP-27): Verkauf an Privatkunden im Ausland mit Ort im Ausland (A_OSS_EU_B2C, A_DRITTLAND_B2C_TBE) und Kleinunternehmer über der Schwelle
+// (A_KU_EU_B2C_UEBER_SCHWELLE), nur mit Kern-Option oss. Voranmeldung: Kz 45 netto (Zeile 36), keine deutsche Steuer, im Zeitraum des Leistungstags
+// (Korrektur: Wirkdatum), auch bei Ist-Versteuerung (W_OSS_IST_ZEITRAUM, B). Satz nicht in der Satzliste und nicht bestätigt: nicht berechnet. Fremdwährung
+// ohne Monatskurs (§ 16 Abs. 6 S. 1 UStG): nicht berechnet. EÜR: je Zahlung Netto Kz 112 und ausländische Steuer Kz 140 (O-3, C, W_OSS_EUER_ZUORDNUNG);
+// Fremdwährung und Korrekturen als unsicherer Betrag (R-EUER-35).
+// ---------------------------------------------------------------------------------------------
+function ossWirkungen(s, profil, ctx, out) {
+  const sf = s.steuerfall;
+  const o = s.oss;
+  const korr = KORREKTUR_ARTEN.includes(s.beleg_art);
+  const datum = korr ? (istDatum(s.wirkdatum) ? s.wirkdatum : null) : (istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null);
+  const per = datum ? ustPeriode(profil, datum, ctx.hinweise) : null;
+  const unsichereEuer = () => {
+    for (const z of aktiveZahlungen(s)) out.push(mk(ctx, { welt: 'euer', periode: String(jahrVon(z.datum)), datum_wirk: z.datum, kz: null, betrag_cent: z.betrag_cent, netto_cent: z.betrag_cent, rolle: s.richtung === 'ausgang' ? 'einnahme' : 'ausgabe', spalte: s.richtung === 'ausgang' ? 'einnahme' : 'ausgabe', status: 'unbekannt', regel_id: 'R-EUER-35', unsicher: true, ereignis_id: z.id }));
+  };
+  const offen = (detail, code, status) => {
+    ctx.beleg_status = status === 'ausgeschlossen' ? 'ausgeschlossen' : 'unbekannt';
+    if (code && !ctx.hinweise.includes(code)) ctx.hinweise.push(code);
+    out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: datum, rolle: 'hinweis', status: status || 'unbekannt', regel_id: sf === 'A_KU_EU_B2C_UEBER_SCHWELLE' ? 'R-OSS-08' : 'R-OSS-04', hinweis_detail: detail, euer_zahlungen: status === 'ausgeschlossen' ? gesperrteZahlungen(s) : undefined }));
+    if (status !== 'ausgeschlossen') unsichereEuer();
+  };
+  if (!datum) { offen('oss_datum_fehlt', null); return; }
+  if (sf === 'A_KU_EU_B2C_UEBER_SCHWELLE') { offen('oss_ku_weiche', 'W_OSS_KU_WEICHE', 'ausgeschlossen'); return; }
+  if (versteuerungAm(profil, datum).art === 'ist' && !ctx.hinweise.includes('W_OSS_IST_ZEITRAUM')) ctx.hinweise.push('W_OSS_IST_ZEITRAUM');
+  if (sf === 'A_OSS_EU_B2C') {
+    const tagOrig = korr && istObjekt(o.zuordnung) && istDatum(o.zuordnung.datum_original) ? o.zuordnung.datum_original : datum;
+    if (o.satz_bestaetigt === true) { if (!ctx.hinweise.includes('HN_OSS_SATZ_BESTAETIGT')) ctx.hinweise.push('HN_OSS_SATZ_BESTAETIGT'); }
+    else {
+      const fehl = o.zeilen.map((x) => ossSatzPruefung(o.land, x.satz_bp, tagOrig)).find((r) => !r.ok);
+      if (fehl) { offen('oss_satz', fehl.code); return; }
+    }
+  }
+  const netto = ossNettoEuro(o);
+  if (netto === null) { offen('oss_kurs_fehlt', 'W_OSS_KURS_FEHLT'); return; }
+  const hinw = [sf === 'A_DRITTLAND_B2C_TBE' ? 'HN_OSS_DRITTLAND_TBE' : 'HN_OSS_KZ45'];
+  out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: datum, kz: 45, netto_cent: netto, ust_cent: 0, rolle: 'nst_umsatz', satz_bp: null, regel_id: sf === 'A_DRITTLAND_B2C_TBE' ? 'R-OSS-10' : 'R-OSS-04', hinweise: hinw }));
+  out[out.length - 1].oss_land = o.land;
+  // EÜR
+  if (korr || o.waehrung !== 'EUR') { unsichereEuer(); return; }
+  let n = 0; let u = 0;
+  for (const x of o.zeilen) { n += x.netto_cent; u += x.ust_cent; }
+  const brutto = n + u;
+  for (const z of aktiveZahlungen(s)) {
+    const jahr = String(jahrVon(z.datum));
+    const nz = brutto > 0 ? mulDivRund(z.betrag_cent, n, brutto) : z.betrag_cent;
+    const uz = z.betrag_cent - nz;
+    const he = sf === 'A_OSS_EU_B2C' ? ['W_OSS_EUER_ZUORDNUNG'] : [];
+    if (nz !== 0) out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: z.datum, kz: 112, netto_cent: nz, betrag_cent: nz, rolle: 'einnahme', spalte: 'einnahme', regel_id: 'R-OSS-09', ereignis_id: z.id, hinweise: he }));
+    if (uz !== 0) out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: z.datum, kz: 140, netto_cent: uz, betrag_cent: uz, rolle: 'einnahme', spalte: 'einnahme', regel_id: 'R-OSS-09', ereignis_id: z.id, hinweise: he }));
+  }
 }
 
 function sortiertVerlauf(verlauf) {
@@ -2132,12 +2196,15 @@ export function alleWirkungen(belege, profil, optionen) {
     if (istObjekt(b) && istObjekt(b.steuer) && b.steuer.wirkungslos !== true && b.steuer.steuerfall !== 'PRIVAT' && typeof b.id === 'string' && b.id !== '') idZaehler.set(b.id, (idZaehler.get(b.id) || 0) + 1);
   }
   const doppelt = (b) => istObjekt(b) && istObjekt(b.steuer) && b.steuer.wirkungslos !== true && b.steuer.steuerfall !== 'PRIVAT' && typeof b.id === 'string' && (idZaehler.get(b.id) || 0) > 1;
-  const vorbereitet = geschenkePruefen(sortiert);
+  // KERN-C: mit Kern-Option oss bekommen Belege mit steuer.oss ihren Steuerfall aus der Schwelle über alle Belege (oss.js), sonst unverändert
+  const vorbereitet = geschenkePruefen(ossBelegeVorbereiten(sortiert, profil, optionen));
   const originale = new Map();
   for (const b of vorbereitet) if (b && typeof b.id === 'string') originale.set(b.id, b);
   // Korrekturen zuerst prüfen: Die Zerlegung nach Zahlungsstand und der Abzug vom Leistungsposten (Rückgängigmachung vor der Leistung) gehören
   // zum Original, das vor den Korrekturen gerechnet wird.
-  const korrekturen = vorbereitet.filter((b) => { const s = b && b.steuer; return istObjekt(s) && KORREKTUR_ARTEN.includes(s.beleg_art); });
+  // KERN-C: Korrekturen eines OSS-Belegs (A_OSS_EU_B2C, A_DRITTLAND_B2C_TBE, Sperre) rechnet ossWirkungen selbst, nicht der Korrekturpfad
+  const ossKorr = (s) => istObjekt(s) && OSS_FAELLE.includes(s.steuerfall) && regelAn(optionen, 'oss');
+  const korrekturen = vorbereitet.filter((b) => { const s = b && b.steuer; return istObjekt(s) && KORREKTUR_ARTEN.includes(s.beleg_art) && !ossKorr(s); });
   const { aus: korrAusschluss, origVon } = korrekturPruefung(korrekturen.filter((b) => !doppelt(b)), originale, profil, optionen);
   const kontext = korrekturKontext(korrekturen.filter((b) => !doppelt(b) && !korrAusschluss.has(b)), origVon, profil, optionen);
   // Erst alle Belege ohne Korrekturen, damit der Zeitraum des Originals bekannt ist (W_STORNO_ABGESCHLOSSENER_ZEITRAUM)
@@ -2149,7 +2216,7 @@ export function alleWirkungen(belege, profil, optionen) {
       wirk.push(mk({ id: b.id, steuerfall: s.steuerfall, beleg_status: 'ausgeschlossen', hinweise: ['HN_NOCH_NICHT_UNTERSTUETZT', 'HN_DOPPELTE_BELEG_ID'] }, { welt: 'ust', rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: 'doppelte_beleg_id' }));
       continue;
     }
-    if (istObjekt(s) && KORREKTUR_ARTEN.includes(s.beleg_art)) continue;
+    if (istObjekt(s) && KORREKTUR_ARTEN.includes(s.beleg_art) && !ossKorr(s)) continue;
     const ws = belegWirkungen(b, profil, { ...(optionen || {}), originale, vorLeistungAbzug: kontext.vorLeistungAbzug });
     for (const w of ws) {
       wirk.push(w);

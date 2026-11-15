@@ -177,15 +177,22 @@ export function kernOptionenAusWirkungen(wirkungen, optionen) {
   const rcMit = ws.some((w) => istObjekt(w) && (w.rolle === 'rc_umsatz' || w.rolle === 'rc_vorsteuer' || (w.status === 'ausgeschlossen' && det(w).startsWith('rc_'))));
   const rcOhne = ws.some((w) => istObjekt(w) && w.rolle === 'hinweis' && RC_OHNE_OPTION.includes(det(w)));
   const unMit = ws.some((w) => istObjekt(w) && (w.uneinbringlich === true || w.regel_id === 'R-KOR-06'));
+  // KERN-C: Kz 45 aus ossWirkungen (rolle nst_umsatz) oder Zuordnungs-Ausschluss (hinweis_detail oss_*) zeigt oss; ein Beleg mit steuer.oss ohne Zuordnung
+  // (oss_ohne_option) zeigt, dass die Wirkungen ohne die Option gerechnet wurden
+  const ossMit = ws.some((w) => istObjekt(w) && (w.rolle === 'nst_umsatz' || det(w).startsWith('oss_')));
+  const ossOhne = ws.some((w) => istObjekt(w) && w.oss_ohne_option === true);
+  const ossOpt = regelAn(opt, 'oss');
   const unOhne = ws.some((w) => istObjekt(w) && w.rolle === 'hinweis' && det(w) === 'korrektur_grund_uneinbringlich');
   const rcOpt = regelAn(opt, 'rc_eingang');
   const unOpt = regelAn(opt, 'uneinbringlichkeit');
   const widerspruch = [];
   if (rcOpt && rcOhne) widerspruch.push('rc_eingang');
   if (unOpt && unOhne) widerspruch.push('uneinbringlichkeit');
+  if (ossOpt && ossOhne) widerspruch.push('oss');
   return {
     rc_eingang: rcMit || (rcOpt && !rcOhne),
     uneinbringlichkeit: unMit || (unOpt && !unOhne),
+    oss: ossMit || (ossOpt && !ossOhne),
     widerspruch,
   };
 }
@@ -333,6 +340,13 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
     else if (w.rolle === 'vorsteuer_minderung') kz37 = addSicher(kz37, 0 - w.ust_cent);
   }
   const hatUnein = unein.length > 0;
+  // --- KERN-C (BP-27): Z.36 Kz 45, übrige nicht steuerbare Umsätze (Leistungsort nicht im Inland): OSS-Umsätze und elektronische Leistungen an Privatkunden im
+  // Drittland, netto, Summe der Cent-Werte, Eintrag in vollen Euro (RUNDUNG_BASIS); keine Steuer, Kz 83 unverändert (Anleitung USt 1 E Zeile 36). Nur aus
+  // ossWirkungen (Kern-Option oss).
+  const kz45 = berechnet.filter((w) => w.rolle === 'nst_umsatz' && w.kz === 45);
+  let b45 = 0;
+  for (const w of kz45) b45 = addSicher(b45, w.netto_cent);
+  const hat45 = kz45.length > 0;
   let z49 = 0;
   const va = voranmeldungAm(profil, periodenEnde(periode));
   // KERN-B (BP-04b): Kz 39 im letzten Voranmeldungszeitraum mit Dauerfrist (Dezember; mit Kern-Option kz39_verzicht auch der letzte Monat vor dem
@@ -406,6 +420,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
   if (kz48Cent_ !== null) zeilen.push(zeile(tabelle, 23, { kz_basis: 48, basis_cent: kz48Cent_, basis_euro: basisInEuro(kz48Cent_, mod), steuer_cent: 0, belege: k48.belege, wechseljahr: true, offen: k48.offen, zwischenwert: k48.offen > 0 }));
   if (hatRc && rc46.anzahl) zeilen.push(zeile(tabelle, 30, { kz_basis: 46, kz_steuer: 47, basis_cent: rc46.basis, basis_euro: basisInEuro(rc46.basis, mod), steuer_cent: rc46.steuer, belege: rc46.belege }));
   if (hatRc && rc84.anzahl) zeilen.push(zeile(tabelle, 32, { kz_basis: 84, kz_steuer: 85, basis_cent: rc84.basis, basis_euro: basisInEuro(rc84.basis, mod), steuer_cent: rc84.steuer, belege: rc84.belege }));
+  if (hat45) zeilen.push(zeile(tabelle, 36, { kz_basis: 45, basis_cent: b45, basis_euro: basisInEuro(b45, mod), steuer_cent: 0, belege: belege(kz45) }));
   zeilen.push(zeile(tabelle, 37, { betrag_cent: primaer.z37_cent }));
   zeilen.push(zeile38);
   if (hatRc && rc67.anzahl) zeilen.push(zeile(tabelle, 41, { kz_steuer: 67, betrag_cent: rc67.steuer, belege: rc67.belege }));
@@ -428,6 +443,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
   if (kz48Cent_ !== null) kennzahlen['48'] = kz48Cent_;
   if (hatRc) { kennzahlen['46'] = rc46.basis; kennzahlen['47'] = rc46.steuer; kennzahlen['84'] = rc84.basis; kennzahlen['85'] = rc84.steuer; kennzahlen['67'] = rc67.steuer; }
   if (hatUnein) { if (kz50 > 0) kennzahlen['50'] = kz50; if (kz37 > 0) kennzahlen['37'] = kz37; }
+  if (hat45) kennzahlen['45'] = b45;
 
   return {
     periode, jahr, zeilen, kennzahlen,
@@ -442,7 +458,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
     },
     unvollstaendig,
     ausgeschlossene: ausg,
-    nicht_berechnet: nichtBerechnet(tabelle, ausg.map((a) => (a.beleg_id === null || a.beleg_id === undefined ? null : (steuerfallVon.get(a.beleg_id) || null))), alle.includes('W_KU_GRENZE_UEBERSCHRITTEN'), kz48Cent_ !== null, [...(kernOpt.rc_eingang ? [30, 32, 41] : []), ...(kernOpt.uneinbringlichkeit ? [51, 52] : [])]),
+    nicht_berechnet: nichtBerechnet(tabelle, ausg.map((a) => (a.beleg_id === null || a.beleg_id === undefined ? null : (steuerfallVon.get(a.beleg_id) || null))), alle.includes('W_KU_GRENZE_UEBERSCHRITTEN'), kz48Cent_ !== null, [...(kernOpt.rc_eingang ? [30, 32, 41] : []), ...(kernOpt.uneinbringlichkeit ? [51, 52] : []), ...(kernOpt.oss && !ausg.some((a) => steuerfallVon.get(a.beleg_id) === 'A_NICHT_STEUERBAR_DRITTLAND_B2B_DL') ? [36] : [])]), // KERN-C: Z.36 nur dann berechnet, wenn kein B2B-Drittlandsfall (Kz 45, Stufe 3b) offen ist
     ...(hat65 ? { kz65_vorschlag: vorschlag65, kz65_variante: variante65 } : {}),
     hinweise: alle,
     warnungen: alle.filter((c) => c.startsWith('W_')),

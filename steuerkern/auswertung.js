@@ -6,7 +6,8 @@
 // dashboard_status { ust_zahllast, gewinn } und nicht_beruecksichtigt_anzahl: Zwischenwert-Kennzeichnung (Gegenprüfung M1).
 // Dashboard-Kennzahlen kommen aus euerFuer und ustvaFuer, nie aus einer eigenen Berechnung.
 
-import { alleWirkungen, pruefeWirkungen } from './wirkung.js';
+import { alleWirkungen, pruefeWirkungen, regelAn } from './wirkung.js';
+import { ossSchwelle } from './oss.js';
 import { ustvaFuer, ustvaPerioden } from './ustva.js';
 import { euerFuer, EINNAHMEN_KZ } from './euer.js';
 import { grenzpruefung, kuUeberschreitung, gesamtumsatz19Abs2, statusAm } from './steuerprofil.js';
@@ -169,6 +170,10 @@ export function auswertungFuerJahr(belege, profil, jahr, optionen) {
   const zwischen = anzahlNicht > 0 || ustva.some((u) => u.unvollstaendig || u.kz83.status !== 'ergebnis');
   const warn = eindeutig(euer.warnungen.concat(...ustva.map((u) => u.warnungen)));
   if (anzahlNicht > 0 && !warn.includes('W_BELEGE_AUSGESCHLOSSEN')) warn.push('W_BELEGE_AUSGESCHLOSSEN');
+  // KERN-C (BP-27): mit Kern-Option oss die Schwelle für Verkäufe an Privatkunden im EU-Ausland aus den Belegen (ossSchwelle), ohne Option kein Feld
+  const oss = regelAn(optionen, 'oss') ? ossSchwelle(belege, profil, jahr, optionen) : null;
+  const hinw = eindeutig(euer.hinweise.concat(...ustva.map((u) => u.hinweise), oss ? oss.hinweise : []));
+  if (oss) for (const h of oss.hinweise) if (h.startsWith('W_') && !warn.includes(h)) warn.push(h);
   return {
     jahr,
     wirkungen,
@@ -176,13 +181,14 @@ export function auswertungFuerJahr(belege, profil, jahr, optionen) {
     euer,
     dashboard,
     nicht_berechnet: euer.ausgeschlossene,
-    hinweise: eindeutig(euer.hinweise.concat(...ustva.map((u) => u.hinweise))),
+    hinweise: hinw,
     warnungen: warn.sort(),
     nicht_beruecksichtigt_anzahl: anzahlNicht,
     // Status der Jahreswerte (Zahlen im Dashboard bleiben reine Cent-Werte): Zahllast und Gewinn sind Zwischenwerte, solange Belege fehlen
     dashboard_status: { ust_zahllast: zwischen ? 'zwischenwert' : 'ergebnis', gewinn: euer.status === 'zwischenwert' || anzahlNicht > 0 ? 'zwischenwert' : 'ergebnis' },
     // BP-03: Grenzfunktionen (Kleinunternehmer Vorjahr/laufend, 800.000 EUR Ist und E-Rechnung, Buchführung, OSS nur mit Werten)
     grenzen: grenzenFuerJahr(wirkungen, profil, jahr, euer, optionen),
+    ...(oss ? { oss } : {}),
   };
 }
 
