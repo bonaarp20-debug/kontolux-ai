@@ -12,6 +12,7 @@ import * as Steuerkern from './steuerkern/index.js';
 import { regelSteuerprofil } from './regel/steuerprofil.js';
 import { regelFestschreibung } from './regel/festschreibung.js';
 import { regelMigration } from './regel/migration.js';
+import { regelKlaerungBeleg } from './regel/klaerung-beleg.js'; // KX-VD
 import { regelAdminFeatures } from './regel/admin-features.js';
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
@@ -702,6 +703,8 @@ export default {
       // Regelbesteuerung Phase 2 (W0): Logik in regel/*.js; UID kommt aus dem geprüften Token (protectedPaths), Firestore per Dienstkonto
       if (url.pathname === '/steuerprofil') return handleSteuerprofil(body, env, cors);
       if (url.pathname === '/festschreibung' || url.pathname === '/entsperren') return handleFestschreiben(url.pathname, body, env, cors);
+      // KX-VD: Sammelklärung mit Doppelschreibung der Legacy-Felder (regel/klaerung-beleg.js); Token, E-Mail und Ratenlimit wie /migration
+      if (url.pathname === '/migration' && body?.aktion === 'klaerung_beleg') return regelKlaerungBeleg(body, env, cors, regelAbhaengigkeiten(env));
       if (url.pathname === '/migration') return handleMigrationAusfuehren(body, env, cors);
       // R2: Zustimmungsnachweis zu den Nutzungsbedingungen (Serverzeit, nur Worker schreibt users/{uid}/agb_zustimmung)
       if (url.pathname === '/agb-zustimmung') return handleAgbZustimmung(body, env, cors);
