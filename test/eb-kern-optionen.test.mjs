@@ -54,10 +54,13 @@ function umgebung(config, { zustimmung = '2026-11-15-1' } = {}) {
   const snapClient = (pid, optionen) => { const s = snapshotFuer(zeilen(), PROFIL, pid, { gefiltert: false, optionen }); return { zeilen: s.zeilen, ausgeschlossen_anzahl: s.ausgeschlossen_anzahl }; };
   return { fs, rufe, snapClient, zeilen };
 }
+// Alle Kern-Regeln aus, dazu die genannten (KERN-C: fünfte Regel oss; unabhängig von der Anzahl der Regeln im Kern)
+const regelnMit = (an = {}) => Object.fromEntries([...Steuerkern.KERN_REGELN].sort().map((r) => [r, an[r] === true]));
 const kz = (snap, k) => (snap.zeilen.find((z) => z.kz === String(k)) || {});
 
 test('kernOptionenFuer: wie Steuerkern.optionenAusFeatures, fehlend/aus/kaputt = aus, kern_max aus = alles aus', () => {
-  assert.deepEqual(kernOptionenFuer(configBereinigen(AN)).regeln, { anlagegut_vorsteuer_sofort: false, kz39_verzicht: false, rc_eingang: true, uneinbringlichkeit: false });
+  assert.deepEqual(kernOptionenFuer(configBereinigen(AN)).regeln, regelnMit({ rc_eingang: true }));
+  assert.deepEqual(Object.keys(kernOptionenFuer(null).regeln).sort(), ['anlagegut_vorsteuer_sofort', 'kz39_verzicht', 'oss', 'rc_eingang', 'uneinbringlichkeit']);
   assert.deepEqual(kernOptionenFuer(configBereinigen({ kern_max: 'aus', features: { ausland: 'an', korrektur: 'an' } })).regeln.rc_eingang, false);
   assert.deepEqual(kernOptionenFuer(configBereinigen(null)), Steuerkern.optionenAusFeatures({}));
   assert.equal(kernOptionenFuer(configBereinigen({ kern_max: 'an', features: { korrektur: 'kaputt', anlagegut: 'an', voranmeldung: 'an' } })).regeln.uneinbringlichkeit, false);
@@ -159,9 +162,60 @@ test('A2: ohne Zustimmung zur Fassung 2026-11-15-1 rechnet die Festschreibung oh
   r = await u.rufe({ aktion: 'festschreiben', unvollstaendig_bestaetigt: true, periode_id: 'ust-2026-Q3', snapshot: u.snapClient('ust-2026-Q3', opt), kern_optionen: opt });
   assert.equal(r.json.fehler[0].code, 'KERN_OPTIONEN_ABWEICHUNG');
   assert.equal(r.json.kern_optionen.regeln.rc_eingang, false);
-  // kz39_verzicht hängt an voranmeldung (Release A) und gilt ohne neue Zustimmung
+  // KERN-C (G-EB F2): kz39_verzicht hängt am eigenen Feature kz39 (Standard aus), nicht mehr an voranmeldung; gilt ohne neue Zustimmung (Release A)
   const { kernOptionenFuerKonto } = await import('../regel/gemeinsam.js');
-  const alle = configBereinigen({ kern_max: 'an', features: { ausland: 'an', korrektur: 'an', anlagegut: 'an', voranmeldung: 'an' } });
-  assert.deepEqual(kernOptionenFuerKonto(alle, false).regeln, { anlagegut_vorsteuer_sofort: false, kz39_verzicht: true, rc_eingang: false, uneinbringlichkeit: false });
+  let alle = configBereinigen({ kern_max: 'an', features: { ausland: 'an', korrektur: 'an', anlagegut: 'an', voranmeldung: 'an' } });
+  assert.deepEqual(kernOptionenFuerKonto(alle, false).regeln, regelnMit());
+  alle = configBereinigen({ kern_max: 'an', features: { ausland: 'an', korrektur: 'an', anlagegut: 'an', voranmeldung: 'an', kz39: 'an' } });
+  assert.deepEqual(kernOptionenFuerKonto(alle, false).regeln, regelnMit({ kz39_verzicht: true }));
   assert.deepEqual(kernOptionenFuerKonto(alle, true), kernOptionenFuer(alle));
+});
+
+// ---------- FIX-EB (G-EB F1 S3, F4) ----------
+test('F1 (S3): Liste agb_zustimmung nicht lesbar beim Festschreiben: 503 zum Wiederholen statt 409 KERN_OPTIONEN_ABWEICHUNG', async () => {
+  const opt = kernOptionenFuer(configBereinigen(AN));
+  const u = umgebung(AN);
+  const fs2 = fakeFirestore();
+  // gleiche Daten, aber die Liste agb_zustimmung antwortet 500
+  for (const p of u.fs.pfade('')) fs2.setze(p, u.fs.lies(p));
+  const fetchFn = async (url, init) => (String(url).includes('/agb_zustimmung') ? new Response('{"error":{"code":500}}', { status: 500 }) : fs2.fetchFn(url, init));
+  const deps = { fetchFn, adminToken: async () => 't', heute: () => '2026-11-14', jetzt: () => '2026-11-14T10:00:00.000Z' };
+  const r = await regelFestschreibung({ userId: UID, anfrage_id: aid(), aktion: 'festschreiben', unvollstaendig_bestaetigt: true, periode_id: 'ust-2026-Q3', snapshot: u.snapClient('ust-2026-Q3', opt), kern_optionen: opt }, {}, {}, deps);
+  const j = await r.json();
+  assert.equal(r.status, 503, JSON.stringify(j));
+  assert.notEqual(j.fehler?.[0]?.code, 'KERN_OPTIONEN_ABWEICHUNG');
+  assert.ok(!fs2.lies(F('ust-2026-Q3')), 'nichts festgeschrieben');
+});
+
+test('F1: agbZustimmungAb streng wirft bei Lesefehler, sonst wie bisher false', async () => {
+  const { agbZustimmungAb } = await import('../regel/gemeinsam.js');
+  const fetchFn = async () => new Response('{"error":{"code":500}}', { status: 500 });
+  assert.equal(await agbZustimmungAb(UID, '2026-11-15-1', { token: 't', fetchFn }), false);
+  await assert.rejects(agbZustimmungAb(UID, '2026-11-15-1', { token: 't', fetchFn, streng: true }));
+});
+
+test('F4: Sperrprüfung beim Schreiben (kernOptionenFuerKontoLaden) nutzt dieselben Optionen wie die Festschreibung (Zustimmung je Konto)', async () => {
+  const { kernOptionenFuerKontoLaden, kernOptionenFuerKonto } = await import('../regel/gemeinsam.js');
+  const { erzeugeSchicht } = await import('../regel/firestore.js');
+  const cfg = configBereinigen(AN);
+  for (const [zustimmung, erwartet] of [['2026-11-15-1', true], ['2026-11-14-1', false], [null, false]]) {
+    const u = umgebung(AN, { zustimmung });
+    const fs = erzeugeSchicht({ token: 't', fetchFn: u.fs.fetchFn, budget: 5 });
+    const o = await kernOptionenFuerKontoLaden(UID, cfg, { fs });
+    assert.deepEqual(o, kernOptionenFuerKonto(cfg, erwartet), String(zustimmung));
+  }
+  // ohne global eingeschaltete Release-B-Regel keine Unteranfrage
+  let aufrufe = 0;
+  const fs = erzeugeSchicht({ token: 't', fetchFn: async () => { aufrufe++; return new Response('{}', { status: 500 }); }, budget: 5 });
+  assert.deepEqual(await kernOptionenFuerKontoLaden(UID, configBereinigen(AUS), { fs }), kernOptionenFuer(configBereinigen(AUS)));
+  assert.equal(aufrufe, 0);
+});
+
+test('F4: Aufrufstellen der Sperrprüfung nutzen kernOptionenFuerKontoLaden statt kernOptionenFuer (Quelltext)', async () => {
+  const { readFileSync } = await import('node:fs');
+  for (const datei of ['regel/schreibweg-v2.js', 'regel/klaerung-beleg.js', 'regel/migration.js']) {
+    const q = readFileSync(new URL('../' + datei, import.meta.url), 'utf8');
+    assert.doesNotMatch(q, /kernOptionen: kernOptionenFuer\(|= kernOptionenFuer\(/, datei);
+    assert.match(q, /kernOptionenFuerKontoLaden\(/, datei);
+  }
 });

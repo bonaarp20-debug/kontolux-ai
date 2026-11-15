@@ -27,7 +27,7 @@
 // Rest 'nicht_bearbeitet' (die App wiederholt). Budget wie alle regel/*-Endpunkte (REGEL_UNTERANFRAGEN_MAX, unter dem Free-Limit 50).
 import * as Steuerkern from '../steuerkern/index.js';
 import {
-  antwort, fehlerAntwort, grundpruefung, istObjekt, nurSchluessel, CONFIG_PFAD, configBereinigen, jetztIso, schichtFuer, regelFehler, ANFRAGE_ID_MUSTER, kernOptionenFuer,
+  antwort, fehlerAntwort, grundpruefung, istObjekt, nurSchluessel, CONFIG_PFAD, configBereinigen, jetztIso, schichtFuer, regelFehler, ANFRAGE_ID_MUSTER, kernOptionenFuerKontoLaden,
 } from './gemeinsam.js';
 import { schreibe, dekodiereFelder, FirestoreFehler, BudgetFehler } from './firestore.js';
 import { auditSchreibvorgaenge, kopfPfad } from './audit.js';
@@ -185,7 +185,7 @@ export async function regelKlaerungBeleg(body, env, cors = {}, deps = {}) {
     if (!klaerungFreigegeben(configBereinigen(docs.get(CONFIG_PFAD)?.daten))) return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
     const profil = docs.get(aktuellPfad(uid))?.daten;
     if (!profilBereit(profil)) return fehlerAntwort(409, 'PROFIL_NICHT_BESTAETIGT', cors);
-    const kontext = { profil, steuerwahl, grundlage: body.antwort.grundlage, ...(landAusAntwort(body.antwort) ? { land: landAusAntwort(body.antwort) } : {}), zeit, stichtag: zeit.slice(0, 10), anfrage_id: body.anfrage_id, festPerioden: [], kernOptionen: kernOptionenFuer(configBereinigen(docs.get(CONFIG_PFAD)?.daten)) }; // E-B (A1): Kern-Optionen für die Sperrprüfung
+    const kontext = { profil, steuerwahl, grundlage: body.antwort.grundlage, ...(landAusAntwort(body.antwort) ? { land: landAusAntwort(body.antwort) } : {}), zeit, stichtag: zeit.slice(0, 10), anfrage_id: body.anfrage_id, festPerioden: [], kernOptionen: await kernOptionenFuerKontoLaden(uid, configBereinigen(docs.get(CONFIG_PFAD)?.daten), { fs }) }; // E-B (A1): Kern-Optionen für die Sperrprüfung; FIX-EB (F4): Zustimmung je Konto wie die Festschreibung
     let einheiten = ids.map((id) => einheitFuer(uid, id, docs.get(dokPfad(uid, id)), kontext));
     if (einheiten.some((e) => e.write)) {
       const liste = await fs.list(`users/${uid}/festschreibung`, { pageSize: 300 });

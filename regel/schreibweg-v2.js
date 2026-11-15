@@ -18,7 +18,7 @@ import * as Steuerkern from '../steuerkern/index.js';
 import { envModus, effektiverKernModus, ablehnungErlaubt, NIE_ABLEHNEN_WEGE } from './kern-modus.js';
 import { erzeugeSchicht, kodiereWert, dekodiereFelder } from './firestore.js';
 import { legacyHash } from './drift.js';
-import { istObjekt, codesBereinigen, CONFIG_PFAD, configBereinigen, featureAktiv, kernOptionenFuer } from './gemeinsam.js';
+import { istObjekt, codesBereinigen, CONFIG_PFAD, configBereinigen, featureAktiv, kernOptionenFuerKontoLaden } from './gemeinsam.js';
 
 const FORMAL = /^PF_(SCHEMA|STEUER|CENT|SUMME|BETRAG_ZU_GROSS|DATUM_FORMAT|SATZ|POSITIONEN|BELEG_ART|RICHTUNG|STEUERFALL)/;
 const ZAHLUNG = /^PF_ZAHLUNG_/;
@@ -110,7 +110,8 @@ export async function v2Vorbereiten(deps) {
   const festPerioden = liste.dokumente.filter((d) => SPERRENDE.includes(d.daten && d.daten.status)).map((d) => String(d.pfad).split('/').pop());
   const legacy = dekodiereFelder(deps.felder || {});
   const eingabe = deps.eingabeFn(deps.weg, deps.belegRoh, deps.stichtag);
-  const kernOptionen = kernOptionenFuer(configBereinigen(docs.get(CONFIG_PFAD) ? docs.get(CONFIG_PFAD).daten : null)); // E-B (A1)
+  // E-B (A1); FIX-EB (G-EB F4): dieselben Optionen wie die Festschreibung (Zustimmung je Konto), eine Unteranfrage nur bei Release-B-Regel an
+  const kernOptionen = await kernOptionenFuerKontoLaden(uid, configBereinigen(docs.get(CONFIG_PFAD) ? docs.get(CONFIG_PFAD).daten : null), { fs: schicht });
   const e = v2Entscheiden({ weg: deps.weg, eingabe, profil, legacy, stichtag: deps.stichtag, festPerioden, nieAblehnen: deps.nieAblehnen === true, kernOptionen });
   return { ...e, profil, felder: v2RestFelder(e, deps.zeit || new Date().toISOString()) };
 }
@@ -163,6 +164,6 @@ export async function clientSteuerVorbereiten(deps) {
   if (!config || config.kern_max === 'aus' || !featureAktiv(config, 'beleg_formular') || !profilBereit(profil)) return { ignoriert: true, ablehnen: false, codes: [], steuer: null, profil, felder: {} };
   const liste = await schicht.list(`users/${deps.uid}/festschreibung`, { pageSize: 300 });
   const festPerioden = liste.dokumente.filter((d) => SPERRENDE.includes(d.daten && d.daten.status)).map((d) => String(d.pfad).split('/').pop());
-  const e = clientSteuerPruefen({ steuer: deps.steuer, legacy: dekodiereFelder(deps.felder || {}), stichtag: deps.stichtag, festPerioden, profil, kernOptionen: kernOptionenFuer(config) }); // E-B (A1)
+  const e = clientSteuerPruefen({ steuer: deps.steuer, legacy: dekodiereFelder(deps.felder || {}), stichtag: deps.stichtag, festPerioden, profil, kernOptionen: await kernOptionenFuerKontoLaden(deps.uid, config, { fs: schicht }) }); // E-B (A1); FIX-EB (F4): Zustimmung je Konto
   return { ...e, profil, felder: v2RestFelder(e, deps.zeit || new Date().toISOString()) };
 }

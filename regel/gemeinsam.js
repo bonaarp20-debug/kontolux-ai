@@ -55,7 +55,8 @@ const FEATURE_STANDARD = { steuerprofil: true, migration: false, festschreibung:
 // E-B (Release B, Konzept 2.1): neue Feature-Namen. Im Worker gilt jedes fehlende Feature als aus (featureAktiv), in der App als an (Lader):
 // deshalb setzt das Drehbuch B (docs/regelbesteuerung/19-phase3/rollout-drehbuch-b.md) alle Namen ausdrücklich auf 'aus', BEVOR die App deployt wird.
 // Die Liste dient Drehbuch, Vorprüfung und dem Paritätstest gegen regel/loader.js FEATURES (App); sie schaltet nichts.
-export const FEATURES_RELEASE_B = Object.freeze(['korrektur', 'anlagegut', 'auszahlung']);
+// FIX-EB (G-EB F2/F8): kz39 (Kern-Option kz39_verzicht, KERN-C) und oss (Kern-Option oss, Release C, KERN-C) kommen dazu, beide Standard aus.
+export const FEATURES_RELEASE_B = Object.freeze(['korrektur', 'anlagegut', 'auszahlung', 'kz39', 'oss']);
 
 // E-B (G-RECHT-B F-M3, Auflage A6): Mindestfassung der Nutzungsbedingungen für Release-B-Funktionen, die der Worker selbst anwendet (plattform im
 // Webhook). Maßgeblich ist der Zustimmungsnachweis users/{uid}/agb_zustimmung (nur der Worker schreibt, POST /agb-zustimmung), nicht das vom Client
@@ -85,13 +86,21 @@ export function kernOptionenBrauchenZustimmung(config) {
 }
 // Hat das Konto einer Fassung ab mindest zugestimmt? Eine Unteranfrage (Liste agb_zustimmung, wenige Einträge je Konto). Fehler = nein (Altverhalten).
 // fs: vorhandene Schicht (Budget des Aufrufers), sonst eigene mit token/fetchFn.
-export async function agbZustimmungAb(uid, mindest, { token, fetchFn, fs: schicht } = {}) {
+// FIX-EB (G-EB F1 S3): streng: true wirft den Lesefehler weiter (Festschreibung: 503 zum Wiederholen statt 409 KERN_OPTIONEN_ABWEICHUNG, weil die
+// App dieselbe Liste gelesen hat und mit den Regeln rechnet).
+export async function agbZustimmungAb(uid, mindest, { token, fetchFn, fs: schicht, streng = false } = {}) {
   try {
     if (!UID_MUSTER.test(String(uid || ''))) return false;
     const fs = schicht || erzeugeSchicht({ token, fetchFn, budget: 1 });
     const l = await fs.list(`users/${uid}/agb_zustimmung`, { pageSize: 100 });
     return l.dokumente.some((d) => istObjekt(d && d.daten) && (agbFassungVergleich(d.daten.version, mindest) ?? -1) >= 0);
-  } catch { return false; }
+  } catch (e) { if (streng) throw e; return false; }
+}
+// FIX-EB (G-EB F1/F4): Kern-Optionen eines Kontos an EINER Stelle (Festschreibung und Sperrprüfung beim Schreiben): config/features plus Zustimmung
+// je Konto aus agb_zustimmung (dieselbe Quelle wie der Lader der App). Eine Unteranfrage nur, wenn eine Release-B-Regel global an ist.
+export async function kernOptionenFuerKontoLaden(uid, config, { fs, streng = false } = {}) {
+  const zustimmung = kernOptionenBrauchenZustimmung(config) ? await agbZustimmungAb(uid, AGB_FASSUNG_RELEASE_B, { fs, streng }) : false;
+  return kernOptionenFuerKonto(config, zustimmung);
 }
 
 // Bereinigt ein gelesenes config/features-Dokument. Unbekannte oder kaputte Werte gelten als 'aus' (migration-rollout.md 6.2).

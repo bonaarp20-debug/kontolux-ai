@@ -27,7 +27,7 @@
 import * as Steuerkern from '../steuerkern/index.js';
 import {
   antwort, fehlerAntwort, grundpruefung, istObjekt, istText, nurSchluessel, CONFIG_PFAD, configBereinigen, featureAktiv, periodeAusId,
-  kernOptionenFuer, kernOptionenNormieren, kanonisch, kernOptionenFuerKonto, kernOptionenBrauchenZustimmung, agbZustimmungAb, AGB_FASSUNG_RELEASE_B,
+  kernOptionenNormieren, kanonisch, kernOptionenFuerKontoLaden,
   jetztIso, schichtFuer, regelFehler,
 } from './gemeinsam.js';
 import { schreibe, vorbedingungAus, vollerName, FirestoreFehler, BudgetFehler } from './firestore.js';
@@ -304,9 +304,12 @@ function sperrAntwort(periodeId, s, cors) {
 // ---------------------------------------------------------------------------------------------
 // E-B (A1/A2): Kern-Optionen des Kontos: config/features wie der Lader; Regeln von Release-B-Funktionen nur mit Zustimmung ab AGB_FASSUNG_RELEASE_B
 // (users/{uid}/agb_zustimmung). Die Unteranfrage läuft nur, wenn eine solche Regel global an ist.
+// FIX-EB (G-EB F1 S3): streng, ein Lesefehler der Liste ergibt 503 (wiederholbar) statt einer Rechnung ohne Zustimmung und 409.
 async function kontoOptionen(fs, uid, config) {
-  const zustimmung = kernOptionenBrauchenZustimmung(config) ? await agbZustimmungAb(uid, AGB_FASSUNG_RELEASE_B, { fs }) : false;
-  return kernOptionenFuerKonto(config, zustimmung);
+  try { return await kernOptionenFuerKontoLaden(uid, config, { fs, streng: true }); } catch (e) {
+    if (e instanceof BudgetFehler) throw e;
+    throw new LeseFehler(503, 'ZUSTIMMUNG_NICHT_LESBAR');
+  }
 }
 
 export async function regelFestschreibung(body, env, cors = {}, deps = {}) {

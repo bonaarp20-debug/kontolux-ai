@@ -15,7 +15,7 @@ import { regelMigration } from './regel/migration.js';
 import { regelKlaerungBeleg } from './regel/klaerung-beleg.js'; // KX-VD
 import { regelZaehler, ZAEHLER_PFADE } from './regel/zaehler.js'; // KX-RB (BP-19)
 import { regelAdminFeatures } from './regel/admin-features.js';
-import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen } from './regel/prompts.js'; // BP-22B
+import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto } from './regel/prompts.js'; // BP-22B
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
 import { v2Vorbereiten, clientSteuerVorbereiten, v2RestFelder } from './regel/schreibweg-v2.js';
@@ -1627,8 +1627,15 @@ function buildStaticForModules(modules, stand = KI_FEATURES_AUS) {
 }
 
 // Feature-Zustand für den Prompt (eine Unteranfrage höchstens alle 60 s je Isolate, Token nur bei Cache-Fehlschlag). Wirft nie, Fehler = alles aus.
-async function kiFeatureStandFuer(env) {
-  try { return await kiFeatureStandLesen({ tokenFn: () => getGoogleAccessToken(env, FIRESTORE_SCOPE), fetchFn: (...a) => fetch(...a) }); } catch { return KI_FEATURES_AUS; }
+// FIX-EB (G-EB F3): je Konto nur mit Zustimmung zur Fassung 15.11. (regel/prompts.js kiFeatureStandKonto, eine Unteranfrage je Konto und 60 s,
+// nur wenn global ein Prompt-Feature an ist); ohne Zustimmung der Prompt mit allen Funktionen aus.
+async function kiFeatureStandFuer(env, userId) {
+  try {
+    const tokenFn = () => getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const fetchFn = (...a) => fetch(...a);
+    const stand = await kiFeatureStandLesen({ tokenFn, fetchFn });
+    return await kiFeatureStandKonto({ uid: userId, stand, tokenFn, fetchFn });
+  } catch { return KI_FEATURES_AUS; }
 }
 
 // Statischer Prompt für /image und /document (Konzept 9.2-a): derselbe Text wie /chat mit Datei-Anhang
@@ -2212,7 +2219,7 @@ async function handleChat(body, env, cors = {}, ctx) {
     const [limit, steuerrechtText, kiStand] = await Promise.all([
       checkNachrichtenLimit(Nutzername, env, userId, ctx),
       loadSteuerrechtContext(env),
-      kiFeatureStandFuer(env), // BP-22B: Prompt-Abschnitte nur für freigeschaltete Funktionen
+      kiFeatureStandFuer(env, userId), // BP-22B: Prompt-Abschnitte nur für freigeschaltete Funktionen
     ]);
     if (!limit.erlaubt) {
       return new Response(limit.grund === 'infra' ? 'Kontolux ist gerade nicht erreichbar. Bitte versuche es in ein paar Minuten noch einmal.' : 'Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
@@ -2506,7 +2513,7 @@ async function handleImage(body, env, cors = {}, ctx) {
   }
 
   // KX-SPEED: Wissensbasis und Feature-Stand (reine Lesezugriffe, werfen nie) laufen parallel zu den Limit-Prüfungen statt danach.
-  const kxSpeedVorab = Promise.all([loadSteuerrechtContext(env), kiFeatureStandFuer(env)]);
+  const kxSpeedVorab = Promise.all([loadSteuerrechtContext(env), kiFeatureStandFuer(env, userId)]);
   // Upload Limit prüfen
   const uploadLimit = await peekUploadLimit(userId, env);
   if (!uploadLimit.erlaubt) {
@@ -3370,7 +3377,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
     return handleChat(body, env, cors, ctx);
   }
   // KX-SPEED: Wissensbasis und Feature-Stand (reine Lesezugriffe, werfen nie) laufen parallel zu den Limit-Prüfungen statt danach.
-  const kxSpeedVorab = Promise.all([loadSteuerrechtContext(env), kiFeatureStandFuer(env)]);
+  const kxSpeedVorab = Promise.all([loadSteuerrechtContext(env), kiFeatureStandFuer(env, userId)]);
   const uploadLimit = await peekUploadLimit(userId, env);
   if (!uploadLimit.erlaubt) {
     return new Response('Du hast dein monatliches Upload-Limit erreicht. Du kannst Kontolux AI weiterhin vollständig nutzen — Chat, Finanzkalender und manuelle Monatsabschlüsse funktionieren wie gewohnt. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand. 📊', {

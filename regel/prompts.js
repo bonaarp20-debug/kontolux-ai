@@ -3,11 +3,14 @@
 // kern_max 'an' UND features.<name> 'an' (strenger als der App-Lader, der fehlende Features als an wertet: der Prompt verspricht nichts, was
 // nicht ausdrücklich an ist). Bei 'aus' steht höchstens ein kurzer Satz, was Kontolux dann nicht rechnet (Zwischenwert).
 // config/features ist global; der statische Prompt-Block bleibt damit für alle Nutzer gleich (Prompt Caching, buildSystemBlocks).
+// FIX-EB (G-EB F3): je Konto zusätzlich die Zustimmung zur Fassung 15.11. (kiFeatureStandKonto). Alle Prompt-Features sind Release-B-Funktionen; ohne
+// Nachweis in users/{uid}/agb_zustimmung (dieselbe Quelle wie Lader und Festschreibung) bekommt das Konto den Stand "alles aus", denn für dieses
+// Konto rechnet die App ohne diese Regeln und zeigt die Dialoge nicht. Es gibt damit genau zwei Prompt-Fassungen (global und alles aus), der Cache bleibt.
 // Jeder Abschnitt steht in genau einem Modul, damit der Datei-Prompt (steuer, euer, rechnungen, tools) keine Doppel-Token trägt.
 // Texte: allgemeine Regel mit Norm, Zahlen nur aus KERN_ZAHLEN, Entscheidung beim Nutzer, keine Befehle (Zahlungen und Korrekturen laufen über
 // die Dialoge der App, BP-15). Quellen: kern-b-bericht.md (BP-04b, BP-05a-Kern), app-b-bericht.md (BP-15), worker-b-bericht.md und
 // plattform-klaerung-texte.js (BP-21a), rechnung-b-/-b2-bericht.md (BP-17, BP-18).
-import { CONFIG_PFAD, configBereinigen } from './gemeinsam.js';
+import { CONFIG_PFAD, configBereinigen, agbZustimmungAb, AGB_FASSUNG_RELEASE_B, UID_MUSTER } from './gemeinsam.js';
 import { erzeugeSchicht } from './firestore.js';
 
 export const KI_FEATURES = Object.freeze(['ausland', 'zahlung', 'korrektur', 'anlagegut', 'rechnung', 'erechnung', 'plattform']);
@@ -92,4 +95,28 @@ export async function kiFeatureStandLesen({ tokenFn, fetchFn, jetzt = Date.now()
   }
   cache = { stand, bis };
   return stand;
+}
+
+// FIX-EB (G-EB F3): Prompt-Stand eines Kontos. stand = globaler Stand (kiFeatureStandLesen). Ist dort nichts an, keine Unteranfrage. Sonst eine
+// Unteranfrage (Liste agb_zustimmung) je Konto höchstens alle 60 s (Fehler 10 s). Wirft nie: jeder Fehler = alles aus.
+const ZUSTIMMUNG_CACHE_MAX = 2000;
+const zustimmungCache = new Map(); // uid -> { ok, bis }
+export function kiZustimmungCacheLeeren() { zustimmungCache.clear(); }
+export async function kiFeatureStandKonto({ uid, stand, tokenFn, fetchFn, jetzt = Date.now() } = {}) {
+  try {
+    if (!stand || !KI_FEATURES.some((n) => stand[n] === true)) return KI_FEATURES_AUS;
+    if (!UID_MUSTER.test(String(uid || ''))) return KI_FEATURES_AUS;
+    const c = zustimmungCache.get(uid);
+    let ok;
+    if (c && jetzt < c.bis) ok = c.ok;
+    else {
+      let bis = jetzt + CACHE_MS;
+      try {
+        ok = await agbZustimmungAb(uid, AGB_FASSUNG_RELEASE_B, { token: await tokenFn(), fetchFn, streng: true });
+      } catch { ok = false; bis = jetzt + FEHLER_CACHE_MS; }
+      if (zustimmungCache.size >= ZUSTIMMUNG_CACHE_MAX) zustimmungCache.clear();
+      zustimmungCache.set(uid, { ok, bis });
+    }
+    return ok === true ? stand : KI_FEATURES_AUS;
+  } catch { return KI_FEATURES_AUS; }
 }

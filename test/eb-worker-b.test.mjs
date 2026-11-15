@@ -103,7 +103,7 @@ test('(2) vorhandenes anderes Land wird nicht überschrieben (land_widerspruch);
 });
 
 test('(3) Release-B-Features: im Worker ohne Eintrag aus, Namen gültig', () => {
-  assert.deepEqual([...FEATURES_RELEASE_B].sort(), ['anlagegut', 'auszahlung', 'korrektur']);
+  assert.deepEqual([...FEATURES_RELEASE_B].sort(), ['anlagegut', 'auszahlung', 'korrektur', 'kz39', 'oss']); // FIX-EB: kz39 (G-EB F2/F8) und oss (KERN-C), Standard aus
   for (const name of [...FEATURES_RELEASE_B, 'ausland', 'zahlung', 'rechnung', 'erechnung', 'plattform']) {
     assert.ok(FEATURE_NAME_MUSTER.test(name));
     assert.equal(featureAktiv(configBereinigen({ kern_max: 'an', features: {} }), name), false, name);

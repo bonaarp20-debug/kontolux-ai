@@ -44,7 +44,7 @@ import * as Steuerkern from '../steuerkern/index.js';
 import MANIFEST from '../steuerkern/MANIFEST.json' with { type: 'json' };
 import {
   antwort, fehlerAntwort, grundpruefung, istObjekt, CONFIG_PFAD, configBereinigen, featureAktiv, periodeAusId, jetztIso, schichtFuer, regelFehler,
-  ANFRAGE_ID_MUSTER, kanonisch, sha256Hex, kernOptionenFuer,
+  ANFRAGE_ID_MUSTER, kanonisch, sha256Hex, kernOptionenFuerKontoLaden,
 } from './gemeinsam.js';
 import { schreibe, vorbedingungAus, vollerName, FirestoreFehler, BudgetFehler } from './firestore.js';
 import { auditSchreibvorgaenge, kopfPfad } from './audit.js';
@@ -693,7 +693,7 @@ async function klaerungAusfuehren(fs, uid, body, zeit, cors) {
   const profil = docs.get(aktuellPfad(uid))?.daten;
   if (!profilBereit(profil)) return fehlerAntwort(409, 'PROFIL_NICHT_BESTAETIGT', cors);
   const steuerwahl = body.antwort.steuerwahl;
-  const kontext = { profil, steuerwahl, zeit, stichtag: zeit.slice(0, 10), anfrage_id: body.anfrage_id, festPerioden: [], kernOptionen: kernOptionenFuer(configBereinigen(docs.get(CONFIG_PFAD)?.daten)) }; // E-B (A1)
+  const kontext = { profil, steuerwahl, zeit, stichtag: zeit.slice(0, 10), anfrage_id: body.anfrage_id, festPerioden: [], kernOptionen: await kernOptionenFuerKontoLaden(uid, configBereinigen(docs.get(CONFIG_PFAD)?.daten), { fs }) }; // E-B (A1); FIX-EB (F4): Zustimmung je Konto wie die Festschreibung
   let einheiten = ids.map((id) => klaerungEinheit(uid, id, docs.get(dokPfad(uid, id)), kontext));
   // Festgeschriebene und gerade gesperrte Zeiträume nur lesen, wenn überhaupt etwas geschrieben würde (eine Unteranfrage)
   if (einheiten.some((e) => e.write)) {
