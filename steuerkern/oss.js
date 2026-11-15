@@ -17,6 +17,9 @@
 //   ab 2027: B). Kurs: EZB, letzter Tag des Quartals (§ 16 Abs. 6 S. 4, 5 UStG, A). Berichtigung je Land und Ursprungszeitraum in späterer Erklärung,
 //   drei Jahre (§ 18j Abs. 4 S. 5, BOP-Hilfe, A); Erstattung = Berichtigung des Ursprungsquartals (USP Österreich, B). Frist ohne Verschiebung (Kommission, A).
 //   Steuer je Zeile = Bemessung mal Satz, kaufmännisch auf Cent (C). Schwelle ohne Abzug späterer Erstattungen (C, Standard).
+//   KERN-C2 (Kern 2026.11.16-6, Funde G-KERN-C): Erstattung zu einer bezahlten Rechnung wirkt erst mit der Rückgewähr, ohne erfasste Rückzahlung vorläufig
+//   (wie der Inlandspfad, § 17 Abs. 1, 2 UStG entsprechend, UStAE 17.1 Abs. 2 S. 3; Entscheidung H1, B). Korrekturen später als 31.12. des vierten Jahres nach
+//   dem Original nicht berechnet (G-KC-01, Vorfilter-Spanne). Fehlender Schnappschuss eines Zwischenquartals überschreibt keinen bekannten Stand (G-KC-04).
 // Beleg-Daten: steuer.oss = { leistungsart 'ware'|'tbe'|null, land (ISO, GR statt EL), lage 'eu'|'drittland'|'ungeklaert', zeilen [{ netto_cent, ust_cent,
 //   satz_bp }] in der Belegwährung (Korrektur negativ), waehrung, kurs_monat?, versand_von?, satz_bestaetigt? } (beleg.js normalisiereEingabe, steuerwahl
 //   'b2c_ausland'). Profil: profil.oss = { jahre_cent: { 'JJJJ': Cent (Nutzerwert, Summe des Jahres) }, verzicht_ab, registriert_ab } und die
@@ -238,11 +241,55 @@ function rechneSchwelle(belege, profil) {
     const oid = bezugId(b.steuer);
     const o = oid ? faelle.get(oid) : null;
     if (!o || !istDatum(b.steuer.wirkdatum)) { faelle.set(b.id, { fall: 'UNBEKANNT', grund: 'oss_original_fehlt', hinweise: [], datum: datumAb(b.steuer.wirkdatum), korrektur: true, original_id: oid }); continue; }
-    faelle.set(b.id, { ...o, hinweise: o.hinweise.slice(), korrektur: true, original_id: oid, datum_original: o.datum, datum: b.steuer.wirkdatum });
     const d = proJahr.get(jahrVon(o.datum));
     if (d) d.mit_korrektur = true;
+    const offenK = (grund, hinweis, datum) => faelle.set(b.id, { fall: 'UNBEKANNT', grund, hinweise: [hinweis], datum, korrektur: true, original_id: oid, datum_original: o.datum });
+    let datum = b.steuer.wirkdatum;
+    // H1: Steuer gegenüber dem Kundenland (OSS) bzw. Kz 45 mindert der bezahlte Teil erst mit der Rückzahlung
+    if (o.fall === 'A_OSS_EU_B2C' || o.fall === 'A_DRITTLAND_B2C_TBE') {
+      const r = rueckgewaehr(b, ids.get(oid), korrekturen);
+      if (!r) { offenK('oss_rueckzahlung_fehlt', 'W_OSS_ERSTATTUNG_OHNE_RUECKZAHLUNG', datum); continue; }
+      datum = r;
+    }
+    // G-KC-01: der Fall des Originals hängt an den Belegen des Vorjahres; der Vorfilter der Festschreibung trägt sie bis 31.12. des vierten Jahres nach dem
+    // Original (ossSchwellenSpanne). Danach rechnen App und Worker die Korrektur gleich nicht (nur Datumsregel). Drittland-TBE hängt an keiner Schwelle.
+    if (o.fall !== 'A_DRITTLAND_B2C_TBE' && datum > korrekturGrenze(o.datum)) { offenK('oss_korrektur_spaet', 'W_OSS_KORREKTUR_SPAET', datum); continue; }
+    faelle.set(b.id, { ...o, hinweise: o.hinweise.slice(), korrektur: true, original_id: oid, datum_original: o.datum, datum });
   }
   return { faelle, proJahr, verzichtAb, registriertAb };
+}
+
+// Letzter Tag, bis zu dem eine Korrektur dem Fall ihres Originals folgt: 31.12. des vierten Jahres nach dem Leistungstag des Originals. Deckt die
+// Berichtigungsfrist im OSS (drei Jahre nach der Abgabefrist, für Q4 J also 31.01. J+4; § 18j Abs. 4 S. 5 UStG) und passt zur Spanne in ossSchwellenSpanne.
+const KORREKTUR_JAHRE = 4;
+const korrekturGrenze = (tagOrig) => `${String(jahrVon(tagOrig) + KORREKTUR_JAHRE).padStart(4, '0')}-12-31`;
+
+// H1 (KERN-C2): Zeitpunkt, ab dem eine Korrektur eines OSS- oder Drittland-TBE-Belegs wirkt, oder null (vorläufig, nicht berechnet). Wie der Inlandspfad
+// (wirkung.js korrekturWirkungen, R-KOR-13): der noch offene Teil der Rechnung mindert am Wirkdatum; der bezahlte Teil erst mit der Rückzahlung, im Zeitraum
+// der Rückzahlung. Vereinfachung zur sicheren Seite: keine Aufteilung einer Korrektur in Teile mit verschiedenen Zeiträumen; reicht der offene Teil nicht und
+// deckt die erfasste Rückzahlung den Rest nicht, bleibt die ganze Korrektur vorläufig (W_OSS_ERSTATTUNG_OHNE_RUECKZAHLUNG). Offen = Brutto des Originals
+// minus Zahlungen bis zum Wirkdatum minus alle anderen Korrekturen desselben Originals. Fremdwährung (Zahlungen in Euro, Beleg in Fremdwährung): ohne
+// Rückzahlung nur, wenn nichts gezahlt ist.
+const aktiveZahlungenBis = (s, bis) => (Array.isArray(s.zahlungen) ? s.zahlungen : []).filter((z) => istObjekt(z) && z.status !== 'rueckgaengig' && istDatum(z.datum) && istCent(z.betrag_cent) && z.datum <= bis);
+const bruttoZeilen = (oss) => Math.abs(oss.zeilen.reduce((a, z) => a + z.netto_cent + z.ust_cent, 0));
+function rueckgewaehr(b, orig, alleKorrekturen) {
+  const s = b.steuer;
+  const wirk = s.wirkdatum;
+  const rzRoh = istObjekt(s.rueckzahlung) ? s.rueckzahlung : null;
+  const rz = rzRoh && istDatum(rzRoh.datum) && istCent(rzRoh.betrag_cent) && rzRoh.betrag_cent > 0 ? rzRoh : null;
+  const os = istObjekt(orig) && istObjekt(orig.steuer) && istObjekt(orig.steuer.oss) && Array.isArray(orig.steuer.oss.zeilen) ? orig.steuer : null;
+  const gezahlt = os ? aktiveZahlungenBis(os, wirk).reduce((a, z) => a + z.betrag_cent, 0) : 0;
+  if (!rz && gezahlt <= 0) return wirk;
+  if (!os || !Array.isArray(s.oss.zeilen)) return rz ? (rz.datum > wirk ? rz.datum : wirk) : null;
+  const eur = os.oss.waehrung === 'EUR' && s.oss.waehrung === 'EUR';
+  if (!eur) return rz ? (rz.datum > wirk ? rz.datum : wirk) : null;
+  let andere = 0;
+  for (const k of alleKorrekturen) if (k !== b && bezugId(k.steuer) === bezugId(s) && istObjekt(k.steuer.oss) && Array.isArray(k.steuer.oss.zeilen)) andere += bruttoZeilen(k.steuer.oss);
+  const offen = Math.max(0, bruttoZeilen(os.oss) - gezahlt - andere);
+  const korr = bruttoZeilen(s.oss);
+  if (korr <= offen) return wirk;
+  if (rz && rz.betrag_cent >= korr - offen) return rz.datum > wirk ? rz.datum : wirk;
+  return null;
 }
 
 export function ossZuordnung(belege, profil, optionen) {
@@ -343,7 +390,7 @@ export function ossBelegeVorbereiten(belege, profil, optionen) {
     const s = b.steuer;
     const z = faelle.get(b.id);
     if (!z) return b;
-    const zuordnung = { fall: z.fall, grund: z.grund, ...(z.datum_original ? { datum_original: z.datum_original } : {}) };
+    const zuordnung = { fall: z.fall, grund: z.grund, ...(z.datum_original ? { datum_original: z.datum_original } : {}), ...(z.korrektur && istDatum(z.datum) && z.datum !== s.wirkdatum ? { datum_wirk: z.datum } : {}) };
     const sh = Array.isArray(s.status_hinweise) ? s.status_hinweise.slice() : [];
     for (const h of z.hinweise) if (!sh.includes(h)) sh.push(h);
     const offen = (grund, hin) => {
@@ -483,11 +530,16 @@ export function ossQuartal(belege, profil, jahr, quartal, optionen) {
     let quelle;
     if (istObjekt(abgaben[qy]) && Array.isArray(abgaben[qy].zeilen)) { bisher = steuerJeLand(abgaben[qy].zeilen); quelle = 'abgabe'; }
     else { bisher = steuerJeLand(quartalsWerte(liste, faelle, qy, periodenEnde(qy), opt.kurse).zeilen); quelle = 'gerechnet'; }
-    // spätere Erklärungen zwischen qy und dem laufenden Quartal: deren Berichtigungen für qy gelten als erklärt
+    // spätere Erklärungen zwischen qy und dem laufenden Quartal: deren Berichtigungen für qy gelten als erklärt.
+    // G-KC-04 (KERN-C2): fehlt der Schnappschuss eines Zwischenquartals qz, bleibt ein aus einer Abgabe bekannter Stand stehen (der Kern kennt das
+    // Erfassungsdatum nicht; ein nachgetragener Beleg gälte sonst still als erklärt); die Berichtigung trägt dann W_OSS_ABGABE_FEHLT (Nutzer prüft).
+    // Ohne jeden Schnappschuss (bisher gerechnet) bleibt die Kette über das Ende von qz, damit eine Erstattung nicht in jedem Quartal neu erscheint.
+    let luecke = false;
     for (let qz = periodeVerschieben(qy, 1); qz < periode; qz = periodeVerschieben(qz, 1)) {
       if (istObjekt(abgaben[qz]) && Array.isArray(abgaben[qz].berichtigungen)) {
         for (const r of abgaben[qz].berichtigungen) if (istObjekt(r) && r.zeitraum === qy && istCent(r.berichtigt_cent)) bisher.set(r.land, r.berichtigt_cent);
-      } else bisher = steuerJeLand(quartalsWerte(liste, faelle, qy, periodenEnde(qz), opt.kurse).zeilen);
+      } else if (quelle === 'abgabe') luecke = true;
+      else bisher = steuerJeLand(quartalsWerte(liste, faelle, qy, periodenEnde(qz), opt.kurse).zeilen);
     }
     const laender = eindeutig([...jetzt.keys(), ...bisher.keys()]);
     for (const land of laender) {
@@ -505,8 +557,8 @@ export function ossQuartal(belege, profil, jahr, quartal, optionen) {
       const fristQy = ossFrist(Number(qy.slice(0, 4)), quartalNr(qy)).frist;
       const zuAlt = frist.frist > addiereMonate(fristQy, 12 * OSS_FRISTEN.berichtigung_jahre);
       if (zuAlt) hinweise.add('W_OSS_BERICHTIGUNG_FRIST');
-      if (quelle === 'gerechnet') hinweise.add('W_OSS_ABGABE_FEHLT');
-      berichtigungen.push({ zeitraum: qy, land, bisher_cent: a, berichtigt_cent: n, differenz_cent: n - a, quelle_bisher: quelle, belege: verursacher.sort(), ...(zuAlt ? { frist_abgelaufen: true } : {}) });
+      if (quelle === 'gerechnet' || luecke) hinweise.add('W_OSS_ABGABE_FEHLT');
+      berichtigungen.push({ zeitraum: qy, land, bisher_cent: a, berichtigt_cent: n, differenz_cent: n - a, quelle_bisher: quelle, belege: verursacher.sort(), ...(zuAlt ? { frist_abgelaufen: true } : {}), ...(luecke ? { abgabe_fehlt: true } : {}) });
     }
   }
   // Je Land saldieren: Guthaben eines Landes erstattet dieses Land (BZSt-Beispiel)
@@ -596,15 +648,16 @@ export function ossZahlenlisteCsv(ergebnis) {
   return z.join('\n') + '\n';
 }
 
-// Für den Vorfilter (belegZeitraumDaten): ein Beleg mit steuer.oss oder ein offener Plattformbeleg mit Kunde in der EU wirkt über die Schwelle bis zum
-// Ende des Folgejahres (Vorjahreswert). Rückgabe: [von, bis] oder null.
+// Für den Vorfilter (belegZeitraumDaten): ein Beleg mit steuer.oss oder ein offener Plattformbeleg mit Kunde in der EU wirkt über die Schwelle auf die
+// Belege seines Jahres und des Folgejahres (Vorjahreswert) und über deren Korrekturen, die dem Fall des Originals folgen, bis 31.12. des vierten Jahres
+// nach dem Original (korrekturGrenze). Spanne daher bis 31.12. des fünften Folgejahres (KERN-C2, G-KC-01; vorher nur Folgejahr). Rückgabe: [von, bis] oder null.
 export function ossSchwellenSpanne(s) {
   if (!istObjekt(s)) return null;
   const tag = leistungstag(s);
   if (!tag) return null;
   const relevant = istObjekt(s.oss) || bestaetigtUnter(s) || (s.steuerfall === 'UNBEKANNT' && s.unbekannt_grund === 'auslandskunde' && s.richtung === 'ausgang' && istObjekt(s.gegenpartei) && typeof s.gegenpartei.land === 'string');
   if (!relevant) return null;
-  return [tag, `${String(jahrVon(tag) + 1).padStart(4, '0')}-12-31`];
+  return [tag, `${String(jahrVon(tag) + 1 + KORREKTUR_JAHRE).padStart(4, '0')}-12-31`];
 }
 
 // Kz-45-Hilfe für wirkung.js: Euro-Netto (null ohne Kurs)

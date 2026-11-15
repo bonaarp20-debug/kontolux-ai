@@ -457,7 +457,9 @@ export function anbieterLage(code, gebiet) {
 // Database (TEDB), SOAP-Abfrage situationOn 2026-11-15 (docs/quellen/tedb-mwst-saetze-2026-11-15-rf.md); die Angaben stammen von den Mitgliedstaaten,
 // Konfidenz B (Datenbank, kein Rechtsakt). Je Land: { satz_bp, typ, gueltig_von, gueltig_bis, gebiet? }. typ: normal (STANDARD), ermaessigt (reduced),
 // stark_ermaessigt (super_reduced), zwischensatz (parking), befreit (0 % exempted/out_of_scope/not_applicable: kein Satz einer OSS-Zeile).
-// gueltig_von: das von TEDB je Land gelieferte situationOn (Beginn des Datenstands); vor diesem Tag macht der Kern keine Aussage (W_OSS_SATZ_STAND).
+// gueltig_von: KERN-C2 (G-KC-02): 2026-01-01 für alle 27 Länder. TEDB-Abrufe für 01.01., 15.02., 15.04., 31.05. und 30.06.2026 liefern dieselben
+// Satzmengen wie der Stand 15.11.2026, nur AT ohne 4,9 % (stark ermäßigt, ab 2026-07-01, eigener gueltig_von); docs/quellen/tedb-mwst-saetze-2026-h1-rf.md.
+// Vor 2026-01-01 keine Aussage (W_OSS_SATZ_STAND): zum 01.01.2026 änderten u. a. FI (14 % -> 13,5 %) und LT (9 % -> 12 %).
 // gebiet: true = Satz mit vermutetem Gebietsbezug (AT 19 % Jungholz/Mittelberg, ES 7 % unter STANDARD, PT 16/22 % Azoren/Madeira, GR 17 % Inseln,
 // FR 0,9/1,05/8,5/13 % Korsika und Überseegebiete); TEDB führt sie als eigene Einträge, die Zuordnung ist eigene Beobachtung (Konfidenz C):
 // sie gelten in der Satzprüfung nicht als Hauptsatz (W_OSS_SATZ_GEBIET, Bestätigung nötig). Kontolux sagt nie, welcher ermäßigte Satz für eine
@@ -468,7 +470,7 @@ function eus(von, normal, weitere, gebiet) {
   const g = gebiet || [];
   const l = [];
   for (const bp of normal) l.push({ satz_bp: bp, typ: 'normal', gueltig_von: von, gueltig_bis: null, ...(g.includes(bp) ? { gebiet: true } : {}) });
-  for (const [bp, typ] of weitere) l.push({ satz_bp: bp, typ, gueltig_von: von, gueltig_bis: null, ...(typ !== 'befreit' && g.includes(bp) ? { gebiet: true } : {}) });
+  for (const [bp, typ, abw] of weitere) l.push({ satz_bp: bp, typ, gueltig_von: abw || von, gueltig_bis: null, ...(typ !== 'befreit' && g.includes(bp) ? { gebiet: true } : {}) });
   return l;
 }
 const E = 'ermaessigt';
@@ -481,36 +483,36 @@ export const EU_SAETZE = frieren({
   id: 'EU_SAETZE',
   wert: 27,
   laender: {
-    AT: eus(J7, [2000], [[0, BF], [490, SE], [1000, E], [1300, E], [1900, E]], [1900]),
-    BE: eus(J7, [2100], [[0, BF], [600, E], [1200, ZW], [1200, E]]),
-    BG: eus(J7, [2000], [[900, E]]),
+    AT: eus(J1, [2000], [[0, BF], [490, SE, J7], [1000, E], [1300, E], [1900, E]], [1900]),
+    BE: eus(J1, [2100], [[0, BF], [600, E], [1200, ZW], [1200, E]]),
+    BG: eus(J1, [2000], [[900, E]]),
     CY: eus(J1, [1900], [[0, BF], [300, SE], [500, E], [900, E]]),
-    CZ: eus(J7, [2100], [[0, BF], [1200, E]]),
-    DE: eus(J7, [1900], [[0, BF], [700, E]]),
-    DK: eus(J7, [2500], [[0, BF]]),
-    EE: eus(J7, [2400], [[900, E], [1300, E]]),
-    ES: eus(J7, [2100, 700], [[400, SE], [1000, E]], [700]),
-    FI: eus(J7, [2550], [[1000, E], [1350, E]]),
-    FR: eus(J7, [2000], [[0, BF], [90, E], [105, E], [210, SE], [550, E], [850, E], [1000, E], [1300, E]], [90, 105, 850, 1300]),
+    CZ: eus(J1, [2100], [[0, BF], [1200, E]]),
+    DE: eus(J1, [1900], [[0, BF], [700, E]]),
+    DK: eus(J1, [2500], [[0, BF]]),
+    EE: eus(J1, [2400], [[900, E], [1300, E]]),
+    ES: eus(J1, [2100, 700], [[400, SE], [1000, E]], [700]),
+    FI: eus(J1, [2550], [[1000, E], [1350, E]]),
+    FR: eus(J1, [2000], [[0, BF], [90, E], [105, E], [210, SE], [550, E], [850, E], [1000, E], [1300, E]], [90, 105, 850, 1300]),
     GR: eus(J1, [2400], [[0, BF], [400, SE], [600, E], [1300, ZW], [1300, E], [1700, E]], [1700]),
-    HR: eus(J7, [2500], [[500, E], [1300, E]]),
-    HU: eus(J7, [2700], [[0, BF], [500, E], [1800, E]]),
-    IE: eus(J7, [2300], [[0, BF], [900, E], [1350, E]]),
-    IT: eus(J7, [2200], [[400, SE], [500, E], [1000, E]]),
-    LT: eus(J7, [2100], [[500, E], [1200, E]]),
-    LU: eus(J7, [1700], [[0, BF], [300, SE], [800, SE], [800, E], [1400, ZW], [1400, E]]),
-    LV: eus(J7, [2100], [[0, BF], [500, E], [1200, E]]),
-    MT: eus(J7, [1800], [[0, BF], [500, E], [700, E], [1200, ZW]]),
-    NL: eus(J7, [2100], [[0, BF], [900, E]]),
-    PL: eus(J7, [2300], [[500, E], [800, SE], [800, E]]),
+    HR: eus(J1, [2500], [[500, E], [1300, E]]),
+    HU: eus(J1, [2700], [[0, BF], [500, E], [1800, E]]),
+    IE: eus(J1, [2300], [[0, BF], [900, E], [1350, E]]),
+    IT: eus(J1, [2200], [[400, SE], [500, E], [1000, E]]),
+    LT: eus(J1, [2100], [[500, E], [1200, E]]),
+    LU: eus(J1, [1700], [[0, BF], [300, SE], [800, SE], [800, E], [1400, ZW], [1400, E]]),
+    LV: eus(J1, [2100], [[0, BF], [500, E], [1200, E]]),
+    MT: eus(J1, [1800], [[0, BF], [500, E], [700, E], [1200, ZW]]),
+    NL: eus(J1, [2100], [[0, BF], [900, E]]),
+    PL: eus(J1, [2300], [[500, E], [800, SE], [800, E]]),
     PT: eus(J1, [2300], [[600, SE], [600, E], [1300, ZW], [1300, E], [1600, E], [2200, E]], [1600, 2200]),
-    RO: eus(J7, [2100], [[0, BF], [1100, E]]),
-    SE: eus(J7, [2500], [[600, E], [1200, E]]),
-    SI: eus(J7, [2200], [[500, E], [950, E]]),
-    SK: eus(J7, [2300], [[500, E], [1900, E]]),
+    RO: eus(J1, [2100], [[0, BF], [1100, E]]),
+    SE: eus(J1, [2500], [[600, E], [1200, E]]),
+    SI: eus(J1, [2200], [[500, E], [950, E]]),
+    SK: eus(J1, [2300], [[500, E], [1900, E]]),
   },
   tedb_codes: { GR: 'EL' },
-  quelle: 'docs/quellen/tedb-mwst-saetze-2026-11-15-rf.md (EU-Kommission TEDB, SOAP retrieveVatRates, situationOn 2026-11-15)',
+  quelle: 'docs/quellen/tedb-mwst-saetze-2026-11-15-rf.md (EU-Kommission TEDB, SOAP retrieveVatRates, situationOn 2026-11-15); Stand erstes Halbjahr 2026: docs/quellen/tedb-mwst-saetze-2026-h1-rf.md',
   abruf: '2026-11-15',
   gueltig_von: null,
   gueltig_bis: null,
@@ -1361,7 +1363,7 @@ export const REGELN_NEU = frieren([
   },
   {
     regel_id: 'R-OSS-06', abschnitt: '2.4', sachverhalt: 'OSS: Berichtigungen früherer Quartale',
-    regel: 'Änderungen eines früheren Quartals (Erstattung, nachgetragener Beleg) erscheinen in der Liste des laufenden Quartals als Berichtigung je Ursprungsquartal und Land mit bisher erklärter und berichtigter Steuer; bisher erklärt aus dem Abgabe-Schnappschuss, sonst gerechnet (W_OSS_ABGABE_FEHLT). Zahlbetrag je Land saldiert, Guthaben eines Landes erstattet dieses Land. Nur innerhalb von drei Jahren.',
+    regel: 'Änderungen eines früheren Quartals (Erstattung, nachgetragener Beleg) erscheinen in der Liste des laufenden Quartals als Berichtigung je Ursprungsquartal und Land mit bisher erklärter und berichtigter Steuer; bisher erklärt aus dem Abgabe-Schnappschuss, sonst gerechnet (W_OSS_ABGABE_FEHLT); fehlt der Schnappschuss eines späteren Quartals, bleibt ein bekannter Stand stehen (W_OSS_ABGABE_FEHLT, KERN-C2). Erstattung einer bezahlten Rechnung erst mit der Rückzahlung (sonst vorläufig, W_OSS_ERSTATTUNG_OHNE_RUECKZAHLUNG, B). Zahlbetrag je Land saldiert, Guthaben eines Landes erstattet dieses Land. Nur innerhalb von drei Jahren; Korrekturen später als 31.12. des vierten Jahres nach dem Umsatz rechnet der Kern nicht (W_OSS_KORREKTUR_SPAET).',
     quelle: '§ 18j Abs. 4 S. 5 UStG; BZSt (Beispiel Guthaben); ELSTER/BOP-Hilfe OSS (docs/quellen/oss-portal-kommission-at-2026-11-15-rf.md)',
     konfidenz: 'A', konfidenz_konzept: 'neu aus Phase 3 (KERN-C, OSS)', blockiert_durch: [], blockiert_konzept: '',
   },
@@ -1379,8 +1381,8 @@ export const REGELN_NEU = frieren([
   },
   {
     regel_id: 'R-OSS-09', abschnitt: '2.4', sachverhalt: 'OSS: EÜR-Zeilen',
-    regel: 'Standard bis zur Antwort O-3: Entgelt netto Zeile 15 (Kz 112), vereinnahmte ausländische Steuer Zeile 17 (Kz 140); die Zahlung an die Bundeskasse erfasst der Nutzer als Zahlung. Gewinnneutral.',
-    quelle: 'Anleitung Anlage EÜR 2026 Zeilen 15 bis 17, 59 (docs/quellen/bmf-2026-09-01-anlage-euer-2026.md)',
+    regel: 'Standard bis zur Antwort O-3: Entgelt netto Zeile 15 (Kz 112), vereinnahmte ausländische Steuer Zeile 17 (Kz 140); die Zahlung an die Bundeskasse erfasst der Nutzer als Zahlung. KERN-C2 (G-KC-03, B): Kleinunternehmer brutto Zeile 12 (Kz 111, Anleitung Z. 12/14: nicht Zeilen 15 bis 17); elektronische Leistung ins Drittland bei Regelbesteuerung brutto Zeile 16 (Kz 103, nicht umsatzsteuerbar). Gewinnneutral.',
+    quelle: 'Anleitung Anlage EÜR 2026 Zeilen 12 bis 17, 59 (docs/quellen/bmf-2026-09-01-anlage-euer-2026.md)',
     konfidenz: 'C', konfidenz_konzept: 'neu aus Phase 3 (KERN-C, OSS)', blockiert_durch: ['O-3'], blockiert_konzept: '',
   },
   {
@@ -1409,7 +1411,7 @@ export const REGEL_UMSETZUNG = Object.freeze({
   'R-OSS-03': U('umgesetzt', OSS + 'Zuordnung je Beleg', 'oss.js:export function ossZuordnung'), 'R-OSS-04': U('umgesetzt', OSS + 'Z.36 Kz 45', 'ustva.js:kz45'),
   'R-OSS-05': U('umgesetzt', OSS + 'Quartalsliste', 'oss.js:export function ossQuartal'), 'R-OSS-06': U('umgesetzt', OSS + 'Berichtigungen aus Abgabe-Schnappschüssen', 'oss.js:berichtigungen'),
   'R-OSS-07': U('umgesetzt', OSS + 'Frist ohne Verschiebung', 'oss.js:export function ossFrist'), 'R-OSS-08': U('umgesetzt', OSS + 'Sperre mit Weiche', 'oss.js:A_KU_EU_B2C_UEBER_SCHWELLE'),
-  'R-OSS-09': U('umgesetzt', OSS + 'EÜR Kz 112/140 mit W_OSS_EUER_ZUORDNUNG', 'wirkung.js:W_OSS_EUER_ZUORDNUNG'), 'R-OSS-10': U('umgesetzt', OSS + 'Drittland-TBE Kz 45', 'oss.js:A_DRITTLAND_B2C_TBE'),
+  'R-OSS-09': U('umgesetzt', OSS + 'EÜR Kz 112/140 mit W_OSS_EUER_ZUORDNUNG, KU Kz 111, Drittland-TBE Kz 103', 'wirkung.js:W_OSS_EUER_ZUORDNUNG'), 'R-OSS-10': U('umgesetzt', OSS + 'Drittland-TBE Kz 45', 'oss.js:A_DRITTLAND_B2C_TBE'),
   // KERN-B (BP-05a): Reverse Charge Eingang gerechnet hinter der Kern-Option rc_eingang (Feature ausland); ohne Option wie bisher ausgeschlossen
   'R-13B-01': U('umgesetzt', RC + 'EU-Dienstleister Kz 46/47', 'wirkung.js:function reverseChargeWirkung'), 'R-13B-02': U('umgesetzt', RC + 'Kz 67 aus derselben Basis, nur Status Regel', 'wirkung.js:rc_vorsteuer'),
   'R-13B-03': U('umgesetzt', RC + 'Drittland Kz 84/85', 'wirkung.js:function reverseChargeWirkung'),

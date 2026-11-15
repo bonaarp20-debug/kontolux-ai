@@ -71,6 +71,28 @@ export function optionenAusFeatures(features) {
   return { regeln };
 }
 
+// KERN-C2 (H8 der Gegenprüfung G-KERN-C): welche Funktionen (Feature-Namen) erst mit der Zustimmung zu einer Fassung der Nutzungsbedingungen wirken.
+// B: Release B (gleich KontoluxWorker/regel/gemeinsam.js und regel/loader.js FEATURES_AGB_RELEASE_B, dazu kz39); C: Release C (oss). Eine Zustimmung zu
+// Release B schaltet oss NICHT frei: oss bleibt aus, bis L-C/E-C die Fassung C und ihren Nachweis liefern. Nur Namen und eine reine Hilfe; Lader (App)
+// und Worker verdrahten sie mit L-C (bis dahin gelten dort ihre eigenen Listen).
+export const KERN_FEATURES_AGB = Object.freeze({
+  B: Object.freeze(['zahlung', 'korrektur', 'anlagegut', 'ausland', 'plattform', 'auszahlung', 'rechnung', 'erechnung', 'datev_import', 'kz39']),
+  C: Object.freeze(['oss']),
+});
+// Optionen (optionenAusFeatures) für ein Konto: Regeln, deren Feature in KERN_FEATURES_AGB[F] steht, nur mit zustimmung[F] === true, sonst aus.
+// Ergebnis neu und vollständig wie optionenAusFeatures (Schlüssel alphabetisch).
+export function optionenFuerZustimmung(optionen, zustimmung) {
+  const r = istObjekt(optionen) && istObjekt(optionen.regeln) ? optionen.regeln : {};
+  const z = istObjekt(zustimmung) ? zustimmung : {};
+  const regeln = {};
+  for (const name of Object.keys(KERN_OPTION_FEATURES).sort()) {
+    const feat = KERN_OPTION_FEATURES[name];
+    const fassung = Object.keys(KERN_FEATURES_AGB).find((f) => KERN_FEATURES_AGB[f].includes(feat));
+    regeln[name] = r[name] === true && (fassung === undefined || z[fassung] === true);
+  }
+  return { regeln };
+}
+
 export const STEUERFAELLE_STUFE_NICHT_GERECHNET = Object.freeze([
   'A_NICHT_STEUERBAR_EU_B2B_DL', 'A_NICHT_STEUERBAR_DRITTLAND_B2B_DL', 'A_WERTABGABE', 'E_13B_EU_DL', 'E_13B_DRITTLAND_DL', 'E_VORSTEUER_NICHT_ABZIEHBAR',
 ]);
@@ -833,7 +855,10 @@ export function belegWirkungen(beleg, profil, optionen) {
       if (per) weitereHinweisWirkungen(s, profil, ctx, out, per, { status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: s.sperrgrund || null });
     } else if (sf === 'UNBEKANNT') {
       ctx.beleg_status = s.unbekannt_grund === 'datum_fehlt' ? 'zuordnung_offen' : 'unbekannt';
-      const datum = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null;
+      // KERN-C2 (H1, G-KC-01): eine offene Korrektur eines OSS-Belegs (Rückzahlung fehlt, zu spät, Original offen) gehört mit Kern-Option oss in den
+      // Zeitraum ihres Wirkdatums (sonst ohne Zeitraum und damit in jedem Zeitraum offen). Ohne Option unverändert.
+      const ossKorrTag = regelAn(opt, 'oss') && istObjekt(s.oss) && istObjekt(s.oss.zuordnung) && KORREKTUR_ARTEN.includes(s.beleg_art) && istDatum(s.wirkdatum) ? s.wirkdatum : null;
+      const datum = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : ossKorrTag;
       const per = datum ? ustPeriode(profil, datum, hinweise) : null;
       out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: datum, rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-ZP-11', hinweis_detail: s.unbekannt_grund || null }));
       // KERN-C: Beleg mit steuer.oss, ohne Kern-Option oss gerechnet (keine Zuordnung): Spur für kernOptionenAusWirkungen (W_KERN_OPTIONEN_WIDERSPRUCH)
@@ -1130,13 +1155,16 @@ function ausgangWirkungen(s, profil, ctx, out, opt) {
 // (A_KU_EU_B2C_UEBER_SCHWELLE), nur mit Kern-Option oss. Voranmeldung: Kz 45 netto (Zeile 36), keine deutsche Steuer, im Zeitraum des Leistungstags
 // (Korrektur: Wirkdatum), auch bei Ist-Versteuerung (W_OSS_IST_ZEITRAUM, B). Satz nicht in der Satzliste und nicht bestätigt: nicht berechnet. Fremdwährung
 // ohne Monatskurs (§ 16 Abs. 6 S. 1 UStG): nicht berechnet. EÜR: je Zahlung Netto Kz 112 und ausländische Steuer Kz 140 (O-3, C, W_OSS_EUER_ZUORDNUNG);
-// Fremdwährung und Korrekturen als unsicherer Betrag (R-EUER-35).
+// Fremdwährung und Korrekturen als unsicherer Betrag (R-EUER-35). KERN-C2 (G-KC-03, Anleitung Anlage EÜR 2026 Zeilen 12, 14, 16): Kleinunternehmer
+// (Status am Leistungstag) brutto in Kz 111 (HN_OSS_EUER_KU, B); Regelbesteuerte mit Drittland-TBE (im Inland nicht steuerbar) brutto in Kz 103
+// (HN_OSS_EUER_DRITTLAND, B). Gewinn in jeder Variante gleich. Korrektur mit Rückzahlung nach dem Wirkdatum: Zeitraum der Rückzahlung (oss.js, H1).
 // ---------------------------------------------------------------------------------------------
 function ossWirkungen(s, profil, ctx, out) {
   const sf = s.steuerfall;
   const o = s.oss;
   const korr = KORREKTUR_ARTEN.includes(s.beleg_art);
-  const datum = korr ? (istDatum(s.wirkdatum) ? s.wirkdatum : null) : (istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null);
+  const wirkOss = istObjekt(o.zuordnung) && istDatum(o.zuordnung.datum_wirk) ? o.zuordnung.datum_wirk : s.wirkdatum;
+  const datum = korr ? (istDatum(wirkOss) ? wirkOss : null) : (istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null);
   const per = datum ? ustPeriode(profil, datum, ctx.hinweise) : null;
   const unsichereEuer = () => {
     for (const z of aktiveZahlungen(s)) out.push(mk(ctx, { welt: 'euer', periode: String(jahrVon(z.datum)), datum_wirk: z.datum, kz: null, betrag_cent: z.betrag_cent, netto_cent: z.betrag_cent, rolle: s.richtung === 'ausgang' ? 'einnahme' : 'ausgabe', spalte: s.richtung === 'ausgang' ? 'einnahme' : 'ausgabe', status: 'unbekannt', regel_id: 'R-EUER-35', unsicher: true, ereignis_id: z.id }));
@@ -1168,8 +1196,14 @@ function ossWirkungen(s, profil, ctx, out) {
   let n = 0; let u = 0;
   for (const x of o.zeilen) { n += x.netto_cent; u += x.ust_cent; }
   const brutto = n + u;
+  const ku = statusAm(profil, datum).status === 'ku';
   for (const z of aktiveZahlungen(s)) {
     const jahr = String(jahrVon(z.datum));
+    if (ku || sf === 'A_DRITTLAND_B2C_TBE') {
+      // G-KC-03: Kleinunternehmer Zeile 12 (Kz 111, "nicht in den Zeilen 15 bis 17"), Regelbesteuerte Drittland-TBE Zeile 16 (Kz 103, nicht steuerbar), je brutto
+      if (z.betrag_cent !== 0) out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: z.datum, kz: ku ? 111 : 103, netto_cent: z.betrag_cent, betrag_cent: z.betrag_cent, rolle: 'einnahme', spalte: 'einnahme', regel_id: 'R-OSS-09', ereignis_id: z.id, hinweise: [ku ? 'HN_OSS_EUER_KU' : 'HN_OSS_EUER_DRITTLAND'] }));
+      continue;
+    }
     const nz = brutto > 0 ? mulDivRund(z.betrag_cent, n, brutto) : z.betrag_cent;
     const uz = z.betrag_cent - nz;
     const he = sf === 'A_OSS_EU_B2C' ? ['W_OSS_EUER_ZUORDNUNG'] : [];
@@ -2203,7 +2237,11 @@ export function alleWirkungen(belege, profil, optionen) {
   // Korrekturen zuerst prüfen: Die Zerlegung nach Zahlungsstand und der Abzug vom Leistungsposten (Rückgängigmachung vor der Leistung) gehören
   // zum Original, das vor den Korrekturen gerechnet wird.
   // KERN-C: Korrekturen eines OSS-Belegs (A_OSS_EU_B2C, A_DRITTLAND_B2C_TBE, Sperre) rechnet ossWirkungen selbst, nicht der Korrekturpfad
-  const ossKorr = (s) => istObjekt(s) && OSS_FAELLE.includes(s.steuerfall) && regelAn(optionen, 'oss');
+  // KERN-C2: ebenso offene OSS-Korrekturen aus reinen Daten- und Zahlungsregeln (zu spät, Rückzahlung fehlt): sie bleiben UNBEKANNT im Zeitraum des
+  // Wirkdatums, unabhängig davon, ob das Original im Vorfilter des Workers gerechnet werden kann (sonst App unbekannt, Worker ausgeschlossen).
+  const OSS_KORR_OFFEN = ['oss_korrektur_spaet', 'oss_rueckzahlung_fehlt'];
+  const ossKorr = (s) => istObjekt(s) && regelAn(optionen, 'oss') && (OSS_FAELLE.includes(s.steuerfall)
+    || (s.steuerfall === 'UNBEKANNT' && istObjekt(s.oss) && istObjekt(s.oss.zuordnung) && OSS_KORR_OFFEN.includes(s.oss.zuordnung.grund)));
   const korrekturen = vorbereitet.filter((b) => { const s = b && b.steuer; return istObjekt(s) && KORREKTUR_ARTEN.includes(s.beleg_art) && !ossKorr(s); });
   const { aus: korrAusschluss, origVon } = korrekturPruefung(korrekturen.filter((b) => !doppelt(b)), originale, profil, optionen);
   const kontext = korrekturKontext(korrekturen.filter((b) => !doppelt(b) && !korrAusschluss.has(b)), origVon, profil, optionen);
