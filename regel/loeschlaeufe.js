@@ -88,7 +88,7 @@ export function logLauf(name, daten) {
 export const AUFBEWAHRUNG_SAMMLUNGEN = Object.freeze([
   'dokumente', 'monatsabschluesse', 'abschreibungen', 'privatvorgaenge', 'tagesdaten', 'audit_log', 'angebote', 'kunden',
   'zeiteintraege', 'reisekosten', 'sammelbelege', 'stripe_links', 'stripe_rechnungen', 'agb_zustimmung',
-  'steuerprofil', 'festschreibung', 'audit_v2', 'migration', 'rechnungsnummern',
+  'steuerprofil', 'festschreibung', 'audit_v2', 'migration', 'rechnungsnummern', 'zaehler', // zaehler: Nummernkreis (FIX-RB N6)
 ]);
 // Profil-Dokumente, die zu den Buchungsdaten gehören (Firmendaten, Steuernummer, Nummernkreise, DATEV) oder die Archiv-Markierung sind
 export const AUFBEWAHRUNG_PROFIL = Object.freeze(['settings', 'steuer', 'rechnungsCounter', 'angeboteCounter', 'datevImporte', 'konto_archiv']);

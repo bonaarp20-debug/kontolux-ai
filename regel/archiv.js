@@ -6,7 +6,8 @@
 // Darum werden sie über eine Abfrage über alle Nachfahren (allDescendants) unter users/{uid} gefunden: eine Unteranfrage je 300 Dokumente,
 // unabhängig von der Zahl der Elterndokumente (Free-Plan: 50 Unteranfragen; eine Liste je Beleg wäre bei 5.000 Belegen nicht machbar).
 export const FIRESTORE_WURZEL = 'https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents';
-export const REGEL_SAMMLUNGEN = Object.freeze(['steuerprofil', 'festschreibung', 'audit_v2', 'migration', 'rechnungsnummern']);
+// FIX-RB N6 (G-RB): zaehler (benannte Zähler, regel/zaehler.js) gehört mit in Archiv, Löschlauf, Speicher-Umzug und Export
+export const REGEL_SAMMLUNGEN = Object.freeze(['steuerprofil', 'festschreibung', 'audit_v2', 'migration', 'rechnungsnummern', 'zaehler']);
 // Unterkollektionen je Sammlung (chats/messages räumt der Löschlauf schon heute je Chat ab)
 export const UNTERSAMMLUNGEN = Object.freeze({ chats: ['messages'], steuerprofil: ['verlauf'], dokumente: ['versionen'] });
 // Für den Löschlauf und den Export über allDescendants (messages bleibt beim bisherigen Weg je Chat)

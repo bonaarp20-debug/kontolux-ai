@@ -228,6 +228,45 @@ test('Eigene (manuelle) Nummer: wird eindeutig eingetragen; zweimal dieselbe Num
   assert.equal(kollision.status, 409);
 });
 
+test('FIX-RB Z1: eigene Nummer im Zählerformat (RE-JJJJ-NNN) schiebt Zähler und Altzähler hinter sich, die nächste automatische Nummer folgt', async () => {
+  const { fs, rufe, reserviereBisOk } = umgebung();
+  assert.equal((await reserviereBisOk(key())).json.nummer, 'RE-2026-001');
+  const m = await rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung', manuell: 'RE-2026-045' });
+  assert.equal(m.status, 200, JSON.stringify(m.json));
+  assert.equal(m.json.nummer, 'RE-2026-045');
+  assert.equal(fs.lies(`users/${UID}/rechnungsnummern/RE-2026-045`).herkunft, 'manuell');
+  assert.equal(fs.lies(`users/${UID}/zaehler/RE`).letzte, 45, 'Zähler hinter der eigenen Nummer');
+  assert.equal(fs.lies(`users/${UID}/profil/rechnungsCounter`).count, 45, 'Altzähler ebenso (Zurückschalten aufs Altformular vergibt 046)');
+  assert.ok(m.anfragen <= 3, String(m.anfragen));
+  assert.equal((await reserviereBisOk(key())).json.nummer, 'RE-2026-046');
+  // Altformular zählt weiter (count 47), danach wieder v2: 048
+  fs.setze(`users/${UID}/profil/rechnungsCounter`, { count: 47 });
+  assert.equal((await reserviereBisOk(key())).json.nummer, 'RE-2026-048');
+});
+
+test('FIX-RB Z1: eigene Nummer im schon vergebenen Bereich -> 409 NUMMER_IM_ZAEHLERBEREICH, nichts geschrieben (nie doppelt)', async () => {
+  const { fs, rufe } = umgebung({ legacy: 7 }); // Altformular hat 1..7 vergeben, ohne Nummern-Dokumente
+  for (const nr of ['RE-2026-005', 'RE-2026-7', 'RE-2025-003']) {
+    const r = await rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung', manuell: nr });
+    assert.equal(r.status, 409, nr);
+    assert.equal(r.json.fehler[0].code, 'NUMMER_IM_ZAEHLERBEREICH', nr);
+  }
+  assert.equal(fs.pfade(`users/${UID}/rechnungsnummern/`).length, 0);
+  assert.equal(fs.lies(`users/${UID}/profil/rechnungsCounter`).count, 7);
+});
+
+test('FIX-RB Z1: belegtes Nummern-Dokument aus dem Altbestand wird übersprungen statt Dauerkonflikt; parallel bleibt alles eindeutig', async () => {
+  const { fs, reserviereBisOk } = umgebung();
+  fs.setze(`users/${UID}/zaehler/RE`, { name: 'RE', letzte: 2 });
+  fs.setze(`users/${UID}/rechnungsnummern/RE-2026-003`, { nummer: 'RE-2026-003', zaehler: 'RE', laufnummer: null, schluessel: 'alt-0000001', status: 'verwendet', herkunft: 'manuell' });
+  fs.setze(`users/${UID}/rechnungsnummern/RE-2026-004`, { nummer: 'RE-2026-004', zaehler: 'RE', laufnummer: null, schluessel: 'alt-0000002', status: 'verwendet', herkunft: 'manuell' });
+  const erg = await Promise.all(Array.from({ length: 10 }, () => reserviereBisOk(key())));
+  const nummern = erg.map((r) => r.json.laufnummer).sort((a, b) => a - b);
+  assert.deepEqual(nummern, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+  assert.equal(fs.lies(`users/${UID}/zaehler/RE`).letzte, 14);
+  assert.equal(fs.lies(`users/${UID}/rechnungsnummern/RE-2026-003`).schluessel, 'alt-0000001', 'Altdokument unberührt');
+});
+
 test('Eingabeprüfung und Freischaltung: Feature rechnung aus -> 403, unbekannter Zähler/Zweck/Schlüssel -> 400, nur eigener Pfad', async () => {
   {
     const { fs, rufe } = umgebung({ config: { kern_max: 'schatten', features: { rechnung: 'aus' } } });

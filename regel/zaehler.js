@@ -19,6 +19,10 @@
 // Reihenfolge je Versuch (V-F, N-1): batchGet (Zähler, Altzähler) -> Suche nach anfrage_id -> commit mit Vorbedingung. Damit vergibt derselbe
 // Schlüssel auch bei gleichzeitigen Läufen genau eine Nummer (Begründung am Schleifenanfang). Grenze: dieselbe anfrage_id gleichzeitig als
 // automatische UND als eigene (manuelle) Nummer, oder mit zwei verschiedenen eigenen Nummern, ist ein Fehlgebrauch des Clients und nicht abgesichert.
+// Eigene Nummern (FIX-RB, G-RB Z1): Eine eigene Nummer im Format des Zählers (RE-JJJJ-N) hinter dem Stand wird eingetragen und schiebt
+// Zähler UND Altzähler im selben Commit hinter sich; im schon vergebenen Bereich (<= Stand) 409 NUMMER_IM_ZAEHLERBEREICH (sie kann eine Nummer
+// des Altformulars ohne Nummern-Dokument sein). Andere eigene Nummern (z. B. KD-17) berühren den Zähler nicht. Gibt es das Dokument einer
+// berechneten Nummer schon (Altbestand), springt der nächste Versuch über sie (ALREADY_EXISTS), statt dauerhaft 409 KONFLIKT zu liefern.
 // Konflikt: bis ZAEHLER_VERSUCHE Wiederholungen mit kurzer Zufallspause, danach 409 KONFLIKT. Der Client wiederholt mit derselben
 // anfrage_id. Netzfehler: keine Nummer in der Antwort, nie eine Ersatznummer (Abfrage nach anfrage_id findet eine doch geschriebene Nummer).
 import { antwort, fehlerAntwort, grundpruefung, nurSchluessel, CONFIG_PFAD, configBereinigen, featureAktiv, jetztIso, schichtFuer, regelFehler } from './gemeinsam.js';
@@ -46,6 +50,15 @@ export function nummerDokId(nummer) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/.test(s)) return null;
   if (/^__.*__$/.test(s)) return null;
   return s;
+}
+
+// FIX-RB Z1: Laufnummer einer Nummer im Format dieses Zählers (PRAEFIX-JJJJ-N...), sonst null. Der Zähler läuft jahresübergreifend
+// (wie das Altformular), deshalb zählt jede Jahreszahl.
+export function laufnummerAusFormat(def, nummer) {
+  const m = new RegExp(`^${def.praefix}-(\\d{4})-(\\d{1,9})$`).exec(String(nummer ?? ''));
+  if (!m) return null;
+  const n = Number(m[2]);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
 
 const zaehlerPfad = (uid, name) => `users/${uid}/zaehler/${name}`;
@@ -88,14 +101,16 @@ async function reservieren(body, cors, deps) {
   const warte = typeof deps.warte === 'function' ? deps.warte : (() => warteStandard(5 + Math.floor(Math.random() * 25)));
   try {
     const fs = await schichtFuer(deps);
+    const zp = zaehlerPfad(uid, name);
+    const ap = altPfad(uid, def);
+    let mindest = 0;
     for (let versuch = 0; versuch < ZAEHLER_VERSUCHE; versuch++) {
       // V-F (N-1, G-VE): erst lesen (Zähler mit updateTime), DANN nach dem Schlüssel suchen, dann mit der Vorbedingung schreiben. Hat ein
       // paralleler Lauf mit demselben Schlüssel vor der Suche geschrieben, findet ihn die Suche; schreibt er danach, hat er den Zähler nach
       // unserem Lesen geändert und unser Commit scheitert an der Vorbedingung (nächster Versuch findet ihn). Vorher stand die Suche vor dem
       // Lesen: dazwischen konnte der andere Lauf schreiben, und es entstanden zwei Nummern zum selben Schlüssel.
-      const zp = zaehlerPfad(uid, name);
-      const ap = altPfad(uid, def);
-      const docs = await fs.batchGet(manuell ? [CONFIG_PFAD, nummerPfad(uid, def, manuellId)] : [CONFIG_PFAD, zp, ap]);
+      // FIX-RB Z1: auch bei eigener Nummer Zähler und Altzähler mitlesen (eine eigene Nummer im Zählerformat schiebt den Zähler weiter)
+      const docs = await fs.batchGet(manuell ? [CONFIG_PFAD, zp, ap, nummerPfad(uid, def, manuellId)] : [CONFIG_PFAD, zp, ap]);
       const vorhanden = await nachSchluessel(fs, uid, def, schluessel);
       if (vorhanden) {
         const d = vorhanden.daten;
@@ -104,12 +119,28 @@ async function reservieren(body, cors, deps) {
       }
       if (!featureAktiv(configBereinigen(docs.get(CONFIG_PFAD)?.daten), def.feature)) return fehlerAntwort(403, 'FEATURE_AUS', cors);
       const zeit = jetztIso(deps);
+      const z = docs.get(zp);
+      const alt = docs.get(ap);
+      const stand = Math.max(ganz(z?.daten?.letzte), ganz(alt?.daten?.count));
       if (manuell) {
         // Eindeutigkeit über das create-only Nummern-Dokument (gleiche Nummer parallel: einer scheitert, der nächste Versuch findet den Schlüssel)
         if (docs.get(nummerPfad(uid, def, manuellId))) return fehlerAntwort(409, 'NUMMER_VERGEBEN', cors);
-        const d = { nummer: manuellId, zaehler: name, laufnummer: null, jahr: null, zweck: body.zweck, schluessel, status: 'reserviert', herkunft: 'manuell', reserviert_am: zeit };
+        const imFormat = laufnummerAusFormat(def, manuellId);
+        const d = { nummer: manuellId, zaehler: name, laufnummer: imFormat, jahr: imFormat ? manuellId.split('-')[1] : null, zweck: body.zweck, schluessel, status: 'reserviert', herkunft: 'manuell', reserviert_am: zeit };
+        const writes = [];
+        if (imFormat !== null) {
+          // FIX-RB Z1: Eine eigene Nummer im Format des Zählers (RE-JJJJ-NNN). Liegt sie im schon vergebenen Bereich, kann sie eine Nummer
+          // des Altformulars oder des Zählers sein, für die es kein Nummern-Dokument gibt: ablehnen (nie doppelt). Liegt sie dahinter,
+          // wird sie eingetragen und Zähler UND Altzähler im selben Commit hinter sie gesetzt (beide Richtungen konsistent).
+          if (imFormat <= stand) return fehlerAntwort(409, 'NUMMER_IM_ZAEHLERBEREICH', cors);
+          writes.push(
+            schreibe.setzen(zp, { name, letzte: imFormat, aktualisiert_am: zeit }, vorbedingungAus(z)),
+            schreibe.aendern(ap, { count: imFormat }, ['count'], vorbedingungAus(alt)),
+          );
+        }
+        writes.push(schreibe.anlegen(nummerPfad(uid, def, manuellId), d));
         try {
-          await fs.commit([schreibe.anlegen(nummerPfad(uid, def, manuellId), d)]);
+          await fs.commit(writes);
           return ergebnis(d, false, cors);
         } catch (e) {
           if (!(e instanceof FirestoreFehler && e.art === 'konflikt')) throw e;
@@ -117,9 +148,10 @@ async function reservieren(body, cors, deps) {
           continue;
         }
       }
-      const z = docs.get(zp);
-      const alt = docs.get(ap);
-      const laufnummer = Math.max(ganz(z?.daten?.letzte), ganz(alt?.daten?.count)) + 1;
+      // FIX-RB Z1: belegt ist eine Nummer auch, wenn es ihr Dokument schon gibt (Altbestand vor dem Fix). Scheitert das create-only Anlegen
+      // (ALREADY_EXISTS), springt der nächste Versuch über diese Laufnummer, statt sie zehnmal zu wiederholen. Ohne Zusatzanfrage: kam der
+      // Fehler in Wahrheit vom gleichzeitigen Anlegen des Zählers, steht der Zähler beim nächsten Lesen ohnehin mindestens dort.
+      const laufnummer = Math.max(stand, mindest - 1) + 1;
       const jahr = jahrAus(deps);
       const nummer = nummerFormat(def.praefix, jahr, laufnummer, def.stellen);
       const d = { nummer, zaehler: name, laufnummer, jahr, zweck: body.zweck, schluessel, status: 'reserviert', herkunft: 'zaehler', reserviert_am: zeit };
@@ -132,6 +164,7 @@ async function reservieren(body, cors, deps) {
         return ergebnis(d, false, cors);
       } catch (e) {
         if (!(e instanceof FirestoreFehler && e.art === 'konflikt')) throw e;
+        if (e.klasse === 'ALREADY_EXISTS') mindest = Math.max(mindest, laufnummer + 1);
         await warte(versuch);
       }
     }

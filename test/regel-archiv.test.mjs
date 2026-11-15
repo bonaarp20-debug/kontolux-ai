@@ -25,6 +25,7 @@ function befuelle(fs, uid) {
   fs.setze(`${u}/audit_v2/e0000000001`, { seq: 1 });
   fs.setze(`${u}/migration/_aktiv`, { lauf: 'x' });
   fs.setze(`${u}/rechnungsnummern/R1`, { beleg: 'd2' });
+  fs.setze(`${u}/zaehler/RE`, { name: 'RE', letzte: 1 }); // FIX-RB N6
   fs.setze(`${u}/chats/c1`, { titel: 'x' });
   fs.setze(`${u}/chats/c1/messages/m1`, { text: 'x' });
   fs.setze(`${u}/monatsabschluesse/August-2026`, { festgeschrieben: true });
@@ -32,7 +33,7 @@ function befuelle(fs, uid) {
 }
 
 test('ARCHIV_SAMMLUNGEN in worker.js enthält die neuen Sammlungen; Speicher-Umzug und Export nutzen die Unterkollektionen', () => {
-  assert.deepEqual([...REGEL_SAMMLUNGEN].sort(), ['audit_v2', 'festschreibung', 'migration', 'rechnungsnummern', 'steuerprofil']);
+  assert.deepEqual([...REGEL_SAMMLUNGEN].sort(), ['audit_v2', 'festschreibung', 'migration', 'rechnungsnummern', 'steuerprofil', 'zaehler']);
   const quelle = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
   assert.match(quelle, /const ARCHIV_SAMMLUNGEN = \[[\s\S]*?\.\.\.REGEL_SAMMLUNGEN\s*\];/);
   assert.match(quelle, /\[\.\.\.ARCHIV_SAMMLUNGEN, 'messages', \.\.\.REGEL_UNTERSAMMLUNGEN\]/, 'Speicher-Umzug');

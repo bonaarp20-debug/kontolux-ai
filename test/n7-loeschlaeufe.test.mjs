@@ -84,6 +84,12 @@ async function laufBisFertig(g, e, kv, jetzt, max = 40, pruefe = () => {}) {
 }
 
 // ── 1. Schalter ───────────────────────────────────────────────────────────────────────────────────────────────
+test('FIX-RB N6: Sammlung zaehler (Nummernkreis der Rechnungsnummern) ist geschützt wie profil/rechnungsCounter; kein Teil-Löschlauf fasst sie an', () => {
+  assert.equal(istAufbewahrungsPfad('users/u1/zaehler/RE'), true);
+  assert.equal(istAufbewahrungsPfad('users/u1/profil/rechnungsCounter'), true);
+  assert.equal(istAufbewahrungsPfad('users/u1/rechnungsnummern/RE-2026-001'), true);
+});
+
 test('Schalter: ohne Variable ist jeder Lauf aus; LOESCHLAEUFE_MAX deckelt; unbekannte Werte gelten als aus', () => {
   for (const k of Object.keys(SCHALTER)) assert.equal(loeschModus({}, k), 'aus', k);
   assert.equal(loeschModus({ LOESCHLAUF_ARCHIV: 'an' }, 'ARCHIV'), 'aus', 'ohne MAX bleibt aus');
