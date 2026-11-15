@@ -121,6 +121,35 @@ test('Gleicher Idempotenzschlüssel: gleiche Nummer (auch parallel), keine zweit
   assert.equal(fs.lies(`users/${UID}/zaehler/RE`).letzte, 2);
 });
 
+// V-F (N-1 aus g-ve-bericht.md): deterministisch statt Zufall. Lauf B hält nach einer bestimmten Unteranfrage an, bis Lauf A mit DEMSELBEN Schlüssel
+// fertig ist. Vorher (Suche vor dem Lesen) vergab B nach dem Halt hinter der Suche eine zweite Nummer zum selben Schlüssel.
+for (const halt of [':runQuery', ':batchGet', ':commit']) {
+  test(`N-1: gleicher Schlüssel, Lauf B hält nach ${halt}, Lauf A schreibt dazwischen: genau eine Nummer, beide erhalten sie`, async () => {
+    const { fs, deps } = umgebung({ verzoegerung: false });
+    const k = key();
+    let amTor; const bAmTor = new Promise((r) => { amTor = r; });
+    let weiter; const aFertig = new Promise((r) => { weiter = r; });
+    let gehalten = false;
+    const depsB = { ...deps, warte: async () => {}, fetchFn: async (u, i) => {
+      const res = await fs.fetchFn(u, i);
+      if (!gehalten && String(u).includes(halt)) { gehalten = true; amTor(); await aFertig; }
+      return res;
+    } };
+    const body = { userId: UID, anfrage_id: k, zaehler: 'RE', zweck: 'rechnung' };
+    const laufB = regelZaehler('/zaehler/reservieren', body, {}, {}, depsB);
+    await bAmTor;
+    const a = await regelZaehler('/zaehler/reservieren', body, {}, {}, { ...deps, fetchFn: fs.fetchFn, warte: async () => {} });
+    weiter();
+    const b = await laufB;
+    const ja = await a.json(); const jb = await b.json();
+    assert.equal(a.status, 200, JSON.stringify(ja));
+    assert.equal(b.status, 200, JSON.stringify(jb));
+    assert.equal(jb.nummer, ja.nummer, 'derselbe Schlüssel, dieselbe Nummer');
+    assert.equal(fs.pfade(`users/${UID}/rechnungsnummern/`).length, 1, 'genau ein Nummern-Dokument');
+    assert.equal(fs.lies(`users/${UID}/zaehler/RE`).letzte, 1);
+  });
+}
+
 test('Netzfehler beim Commit: keine Nummer in der Antwort, kein Ersatz; ging der Commit doch durch, liefert die Wiederholung dieselbe Nummer', async () => {
   const { fs, rufe } = umgebung({ verzoegerung: false });
   // a) Commit erreicht Firestore nicht

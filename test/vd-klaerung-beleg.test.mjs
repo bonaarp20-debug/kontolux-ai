@@ -239,12 +239,13 @@ test('Eingaben: keine Vorauswahl/kein Raten (weiss_nicht, leer, fremde Wahl = 40
   assert.deepEqual(fs.roheFelder(pfad('b1')), vorher, 'nichts geschrieben');
 });
 
-test('Unteranfragen: 100 Belege in höchstens 3 Firestore-Aufrufen; Konfliktfall bleibt unter dem Budget (Rest nicht_bearbeitet)', async () => {
+// V-F (G-VE-3): +1 Unteranfrage für die alten Monatsabschlüsse (regel/klaerung-altmonat.js), nur wenn etwas zu schreiben ist
+test('Unteranfragen: 100 Belege in höchstens 4 Firestore-Aufrufen; Konfliktfall bleibt unter dem Budget (Rest nicht_bearbeitet)', async () => {
   const belege = Object.fromEntries(Array.from({ length: KLAERUNG_MAX }, (_, i) => [`m${i}`, formularBeleg({ cent: 1190 + i * 119 })]));
   const { fs, rufe } = umgebung(belege);
   const r = await rufe({ anfrage_id: aid(), beleg_ids: Object.keys(belege), antwort: { steuerwahl: 'inland_19' } });
   assert.deepEqual(r.json.ergebnis, { geklaert: KLAERUNG_MAX });
-  assert.ok(r.anfragen <= 3, `Unteranfragen ${r.anfragen}`);
+  assert.ok(r.anfragen <= 4, `Unteranfragen ${r.anfragen}`);
   const alle = Object.keys(belege).map((id) => ({ id, ...fs.lies(pfad(id)) }));
   const erwartet = Object.keys(belege).reduce((s, _, i) => s + (1190 + i * 119) - Math.round((1190 + i * 119) / 1.19), 0);
   assert.equal(kz(alle)['66'], erwartet, 'Vorsteuer aller 100 Belege auf den Cent');

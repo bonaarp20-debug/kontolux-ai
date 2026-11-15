@@ -16,6 +16,9 @@
 //                             ist max(zaehler.letzte, count). So vergibt auch ein Zurückschalten auf das Altformular keine Nummer doppelt.
 // Gleichzeitigkeit: optimistische Transaktion über :commit mit updateTime-Vorbedingung auf Zähler und Altzähler plus create-only
 // Nummern-Dokument (die Schicht regel/firestore.js kennt keine Transaktions-API; für ein Dokument ist die Vorbedingung gleichwertig).
+// Reihenfolge je Versuch (V-F, N-1): batchGet (Zähler, Altzähler) -> Suche nach anfrage_id -> commit mit Vorbedingung. Damit vergibt derselbe
+// Schlüssel auch bei gleichzeitigen Läufen genau eine Nummer (Begründung am Schleifenanfang). Grenze: dieselbe anfrage_id gleichzeitig als
+// automatische UND als eigene (manuelle) Nummer, oder mit zwei verschiedenen eigenen Nummern, ist ein Fehlgebrauch des Clients und nicht abgesichert.
 // Konflikt: bis ZAEHLER_VERSUCHE Wiederholungen mit kurzer Zufallspause, danach 409 KONFLIKT. Der Client wiederholt mit derselben
 // anfrage_id. Netzfehler: keine Nummer in der Antwort, nie eine Ersatznummer (Abfrage nach anfrage_id findet eine doch geschriebene Nummer).
 import { antwort, fehlerAntwort, grundpruefung, nurSchluessel, CONFIG_PFAD, configBereinigen, featureAktiv, jetztIso, schichtFuer, regelFehler } from './gemeinsam.js';
@@ -29,7 +32,7 @@ export const ZAEHLER = Object.freeze({
 export const ZWECKE = Object.freeze(['rechnung', 'anzahlung', 'schlussrechnung', 'storno', 'berichtigung', 'gutschrift']);
 export const STATUS = Object.freeze(['reserviert', 'verwendet', 'nicht_verwendet']);
 export const NICHT_VERWENDET_GRUENDE = Object.freeze(['abgebrochen', 'pdf_fehler', 'doppelt_angelegt', 'sonstiges']);
-export const ZAEHLER_VERSUCHE = 10; // je Versuch höchstens 3 Unteranfragen (Abfrage, batchGet, commit): 30 von 35
+export const ZAEHLER_VERSUCHE = 10; // je Versuch höchstens 3 Unteranfragen (batchGet, Abfrage, commit): 30 von 35
 const BELEG_ID_MUSTER = /^[A-Za-z0-9_.-]{1,200}$/;
 const SCHLUESSEL_RESERVIEREN = ['userId', 'token', 'anfrage_id', 'zaehler', 'zweck', 'manuell'];
 const SCHLUESSEL_VERWENDEN = ['userId', 'token', 'anfrage_id', 'zaehler', 'nummer', 'aktion', 'beleg_id', 'grund'];
@@ -86,16 +89,23 @@ async function reservieren(body, cors, deps) {
   try {
     const fs = await schichtFuer(deps);
     for (let versuch = 0; versuch < ZAEHLER_VERSUCHE; versuch++) {
+      // V-F (N-1, G-VE): erst lesen (Zähler mit updateTime), DANN nach dem Schlüssel suchen, dann mit der Vorbedingung schreiben. Hat ein
+      // paralleler Lauf mit demselben Schlüssel vor der Suche geschrieben, findet ihn die Suche; schreibt er danach, hat er den Zähler nach
+      // unserem Lesen geändert und unser Commit scheitert an der Vorbedingung (nächster Versuch findet ihn). Vorher stand die Suche vor dem
+      // Lesen: dazwischen konnte der andere Lauf schreiben, und es entstanden zwei Nummern zum selben Schlüssel.
+      const zp = zaehlerPfad(uid, name);
+      const ap = altPfad(uid, def);
+      const docs = await fs.batchGet(manuell ? [CONFIG_PFAD, nummerPfad(uid, def, manuellId)] : [CONFIG_PFAD, zp, ap]);
       const vorhanden = await nachSchluessel(fs, uid, def, schluessel);
       if (vorhanden) {
         const d = vorhanden.daten;
         if (d.zaehler !== name || (manuell && d.nummer !== manuellId)) return fehlerAntwort(409, 'SCHLUESSEL_BELEGT', cors);
         return ergebnis(d, true, cors);
       }
+      if (!featureAktiv(configBereinigen(docs.get(CONFIG_PFAD)?.daten), def.feature)) return fehlerAntwort(403, 'FEATURE_AUS', cors);
       const zeit = jetztIso(deps);
       if (manuell) {
-        const docs = await fs.batchGet([CONFIG_PFAD, nummerPfad(uid, def, manuellId)]);
-        if (!featureAktiv(configBereinigen(docs.get(CONFIG_PFAD)?.daten), def.feature)) return fehlerAntwort(403, 'FEATURE_AUS', cors);
+        // Eindeutigkeit über das create-only Nummern-Dokument (gleiche Nummer parallel: einer scheitert, der nächste Versuch findet den Schlüssel)
         if (docs.get(nummerPfad(uid, def, manuellId))) return fehlerAntwort(409, 'NUMMER_VERGEBEN', cors);
         const d = { nummer: manuellId, zaehler: name, laufnummer: null, jahr: null, zweck: body.zweck, schluessel, status: 'reserviert', herkunft: 'manuell', reserviert_am: zeit };
         try {
@@ -107,10 +117,6 @@ async function reservieren(body, cors, deps) {
           continue;
         }
       }
-      const zp = zaehlerPfad(uid, name);
-      const ap = altPfad(uid, def);
-      const docs = await fs.batchGet([CONFIG_PFAD, zp, ap]);
-      if (!featureAktiv(configBereinigen(docs.get(CONFIG_PFAD)?.daten), def.feature)) return fehlerAntwort(403, 'FEATURE_AUS', cors);
       const z = docs.get(zp);
       const alt = docs.get(ap);
       const laufnummer = Math.max(ganz(z?.daten?.letzte), ganz(alt?.daten?.count)) + 1;

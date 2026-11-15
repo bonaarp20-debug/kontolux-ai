@@ -15,8 +15,15 @@
 //   über die NEUEN Legacy-Felder, alles in EINEM Schreibvorgang mit derselben updateTime-Vorbedingung. Brutto, Typ, Datum, Zahlung, Kategorie
 //   bleiben. Nur wenn Brutto des Legacy-Belegs gleich dem Kern-Brutto ist und die Gegenprobe (driftStatus 'ok', belegFuerKern liefert den
 //   geklärten Steuerfall) stimmt; sonst wie bisher nur 'steuer' (nie schlechter als die Aktion 'klaerung').
+// V-F (G-VE-3, 15.11.2026): Die vorherigen Legacy-Werte stehen in steuer.migration.klaerung.legacy_vorher { mwst_satz, betrag_netto, ust_unklar }
+// (fehlende als null), damit ist die Doppelschreibung umkehrbar. Belege in einem alten, festgeschriebenen Monatsabschluss
+// (users/{uid}/monatsabschluesse/{Monat-Jahr}, festgeschrieben true; Monat nach bezahlt_am, bei Reisekosten datum, wie die App
+// belegInFestgeschriebenemMonat und regel/festschreibung-kern.js legacyBelegRelevant; regel/klaerung-altmonat.js) klärt dieser Weg nicht: Code 'gesperrt', nichts geschrieben.
+// Das ist dieselbe Wirkung wie nach der Übernahme (legacy_uebernehmen -> festschreibung euer-JJJJ-MM, über festPerioden 'gesperrt') und wie die
+// Sperre der App im Altpfad; die Klärung geht nach einer Entsperrung. Sind die Monatsabschlüsse nicht vollständig lesbar (mehr als eine Seite):
+// sicherheitshalber alles 'gesperrt'.
 // Audit: Aktion migration_klaerung (bekannt in regel/audit.js) mit details.weg 'klaerung_beleg', nur Zähler und IDs, keine Beträge. Logs: keine.
-// Unteranfragen: batchGet (1), Festschreibungen (1, nur wenn etwas zu schreiben ist), commit (1); im Konfliktfall einzeln bis zum Budget,
+// Unteranfragen: batchGet (1), Festschreibungen und Monatsabschlüsse (je 1, nur wenn etwas zu schreiben ist), commit (1); im Konfliktfall einzeln bis zum Budget,
 // Rest 'nicht_bearbeitet' (die App wiederholt). Budget wie alle regel/*-Endpunkte (REGEL_UNTERANFRAGEN_MAX, unter dem Free-Limit 50).
 import * as Steuerkern from '../steuerkern/index.js';
 import {
@@ -28,6 +35,7 @@ import { aktuellPfad } from './steuerprofil.js';
 import { legacyHash } from './drift.js';
 import { klaerungEinheit, KLAERUNG_MAX, KLAERUNG_WAHLEN } from './klaerung.js';
 import { klaerungFreigegeben } from './migration.js';
+import { altFestMonate, altMonateSperren } from './klaerung-altmonat.js';
 
 export const KLAERUNG_BELEG_AKTION = 'klaerung_beleg';
 const DOK_ID_MUSTER = /^[A-Za-z0-9_.-]{1,200}$/; // wie regel/migration.js
@@ -67,7 +75,10 @@ export function legacyErgaenzen(uid, id, dok, einheit) {
     const neuLegacy = { mwst_satz: lf.mwst_satz, betrag_netto: lf.betrag_netto };
     const dNeu = { ...d, ...neuLegacy };
     delete dNeu.ust_unklar;
-    const steuerNeu = { ...steuer, migration: { ...(istObjekt(steuer.migration) ? steuer.migration : {}), legacy_hash: legacyHash(dNeu) } };
+    const m = istObjekt(steuer.migration) ? steuer.migration : {};
+    const vorherWert = (k) => (d[k] === undefined ? null : d[k]);
+    const klaerung = { ...(istObjekt(m.klaerung) ? m.klaerung : {}), legacy_vorher: { mwst_satz: vorherWert('mwst_satz'), betrag_netto: vorherWert('betrag_netto'), ust_unklar: vorherWert('ust_unklar') } };
+    const steuerNeu = { ...steuer, migration: { ...m, klaerung, legacy_hash: legacyHash(dNeu) } };
     // Gegenprobe mit dem Kern: Drift 'ok' und derselbe Steuerfall, wie ihn der Kern danach liest
     const probe = { ...dNeu, schema_version: 2, steuer: steuerNeu, id };
     if (Steuerkern.driftStatus(probe) !== 'ok') return einheit;
@@ -115,7 +126,10 @@ export async function regelKlaerungBeleg(body, env, cors = {}, deps = {}) {
     if (einheiten.some((e) => e.write)) {
       const liste = await fs.list(`users/${uid}/festschreibung`, { pageSize: 300 });
       kontext.festPerioden = liste.dokumente.filter((d) => ['festgeschrieben', 'sperre_laeuft'].includes(d.daten && d.daten.status)).map((d) => String(d.pfad).split('/').pop());
+      const alt = await altFestMonate(fs, uid);
+      if (alt.monate.length || alt.unvollstaendig) kontext.altFest = alt;
       if (kontext.festPerioden.length) einheiten = ids.map((id) => einheitFuer(uid, id, docs.get(dokPfad(uid, id)), kontext));
+      einheiten = altMonateSperren(einheiten, ids, (id) => docs.get(dokPfad(uid, id)), kontext.altFest); // V-F (G-VE-3)
     }
     const writes = einheiten.filter((e) => e.write).map((e) => e.write);
     try {
