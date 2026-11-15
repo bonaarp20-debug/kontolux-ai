@@ -969,6 +969,53 @@ export function pruefeBetragZeile(line) {
   return line;
 }
 
+// ── KX-SPEED: Stream-Filter für KI-Antworten (CHAT-SPEED, docs/regelbesteuerung/19-phase3/chat-speed-bericht.md) ──
+// Vorher hielt der Worker JEDE Zeile bis zu ihrem Zeilenende zurück, damit pruefeBetragZeile die Befehlszeilen prüfen kann. Bei Absätzen von
+// mehreren hundert Zeichen sah der Nutzer dadurch je Absatz eine Pause statt fließenden Text. Jetzt geht Fließtext sofort raus; zurückgehalten
+// wird nur ab einer Stelle, an der einer der von pruefeBetragZeile geprüften Befehle beginnen KÖNNTE (Groß-/Kleinschreibung egal, wie die
+// /i-Regexe). pruefeBetragZeile ändert eine Zeile nur ab dem Befehlsanfang (line.slice(0, index) bleibt), deshalb ist die Ausgabe Zeichen für
+// Zeichen gleich der bisherigen zeilenweisen Verarbeitung (test/chat-speed.test.mjs prüft das für jede Stückelung). Neue Befehle in
+// pruefeBetragZeile gehören auch in diese Liste (der Test liest die Regexe aus pruefeBetragZeile und bricht sonst).
+export const KX_SPEED_BEFEHLE = Object.freeze(['RECHNUNG_ERSTELLEN', 'MAHNUNG_ERSTELLEN', 'RECHNUNG_STORNIEREN', 'AUSGABE_UPDATE', 'DOKUMENT_SPEICHERN', 'PROFIL_UPDATE', 'ANGEBOT_ERSTELLEN'].map((b) => b + ':'));
+// ASCII-Vergleich ohne Groß-/Kleinschreibung: die /i-Regexe ohne u-Flag bilden Nicht-ASCII nie auf ASCII ab, toUpperCase() würde dagegen
+// Längen ändern (ß -> SS) und die Positionen verschieben.
+function kxSpeedGleich(a, b) { return a === b || (a >= 97 && a <= 122 && a - 32 === b); }
+function kxSpeedHaltePosition(zeile, ab) {
+  for (let p = ab; p < zeile.length; p++) {
+    for (const befehl of KX_SPEED_BEFEHLE) {
+      const n = Math.min(befehl.length, zeile.length - p);
+      let passt = true;
+      for (let i = 0; i < n && passt; i++) passt = kxSpeedGleich(zeile.charCodeAt(p + i), befehl.charCodeAt(i));
+      if (passt) return p; // vollständiger Befehl oder möglicher Anfang am Zeilenende: ab hier bis zum Zeilenende zurückhalten
+    }
+  }
+  return zeile.length;
+}
+export function kxSpeedZeilenFilter() {
+  let zeile = '';
+  let gesendet = 0; // Zeichen der laufenden Zeile, die schon an die App gingen (vor jedem möglichen Befehlsanfang)
+  return {
+    push(text) {
+      let aus = '';
+      zeile += text;
+      let nl;
+      while ((nl = zeile.indexOf('\n')) !== -1) {
+        aus += pruefeBetragZeile(zeile.slice(0, nl)).slice(gesendet) + '\n';
+        zeile = zeile.slice(nl + 1);
+        gesendet = 0;
+      }
+      const halt = kxSpeedHaltePosition(zeile, gesendet);
+      if (halt > gesendet) { aus += zeile.slice(gesendet, halt); gesendet = halt; }
+      return aus;
+    },
+    ende() {
+      const rest = zeile ? pruefeBetragZeile(zeile).slice(gesendet) : '';
+      zeile = ''; gesendet = 0;
+      return rest;
+    }
+  };
+}
+
 function validateDatei(Datei, { allowedTypes = DATEI_ERLAUBTE_TYPEN } = {}) {
   if (!Datei || typeof Datei.base64 !== 'string' || !Datei.base64) {
     return { ok: false, error: 'Keine Datei übermittelt.' };
@@ -1810,7 +1857,15 @@ let steuerrechtFallback = null;
 // die um ein Vielfaches teurer sind als üblich, obwohl es nicht die erste Nachricht im Chat
 // war. Nur wenn wirklich der ALLERERSTE Versuch in einem frischen Worker-Isolate fehlschlägt
 // (noch kein Fallback vorhanden), liefert die Funktion weiterhin null.
+// KX-SPEED: Isolate-Cache für die Wissensbasis (10 min). Vorher las JEDE Chat-, Bild- und Dokument-Anfrage steuerrecht/de neu (eine
+// Firestore-Unteranfrage plus JSON von rund 20.000 Zeichen); der Inhalt ändert sich nur über /admin/seed-steuerrecht (selten, Jahreswechsel).
+// Nach einem Seed sehen andere Isolates den neuen Text spätestens nach 10 min. Nur Erfolge werden gecacht; der Text bleibt byte-gleich
+// (Prompt-Caching-Block 1, buildSystemBlocks).
+const KX_SPEED_WISSENSBASIS_MS = 10 * 60 * 1000;
+let kxSpeedWissensbasis = null; // { inhalt, bis }
+export function kxSpeedWissensbasisCacheLeeren() { kxSpeedWissensbasis = null; steuerrechtFallback = null; }
 async function loadSteuerrechtContext(env) {
+  if (kxSpeedWissensbasis && Date.now() < kxSpeedWissensbasis.bis) return kxSpeedWissensbasis.inhalt;
   try {
     const token = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
     const res = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/steuerrecht/de', {
@@ -1822,7 +1877,7 @@ async function loadSteuerrechtContext(env) {
     }
     const data = await res.json();
     const inhalt = data.fields?.inhalt?.stringValue || null;
-    if (inhalt) steuerrechtFallback = inhalt;
+    if (inhalt) { steuerrechtFallback = inhalt; kxSpeedWissensbasis = { inhalt, bis: Date.now() + KX_SPEED_WISSENSBASIS_MS }; } // KX-SPEED
     return inhalt || steuerrechtFallback;
   } catch (e) {
     console.error('loadSteuerrechtContext Error:', e.message, '— nutze Fallback falls vorhanden');
@@ -2138,6 +2193,7 @@ function ungueltigeEingabeAntwort(cors) {
 
 async function handleChat(body, env, cors = {}, ctx) {
   if (textEingabenUngueltig(body)) return ungueltigeEingabeAntwort(cors);
+  const kxSpeedT0 = Date.now(); // KX-SPEED: Zeitmessung im [chat-usage]-Log
   const { Nachricht, Verlauf, Nutzername, Profil, FristType, Datum, userId, ChatId, ErsteNachricht, Datei } = body;
 
   // Obergrenzen gegen überlange Eingaben (jedes Token kostet echtes Geld, das Tageslimit zählt nur Nachrichten)
@@ -2238,9 +2294,15 @@ async function handleChat(body, env, cors = {}, ctx) {
   // beiden stabilen Blöcke (Steuerrecht, STATIC_SYSTEM_INSTRUCTIONS) bleiben wie gehabt gecacht
   // — nur die für dieses Muster wirkungslose zusätzliche Ebene entfällt.
 
-  // Modell und max_tokens — immer 2048, kein Intent-Routing mehr.
+  // KX-SPEED: Modell bleibt Haiku 5.5 für alle Fragen (schnellstes Modell; Sonnet 5.5 wäre langsamer je Token und 20-fach teurer, siehe
+  // chat-speed-bericht.md). Haiku 5.5 denkt ohne thinking-Parameter adaptiv (Standard-effort medium), und das Denken zählt in max_tokens:
+  // 4096 statt 2048 lässt Raum für Denken plus Antwort (vorher drohte stop=max_tokens mitten in der Antwort). max_tokens ist eine Obergrenze,
+  // keine Zielgröße, und verlängert keine Antwort. CHAT_EFFORT (wrangler-Variable, low|medium|high) ist ein Schalter für einen gemessenen
+  // Live-Vergleich; ohne Variable geht kein effort mit (Verhalten wie bisher).
   const model = 'claude-haiku-5-5';
-  const maxTokensForRequest = 2048;
+  const maxTokensForRequest = 4096;
+  const chatEffort = ['low', 'medium', 'high'].includes(env.CHAT_EFFORT) ? env.CHAT_EFFORT : null;
+  const kxSpeedStart = Date.now();
 
   // Claude aufrufen und SSE parsen → reinen Text streamen
   const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
@@ -2255,11 +2317,14 @@ async function handleChat(body, env, cors = {}, ctx) {
     body: JSON.stringify({
       model: model,
       max_tokens: maxTokensForRequest,
+      ...(chatEffort ? { output_config: { effort: chatEffort } } : {}), // KX-SPEED
       stream: true,
       system,
       messages: trimmedMessages
     })
   });
+  const kxSpeedVorlaufMs = kxSpeedStart - kxSpeedT0; // KX-SPEED: Unteranfragen und Prompt-Aufbau vor dem API-Aufruf
+  const kxSpeedKopfMs = Date.now() - kxSpeedT0; // KX-SPEED: bis die API den Stream beginnt
 
   // ✅ Fehlerbehandlung: Claude API muss ok sein!
   if (!claudeRes.ok) {
@@ -2280,11 +2345,11 @@ async function handleChat(body, env, cors = {}, ctx) {
     const decoder = new TextDecoder();
     let fullText = '';
     let buffer = '';
-    // Zeilenpuffer für den ausgehenden Text — RECHNUNG_ERSTELLEN/MAHNUNG_ERSTELLEN müssen VOR dem
-    // Weiterreichen an den Client geprüft werden (siehe pruefeBetragZeile), was eine vollständige
-    // Zeile voraussetzt. Nur die eine Befehlszeile wird dadurch kurz zurückgehalten, aller andere
-    // Text streamt weiterhin unverändert live.
-    let textLineBuffer = '';
+    // KX-SPEED: Befehlszeilen (RECHNUNG_ERSTELLEN, DOKUMENT_SPEICHERN, PROFIL_UPDATE, ...) müssen VOR dem Weiterreichen an den Client geprüft
+    // werden (pruefeBetragZeile). kxSpeedZeilenFilter hält nur ab einem möglichen Befehlsanfang bis zum Zeilenende zurück; Fließtext
+    // streamt sofort (vorher wartete jede Zeile auf ihr Zeilenende).
+    const zeilenFilter = kxSpeedZeilenFilter();
+    let kxSpeedErsterTextMs = null;
     // Kosten-Diagnose: Token-Nutzung/stop_reason pro Chat-Nachricht mitloggen (wrangler tail),
     // damit Kostenausreißer und stille Antwort-Abschneidungen (stop_reason=max_tokens) live
     // messbar sind, ohne bei jeder Untersuchung erneut Ad-hoc-Logging einbauen zu müssen.
@@ -2307,13 +2372,10 @@ async function handleChat(body, env, cors = {}, ctx) {
           try {
             const data = JSON.parse(dataStr);
             if (data.type === 'content_block_delta' && data.delta?.type === 'text_delta' && data.delta?.text) {
+              if (kxSpeedErsterTextMs === null) kxSpeedErsterTextMs = Date.now() - kxSpeedT0;
               fullText += data.delta.text;
-              textLineBuffer += data.delta.text;
-              const textLines = textLineBuffer.split('\n');
-              textLineBuffer = textLines.pop();
-              for (const textLine of textLines) {
-                await writer.write(encoder.encode(pruefeBetragZeile(textLine) + '\n'));
-              }
+              const raus = zeilenFilter.push(data.delta.text); // KX-SPEED
+              if (raus) await writer.write(encoder.encode(raus));
             } else if (data.type === 'message_start' && data.message?.usage) {
               usageInfo = { ...usageInfo, ...data.message.usage };
             } else if (data.type === 'message_delta') {
@@ -2323,11 +2385,12 @@ async function handleChat(body, env, cors = {}, ctx) {
           } catch(e) {}
         }
       }
-      if (textLineBuffer) {
-        await writer.write(encoder.encode(pruefeBetragZeile(textLineBuffer)));
-      }
+      const rest = zeilenFilter.ende(); // KX-SPEED
+      if (rest) await writer.write(encoder.encode(rest));
       const costCents = estimateCostCents(model, usageInfo);
-      console.log(`[chat-usage] model=${model} stop=${stopReason} ab=${abGruppe} intent=${requiredModules.join(',')} in=${usageInfo.input_tokens ?? '?'} cacheWrite=${usageInfo.cache_creation_input_tokens ?? 0} cacheRead=${usageInfo.cache_read_input_tokens ?? 0} out=${usageInfo.output_tokens ?? '?'} costCents=${costCents} erste=${ErsteNachricht}`);
+      // KX-SPEED: vorlauf_ms = Unteranfragen und Prompt-Aufbau, kopf_ms = bis die API antwortet, erster_text_ms = erstes sichtbares Zeichen
+      // (Differenz zu kopf_ms = Denkzeit des Modells), gesamt_ms = Ende. Grundlage für einen Live-Vergleich (z. B. CHAT_EFFORT).
+      console.log(`[chat-usage] model=${model} stop=${stopReason} ab=${abGruppe} intent=${requiredModules.join(',')} in=${usageInfo.input_tokens ?? '?'} cacheWrite=${usageInfo.cache_creation_input_tokens ?? 0} cacheRead=${usageInfo.cache_read_input_tokens ?? 0} out=${usageInfo.output_tokens ?? '?'} costCents=${costCents} erste=${ErsteNachricht} effort=${chatEffort || 'standard'} vorlauf_ms=${kxSpeedVorlaufMs} kopf_ms=${kxSpeedKopfMs} erster_text_ms=${kxSpeedErsterTextMs ?? -1} gesamt_ms=${Date.now() - kxSpeedT0}`);
 
       // A/B-Test-Log zu Firestore (nur wenn Feature-Flag aktiv)
       if (kiOptimierungAktiv && ctx) {
@@ -2384,9 +2447,8 @@ async function streamTextResponse(claudeRes, userId, env, cors, model = 'claude-
     const decoder = new TextDecoder();
     let fullText = '';
     let buffer = '';
-    // Siehe handleChat weiter oben — gleiche Begründung: Zeilenpuffer, damit
-    // RECHNUNG_ERSTELLEN/MAHNUNG_ERSTELLEN vor dem Weiterreichen geprüft werden können.
-    let textLineBuffer = '';
+    // KX-SPEED: wie handleChat — Befehlszeilen geprüft, Fließtext sofort (kxSpeedZeilenFilter).
+    const zeilenFilter = kxSpeedZeilenFilter();
     let usageInfo = {};
     let stopReason = null;
 
@@ -2407,12 +2469,8 @@ async function streamTextResponse(claudeRes, userId, env, cors, model = 'claude-
             const data = JSON.parse(dataStr);
             if (data.type === 'content_block_delta' && data.delta?.type === 'text_delta' && data.delta?.text) {
               fullText += data.delta.text;
-              textLineBuffer += data.delta.text;
-              const textLines = textLineBuffer.split('\n');
-              textLineBuffer = textLines.pop();
-              for (const textLine of textLines) {
-                await writer.write(encoder.encode(pruefeBetragZeile(textLine) + '\n'));
-              }
+              const raus = zeilenFilter.push(data.delta.text); // KX-SPEED
+              if (raus) await writer.write(encoder.encode(raus));
             } else if (data.type === 'message_start' && data.message?.usage) {
               usageInfo = { ...usageInfo, ...data.message.usage };
             } else if (data.type === 'message_delta') {
@@ -2422,9 +2480,8 @@ async function streamTextResponse(claudeRes, userId, env, cors, model = 'claude-
           } catch(e) {}
         }
       }
-      if (textLineBuffer) {
-        await writer.write(encoder.encode(pruefeBetragZeile(textLineBuffer)));
-      }
+      const rest = zeilenFilter.ende(); // KX-SPEED
+      if (rest) await writer.write(encoder.encode(rest));
       const costCents = estimateCostCents(model, usageInfo);
       console.log(`[chat-usage:${label}] model=${model} stop=${stopReason} in=${usageInfo.input_tokens ?? '?'} cacheWrite=${usageInfo.cache_creation_input_tokens ?? 0} cacheRead=${usageInfo.cache_read_input_tokens ?? 0} out=${usageInfo.output_tokens ?? '?'} costCents=${costCents}`);
     } finally {
@@ -2447,6 +2504,8 @@ async function handleImage(body, env, cors = {}, ctx) {
     return new Response(dateiCheck.error, { status: 400, headers: { ...cors, 'Content-Type': 'text/plain' } });
   }
 
+  // KX-SPEED: Wissensbasis und Feature-Stand (reine Lesezugriffe, werfen nie) laufen parallel zu den Limit-Prüfungen statt danach.
+  const kxSpeedVorab = Promise.all([loadSteuerrechtContext(env), kiFeatureStandFuer(env)]);
   // Upload Limit prüfen
   const uploadLimit = await peekUploadLimit(userId, env);
   if (!uploadLimit.erlaubt) {
@@ -2465,7 +2524,7 @@ async function handleImage(body, env, cors = {}, ctx) {
   await incrementUploadLimit(userId, env);
 
   const dynamicContext = buildDynamicContext(Profil, Datum);
-  const [kbText, kiStand] = await Promise.all([loadSteuerrechtContext(env), kiFeatureStandFuer(env)]); // BP-22B
+  const [kbText, kiStand] = await kxSpeedVorab; // BP-22B; KX-SPEED: oben gestartet
   const system = buildSystemBlocks(dynamicContext, kbText, buildStaticForModules(MODULSATZ_DATEI, kiStand));
 
   const messages = [{
@@ -3309,6 +3368,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
     // Keine Datei → wie normaler Chat behandeln. Vor den Limits, sonst zählt der Chat doppelt (Upload + zwei Nachrichten).
     return handleChat(body, env, cors, ctx);
   }
+  // KX-SPEED: Wissensbasis und Feature-Stand (reine Lesezugriffe, werfen nie) laufen parallel zu den Limit-Prüfungen statt danach.
+  const kxSpeedVorab = Promise.all([loadSteuerrechtContext(env), kiFeatureStandFuer(env)]);
   const uploadLimit = await peekUploadLimit(userId, env);
   if (!uploadLimit.erlaubt) {
     return new Response('Du hast dein monatliches Upload-Limit erreicht. Du kannst Kontolux AI weiterhin vollständig nutzen — Chat, Finanzkalender und manuelle Monatsabschlüsse funktionieren wie gewohnt. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand. 📊', {
@@ -3332,7 +3393,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
   }
 
   const dynamicContext = buildDynamicContext(Profil, Datum);
-  const [kbText, kiStand] = await Promise.all([loadSteuerrechtContext(env), kiFeatureStandFuer(env)]); // BP-22B
+  const [kbText, kiStand] = await kxSpeedVorab; // BP-22B; KX-SPEED: oben gestartet
   const system = buildSystemBlocks(dynamicContext, kbText, buildStaticForModules(MODULSATZ_DATEI, kiStand));
 
   // Der Dateityp wurde bisher IMMER hart als 'application/pdf' an Claude gemeldet, egal was
