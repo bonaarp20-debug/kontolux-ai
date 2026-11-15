@@ -1,0 +1,11 @@
+{
+  "id": 509562969,
+  "order_id": 5900000000000,
+  "created_at": "2026-11-14T12:00:00+01:00",
+  "processed_at": "2026-11-14T12:00:00+01:00",
+  "note": "Kunde unzufrieden",
+  "refund_line_items": [
+    { "quantity": 1, "subtotal": 100.0, "total_tax": 20.0, "line_item": { "title": "Tasse Keramik", "price": "120.00", "tax_lines": [{ "title": "FR TVA", "price": "20.00", "rate": 0.2 }] } }
+  ],
+  "transactions": [{ "kind": "refund", "status": "success", "amount": "120.00", "currency": "EUR", "gateway": "shopify_payments", "payment_details": { "credit_card_number": "•••• •••• •••• 4242" } }]
+}

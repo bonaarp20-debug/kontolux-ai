@@ -1,0 +1,6 @@
+{
+  "event": "payment.successful", "order_id": "ABL-PF-FR-1", "created_at": "10.11.2026 14:54", "success_date": "10.11.2026 14:54",
+  "revenue": "120.00", "vat_amount": "20.00", "vat_rate": "20", "fee": "6.00", "amount": "114.00", "currency": "EUR",
+  "product": { "name": "Videokurs" },
+  "payer": { "email": "paul@exemple.fr", "first_name": "Paul", "last_name": "Durand", "street": "4 Rue Lafayette", "zip": "13001", "city": "Marseille", "country": "FR", "phone": "+33655554444" }
+}

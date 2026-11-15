@@ -1,0 +1,7 @@
+{
+  "id": "ORDER-PF-FR-1", "status": "COMPLETED",
+  "payer": { "name": { "given_name": "Sophie", "surname": "Petit" }, "email_address": "sophie@exemple.fr", "payer_id": "PAYERID123", "address": { "address_line_1": "1 Place Bellecour", "admin_area_2": "Lyon", "postal_code": "69002", "country_code": "FR" }, "phone": { "phone_number": { "national_number": "0612345678" } } },
+  "purchase_units": [{ "amount": { "currency_code": "EUR", "value": "35.00", "breakdown": { "item_total": { "currency_code": "EUR", "value": "29.17" }, "tax_total": { "currency_code": "EUR", "value": "5.83" } } },
+    "items": [{ "name": "Beratung", "quantity": "1", "unit_amount": { "currency_code": "EUR", "value": "29.17" }, "tax": { "currency_code": "EUR", "value": "5.83" }, "tax_rate": "20.00" }],
+    "shipping": { "name": { "full_name": "Sophie Petit" }, "address": { "address_line_1": "1 Place Bellecour", "admin_area_2": "Lyon", "postal_code": "69002", "country_code": "FR" } } }]
+}

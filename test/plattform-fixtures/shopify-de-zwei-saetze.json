@@ -1,0 +1,20 @@
+{
+  "id": 5900000000002,
+  "name": "#1003",
+  "email": "erika.muster@beispiel.de",
+  "processed_at": "2026-11-12T10:00:00+01:00",
+  "currency": "EUR",
+  "total_price": "231.95",
+  "total_tax": "26.95",
+  "taxes_included": true,
+  "company": null,
+  "customer": { "first_name": "Erika", "last_name": "Muster" },
+  "billing_address": { "address1": "Musterweg 7", "city": "Köln", "zip": "50667", "country_code": "DE" },
+  "shipping_address": { "address1": "Musterweg 7", "city": "Köln", "zip": "50667", "country_code": "DE" },
+  "line_items": [
+    { "title": "Kopfhörer", "price": "129.00", "quantity": 1, "discount_allocations": [{ "amount": "10.00" }], "tax_lines": [{ "title": "MwSt", "price": "19.00", "rate": 0.19 }] },
+    { "title": "Kochbuch", "price": "53.50", "quantity": 2, "tax_lines": [{ "title": "MwSt", "price": "7.00", "rate": 0.07 }] }
+  ],
+  "shipping_lines": [{ "title": "DHL", "price": "5.95", "discount_allocations": [], "tax_lines": [{ "title": "MwSt", "price": "0.95", "rate": 0.19 }] }],
+  "tax_lines": [{ "title": "MwSt", "price": "19.95", "rate": 0.19 }, { "title": "MwSt", "price": "7.00", "rate": 0.07 }]
+}

@@ -1,0 +1,11 @@
+{
+  "id": 5900000000004,
+  "name": "#1005",
+  "processed_at": "2026-11-13T08:00:00+01:00",
+  "currency": "EUR",
+  "total_price": "35.70",
+  "total_tax": "5.70",
+  "taxes_included": true,
+  "line_items": [{ "title": "Gutschein", "price": "35.70", "quantity": 1, "tax_lines": [{ "title": "MwSt", "price": "5.70", "rate": 0.19 }] }],
+  "tax_lines": [{ "title": "MwSt", "price": "5.70", "rate": 0.19 }]
+}

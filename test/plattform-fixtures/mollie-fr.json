@@ -1,0 +1,10 @@
+{
+  "resource": "payment", "id": "tr_pfFR0001", "mode": "live", "status": "paid",
+  "amount": { "value": "89.00", "currency": "EUR" }, "amountRefunded": { "value": "0.00", "currency": "EUR" },
+  "description": "Workshop Paris", "paidAt": "2026-11-10T10:00:00+01:00", "countryCode": "FR",
+  "billingAddress": { "givenName": "Luc", "familyName": "Bernard", "streetAndNumber": "3 Quai de la Loire", "postalCode": "75019", "city": "Paris", "country": "FR", "email": "luc@exemple.fr", "phone": "+33611112222" },
+  "metadata": { "email": "luc@exemple.fr" },
+  "details": { "cardNumber": "6787", "cardHolder": "L. Bernard", "cardFingerprint": "abc123fingerprint", "cardCountryCode": "FR" },
+  "lines": [{ "type": "digital", "description": "Workshop", "quantity": 1, "vatRate": "20.00", "unitPrice": { "value": "89.00", "currency": "EUR" }, "totalAmount": { "value": "89.00", "currency": "EUR" }, "vatAmount": { "value": "14.83", "currency": "EUR" } }],
+  "_links": {}
+}

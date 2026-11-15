@@ -1,0 +1,12 @@
+{
+  "id": 5900000000005,
+  "name": "#1006",
+  "processed_at": "2026-11-13T09:00:00+01:00",
+  "currency": "EUR",
+  "total_price": "124.00",
+  "total_tax": "24.00",
+  "taxes_included": true,
+  "shipping_address": { "address1": "Odos Ermou 10", "city": "Athina", "zip": "10563", "country_code": "GR" },
+  "line_items": [{ "title": "Lampe", "price": "124.00", "quantity": 1, "tax_lines": [{ "title": "GR ΦΠΑ", "price": "24.00", "rate": 0.24 }] }],
+  "tax_lines": [{ "title": "GR ΦΠΑ", "price": "24.00", "rate": 0.24 }]
+}

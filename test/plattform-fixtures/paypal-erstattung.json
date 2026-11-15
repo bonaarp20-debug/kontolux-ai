@@ -1,0 +1,5 @@
+{
+  "id": "WH-PF-FR-REF", "event_type": "PAYMENT.CAPTURE.REFUNDED", "create_time": "2026-11-12T09:00:00Z",
+  "resource": { "id": "REF-PF-1", "status": "COMPLETED", "amount": { "value": "35.00", "currency_code": "EUR" },
+    "links": [{ "href": "https://api.paypal.com/v2/payments/refunds/REF-PF-1", "rel": "self", "method": "GET" }, { "href": "https://api.paypal.com/v2/payments/captures/CAP-PF-FR-1", "rel": "up", "method": "GET" }] }
+}

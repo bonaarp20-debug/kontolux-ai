@@ -1,0 +1,23 @@
+{
+  "id": 5900000000000,
+  "name": "#1001",
+  "email": "claire.martin@exemple.fr",
+  "processed_at": "2026-11-10T14:05:00+01:00",
+  "currency": "EUR",
+  "presentment_currency": "EUR",
+  "total_price": "120.00",
+  "total_tax": "20.00",
+  "taxes_included": true,
+  "company": null,
+  "customer": { "first_name": "Claire", "last_name": "Martin", "email": "claire.martin@exemple.fr", "phone": "+33612345678", "tax_exempt": false, "tax_exemptions": [] },
+  "billing_address": { "first_name": "Claire", "last_name": "Martin", "address1": "12 Rue de Rivoli", "city": "Paris", "zip": "75001", "province": "Ile-de-France", "country": "France", "country_code": "FR", "phone": "+33612345678", "company": null, "latitude": 48.8566, "longitude": 2.3522 },
+  "shipping_address": { "first_name": "Claire", "last_name": "Martin", "address1": "12 Rue de Rivoli", "city": "Paris", "zip": "75001", "country": "France", "country_code": "FR", "phone": "+33612345678", "company": null },
+  "browser_ip": "203.0.113.77",
+  "payment_details": { "credit_card_number": "•••• •••• •••• 4242", "credit_card_company": "Visa", "credit_card_bin": "424242" },
+  "line_items": [
+    { "title": "Tasse Keramik", "price": "120.00", "quantity": 1, "discount_allocations": [], "origin_location": { "country_code": "DE", "address1": "Lagerstraße 5", "zip": "10115", "city": "Berlin" },
+      "tax_lines": [{ "title": "FR TVA", "price": "20.00", "rate": 0.2, "channel_liable": false }] }
+  ],
+  "shipping_lines": [],
+  "tax_lines": [{ "title": "FR TVA", "price": "20.00", "rate": 0.2, "channel_liable": false }]
+}

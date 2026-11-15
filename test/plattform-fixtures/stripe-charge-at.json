@@ -1,0 +1,6 @@
+{
+  "id": "ch_pf_at_003", "object": "charge", "amount": 2900, "currency": "eur",
+  "billing_details": { "name": "Anna Gruber", "email": "anna@beispiel.at", "phone": "+43664111222", "address": { "line1": "Ringstraße 3", "city": "Graz", "postal_code": "8010", "country": "AT" } },
+  "payment_method_details": { "type": "card", "card": { "brand": "visa", "country": "AT", "last4": "4242", "exp_month": 12, "exp_year": 2030, "fingerprint": "Xt5EWLLDS7FJjR1c" } },
+  "shipping": null
+}

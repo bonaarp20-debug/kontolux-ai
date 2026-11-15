@@ -1,0 +1,13 @@
+{
+  "id": 5900000000006,
+  "name": "#1007",
+  "processed_at": "2026-11-13T10:00:00+01:00",
+  "currency": "USD",
+  "presentment_currency": "USD",
+  "total_price": "40.00",
+  "total_tax": "0.00",
+  "taxes_included": false,
+  "shipping_address": { "address1": "1 Main St", "city": "Austin", "zip": "73301", "country_code": "US" },
+  "line_items": [{ "title": "E-Book", "price": "40.00", "quantity": 1, "tax_lines": [] }],
+  "tax_lines": []
+}

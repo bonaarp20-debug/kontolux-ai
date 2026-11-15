@@ -15,7 +15,9 @@ import { regelMigration } from './regel/migration.js';
 import { regelAdminFeatures } from './regel/admin-features.js';
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
-import { v2Vorbereiten, clientSteuerVorbereiten } from './regel/schreibweg-v2.js';
+import { v2Vorbereiten, clientSteuerVorbereiten, v2RestFelder } from './regel/schreibweg-v2.js';
+// BP-21a-W (Phase 3): Steuerdaten je Plattformbeleg, OSS-Datenbasis, hinter Feature 'plattform'
+import { plattformAuswerten, plattformFeatureAn, plattformEingabe, plattformSteuerKennzeichnen, plattformDatenFeld, originalZurErstattung, stripeChargeLaden, paypalOrderLaden, refBereinigen, waehrungCode, hinweisAusland, HINWEIS_LAND_FEHLT } from './regel/plattform.js';
 import { kodiereWert as kodiereFirestoreWert } from './regel/firestore.js';
 import { REGEL_SAMMLUNGEN, REGEL_UNTERSAMMLUNGEN, untersammlungenLoeschen, untersammlungenExport, untersammlungLesen } from './regel/archiv.js';
 // KX-N7: Speicherdauer-Löschläufe (regel/loeschlaeufe*.js), alle hinter Schaltern LOESCHLAUF_* (Standard aus)
@@ -6193,14 +6195,21 @@ async function handleFestschreiben(pfad, body, env, cors) {
 // null (Beleg wie heute, die Migration erfasst ihn später). Geloggt werden nur Weg, Kern-Version und Codes.
 // Fahrplan: aus -> warnung (1 bis 2 Wochen, Zähler steuerkernZaehler/Log steuerkern_warnung) -> an (config kern_max 'an' zuerst für alle aus,
 // dann env 'an'; Notaus in Sekunden: config kern_max 'aus' oder env zurück); siehe docs/regelbesteuerung/15-phase2/bp13-bericht.md.
-async function schreibwegV2(env, weg, userId, token, belegRoh, felder, { nieAblehnen = false } = {}) {
+async function schreibwegV2(env, weg, userId, token, belegRoh, felder, { nieAblehnen = false, plattformDaten = null } = {}) {
   const wegKennung = String(weg || 'unbekannt').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 40) || 'unbekannt';
   try {
     if (steuerkernModus(env) !== 'an') return null;
     const e = await v2Vorbereiten({
-      env, weg: wegKennung, uid: userId, token, felder, belegRoh, eingabeFn: steuerkernEingabeAusBeleg, stichtag: berlinDatumAlsString(),
+      env, weg: wegKennung, uid: userId, token, felder, belegRoh, stichtag: berlinDatumAlsString(),
+      // BP-21a-W: Plattformbeleg mit Feature 'plattform' an bringt gegenpartei (Länder, USt-IdNr., unternehmer) in die Kern-Eingabe
+      eingabeFn: plattformDaten ? (w, b, st) => plattformEingabe(steuerkernEingabeAusBeleg(w, b, st), plattformDaten) : steuerkernEingabeAusBeleg,
       fetchFn: (...a) => fetch(...a), nieAblehnen, zeit: new Date().toISOString(),
     });
+    // R-PLF-04: Auslandskunde -> UNBEKANNT mit Grund auslandskunde (nur Grund/Detail, nie Beträge), REST-Felder neu kodieren
+    if (plattformDaten && e && e.steuer) {
+      const s2 = plattformSteuerKennzeichnen(e.steuer, plattformDaten);
+      if (s2 !== e.steuer) { e.steuer = s2; e.felder = v2RestFelder(e, new Date().toISOString()); }
+    }
     if (e && !e.aus) console.log('steuerkern_v2 ' + JSON.stringify({ weg: wegKennung, ablehnen: !!e.ablehnen, v2: !!e.steuer, kern: Steuerkern.KERN_VERSION, codes: (e.codes || []).slice(0, 30) }));
     return e;
   } catch (err) {
@@ -6280,8 +6289,11 @@ export async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
   };
 
   // Modus 'an' (NP-05): steuer im selben PATCH; Webhook-Trichter lehnt nie ab (D7), Mängel werden UNBEKANNT
-  const v2 = await schreibwegV2(env, belegData.quelle || 'webhook', userId, adminToken, { ...belegData, herkunft: 'plattform' }, metadata.fields, { nieAblehnen: true });
+  const plattformDaten = belegData.plattform_daten || null;
+  const v2 = await schreibwegV2(env, belegData.quelle || 'webhook', userId, adminToken, { ...belegData, herkunft: 'plattform' }, metadata.fields, { nieAblehnen: true, plattformDaten });
   if (v2 && v2.felder) Object.assign(metadata.fields, v2.felder);
+  // BP-21a-W: Steuerdaten der Plattform (nur bei Feature 'plattform' an gesetzt; nach dem Kern, damit legacy_hash unverändert bleibt)
+  if (plattformDaten) Object.assign(metadata.fields, plattformDatenFeld(plattformDaten));
 
   const firestoreRes = await fetch(firestoreUrl, {
     method: 'PATCH',
@@ -7246,8 +7258,28 @@ async function handleStripeWebhook(request, url, env, cors) {
     // Ein charge.refunded-Beleg (typ 'rechnung_eingehend') ist keine Einnahme und bekommt
     // bewusst KEINE Einnahmen-Kategorie — die Nutzer-Einstellung "Meine Stripe-EINNAHMEN
     // unterliegen..." bezieht sich nur auf Zahlungseingänge.
+    // BP-21a-W: Kundenland (PaymentIntent.shipping; Charge nur mit optionalem Schlüssel des Nutzers), Erstattung mit Bezug
+    const plattformAn = await plattformFeatureAktiv(adminToken);
+    let pfKategorie = null;
+    if (plattformAn) {
+      const obj = event.data?.object || {};
+      const istErst = event.type === 'refund.created';
+      const extra = {}; const hinweise = [];
+      if (!istErst && !obj.shipping?.address?.country && typeof obj.latest_charge === 'string') {
+        const schluessel = await gespeichertesGeheimnis(fields, 'api_key', env);
+        if (schluessel) {
+          extra.charge = await stripeChargeLaden({ chargeId: obj.latest_charge, schluessel, fetchFn: (...a) => fetch(...a) });
+          if (!extra.charge) hinweise.push('abruf_fehlgeschlagen');
+        }
+      }
+      ({ kategorie: pfKategorie } = await steuerfallFuerPlattformBeleg('stripe', belegData, obj, {
+        userId, adminToken, mwstSetting: firestoreValue(fields.mwst_setting), extra, hinweise,
+        ref: istErst ? null : refBereinigen('stripe', obj.id), bezugRef: istErst ? refBereinigen('stripe', obj.payment_intent || obj.charge) : null,
+        waehrung: obj.currency || null, leistungHerkunft: istErst ? 'erstattungsdatum' : 'zahlungsdatum',
+      }));
+    }
     if (belegData.typ === 'rechnung_ausgehend') {
-      const kategorie = mwstSettingAnwenden(belegData, firestoreValue(fields.mwst_setting)); // R2: ohne Wahl kein Satz (satz_offen)
+      const kategorie = plattformAn ? pfKategorie : mwstSettingAnwenden(belegData, firestoreValue(fields.mwst_setting)); // R2: ohne Wahl kein Satz (satz_offen)
       // sachkonto ist optional und wird von DATEV-Export/Monatsabschluss ohnehin live aus
       // `kategorie` per resolveSachkonto() aufgelöst (siehe worker.js oben) — hier zusätzlich
       // gesetzt nur für die Beleg-Detailanzeige, analog zu BELEG_MANUELL. Scheitert der
@@ -7378,7 +7410,7 @@ async function verifyMolliePayment(paymentId, apiKey, testmodus = false) {
  * Mollie ruft den Webhook erneut auf, sobald sie "refunded" sind.
  * @returns {Promise<number>} Anzahl neu gebuchter Belege
  */
-async function mollieErstattungenBuchen(userId, payment, apiKey, env, adminToken) {
+async function mollieErstattungenBuchen(userId, payment, apiKey, env, adminToken, plattformAn = false) {
   const wert = (b) => parseFloat(b?.value) || 0;
   const hatErstattung = wert(payment.amountRefunded) > 0 || (payment._links?.refunds && !payment.amountRefunded);
   const hatRueckbuchung = wert(payment.amountChargedBack) > 0 || (payment._links?.chargebacks && !payment.amountChargedBack);
@@ -7404,7 +7436,7 @@ async function mollieErstattungenBuchen(userId, payment, apiKey, env, adminToken
     const gueltig = isNaN(datum.getTime()) ? new Date() : datum;
     const monatJahr = BERLIN_MONAT_JAHR_FORMATTER.format(gueltig);
     const beschreibung = payment.description || null;
-    await writeBelegAsAdmin(userId, {
+    const erstBeleg = {
       dedupKey: p.id,
       typ: 'rechnung_eingehend',
       betrag: p.betrag,
@@ -7415,7 +7447,14 @@ async function mollieErstattungenBuchen(userId, payment, apiKey, env, adminToken
       quelle: 'mollie_webhook',
       name: `Mollie-${p.art}${beschreibung ? `: ${beschreibung}` : ''} ${monatJahr}`,
       buchungstext: `Mollie-${p.art} zu ${payment.id}${p.text ? ` – ${p.text}` : ''}`
-    }, env, adminToken);
+    };
+    // BP-21a-W: Erstattung mit Bezug; Land aus dem Zahlungsobjekt, Original-ID wie writeBelegAsAdmin sie aus dem Schlüssel bildet
+    if (plattformAn) {
+      const origId = `beleg_webhook_${(await sha256Hex(`${userId}|${payment.id}`)).slice(0, 32)}`;
+      await steuerfallFuerPlattformBeleg('mollie', erstBeleg, payment, { userId, adminToken, bezugRef: refBereinigen('mollie', payment.id), original: { beleg_id: origId, gegenpartei: null },
+        waehrung: payment.amount?.currency || null, leistungHerkunft: 'erstattungsdatum', ohneSteuer: true });
+    }
+    await writeBelegAsAdmin(userId, erstBeleg, env, adminToken);
     await markAsProcessed(userId, p.id, adminToken);
     await incrementWebhookBelegCount(userId, env);
     gebucht++;
@@ -7525,11 +7564,15 @@ async function handleMollieWebhook(request, url, env, cors) {
     // Duplikat-Check der Zahlung, Erstattungen gingen so nie in die Buchhaltung. Jetzt: Zahlung nur
     // einmal buchen, danach bei JEDEM Aufruf Erstattungen/Rückbuchungen der Zahlung abgleichen.
     let docId = null;
+    const plattformAn = await plattformFeatureAktiv(adminToken);
     if (!(await isAlreadyProcessed(userId, payment.id, adminToken))) {
       const belegData = mollieEventToBeleg(payment);
 
       // ── MwSt-Setting + Sachkonto — identisches Muster wie handleStripeWebhook ──────────
-      const kategorie = mwstSettingAnwenden(belegData, firestoreValue(fields.mwst_setting)); // R2: ohne Wahl kein Satz (satz_offen)
+      // BP-21a-W: Kundenland aus shippingAddress/billingAddress/countryCode, Steuerzeilen aus lines (nur bei Feature 'plattform' an)
+      const kategorie = plattformAn
+        ? (await steuerfallFuerPlattformBeleg('mollie', belegData, payment, { userId, adminToken, mwstSetting: firestoreValue(fields.mwst_setting), ref: refBereinigen('mollie', payment.id), waehrung: payment.amount?.currency || null })).kategorie
+        : mwstSettingAnwenden(belegData, firestoreValue(fields.mwst_setting)); // R2: ohne Wahl kein Satz (satz_offen)
       try {
         const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
         const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
@@ -7560,7 +7603,7 @@ async function handleMollieWebhook(request, url, env, cors) {
       docId = result.docId;
     }
 
-    const erstattungen = await mollieErstattungenBuchen(userId, payment, apiKey, env, adminToken);
+    const erstattungen = await mollieErstattungenBuchen(userId, payment, apiKey, env, adminToken, plattformAn);
 
     return new Response(JSON.stringify({ received: true, ...(docId ? { docId } : { dedup: true }), ...(erstattungen ? { erstattungen } : {}) }), {
       status: 200, headers: { ...cors, 'Content-Type': 'application/json', [EMPFANG_HEADER]: docId || erstattungen ? 'buchung' : 'duplikat' }
@@ -8121,7 +8164,8 @@ async function verifyPaypalWebhookSignature(request, event, config) {
     return { status: 'verification_unavailable' };
   }
 
-  return { status: data.verification_status === 'SUCCESS' ? 'valid' : 'invalid' };
+  // BP-21a-W: Zugriffstoken für den Order-Abruf weiterreichen (spart eine Unteranfrage), nie geloggt oder gespeichert
+  return data.verification_status === 'SUCCESS' ? { status: 'valid', accessToken } : { status: 'invalid' };
 }
 
 /**
@@ -8260,13 +8304,40 @@ async function handlePaypalWebhook(request, url, env, cors) {
     }
 
     const belegData = paypalEventToBeleg(event);
+    // BP-21a-W: Kundenland aus der Order (Capture hat keine Adresse), Erstattung mit Bezug auf die Capture (nur bei Feature 'plattform' an)
+    const plattformAn = await plattformFeatureAktiv(adminToken);
+    let pfKategorie = null;
+    if (plattformAn) {
+      const res = event.resource || {};
+      const extra = {}; const hinweise = [];
+      let bezugRef = null;
+      if (istErstattung) {
+        const up = (Array.isArray(res.links) ? res.links : []).find((l) => l && l.rel === 'up' && typeof l.href === 'string');
+        const m = up ? /\/captures\/([A-Za-z0-9\-]+)/.exec(up.href) : null;
+        bezugRef = m ? refBereinigen('paypal', m[1]) : null;
+      } else {
+        const orderId = res.supplementary_data?.related_ids?.order_id;
+        if (orderId) {
+          let tok = verifyResult.accessToken || null;
+          if (!tok) { try { tok = await getPaypalAccessToken(clientId, clientSecret); } catch (e) { tok = null; } }
+          extra.order = await paypalOrderLaden({ orderId: String(orderId), accessToken: tok, fetchFn: (...a) => fetch(...a) });
+          if (!extra.order) hinweise.push('abruf_fehlgeschlagen');
+        }
+      }
+      belegData.typ = istErstattung ? 'rechnung_eingehend' : belegData.typ;
+      ({ kategorie: pfKategorie } = await steuerfallFuerPlattformBeleg('paypal', belegData, res, {
+        userId, adminToken, mwstSetting: firestoreValue(configFields.mwst_setting), extra, hinweise,
+        ref: istErstattung ? null : refBereinigen('paypal', res.id), bezugRef, waehrung: res.amount?.currency_code || null,
+        leistungHerkunft: istErstattung ? 'erstattungsdatum' : 'zahlungsdatum',
+      }));
+    }
     if (istErstattung) {
       belegData.typ = 'rechnung_eingehend';
       belegData.name = belegData.name.replace(/^PayPal(-Zahlung|:)/, 'PayPal-Rückerstattung');
       belegData.buchungstext = `PayPal-Rückerstattung${belegData.absender && belegData.absender !== 'PayPal-Kunde' ? ` an ${belegData.absender}` : ''}`;
     } else {
       // ── MwSt-Setting + Sachkonto — identisches Muster wie bei den anderen Plattformen ────────
-      const kategorie = mwstSettingAnwenden(belegData, firestoreValue(configFields.mwst_setting)); // R2: ohne Wahl kein Satz (satz_offen)
+      const kategorie = plattformAn ? pfKategorie : mwstSettingAnwenden(belegData, firestoreValue(configFields.mwst_setting)); // R2: ohne Wahl kein Satz (satz_offen)
       try {
         const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
         const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
@@ -8756,8 +8827,18 @@ async function handleAblefyWebhook(request, url, env, cors) {
 
     // ── MwSt-Setting + Sachkonto — nur für die Einnahme, nicht für die Rückerstattung, analog
     // zu handleStripeWebhook (charge.refunded bekommt dort ebenfalls keine Einnahmen-Kategorie).
+    // BP-21a-W: nur im Seller-Modell (eigener Name) ist der Endkunde Vertragspartner; Reseller-Modell unverändert, keine Kundendaten
+    const plattformAn = ablefyModell === 'eigener_name' && await plattformFeatureAktiv(adminToken);
+    let pfKategorie = null;
+    if (plattformAn) {
+      ({ kategorie: pfKategorie } = await steuerfallFuerPlattformBeleg('ablefy', belegData, payload, {
+        userId, adminToken, mwstSetting: firestoreValue(configFields.mwst_setting),
+        ref: istRueckerstattung ? null : refBereinigen('ablefy', orderId), bezugRef: istRueckerstattung ? refBereinigen('ablefy', orderId) : null,
+        waehrung: payload.currency || null, leistungHerkunft: istRueckerstattung ? 'erstattungsdatum' : 'zahlungsdatum', ohneSteuer: istRueckerstattung,
+      }));
+    }
     if (!istRueckerstattung) {
-      const kategorie = mwstSettingAnwenden(belegData, firestoreValue(configFields.mwst_setting)); // R2: ohne Wahl kein Satz (satz_offen)
+      const kategorie = plattformAn ? pfKategorie : mwstSettingAnwenden(belegData, firestoreValue(configFields.mwst_setting)); // R2: ohne Wahl kein Satz (satz_offen)
       try {
         const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
         const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';
@@ -8818,6 +8899,47 @@ async function handleAblefyWebhook(request, url, env, cors) {
 // Idempotenz doppelt: (a) `X-Shopify-Webhook-Id` gegen Zustell-Wiederholungen (Shopify retryt bis
 // zu 8× in 4 Stunden), (b) ein fachlicher Schlüssel pro Bestellung bzw. Erstattung — damit bucht
 // auch ein versehentlich doppelt angelegter Webhook (zwei Abos, zwei Webhook-IDs) nur einmal.
+
+
+// ── BP-21a-W (Phase 3 Release B): Steuerdaten je Plattformbeleg, OSS-Datenbasis (PF-087) ─────────────────────────────────────
+// Gemeinsam für Stripe, Mollie, PayPal, Ablefy (eigener Name) und Shopify; Logik in regel/plattform.js. Nur bei Feature 'plattform' an
+// (config/features, Standard aus; aus = Verhalten wie heute, kein Feld, kein Abruf). Land ungleich DE -> nie Satz aus der Einstellung.
+async function plattformFeatureAktiv(adminToken) {
+  return plattformFeatureAn({ token: adminToken, fetchFn: (...a) => fetch(...a) });
+}
+
+/**
+ * PF-087: Steuerfall je Plattformbeleg (Land, Status, Währung, Positionen mit mehreren Sätzen). Setzt belegData.plattform_daten und für
+ * Einnahmen mwst_satz/kategorie/Hinweis: Auslandskunde -> 'keine' ohne Kategorie (Kern: weiss_nicht, UNBEKANNT, auslandskunde),
+ * Inland -> Integrationseinstellung wie heute, Land fehlt -> wie heute plus Hinweis. Erstattungen: Legacy unverändert, Bezug aufs Original.
+ * Wirft nicht; die Erstattungs-Suche ist fail-safe (eine Unteranfrage).
+ * @returns {Promise<{kategorie: string|null, fall: string, land: string|null}>}
+ */
+async function steuerfallFuerPlattformBeleg(plattform, belegData, payload, { userId, adminToken, mwstSetting, extra = {}, ref = null, bezugRef = null,
+  original, waehrung = null, waehrungKunde = null, leistungHerkunft = 'zahlungsdatum', hinweise = [], ohneSteuer = false }) {
+  let orig = original;
+  if (bezugRef && orig === undefined) orig = await originalZurErstattung({ uid: userId, token: adminToken, fetchFn: (...a) => fetch(...a), ref: bezugRef });
+  const hw = [...hinweise];
+  if (bezugRef && !orig) hw.push('original_nicht_gefunden');
+  const r = plattformAuswerten(plattform, payload, {
+    extra, ref, bezug: bezugRef ? { ref: bezugRef, beleg_id: (orig && orig.beleg_id) || null } : null, original: (orig && orig.gegenpartei) || null,
+    waehrung, waehrungKunde, leistungDatum: belegData.bezahlt_am, leistungHerkunft, hinweise: hw, ohneSteuer,
+  });
+  let kategorie = null;
+  if (belegData.typ === 'rechnung_ausgehend') {
+    if (r.fall === 'auslandskunde') {
+      belegData.mwst_satz = 'keine';
+      delete belegData.kategorie;
+      const h = hinweisAusland(r.land);
+      belegData.buchungstext = belegData.buchungstext ? `${belegData.buchungstext} · ${h}` : h;
+    } else {
+      kategorie = mwstSettingAnwenden(belegData, mwstSetting);
+      if (r.fall === 'land_fehlt' && kategorie) belegData.buchungstext = belegData.buchungstext ? `${belegData.buchungstext} · ${HINWEIS_LAND_FEHLT}` : HINWEIS_LAND_FEHLT;
+    }
+  }
+  belegData.plattform_daten = r.daten;
+  return { kategorie, fall: r.fall, land: r.land };
+}
 
 /**
  * Verifiziert eine Shopify-Webhook-Signatur (HMAC-SHA256 über den rohen Body, Base64-kodiert).
@@ -8975,8 +9097,20 @@ async function handleShopifyWebhook(request, url, env, cors) {
       return json({ received: true, ignored: topic || 'unknown' });
     }
 
+    // BP-21a-W: Kundenland, Steuerzeilen, Währung, Erstattung mit Bezug (nur bei Feature 'plattform' an)
+    const plattformAn = await plattformFeatureAktiv(adminToken);
+    let pfKategorie = null;
+    if (plattformAn) {
+      const istErst = topic === 'refunds/create';
+      const erstWaehrung = Array.isArray(payload.transactions) && payload.transactions[0] ? payload.transactions[0].currency : null;
+      ({ kategorie: pfKategorie } = await steuerfallFuerPlattformBeleg('shopify', belegData, payload, {
+        userId, adminToken, mwstSetting: firestoreValue(configFields.mwst_setting),
+        ref: istErst ? null : refBereinigen('shopify', payload.id), bezugRef: istErst ? refBereinigen('shopify', payload.order_id) : null,
+        waehrung: payload.currency || erstWaehrung, waehrungKunde: payload.presentment_currency || null, leistungHerkunft: istErst ? 'erstattungsdatum' : 'bestelldatum',
+      }));
+    }
     if (belegData.typ === 'rechnung_ausgehend') {
-      const kategorie = mwstSettingAnwenden(belegData, firestoreValue(configFields.mwst_setting)); // R2: ohne Wahl kein Satz (satz_offen)
+      const kategorie = plattformAn ? pfKategorie : mwstSettingAnwenden(belegData, firestoreValue(configFields.mwst_setting)); // R2: ohne Wahl kein Satz (satz_offen)
       try {
         const profilDoc = await firestoreGetDoc(`users/${userId}/profil/settings`, adminToken);
         const skr = firestoreValue(profilDoc?.fields?.datev_skr) || 'SKR03';

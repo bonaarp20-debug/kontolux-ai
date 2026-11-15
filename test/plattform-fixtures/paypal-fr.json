@@ -1,0 +1,5 @@
+{
+  "id": "WH-PF-FR-1", "event_type": "PAYMENT.CAPTURE.COMPLETED", "create_time": "2026-11-10T09:00:00Z",
+  "resource": { "id": "CAP-PF-FR-1", "status": "COMPLETED", "amount": { "value": "35.00", "currency_code": "EUR" }, "custom_id": "Beratung",
+    "supplementary_data": { "related_ids": { "order_id": "ORDER-PF-FR-1" } } }
+}

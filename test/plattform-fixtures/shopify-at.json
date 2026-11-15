@@ -1,0 +1,20 @@
+{
+  "id": 5900000000001,
+  "name": "#1002",
+  "email": "lukas.huber@beispiel.at",
+  "processed_at": "2026-11-11T09:30:00+01:00",
+  "currency": "EUR",
+  "total_price": "60.00",
+  "total_tax": "10.00",
+  "taxes_included": true,
+  "company": null,
+  "customer": { "first_name": "Lukas", "last_name": "Huber" },
+  "billing_address": { "address1": "Hauptstraße 1", "city": "München", "zip": "80331", "country_code": "DE", "phone": "+4989123456" },
+  "shipping_address": { "address1": "Mariahilfer Straße 99", "city": "Wien", "zip": "1060", "country_code": "AT", "phone": "+43123456" },
+  "line_items": [
+    { "title": "Buch", "price": "50.00", "quantity": 1, "tax_lines": [{ "title": "AT USt", "price": "8.33", "rate": 0.2 }] },
+    { "title": "Poster", "price": "10.00", "quantity": 1, "tax_lines": [{ "title": "AT USt", "price": "1.67", "rate": 0.2 }] }
+  ],
+  "shipping_lines": [],
+  "tax_lines": [{ "title": "AT USt", "price": "10.00", "rate": 0.2, "channel_liable": false }]
+}

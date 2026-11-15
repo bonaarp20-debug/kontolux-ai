@@ -1,0 +1,6 @@
+{
+  "id": "evt_pf_stripe_refund",
+  "type": "refund.created",
+  "livemode": true,
+  "data": { "object": { "id": "re_pf_001", "object": "refund", "amount": 4900, "currency": "eur", "created": 1794733200, "status": "succeeded", "payment_intent": "pi_pf_fr_001", "charge": "ch_pf_fr_001" } }
+}

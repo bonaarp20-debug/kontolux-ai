@@ -1,0 +1,18 @@
+{
+  "id": 5900000000003,
+  "name": "#1004",
+  "email": "achats@societe-exemple.fr",
+  "processed_at": "2026-11-12T11:00:00+01:00",
+  "currency": "EUR",
+  "total_price": "500.00",
+  "total_tax": "0.00",
+  "taxes_included": false,
+  "company": { "id": 98765, "location_id": 4321 },
+  "customer": { "first_name": "Jean", "last_name": "Dupont", "tax_exempt": true, "tax_exemptions": ["EU_REVERSE_CHARGE_EXEMPTION_RULE"] },
+  "billing_address": { "company": "Société Exemple SARL", "address1": "5 Avenue Foch", "city": "Lyon", "zip": "69006", "country_code": "FR" },
+  "shipping_address": { "company": "Société Exemple SARL", "address1": "5 Avenue Foch", "city": "Lyon", "zip": "69006", "country_code": "FR" },
+  "note_attributes": [{ "name": "VAT number", "value": "FR 40 303 265 045" }, { "name": "Lieferhinweis", "value": "Tor 3" }],
+  "line_items": [{ "title": "Beratungspaket", "price": "500.00", "quantity": 1, "tax_lines": [] }],
+  "shipping_lines": [],
+  "tax_lines": []
+}

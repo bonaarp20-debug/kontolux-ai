@@ -1,0 +1,9 @@
+{
+  "id": "evt_pf_stripe_ohne",
+  "type": "payment_intent.succeeded",
+  "livemode": true,
+  "data": { "object": {
+    "id": "pi_pf_ohne_002", "object": "payment_intent", "amount": 11900, "amount_received": 11900, "currency": "eur", "created": 1794646800,
+    "description": "Coaching", "latest_charge": "ch_pf_kaputt_002", "shipping": null
+  } }
+}

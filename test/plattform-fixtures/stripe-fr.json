@@ -1,0 +1,10 @@
+{
+  "id": "evt_pf_stripe_fr",
+  "type": "payment_intent.succeeded",
+  "livemode": true,
+  "data": { "object": {
+    "id": "pi_pf_fr_001", "object": "payment_intent", "amount": 4900, "amount_received": 4900, "currency": "eur", "created": 1794646800,
+    "description": "Online-Kurs", "receipt_email": "marie@exemple.fr", "latest_charge": "ch_pf_fr_001",
+    "shipping": { "name": "Marie Laurent", "phone": "+33698765432", "address": { "line1": "8 Rue Victor Hugo", "city": "Lille", "postal_code": "59000", "country": "FR" } }
+  } }
+}
