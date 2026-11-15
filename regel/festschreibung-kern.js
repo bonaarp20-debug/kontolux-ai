@@ -50,35 +50,47 @@ export function belegeFuerKern(zeilen, profil) {
   return { belege, veraltet, neu_geprueft: neuGeprueft };
 }
 
-function istKorrektur(d) {
+export function istKorrektur(d) {
   const s = istObjekt(d.steuer) ? d.steuer : null;
   return (s && Steuerkern.KORREKTUR_ARTEN.includes(s.beleg_art)) || ['storno', 'gutschrift', 'korrektur'].includes(String(d.typ || ''));
 }
-function bezugsSchluessel(d) {
+// Schlüssel, über die eine Korrektur ihr Original findet: Dokument-ID oder rechnungsnr des Originals (beides möglich, siehe relevanteZeilen)
+export function bezugsSchluessel(d) {
   const s = istObjekt(d.steuer) ? d.steuer : null;
   const k = [];
   if (s && istObjekt(s.bezug)) for (const v of Object.values(s.bezug)) if (typeof v === 'string' && v) k.push(v);
   for (const f of ['storniert_rechnungsnr', 'storno_rechnungsnummer']) if (typeof d[f] === 'string' && d[f]) k.push(d[f]);
   return k;
 }
+// Alle Bezugsschlüssel der Korrekturen unter den Zeilen
+export function korrekturSchluessel(zeilen) {
+  const s = new Set();
+  for (const z of zeilen || []) {
+    const d = istObjekt(z && z.daten) ? z.daten : {};
+    if (istKorrektur(d)) for (const k of bezugsSchluessel(d)) s.add(k);
+  }
+  return s;
+}
+
+// Vorfilter je Beleg (ohne Kontext anderer Belege): kann dieses Dokument den Zeitraum [start, ende] berühren? Korrekturen und Geschenke immer.
+// G1 (TR5-sys-001): das fortsetzbare Lesen in regel/festschreibung.js merkt sich die Kandidaten über genau diese Prüfung.
+export function zeileKannZeitraumBeruehren(daten, start, ende) {
+  const d = istObjekt(daten) ? daten : {};
+  if (istKorrektur(d)) return true;
+  if (istObjekt(d.steuer) && istObjekt(d.steuer.geschenk)) return true;
+  // D4: Tage und Spannen aus dem Kern (Steuerkern.belegZeitraumDaten, dieselbe Liste wie die Sperrprüfung der App): alle Datumsquellen, die der
+  // Kern für Zeiträume liest (auch das Legacy-Feld leistungsdatum, createdAt als Berliner Tag, Teilleistungen, § 13b Drittland). Dokumente,
+  // deren Wirkung keinen Zeitraum hat (undatiert), zählt der Kern in JEDEM Zeitraum als nicht berücksichtigt: immer aufnehmen.
+  const { tage, spannen, undatiert } = Steuerkern.belegZeitraumDaten(d);
+  return undatiert || tage.some((x) => x >= start && x <= ende) || spannen.some(([a, b]) => a <= ende && b >= start);
+}
 
 // Vorfilter: Zeilen, die den Zeitraum [start, ende] berühren können, plus Kontext (Korrekturen samt Originalen, Geschenke)
 export function relevanteZeilen(zeilen, start, ende) {
-  const imZeitraum = (x) => x >= start && x <= ende;
   const drin = new Set();
-  const korrekturen = [];
-  for (const z of zeilen || []) {
-    const d = istObjekt(z && z.daten) ? z.daten : {};
-    if (istKorrektur(d)) { korrekturen.push(z); drin.add(z.id); continue; }
-    if (istObjekt(d.steuer) && istObjekt(d.steuer.geschenk)) { drin.add(z.id); continue; }
-    // D4: Tage und Spannen aus dem Kern (Steuerkern.belegZeitraumDaten, dieselbe Liste wie die Sperrprüfung der App): alle Datumsquellen, die der
-    // Kern für Zeiträume liest (auch das Legacy-Feld leistungsdatum, createdAt als Berliner Tag, Teilleistungen, § 13b Drittland). Dokumente,
-    // deren Wirkung keinen Zeitraum hat (undatiert), zählt der Kern in JEDEM Zeitraum als nicht berücksichtigt: immer aufnehmen.
-    const { tage, spannen, undatiert } = Steuerkern.belegZeitraumDaten(d);
-    if (undatiert || tage.some(imZeitraum) || spannen.some(([a, b]) => a <= ende && b >= start)) drin.add(z.id);
-  }
-  if (korrekturen.length) {
-    const schluessel = new Set(korrekturen.flatMap((z) => bezugsSchluessel(z.daten || {})));
+  for (const z of zeilen || []) if (zeileKannZeitraumBeruehren(z && z.daten, start, ende)) drin.add(z.id);
+  const schluessel = korrekturSchluessel(zeilen);
+  if (schluessel.size) {
     for (const z of zeilen) {
       const d = z.daten || {};
       if (schluessel.has(z.id) || (typeof d.rechnungsnr === 'string' && schluessel.has(d.rechnungsnr))) drin.add(z.id);
@@ -214,12 +226,13 @@ export async function legacySnapshot(daten) {
   };
 }
 // Belege eines Alt-Monats mit derselben Datumslogik wie belegInFestgeschriebenemMonat (index.html): bezahlt_am, bei Reisekosten datum
+export function legacyBelegRelevant(daten, monat) {
+  const d = istObjekt(daten) ? daten : {};
+  const t = tag(d.typ === 'reisekosten' ? d.datum : d.bezahlt_am);
+  return !!t && t.slice(0, 7) === monat;
+}
 export function legacyBelegIds(zeilen, monat) {
   const ids = [];
-  for (const z of zeilen || []) {
-    const d = z.daten || {};
-    const t = tag(d.typ === 'reisekosten' ? d.datum : d.bezahlt_am);
-    if (t && t.slice(0, 7) === monat) ids.push(z.id);
-  }
+  for (const z of zeilen || []) if (legacyBelegRelevant(z.daten, monat)) ids.push(z.id);
   return ids.sort();
 }

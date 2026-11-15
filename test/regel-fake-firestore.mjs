@@ -1,7 +1,7 @@
 // In-Memory-Firestore (REST v1, nur was regel/*.js nutzt) für die Tests der Endpunkte /steuerprofil, /festschreibung, /migration,
 // /admin/features. Keine Netzanfrage. Unterstützt: GET Dokument, GET Liste, :batchGet, :commit (atomar, updateMask, currentDocument
 // exists/updateTime, delete, updateTransforms arrayUnion/arrayRemove), :runQuery (collectionId, allDescendants, where fieldFilter EQUAL/
-// ARRAY_CONTAINS, orderBy __name__, startAt, limit), :batchWrite (delete), DELETE Dokument. Zählt jede Anfrage (Free-Plan-Grenze).
+// ARRAY_CONTAINS/IN, orderBy __name__, startAt, limit), :batchWrite (delete), DELETE Dokument. Zählt jede Anfrage (Free-Plan-Grenze).
 // Haken: vorCommit(writes) für gleichzeitige Änderungen, fehler(url, init) für Fehlerinjektion.
 const PRAEFIX = 'projects/kontolux-ai/databases/(default)/documents/';
 const BASIS = 'https://firestore.googleapis.com/v1/' + PRAEFIX.slice(0, -1);
@@ -105,6 +105,7 @@ export function fakeFirestore() {
           const f = docs.get(p).fields[ff.field.fieldPath];
           if (ff.op === 'ARRAY_CONTAINS') return (f?.arrayValue?.values || []).some((x) => JSON.stringify(x) === JSON.stringify(ff.value));
           if (ff.op === 'EQUAL') return JSON.stringify(f) === JSON.stringify(ff.value);
+          if (ff.op === 'IN') return f !== undefined && (ff.value?.arrayValue?.values || []).some((x) => JSON.stringify(x) === JSON.stringify(f)); // G1
           return false;
         });
       }

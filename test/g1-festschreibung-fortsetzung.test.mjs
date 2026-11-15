@@ -10,6 +10,7 @@ import { regelFestschreibung, lesestandPfad, festPfad } from '../regel/festschre
 import { snapshotFuer, vergleicheSnapshot, belegeHash, legacyBelegIds } from '../regel/festschreibung-kern.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
 import { REGEL_UNTERANFRAGEN_MAX } from '../regel/gemeinsam.js';
+import * as K from '../steuerkern/index.js';
 
 const UID = 'g1Fest0000000000000000001';
 const PERIODE = 'ust-2026-Q3';
@@ -20,6 +21,10 @@ const PROFIL = {
   voranmeldung_verlauf: [{ gueltig_ab: '2020-01-01', zeitraum: 'quartal', dauerfrist: false, quelle: 'elster_bestaetigt' }],
 };
 const dok = (id) => `users/${UID}/dokumente/${id}`;
+const gutschrift = (id, bezug, tag) => {
+  const x = K.normalisiereEingabe({ id, weg: 'beleg_manuell', richtung: 'ausgang', beleg_art: 'gutschrift_erteilt', korrektur_grund: 'rueckabwicklung', wirkdatum: tag, bezug: { korrigiert_beleg_id: bezug }, steuerwahl: 'inland_19', betrag: { cent: 11900, art: 'brutto' }, rechnungsdatum: tag }, { profil: PROFIL });
+  return { ...(x.beleg || x.entwurf), schema_version: 2 };
+};
 
 // Bestand: anzahl gewöhnliche Belege über 6 Jahre plus Sonderfälle. IDs: Originale sortieren nach vorne ('a…', erste Seite), Korrekturen
 // nach hinten ('z…', letzte Seite), damit das Original beim fortsetzbaren Lesen in einem früheren Aufruf liegt.
@@ -33,12 +38,12 @@ function bestand(anzahl, { sonder = true } = {}) {
     fs.setze(dok(`d${String(i).padStart(6, '0')}`), { typ: i % 3 ? 'rechnung_ausgehend' : 'rechnung_eingehend', betrag: 119, betrag_netto: 100, mwst_satz: '19', datum: tag, bezahlt: true, bezahlt_am: tag, absender: 'X', quelle: 'shopify', rechnungsnr: `S-${i}`, createdAt: `${tag}T10:00:00Z` });
   }
   if (sonder) {
-    // Original 2022 (außerhalb des Zeitraums) und sein Storno im Zeitraum, Bezug über die Rechnungsnummer
+    // Originale 2022/2023 (außerhalb des Zeitraums) und Gutschriften (v2) im Zeitraum, Bezug über die Rechnungsnummer bzw. die Dokument-ID.
+    // Ohne Original schließt der Kern die Korrektur aus (W_KORREKTUR_OHNE_ORIGINAL): ein fehlendes Original ändert das Ergebnis.
     fs.setze(dok('a00000orig'), { typ: 'rechnung_ausgehend', betrag: 1190, betrag_netto: 1000, mwst_satz: '19', kategorie: 'Einnahmen 19%', datum: '2022-03-01', bezahlt: true, bezahlt_am: '2022-03-05', rechnungsnr: 'R-ORIG-1', createdAt: '2022-03-01T09:00:00Z' });
-    fs.setze(dok('zz-storno-1'), { typ: 'storno', betrag: 1190, betrag_netto: 1000, mwst_satz: '19', datum: '2026-08-10', storniert_rechnungsnr: 'R-ORIG-1', createdAt: '2026-08-10T09:00:00Z' });
-    // Bezug über die Dokument-ID (Original ohne Rechnungsnummer)
-    fs.setze(dok('a00001orig2'), { typ: 'rechnung_ausgehend', betrag: 535, betrag_netto: 500, mwst_satz: '7', kategorie: 'Einnahmen 7%', datum: '2023-05-02', bezahlt: true, bezahlt_am: '2023-05-03', createdAt: '2023-05-02T09:00:00Z' });
-    fs.setze(dok('zz-storno-2'), { typ: 'storno', betrag: 535, betrag_netto: 500, mwst_satz: '7', datum: '2026-09-01', storniert_rechnungsnr: 'a00001orig2', createdAt: '2026-09-01T09:00:00Z' });
+    fs.setze(dok('a00001orig2'), { typ: 'rechnung_ausgehend', betrag: 1190, betrag_netto: 1000, mwst_satz: '19', kategorie: 'Einnahmen 19%', datum: '2023-05-02', bezahlt: true, bezahlt_am: '2023-05-03', createdAt: '2023-05-02T09:00:00Z' });
+    fs.setze(dok('zz-gutschrift-1'), gutschrift('zz-gutschrift-1', 'R-ORIG-1', '2026-08-10'));
+    fs.setze(dok('zz-gutschrift-2'), gutschrift('zz-gutschrift-2', 'a00001orig2', '2026-09-01'));
     // Bezug mit '/' (kann keine Dokument-ID sein; darf die Abfrage nicht kaputt machen)
     fs.setze(dok('zz-storno-3'), { typ: 'storno', betrag: 119, betrag_netto: 100, mwst_satz: '19', datum: '2025-02-01', storniert_rechnungsnr: 'RE/2025/7', createdAt: '2025-02-01T09:00:00Z' });
     // ohne jedes Datum (zählt in jedem Zeitraum als nicht berücksichtigt), nur über leistungsdatum im Zeitraum
@@ -87,8 +92,10 @@ test('Vorbedingung: der Bestand ist empfindlich für Korrekturen, deren Original
   const fs = bestand(600);
   const alle = alleZeilen(fs);
   const mit = snapshotFuer(alle, PROFIL, PERIODE, { gefiltert: false });
-  const ohne = snapshotFuer(alle.filter((z) => z.id !== 'a00000orig'), PROFIL, PERIODE, { gefiltert: false });
-  assert.equal(vergleicheSnapshot(mit, ohne).gleich, false, 'Storno ohne Original rechnet anders: der Test merkt ein fehlendes Original');
+  for (const orig of ['a00000orig', 'a00001orig2']) {
+    const ohne = snapshotFuer(alle.filter((z) => z.id !== orig), PROFIL, PERIODE, { gefiltert: false });
+    assert.equal(vergleicheSnapshot(mit, ohne).gleich, false, `${orig}: Korrektur ohne Original rechnet anders, der Test merkt ein fehlendes Original`);
+  }
   assert.ok(mit.ausgeschlossen_anzahl >= 1, 'Beleg ohne Datum zählt als nicht berücksichtigt');
 });
 
@@ -117,22 +124,22 @@ test('TR5-sys-001: 10.500 Belege festschreiben über Fortsetzungen, je Aufruf h�
   const b = fs2.lies(festPfad(UID, PERIODE));
   assert.deepEqual(vergleichbar(a), vergleichbar(b));
   assert.deepEqual(gesperrte(fs), gesperrte(fs2));
-  assert.ok(gesperrte(fs).includes('zz-storno-1') && gesperrte(fs).includes('m-leistung') && gesperrte(fs).includes('m-undatiert'));
+  assert.ok(['zz-gutschrift-1', 'zz-gutschrift-2', 'm-leistung', 'm-undatiert'].every((id) => gesperrte(fs).includes(id)), gesperrte(fs).filter((x) => !x.startsWith('d')).join(','));
   // und gleich dem ungefilterten Kern-Snapshot
   const u = snapshotFuer(alleZeilen(fs2).map((z) => ({ id: z.id, daten: { ...z.daten, gesperrt: undefined, gesperrt_durch: undefined } })), PROFIL, PERIODE, { gefiltert: false });
   assert.equal(vergleicheSnapshot(u, { zeilen: a.snapshot_ust, ausgeschlossen_anzahl: a.ausgeschlossen_anzahl }).gleich, true);
   assert.deepEqual(gesperrte(fs), u.beleg_ids);
-  assert.equal(a.audit_seq, 1);
+  assert.equal(a.audit_seq, b.audit_seq, "Audit wie beim Lesen in einem Aufruf (Start und Abschluss)");
 });
 
-test('1.000 Belege: wie vor G1 in einem Aufruf ohne Fortsetzung (7 Unteranfragen), gleiche Zahlen wie das ungefilterte Lesen', async () => {
+test('1.000 Belege: wie vor G1 in einem Aufruf ohne Fortsetzung (8 Unteranfragen wie vorher), gleiche Zahlen wie das ungefilterte Lesen', async () => {
   const fs = bestand(1000);
   const body = festschreibBody(fs);
   const r = await aufruf(fs, body);
   assert.equal(r.status, 200, JSON.stringify(r.json));
   assert.equal(r.json.status, 'festgeschrieben');
   assert.equal(r.json.fortsetzung, undefined);
-  assert.equal(r.anfragen, 7, 'batchGet, 4 Seiten, Start-Commit, Sperr-Commit (mit Abschluss im zweiten)');
+  assert.equal(r.anfragen, 8, 'batchGet, 4 Seiten, Start-Commit, ein Sperrblock, Abschluss (gleich dem Stand vor G1)');
   const u = snapshotFuer(alleZeilen(bestand(1000)), PROFIL, PERIODE, { gefiltert: false });
   assert.deepEqual(gesperrte(fs), u.beleg_ids);
   assert.equal(fs.pfade(`users/${UID}/festschreibung/${PERIODE}/`).length, 0, 'kein Zwischenstand');
@@ -205,15 +212,15 @@ test('Konsistenzwächter (pruefen) und sperre_nachholen bei 10.500 Belegen: fort
 
   // sperre_nachholen eines Alt-Monats (quelle legacy_snapshot): sperrt genau die Belege des Zahlungsmonats
   const fs3 = bestand(10500);
-  fs3.setze(festPfad(UID, 'euer-2026-08'), { art: 'euer', periode: '2026-08', status: 'festgeschrieben', quelle: 'legacy_snapshot', belege_gesperrt: false, snapshot_euer: [], schema: 2 });
-  const s = await bisFertig(fs3, { anfrage_id: aid(), aktion: 'sperre_nachholen', periode_id: 'euer-2026-08', bestaetigt: true });
+  fs3.setze(festPfad(UID, 'euer-2026-06'), { art: 'euer', periode: '2026-06', status: 'festgeschrieben', quelle: 'legacy_snapshot', belege_gesperrt: false, snapshot_euer: [], schema: 2 });
+  const s = await bisFertig(fs3, { anfrage_id: aid(), aktion: 'sperre_nachholen', periode_id: 'euer-2026-06', bestaetigt: true });
   for (const a of s.aufrufe) assert.ok(a.status === 200 && a.anfragen <= 35, `${a.status} ${a.anfragen} ${JSON.stringify(a.json).slice(0, 160)}`);
   assert.equal(s.ende.json.status, 'festgeschrieben', JSON.stringify(s.ende.json));
-  const erwartet = legacyBelegIds(alleZeilen(bestand(10500)), '2026-08');
-  const ist = alleZeilen(fs3).filter((z) => (z.daten.gesperrt_durch || []).includes('euer-2026-08')).map((z) => z.id).sort();
+  const erwartet = legacyBelegIds(alleZeilen(bestand(10500)), '2026-06');
+  const ist = alleZeilen(fs3).filter((z) => (z.daten.gesperrt_durch || []).includes('euer-2026-06')).map((z) => z.id).sort();
   assert.ok(erwartet.length > 100);
   assert.deepEqual(ist, erwartet);
-  const d = fs3.lies(festPfad(UID, 'euer-2026-08'));
+  const d = fs3.lies(festPfad(UID, 'euer-2026-06'));
   assert.equal(d.belege_hash, await belegeHash(alleZeilen(bestand(10500)), erwartet));
 });
 

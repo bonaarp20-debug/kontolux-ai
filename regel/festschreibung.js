@@ -7,12 +7,13 @@
 // Zeiträume: ust-JJJJ-Qn / ust-JJJJ-MM nach dem bestätigten Voranmeldungszeitraum im Steuerprofil (Konzept 3.6), euer-JJJJ-MM.
 //
 // Free-Plan (50 Unteranfragen, 10 ms CPU): Belege werden seitenweise gelesen (300 je Seite), der Kern rechnet nur über die Belege, die den
-// Zeitraum berühren können. Gesperrt wird in Blöcken (bis 400 Belege je commit, mit updateTime-Vorbedingung aus dem geprüften Lesestand);
+// Zeitraum berühren können. Große Konten lesen fortsetzbar über mehrere Aufrufe (G1, TR5-sys-001: Antwort status 'pruefung_laeuft', weiter: true,
+// fortsetzung; der Client sendet dieselbe Anfrage mit fortsetzung erneut, siehe belegeFuerZeitraumLesen). Gesperrt wird in Blöcken (bis 400 Belege je commit, mit updateTime-Vorbedingung aus dem geprüften Lesestand);
 // was in einem Aufruf nicht fertig wird, setzt 'sperren' bzw. 'entsperren' fort (Antwort weiter: true). Abbruch in der Mitte: die schon
 // gesetzten Sperren bleiben bis 'abbrechen' bestehen (sichere Richtung), der Zeitraum ist erst bei status 'festgeschrieben' festgeschrieben.
 //
 // Body: { anfrage_id, aktion, periode_id?, ... }
-//   festschreiben      { periode_id, snapshot: { zeilen: [{ kz, betrag_cent }], ausgeschlossen_anzahl }, kern_version?, unvollstaendig_bestaetigt? }
+//   festschreiben      { periode_id, snapshot: { zeilen: [{ kz, betrag_cent }], ausgeschlossen_anzahl }, kern_version?, unvollstaendig_bestaetigt?, fortsetzung? }
 //   sperren            { periode_id }                Sperrblöcke fortsetzen (status sperre_laeuft)
 //   ruecknahme         { periode_id, grund }         Entsperren mit Grund (>= 10 Zeichen), dann Entsperrblöcke
 //   entsperren         { periode_id }                Entsperrblöcke fortsetzen (status entsperrung_laeuft oder abbruch_laeuft)
@@ -30,7 +31,10 @@ import {
 } from './gemeinsam.js';
 import { schreibe, vorbedingungAus, vollerName, FirestoreFehler, BudgetFehler } from './firestore.js';
 import { auditSchreibvorgaenge, auditKette, kopfPfad, naechsteSeq } from './audit.js';
-import { snapshotFuer, vergleicheSnapshot, belegeHash, periodePruefen, legacySnapshot, legacyBelegIds, monatAusAbschlussId } from './festschreibung-kern.js';
+import {
+  snapshotFuer, vergleicheSnapshot, belegeHash, periodePruefen, legacySnapshot, legacyBelegIds, monatAusAbschlussId,
+  zeileKannZeitraumBeruehren, legacyBelegRelevant, korrekturSchluessel,
+} from './festschreibung-kern.js';
 
 const ZEILEN_MAX = 120;
 const CENT_MAX = 10000000000000;
@@ -65,21 +69,132 @@ export function snapshotBereinigen(s) {
   return { zeilen: out, ausgeschlossen_anzahl: aus };
 }
 
-// Alle Belege des Kontos, seitenweise nach Dokument-ID (eine Unteranfrage je 300). Reicht das Budget nicht, wirft die Schicht BudgetFehler.
-export async function alleBelegeLesen(fs, uid) {
-  const zeilen = [];
-  let cursor = null;
-  for (;;) {
-    const q = {
-      from: [{ collectionId: 'dokumente' }], orderBy: [{ field: { fieldPath: '__name__' }, direction: 'ASCENDING' }], limit: SEITE,
-      ...(cursor ? { startAt: { values: [{ referenceValue: vollerName(dokPfad(uid, cursor)) }], before: false } } : {}),
-    };
-    const seite = (await fs.runQuery(`users/${uid}`, q)).map((d) => ({ id: String(d.pfad).split('/').pop(), daten: d.daten, updateTime: d.updateTime }));
-    zeilen.push(...seite);
-    if (seite.length < SEITE) return zeilen;
-    cursor = seite[seite.length - 1].id;
-  }
+// ---------------------------------------------------------------------------------------------
+// G1 (TR5-sys-001): fortsetzbares Lesen für festschreiben, pruefen und sperre_nachholen
+// ---------------------------------------------------------------------------------------------
+// Vorher las alleBelegeLesen in EINEM Aufruf alle Belege aller Jahre (300 je Unteranfrage, Budget 35): ab rund 9.300 Belegen 503 bei jedem Versuch.
+// Eine Firestore-Abfrage nach dem Zeitraum ist nicht vollständig möglich (viele Datumsfelder, createdAt als Berliner Tag, Spannen, Belege ohne
+// jedes Datum, Korrekturen mit Originalen aus anderen Jahren). Darum:
+//   1. Lesen seitenweise nach Dokument-ID; je Beleg die Prüfung des Vorfilters (zeileKannZeitraumBeruehren bzw. legacyBelegRelevant). Passt das
+//      ganze Konto in diesen Aufruf, rechnet der Aufrufer mit ALLEN gelesenen Zeilen (genau wie vor G1).
+//   2. Sonst: Zwischenstand (Cursor, IDs der Kandidaten, keine Belegdaten) in users/{uid}/festschreibung/{periode}/lesestand/{aktion} (nur der
+//      Worker; Clients haben dort keine Regel, also keinen Zugriff; Kontolöschung über allDescendants). Antwort weiter: true mit fortsetzung
+//      (Marke des Lesestands); der Client sendet dieselbe Anfrage mit fortsetzung erneut (App: regel/festschreibung-ui.js festschreibungAufrufen).
+//   3. Ist alles gelesen: Kandidaten frisch per batchGet (300 je Unteranfrage), dann die Originale aller Korrekturen über ihre Bezugsschlüssel
+//      (Dokument-ID per batchGet, rechnungsnr per IN-Abfrage, 30 Werte je Unteranfrage). Diese Zeilen sind eine Obermenge von
+//      relevanteZeilen(alle Belege), der Kern rechnet also dasselbe wie über alle Belege (test/g1-festschreibung-fortsetzung.test.mjs).
+// Idempotent: Kandidaten sind eine Menge, der Cursor geht nur vor, jede Speicherung hat die updateTime-Vorbedingung des gelesenen Stands
+// (paralleler Aufruf: 409 KONFLIKT). Ein Lesestand gilt 15 Minuten; eine ältere Fortsetzung liest von vorn. Fremde Marke: 409.
+// Grenze: höchstens KANDIDATEN_MAX Belege, die einen Zeitraum berühren können (sonst 503 ZEITRAUM_ZU_GROSS, nie ein unvollständiges Ergebnis).
+// Zwischen zwei Aufrufen neu angelegte oder in den Zeitraum verschobene Belege auf schon gelesenen Seiten sieht der Abschluss nicht; das gleicht
+// der Vergleich mit dem Snapshot des Browsers (409 ABWEICHUNG) bzw. der Konsistenzwächter ('neue_belege') aus, wie beim Lesen in einem Aufruf.
+const LESE_AKTIONEN = ['festschreiben', 'pruefen', 'sperre_nachholen'];
+const LESESTAND_MAX_MS = 15 * 60 * 1000;
+const FORTSETZUNG_MUSTER = /^[A-Za-z0-9_-]{8,64}$/;
+const IN_MAX = 30;
+const RESERVE = 1; // eine Unteranfrage bleibt immer frei: Start-Commit bzw. Speichern des Zwischenstands (die Sperre setzt bei knappem Budget mit 'sperren' fort)
+export const KANDIDATEN_MAX = 9000;
+export const lesestandPfad = (uid, periodeId, aktion) => `${festPfad(uid, periodeId)}/lesestand/${aktion}`;
+// Kann der Text eine Dokument-ID sein? (sonst wäre der Pfad ungültig und die ganze Unteranfrage scheiterte)
+const dokIdMoeglich = (s) => typeof s === 'string' && s.length > 0 && s.length <= 1500 && !s.includes('/') && s !== '.' && s !== '..' && !/^__.*__$/.test(s);
+
+export class LeseFehler extends Error {
+  constructor(status, code) { super(code); this.name = 'LeseFehler'; this.status = status; this.code = code; }
 }
+
+async function belegSeite(fs, uid, cursor) {
+  const q = {
+    from: [{ collectionId: 'dokumente' }], orderBy: [{ field: { fieldPath: '__name__' }, direction: 'ASCENDING' }], limit: SEITE,
+    ...(cursor ? { startAt: { values: [{ referenceValue: vollerName(dokPfad(uid, cursor)) }], before: false } } : {}),
+  };
+  return (await fs.runQuery(`users/${uid}`, q)).map((d) => ({ id: String(d.pfad).split('/').pop(), daten: d.daten, updateTime: d.updateTime }));
+}
+
+const neueMarke = () => globalThis.crypto.randomUUID().replace(/-/g, '');
+
+// Abschluss: Kandidaten und Originale frisch lesen. erlaubtAbbruch: true, wenn bei zu knappem Budget der Zwischenstand gespeichert werden kann
+// (dann null, der nächste Aufruf beginnt hier mit vollem Budget); sonst BudgetFehler. Liefert gelesene Zeilen dieses Aufrufs plus nachgelesene.
+async function abschlussLesen(fs, uid, kandidaten, imSpeicher, modus, erlaubtAbbruch) {
+  const zeilen = new Map(imSpeicher);
+  const knapp = (noetig) => {
+    if (fs.rest - RESERVE >= noetig) return false;
+    if (erlaubtAbbruch) return true;
+    throw new BudgetFehler(fs.budget);
+  };
+  const nachlesen = async (ids) => {
+    for (let i = 0; i < ids.length; i += SEITE) {
+      const teil = ids.slice(i, i + SEITE);
+      const m = await fs.batchGet(teil.map((id) => dokPfad(uid, id)));
+      for (const id of teil) {
+        const d = m.get(dokPfad(uid, id));
+        if (d) zeilen.set(id, { id, daten: d.daten, updateTime: d.updateTime });
+      }
+    }
+  };
+  const fehlend = [...kandidaten].filter((id) => !zeilen.has(id));
+  if (knapp(Math.ceil(fehlend.length / SEITE))) return null;
+  await nachlesen(fehlend);
+  if (modus === 'kern') {
+    // Originale der Korrekturen (relevanteZeilen nimmt sie unabhängig vom Datum mit): Schlüssel aus den frisch gelesenen Korrekturen
+    const schluessel = [...korrekturSchluessel([...zeilen.values()])];
+    const alsId = schluessel.filter((k) => dokIdMoeglich(k) && !zeilen.has(k));
+    if (knapp(Math.ceil(alsId.length / SEITE) + Math.ceil(schluessel.length / IN_MAX))) return null;
+    await nachlesen(alsId);
+    for (let i = 0; i < schluessel.length; i += IN_MAX) {
+      const werte = schluessel.slice(i, i + IN_MAX).map((k) => ({ stringValue: k }));
+      const q = { from: [{ collectionId: 'dokumente' }], where: { fieldFilter: { field: { fieldPath: 'rechnungsnr' }, op: 'IN', value: { arrayValue: { values: werte } } } } };
+      for (const d of await fs.runQuery(`users/${uid}`, q)) {
+        const id = String(d.pfad).split('/').pop();
+        if (!zeilen.has(id)) zeilen.set(id, { id, daten: d.daten, updateTime: d.updateTime });
+      }
+    }
+  }
+  return [...zeilen.values()];
+}
+
+// Ergebnis { fertig: true, zeilen, gelesen, lesestand } (lesestand: true = Dokument vorhanden, im Abschluss-Commit löschen)
+//       | { fertig: false, fortsetzung, gelesen }
+export async function belegeFuerZeitraumLesen(fs, uid, { periodeId, periode, aktion, modus, fortsetzung, lesestandDok, zeit }) {
+  const alt = lesestandDok && istObjekt(lesestandDok.daten) ? lesestandDok.daten : null;
+  if (fortsetzung !== undefined && (!alt || alt.marke !== fortsetzung || alt.modus !== modus)) throw new LeseFehler(409, 'FORTSETZUNG_UNGUELTIG');
+  const alter = alt ? Date.parse(zeit) - Date.parse(alt.gestartet) : NaN;
+  const weiterlesen = fortsetzung !== undefined && alter >= 0 && alter <= LESESTAND_MAX_MS;
+  const st = weiterlesen
+    ? { marke: alt.marke, cursor: typeof alt.cursor === 'string' ? alt.cursor : null, fertigGelesen: alt.fertig_gelesen === true, kandidaten: new Set(Array.isArray(alt.kandidaten) ? alt.kandidaten : []), gelesen: Number.isSafeInteger(alt.gelesen) ? alt.gelesen : 0, gestartet: alt.gestartet }
+    : { marke: neueMarke(), cursor: null, fertigGelesen: false, kandidaten: new Set(), gelesen: 0, gestartet: zeit };
+  const abschlussZuBeginn = st.fertigGelesen;
+  const start = Steuerkern.periodenStart(periode.periode);
+  const ende = Steuerkern.periodenEnde(periode.periode);
+  const kandidat = modus === 'legacy' ? (d) => legacyBelegRelevant(d, periode.periode) : (d) => zeileKannZeitraumBeruehren(d, start, ende);
+
+  const imSpeicher = new Map();
+  while (!st.fertigGelesen && fs.rest > RESERVE) {
+    const seite = await belegSeite(fs, uid, st.cursor);
+    st.gelesen += seite.length;
+    for (const z of seite) { imSpeicher.set(z.id, z); if (kandidat(z.daten)) st.kandidaten.add(z.id); }
+    if (seite.length < SEITE) st.fertigGelesen = true;
+    else st.cursor = seite[seite.length - 1].id;
+  }
+  // In einem Aufruf von vorn ganz gelesen: alle Zeilen, wie vor G1
+  if (st.fertigGelesen && !weiterlesen) return { fertig: true, zeilen: [...imSpeicher.values()], gelesen: st.gelesen, lesestand: !!lesestandDok };
+  if (st.kandidaten.size > KANDIDATEN_MAX) throw new LeseFehler(503, 'ZEITRAUM_ZU_GROSS');
+  if (st.fertigGelesen) {
+    const zeilen = await abschlussLesen(fs, uid, st.kandidaten, imSpeicher, modus, !abschlussZuBeginn);
+    if (zeilen) return { fertig: true, zeilen, gelesen: st.gelesen, lesestand: true };
+  }
+  const daten = {
+    marke: st.marke, aktion, modus, periode_id: periodeId, gestartet: st.gestartet, aktualisiert: zeit,
+    cursor: st.cursor, fertig_gelesen: st.fertigGelesen, gelesen: st.gelesen, kandidaten: [...st.kandidaten],
+  };
+  await fs.commit([schreibe.setzen(lesestandPfad(uid, periodeId, aktion), daten, vorbedingungAus(lesestandDok))]);
+  return { fertig: false, fortsetzung: st.marke, gelesen: st.gelesen };
+}
+
+function leseAntwort(periodeId, lesen, cors) {
+  return antwort({ ok: true, periode_id: periodeId, status: 'pruefung_laeuft', weiter: true, fortsetzung: lesen.fortsetzung, gelesen: lesen.gelesen }, 200, cors);
+}
+// Abschluss-Commit: Zwischenstand mit löschen (ohne Vorbedingung; ein fehlendes Dokument zu löschen ist kein Fehler)
+const lesestandLoeschen = (uid, periodeId, aktion, lesen) => (lesen && lesen.lesestand ? [schreibe.loeschen(lesestandPfad(uid, periodeId, aktion))] : []);
 
 // Offene Sperren als Text 'id|updateTime' (Firestore-Listen dürfen keine Listen enthalten)
 const offenEintrag = (id, t) => `${id}|${t || ''}`;
@@ -200,6 +315,10 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
   if (!periode) return fehlerAntwort(400, 'PERIODE_UNGUELTIG', cors);
   if (periode.art === 'kasse') return fehlerAntwort(400, 'PERIODE_ART_NOCH_NICHT_UNTERSTUETZT', cors);
   const periodeId = body.periode_id;
+  // G1: Fortsetzungsmarke nur bei den lesenden Aktionen
+  if (body.fortsetzung !== undefined && !(LESE_AKTIONEN.includes(body.aktion) && typeof body.fortsetzung === 'string' && FORTSETZUNG_MUSTER.test(body.fortsetzung))) {
+    return fehlerAntwort(400, 'FORTSETZUNG_UNGUELTIG', cors);
+  }
 
   let snapshot = null;
   if (body.aktion === 'festschreiben') {
@@ -220,7 +339,9 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
   try {
     const fs = await schichtFuer(deps);
     const pfad = festPfad(uid, periodeId);
-    const docs = await fs.batchGet([pfad, kopfPfad(uid), CONFIG_PFAD, profilPfad(uid)]);
+    const lPfad = LESE_AKTIONEN.includes(body.aktion) ? lesestandPfad(uid, periodeId, body.aktion) : null;
+    const docs = await fs.batchGet([pfad, kopfPfad(uid), CONFIG_PFAD, profilPfad(uid), ...(lPfad ? [lPfad] : [])]);
+    const lesen = async (modus) => belegeFuerZeitraumLesen(fs, uid, { periodeId, periode, aktion: body.aktion, modus, fortsetzung: body.fortsetzung, lesestandDok: docs.get(lPfad) || null, zeit });
     if (!featureAktiv(configBereinigen(docs.get(CONFIG_PFAD)?.daten), 'festschreibung')) return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
     const festDok = docs.get(pfad);
     const alt = festDok ? festDok.daten : null;
@@ -238,7 +359,9 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
       const pp = periodePruefen(profil, periode);
       if (pp) return fehlerAntwort(409, pp, cors);
       if (body.kern_version !== undefined && body.kern_version !== Steuerkern.KERN_VERSION) return fehlerAntwort(409, 'KERN_VERSION_ABWEICHUNG', cors, { kern_version: Steuerkern.KERN_VERSION });
-      const zeilen = await alleBelegeLesen(fs, uid);
+      const gelesen = await lesen('kern');
+      if (!gelesen.fertig) return leseAntwort(periodeId, gelesen, cors);
+      const zeilen = gelesen.zeilen;
       const snap = snapshotFuer(zeilen, profil, periodeId);
       const vergleich = vergleicheSnapshot(snap, snapshot);
       if (!vergleich.gleich) return fehlerAntwort(409, 'ABWEICHUNG', cors, { abweichungen: vergleich.abweichungen, kern_version: snap.kern_version });
@@ -259,9 +382,9 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
       neu.audit_seq = naechsteSeq(kopfDok);
       const audit = await auditSchreibvorgaenge(uid, kopfDok, {
         aktion: 'festschreibung_start', ziel: periodeId, vorher: alt, nachher: neu, zeit,
-        details: { status: 'sperre_laeuft', belege: neu.belege_anzahl, zeilen: snap.zeilen.length, ausgeschlossen: snap.ausgeschlossen_anzahl, gelesen: snap.gelesen, gerechnet: snap.gerechnet },
+        details: { status: 'sperre_laeuft', belege: neu.belege_anzahl, zeilen: snap.zeilen.length, ausgeschlossen: snap.ausgeschlossen_anzahl, gelesen: gelesen.gelesen, gerechnet: snap.gerechnet },
       });
-      const r = await fs.commit([schreibe.setzen(pfad, neu, vorbedingungAus(festDok)), ...audit.writes]);
+      const r = await fs.commit([schreibe.setzen(pfad, neu, vorbedingungAus(festDok)), ...audit.writes, ...lesestandLoeschen(uid, periodeId, body.aktion, gelesen)]);
       const s = await sperrBloecke(fs, uid, periodeId, { pfad, daten: neu, updateTime: r.updateTimes[0] }, { daten: { seq: audit.seq, hash: audit.hash }, updateTime: r.updateTimes[1] }, zeit);
       return sperrAntwort(periodeId, s, cors);
     }
@@ -306,7 +429,9 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
     // ---- pruefen: Konsistenzwächter (Konzept 3.8.2 letzte Zeile, Audit F3; migration-rollout.md 3.3 R-3 c) ----
     if (body.aktion === 'pruefen') {
       if (alt.status !== 'festgeschrieben') return fehlerAntwort(409, 'NICHT_FESTGESCHRIEBEN', cors, { status: alt.status });
-      const zeilen = await alleBelegeLesen(fs, uid);
+      const gelesen = await lesen(alt.quelle === 'legacy_snapshot' ? 'legacy' : 'kern');
+      if (!gelesen.fertig) return leseAntwort(periodeId, gelesen, cors);
+      const zeilen = gelesen.zeilen;
       const nachId = new Map(zeilen.map((z) => [z.id, z.daten]));
       const ergebnis = { ok: true, periode_id: periodeId, quelle: alt.quelle || 'nutzer' };
       if (alt.quelle === 'legacy_snapshot') {
@@ -338,7 +463,7 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
       // Zusammenfassung am Dokument (keine Beträge), damit die Ansicht 'nach der Festschreibung geändert' zeigen kann (kein Audit: abgeleitet)
       if (fs.rest >= 1) {
         const pruefung = { am: zeit, unveraendert: !!ergebnis.unveraendert, neue_belege: ergebnis.neue_belege ?? null, abweichungen: Array.isArray(ergebnis.abweichungen) ? ergebnis.abweichungen.length : null };
-        try { await fs.commit([schreibe.aendern(pfad, { pruefung }, ['pruefung'], { updateTime: festDok.updateTime })]); } catch (e) { if (!(e instanceof FirestoreFehler)) throw e; }
+        try { await fs.commit([schreibe.aendern(pfad, { pruefung }, ['pruefung'], { updateTime: festDok.updateTime }), ...lesestandLoeschen(uid, periodeId, body.aktion, gelesen)]); } catch (e) { if (!(e instanceof FirestoreFehler)) throw e; }
       }
       return antwort(ergebnis, 200, cors);
     }
@@ -357,7 +482,9 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
     // ---- sperre_nachholen: festgeschriebener Zeitraum ohne Belegsperre (Alt-Monatsabschluss oder W0-Gerüst), nur nach Bestätigung ----
     if (body.aktion === 'sperre_nachholen') {
       if (alt.status !== 'festgeschrieben' || alt.belege_gesperrt === true) return fehlerAntwort(409, 'SPERRE_NICHT_NOETIG', cors, { status: alt.status });
-      const zeilen = await alleBelegeLesen(fs, uid);
+      const gelesen = await lesen(alt.quelle === 'legacy_snapshot' ? 'legacy' : 'kern');
+      if (!gelesen.fertig) return leseAntwort(periodeId, gelesen, cors);
+      const zeilen = gelesen.zeilen;
       let ids;
       if (alt.quelle === 'legacy_snapshot') ids = legacyBelegIds(zeilen, periode.periode);
       else {
@@ -373,12 +500,13 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
       const neu = { ...alt, status: 'sperre_laeuft', belege_hash: await belegeHash(zeilen, ids), belege_anzahl: ids.length, sperre: { offen, gesamt: ids.length, erledigt: ids.length - offen.length }, letzte_anfrage_id: body.anfrage_id };
       neu.audit_seq = naechsteSeq(kopfDok);
       const audit = await auditSchreibvorgaenge(uid, kopfDok, { aktion: 'festschreibung_start', ziel: periodeId, vorher: alt, nachher: neu, zeit, details: { status: 'sperre_laeuft', belege: ids.length, nachgeholt: true } });
-      const r = await fs.commit([schreibe.setzen(pfad, neu, { updateTime: festDok.updateTime }), ...audit.writes]);
+      const r = await fs.commit([schreibe.setzen(pfad, neu, { updateTime: festDok.updateTime }), ...audit.writes, ...lesestandLoeschen(uid, periodeId, body.aktion, gelesen)]);
       const s = await sperrBloecke(fs, uid, periodeId, { pfad, daten: neu, updateTime: r.updateTimes[0] }, { daten: { seq: audit.seq, hash: audit.hash }, updateTime: r.updateTimes[1] }, zeit);
       return sperrAntwort(periodeId, s, cors);
     }
     return fehlerAntwort(400, 'AKTION_UNBEKANNT', cors);
   } catch (e) {
+    if (e instanceof LeseFehler) return fehlerAntwort(e.status, e.code, cors);
     if (e instanceof BudgetFehler) return fehlerAntwort(503, 'BUDGET_ERSCHOEPFT', cors, { hinweis: 'zu viele Belege für einen Aufruf' });
     return regelFehler(e, 'festschreibung', cors);
   }
