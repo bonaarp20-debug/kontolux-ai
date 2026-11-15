@@ -19,6 +19,7 @@
 
 import { normalisiereAlt, tagVonZeit } from './beleg.js';
 import { istDatum } from './daten.js';
+import { istCent } from './geld.js';
 
 export const LEGACY_FELDER_V1 = Object.freeze(['typ', 'betrag', 'betrag_netto', 'mwst_satz', 'datum', 'bezahlt', 'bezahlt_am', 'deleted', 'storniert', 'kategorie']);
 export const LEGACY_FELDER = Object.freeze([...LEGACY_FELDER_V1, 'fa_art', 'fa_kategorie', 'fa_periode', 'art', 'ust_unklar', 'leistungsdatum', 'createdAt', 'quelle']);
@@ -149,10 +150,108 @@ function zusatzfelderPassen(dok, profil, optionen) {
   return true;
 }
 
+// N10 (N2-06, 16.11.2026): Nur Zahlungs- oder Storno-Kennzeichen geändert. Die Altpfade der App (Belegarchiv „Als bezahlt markieren“,
+// Kontoauszug-Abgleich und Datumskorrektur, Stornieren, Löschen, Chat-Befehl „bezahlt“, alte PWA-Stände) ändern an einem v2-Beleg nur bezahlt,
+// bezahlt_am, storniert oder deleted. Früher machte das den Steuerteil 'veraltet' und der Beleg wurde aus den Legacy-Feldern neu gebildet: dabei
+// gingen alles verloren, was die Legacy-Felder nicht tragen (Mischsätze 19 % und 7 % werden zu mwst_satz '19', Leistungszeitraum, Reverse Charge
+// aus dem Formular, Klärung des Nutzers, Kennzeichen). Jetzt: Passt der v2-Hash, wenn man nur diese vier Felder auf einen der möglichen Werte zur
+// Zeit des Schreibens setzt, sind alle übrigen 14 Felder unverändert. Dann bleibt der gespeicherte Steuerteil (Positionen, Sätze, Zeitraum), nur
+// Zahlungen und Wirkungslosigkeit kommen aus den Legacy-Feldern (Regeln wie normalisiereAlt). Quelle 'v2_zahlung', Hinweis ZAHLUNG_AUS_ALTFELDERN.
+// Nicht für: alte v1-Hashes, aus den Legacy-Feldern gebildete Steuerteile ohne Klärung (Migration, Sammelklärung: Neubildung ist dort gleichwertig),
+// Korrekturarten und Belege ohne positiven Bruttobetrag (Vorzeichen der Zahlungen); dort bleibt es bei 'v2_veraltet'.
+export const STATUS_FELDER = Object.freeze(['bezahlt', 'bezahlt_am', 'storniert', 'deleted']);
+const KORREKTUR_ARTEN_DRIFT = Object.freeze(['korrektur', 'storno', 'gutschrift_erteilt', 'gutschrift_erhalten']);
+const PLATTFORM_QUELLEN_DRIFT = Object.freeze(['webhook', 'stripe', 'copecart', 'digistore', 'shopify', 'paypal', 'plattform']);
+const istAktiveZahlung = (z) => istObjekt(z) && z.status !== 'rueckgaengig' && istDatum(z.datum) && istCent(z.betrag_cent);
+const zahlBetrag = (z) => z.betrag_cent + (istCent(z.skonto_cent) ? z.skonto_cent : 0) + (istCent(z.rabatt_cent) ? z.rabatt_cent : 0);
+
+// Wahr, wenn sich gegenüber dem Schreiben höchstens bezahlt, bezahlt_am, storniert, deleted geändert haben (v2-Hash). Kandidaten je Feld: fehlend,
+// false und der heutige Wert; für bezahlt_am fehlend, der heutige Wert und jedes Zahlungsdatum im Steuerteil. Höchstens 3 * n * 3 * 3 Hashes.
+export function nurStatusGeaendert(dok) {
+  if (!istObjekt(dok) || !istObjekt(dok.steuer) || !istObjekt(dok.steuer.migration)) return false;
+  const h = dok.steuer.migration.legacy_hash;
+  if (typeof h !== 'string' || !h.startsWith(`v${LEGACY_HASH_VERSION}:`)) return false;
+  const bool = (aktuell) => [...new Set([undefined, false, true, aktuell])];
+  const tage = new Set([undefined, dok.bezahlt_am]);
+  for (const z of Array.isArray(dok.steuer.zahlungen) ? dok.steuer.zahlungen : []) if (istObjekt(z) && istDatum(z.datum)) tage.add(z.datum);
+  for (const b of bool(dok.bezahlt)) {
+    for (const t of tage) {
+      for (const st of bool(dok.storniert)) {
+        for (const del of bool(dok.deleted)) {
+          if (legacyHash({ ...dok, bezahlt: b, bezahlt_am: t, storniert: st, deleted: del }) === h) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+// Gespeicherter Steuerteil mit Zahlungen und Storno aus den Legacy-Feldern. null, wenn der Fall nicht passt (dann Neubildung wie bisher).
+function statusUebernehmen(dok) {
+  const s = dok.steuer;
+  const sum = istObjekt(s.summe) ? s.summe : null;
+  const brutto = sum && istCent(sum.brutto_cent) ? sum.brutto_cent : null;
+  if (brutto === null || brutto <= 0) return null;
+  if (KORREKTUR_ARTEN_DRIFT.includes(s.beleg_art)) return null;
+  const kl = istObjekt(s.migration) && istObjekt(s.migration.klaerung);
+  const ausLegacy = (istObjekt(s.herkunft) && LEGACY_WEGE.includes(s.herkunft.weg)) || s.steuerfall_herkunft === 'migration';
+  if (ausLegacy && !kl) return null;
+  const quelleText = typeof dok.quelle === 'string' ? dok.quelle.toLowerCase() : '';
+  const istPlattform = PLATTFORM_QUELLEN_DRIFT.some((q) => quelleText.includes(q));
+  // Plattform-Belege aus den Legacy-Feldern: der Leistungstag hängt dort am Zahlungstag (normalisiereAlt), also Neubildung
+  if (ausLegacy && istPlattform) return null;
+  const m = istObjekt(s.migration) ? s.migration : {};
+  const hinweise = [...(Array.isArray(m.hinweise) ? m.hinweise : []), 'ZAHLUNG_AUS_ALTFELDERN'];
+  const flags = [...(Array.isArray(m.flags) ? m.flags : [])];
+  let zahlungen = (Array.isArray(s.zahlungen) ? s.zahlungen : []).map((z) => (istObjekt(z) ? { ...z } : z));
+  let gezahlt = 0;
+  let letzte = null;
+  let anzahl = 0;
+  for (const z of zahlungen) if (istAktiveZahlung(z)) { anzahl++; gezahlt += zahlBetrag(z); if (!letzte || z.datum > letzte) letzte = z.datum; }
+  const warBezahlt = anzahl > 0 && gezahlt >= brutto;
+  const zuruecknehmen = () => { zahlungen = zahlungen.map((z) => (istAktiveZahlung(z) ? { ...z, status: 'rueckgaengig' } : z)); };
+  const neueZahlung = (datum, betrag) => ({ id: `${nichtLeerText(dok.id) ? dok.id : 'alt'}-za${zahlungen.length + 1}`, datum, betrag_cent: betrag, art: 'zahlung',
+    kanal: istPlattform ? 'plattform' : 'import', skonto_cent: 0, rabatt_cent: 0, status: 'aktiv' });
+  if (dok.bezahlt === true) {
+    let zd = istDatum(dok.bezahlt_am) ? dok.bezahlt_am : null;
+    if (!(warBezahlt && (zd === null || zd === letzte))) {
+      if (!zd) {
+        // wie normalisiereAlt (TR-integration-001): ohne Datum Erfassungstag oder Rechnungsdatum, gekennzeichnet
+        zd = tagVonZeit(dok.createdAt) || (istDatum(s.rechnungsdatum) ? s.rechnungsdatum : null);
+        if (!zd) return null;
+        flags.push('zahlungsdatum_unsicher');
+        hinweise.push('ZAHLUNGSDATUM_UNSICHER');
+      }
+      // voll bezahlt mit anderem Datum (Datumskorrektur): eine Zahlung über den ganzen Betrag zum neuen Tag, wie die Legacy-Felder es sagen;
+      // offen oder teilweise bezahlt: der offene Rest zum Zahlungstag
+      if (warBezahlt) { zuruecknehmen(); zahlungen.push(neueZahlung(zd, brutto)); }
+      else if (brutto - gezahlt > 0) zahlungen.push(neueZahlung(zd, brutto - gezahlt));
+    }
+  } else if (warBezahlt) {
+    zuruecknehmen(); // als unbezahlt markiert
+  }
+  const steuer = { ...s, zahlungen, migration: { ...m, flags, hinweise } };
+  // Storno und Löschen wie normalisiereAlt (K-B): bezahlte, stornierte Ausgangsrechnung bleibt ohne erfasste Rückzahlung stehen, auch mit deleted
+  // (index.html stornoDurchfuehren -> weicheLoeschung setzt storniert und deleted)
+  if (dok.deleted === true || dok.storniert === true) {
+    const stornoBezahlt = dok.storniert === true && dok.bezahlt === true && dok.typ === 'rechnung_ausgehend' && s.beleg_art !== 'privat';
+    if (stornoBezahlt) {
+      hinweise.push('ORIGINAL_STORNIERT_BEZAHLT');
+      const sh = Array.isArray(s.status_hinweise) ? s.status_hinweise : [];
+      steuer.status_hinweise = sh.includes('W_STORNO_BEZAHLT_OHNE_RUECKZAHLUNG') ? [...sh] : [...sh, 'W_STORNO_BEZAHLT_OHNE_RUECKZAHLUNG'];
+    } else {
+      hinweise.push('ORIGINAL_STORNIERT');
+      steuer.wirkungslos = true;
+    }
+  }
+  return { schema_version: 2, id: dok.id, steuer };
+}
+const nichtLeerText = (x) => typeof x === 'string' && x.trim() !== '';
+
 // Beleg für den Kern aus einem gespeicherten Dokument (Konzept 3.8.1): v2 wie gespeichert, außer veraltet (dann aus den Legacy-Feldern neu, Hinweis
 // STEUER_VERALTET); v1 in-memory über normalisiereAlt. Bei altem v1-Hash ('neu_pruefen') entscheidet zusatzfelderPassen; das Ergebnis trägt dann
-// neu_pruefen: true (der nächste Kern-Schreibweg legt einen v2-Hash ab).
-// Ergebnis { beleg, quelle: 'v2' | 'v2_veraltet' | 'v1' | 'ungueltig', veraltet, neu_pruefen? }. Nie eine Ausnahme.
+// neu_pruefen: true (der nächste Kern-Schreibweg legt einen v2-Hash ab). N10: nur Zahlung/Storno geändert -> 'v2_zahlung' (statusUebernehmen).
+// Ergebnis { beleg, quelle: 'v2' | 'v2_zahlung' | 'v2_veraltet' | 'v1' | 'ungueltig', veraltet, neu_pruefen? }. Nie eine Ausnahme.
 export function belegFuerKern(dok, profil, optionen) {
   if (!istObjekt(dok)) return { beleg: null, quelle: 'ungueltig', veraltet: false };
   try {
@@ -163,6 +262,10 @@ export function belegFuerKern(dok, profil, optionen) {
         const r = { beleg: { schema_version: 2, id: dok.id, steuer: dok.steuer }, quelle: 'v2', veraltet: false };
         if (np) r.neu_pruefen = true;
         return r;
+      }
+      if (st === 'veraltet' && nurStatusGeaendert(dok)) {
+        const b = statusUebernehmen(dok);
+        if (b) return { beleg: b, quelle: 'v2_zahlung', veraltet: false };
       }
       const b = normalisiereAlt(dok, profil, optionen);
       b.steuer.migration.hinweise.push('STEUER_VERALTET');

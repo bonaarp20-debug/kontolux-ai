@@ -244,6 +244,8 @@ const KATALOG = {
   BEZAHLT_AM_IGNORIERT: H('hinweis', 'Ein Zahlungsdatum ist gespeichert, der Beleg ist aber als unbezahlt markiert. Kontolux rechnet ihn als unbezahlt.', 'R-ZP-07', TECHNIK, 'T'),
   ORIGINAL_STORNIERT_BEZAHLT: H('hinweis', 'Die Rechnung ist storniert, war aber schon bezahlt. Ohne erfasste Rückzahlung bleibt sie in den Zahlen; erfasse die Rückzahlung mit ihrem Datum, dann mindert sie Umsatzsteuer und Einnahmen.', 'R-KOR-05', 'UStAE 17.1 Abs. 2 S. 3; § 17 Abs. 2 Nr. 3 UStG', 'B'),
   STEUER_VERALTET: H('hinweis', 'Der Beleg wurde nach der letzten Berechnung an anderer Stelle geändert. Kontolux rechnet ihn deshalb aus den aktuellen Belegangaben neu.', 'R-HN-02', TECHNIK, 'T'),
+  // N10 (N2-06, 16.11.2026): nur Zahlungs- oder Storno-Kennzeichen an anderer Stelle geändert; Positionen und Sätze bleiben
+  ZAHLUNG_AUS_ALTFELDERN: H('hinweis', 'Der Zahlungsstand oder das Storno-Kennzeichen des Belegs wurde an anderer Stelle geändert. Kontolux übernimmt diese Änderung, die Positionen und Steuersätze des Belegs bleiben.', 'R-HN-02', TECHNIK, 'T'),
   DATUM_UNSICHER: H('hinweis', 'Das Belegdatum war nicht eindeutig und wurde aus dem Erfassungszeitpunkt abgeleitet. Bitte prüfe es.', 'R-HN-02', TECHNIK, 'T'),
   FA_ART_WIDERSPRUCH: H('hinweis', 'Die gespeicherte Art der Zahlung an das Finanzamt passt nicht zur gewählten Zeile. Bitte wähle die Art neu.', 'R-ZP-23', 'K16 (Zahlungen an das Finanzamt)', 'T'),
   FA_ZAHLUNG_SATZ_IGNORIERT: H('hinweis', 'Eine Zahlung an das Finanzamt enthält keine Vorsteuer und keine Umsatzsteuer auf einen Umsatz. Der Steuersatz am Beleg wird nicht verwendet.', 'R-ZP-23', '§ 15 Abs. 1 S. 1 Nr. 1 UStG; K16', 'A'),
