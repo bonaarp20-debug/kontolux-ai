@@ -1,27 +1,27 @@
 {
-  "kern_version": "2026.11.16-2",
+  "kern_version": "2026.11.16-3",
   "dateien": {
-    "VERSION.js": "3bba68694e6dddb04a669d1e1dbc097e7509c2aa50c383f5c8f413990b14a7dc",
+    "VERSION.js": "2009885988cd4bf7e9fec499c23393dc02ceada03f4c30f870311f5b628daab9",
     "auswertung.js": "586901609d362930db40f9c7b24ffe325e86c9b15dd034fb09652534eeb4d939",
-    "beleg.js": "475bc8f00546b179c602c53975e4c793c209f182adc0eb4b37626b40fa0883ea",
+    "beleg.js": "5ba3918ac66de7972c7e6d87d42fcae5a6567895d6b1c25a07000e61cad8d5de",
     "daten.js": "ca7e034d0da8d36c0f67c835038c545f8ae9f7590047ecde75a43791ddf56543",
     "drift.js": "14063c9f43ca36148da3ebcf9e33c6ded5fd5f51a7b65cd6abda2b08e4d3c923",
     "euer.js": "d64b935c1a066c4bb7546c2c9e71589b7696a7f4823f6396adecefadf1e0c43b",
     "geld.js": "5088847eac9557f12b327656bf7625c450027045fd057eb9f00f5f95c9970f8c",
-    "hinweise.js": "93942aaf31fc88b0e9bae9c316b4e48df8987bb8ff2f08861a4bfab3622cb1ca",
+    "hinweise.js": "3e74c4a7458ae2b6a8b02e676ef29b10fe3ca5e03a8a6e1da4ce89b6a9137701",
     "index.js": "b3aa8dd8a7650063e151c0b6963060fc1fe78d4910b90ffa497b2bba2c1c5e5f",
     "migration.js": "01b1bab1770f9a4657904d3612a60ac48fd65cf1706d966212f5142383852edf",
     "regeln-basis.js": "7d00a83387e05624861ec60c6f042fed429156c417bc9784f39dd9eb68f6b832",
-    "steuerprofil.js": "a4faffc46dfd09d57dee8c78e9b01a9a73c206f36fd7c0d60f995850ce9eb19d",
-    "tabellen.js": "e0d76e1bcae58a1afb07131524540da30f8e9d5b81f02100ecbc92c537020964",
-    "ustva.js": "c806b03859f71d7a6f8ca6a8807dfcca9c06d988c3b82a3a436666096809e174",
-    "wirkung.js": "bf53696bd7ecf66adf47addd934d9c69c5a13bbe1666151f5577793c2ab53f8a",
-    "zahlenliste.js": "a479f11fceaca6da13435bd1290c381277019fe109947cb61859101e7ab1115c",
-    "golden/beleg-adapter.json": "8ce0e6b804469751a8401d014eb719ff0c9afdd1bb578a40e2c27d3f0ae010e7",
-    "golden/pruefberichte.json": "16d9e0053603f765ee232b037c241525b1f915eaed8a1071488eea5c2a15f5cc",
-    "golden/referenzfaelle.json": "365512996b733e2384e13d9a73df47c301594e0b50d6daaeba51178d2db1fa52"
+    "steuerprofil.js": "6c22f8e86a39c22a97d97621aceee76d186804b7b790727a5dc37d663c8f668b",
+    "tabellen.js": "6f989d4d945c73ddc327152b5de8d26388f0867e502f6a9859456354545d3463",
+    "ustva.js": "e145059c9502e929d818f86c0f33c9d214dfde930bdf4e15410084884064fdd6",
+    "wirkung.js": "75991ff15f12646c93b75d7c271dd69edc23837b41af2531fbd7907ee0a09cc9",
+    "zahlenliste.js": "c06c0edf1164851c0b92b3787cc1693711aa71c333047f4d84bff1cbd7a93423",
+    "golden/beleg-adapter.json": "32e74a82478d18812b92f5160625db526cfa3a8c150910457fc14c32e2687123",
+    "golden/pruefberichte.json": "a11c0882b3f1256ffdd14ec34a2f90f54e3c5fa7c847b36cd3d7df4c0b680f3f",
+    "golden/referenzfaelle.json": "9de2e0bc4f665482522f1146f2ecd4e0f68c014844c374fed0cb07483f5b57fe"
   },
-  "erzeugt": "2026-11-15T02:40:01.610Z",
+  "erzeugt": "2026-11-15T12:08:51.334Z",
   "nur_app": [
     "schatten.js"
   ]

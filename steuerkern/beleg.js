@@ -8,7 +8,7 @@
 // Ausnahme (K-4). Hinweiscodes: W_ = Warnung (Katalog in 05-testfaelle.md), HN_ = Information, PF_ = Pflichtfeld-Fehler.
 // Gesamtbeleg-Form (Ausgabe): { schema_version: 2, id, ...Altfelder (legacyFelder), steuer: {...} }.
 
-import { istCent, ustAusNetto, ustAusBrutto, teile } from './geld.js';
+import { istCent, ustAusNetto, ustAusBrutto, teile, mulDivRund } from './geld.js';
 import { istDatum, monatsende, monatsanfang, datumAusTagen, tageSeitEpoche, formatDatum, tageImMonat, wochentagNr, istPeriode } from './daten.js';
 import { statusAm, statusFuerAusgangsumsatz, vorsteuerAbziehbar } from './steuerprofil.js';
 import {
@@ -210,8 +210,34 @@ function zahlungsDaten(zahlungen) {
 // kontext: { profil, stichtag, bestand }
 // Ausgabe: { beleg, entwurf, unsicherheiten[], pflichtfeld_fehler[], vorschlaege[] }. beleg ist null bei Blockern;
 // entwurf ist dann der Beleg trotzdem (Steuerfall UNBEKANNT), damit Altpfade und Tests ihn auswerten können.
+// KERN-B (BP-05a, T-S3a-012): Beleg in fremder Währung bei Reverse Charge (§ 13b): eingabe.fremd = { waehrung, betrag_cent (Rechnungsbetrag ohne
+// Steuer in der Fremdwährung, kleinste Einheit 1/100), kurs (1 EUR = kurs Fremdwährung, Monatskurs des BMF für den Monat der Leistung, § 16 Abs. 6
+// S. 1 UStG) }. Der Kern rechnet den Euro-Betrag (kaufmännisch auf Cent) und vermerkt W_WAEHRUNG_KURS; Zahlungen bleiben die tatsächlich gezahlten
+// Euro-Beträge (EÜR). Ohne gültigen Kurs: Sperre fremdwaehrung_ohne_kurs (nicht gerechnet, nie mit Tageskurs geraten). Andere Steuerfälle mit fremd:
+// Sperre nicht_eur wie bisher bei waehrung.
+const RC_WAHLEN = Object.freeze(['reverse_charge_eu', 'reverse_charge_drittland']);
+export function fremdInEuroCent(betragCent, kurs) {
+  if (!istCent(betragCent) || betragCent < 0 || typeof kurs !== 'number' || !Number.isFinite(kurs) || kurs <= 0 || kurs > 1e6) return null;
+  // Kurs als Dezimaltext mit höchstens 6 Nachkommastellen (BMF: 4), ohne Gleitkomma-Rundung (K-2): "1.1558" -> 1155800 Millionstel
+  const m = /^(\d+)(?:\.(\d{1,6}))?$/.exec(String(kurs));
+  if (!m) return null;
+  const k = Number(m[1] + (m[2] || '').padEnd(6, '0'));
+  if (!Number.isSafeInteger(k) || k <= 0) return null;
+  return mulDivRund(betragCent, 1000000, k);
+}
+function fremdVorbereiten(e) {
+  if (!istObjekt(e.fremd)) return { e, hinweis: null, sperre: null };
+  const f = e.fremd;
+  const rc = RC_WAHLEN.includes(e.steuerwahl);
+  const cent = fremdInEuroCent(f.betrag_cent, f.kurs);
+  if (!rc) return { e: { ...e, fremd: undefined }, hinweis: 'W_WAEHRUNG_KURS', sperre: 'nicht_eur' };
+  if (cent === null) return { e: { ...e, fremd: undefined, betrag: { cent: istCent(f.betrag_cent) ? f.betrag_cent : 0, art: 'netto' } }, hinweis: 'W_WAEHRUNG_KURS', sperre: 'fremdwaehrung_ohne_kurs' };
+  return { e: { ...e, fremd: undefined, positionen: undefined, betrag: { cent, art: 'netto' } }, hinweis: 'W_WAEHRUNG_KURS', sperre: null };
+}
+
 export function normalisiereEingabe(eingabe, kontext) {
-  const e = istObjekt(eingabe) ? eingabe : {};
+  const fv = fremdVorbereiten(istObjekt(eingabe) ? eingabe : {});
+  const e = fv.e;
   const ctx = istObjekt(kontext) ? kontext : {};
   const profil = ctx.profil;
   const unsicherheiten = [];
@@ -253,7 +279,11 @@ export function normalisiereEingabe(eingabe, kontext) {
 
   if (!istFa && !istKorrektur && !istPrivat) {
     if (richtung === 'eingang') {
-      if (!rechnungsdatum) {
+      if (!rechnungsdatum && e.ohne_rechnung === true && e.steuerwahl === 'reverse_charge_drittland' && leistung) {
+        // KERN-B (T-S3a-004): Drittland-Leistung ohne Rechnung (vom Nutzer erklärt): § 13b Abs. 2 Nr. 1 UStG, Entstehung spätestens mit Ablauf des
+        // Folgemonats der Leistung; kein Rechnungsdatum nötig (UStAE 13b.15 Abs. 3: Bemessungsgrundlage ggf. schätzen)
+        hinweise.push('HN_RC_OHNE_RECHNUNG');
+      } else if (!rechnungsdatum) {
         // PE1 (06): Beleg ohne Rechnungsdatum: Zahlungsdatum nur als Vorschlag mit Pflichtbestätigung, keine stille Zuordnung.
         unsicherheiten.push(hin('W_RECHNUNGSDATUM_FEHLT', 'rechnungsdatum', 'Eingangsbeleg ohne Rechnungsdatum'));
         if (fruehesteZahlung) vorschlaege.push({ feld: 'rechnungsdatum', wert: fruehesteZahlung, grund: 'Zahlungsdatum als Vorschlag (PE1), Bestätigung nötig' });
@@ -330,6 +360,10 @@ export function normalisiereEingabe(eingabe, kontext) {
   } else if (istFa) {
     steuerfall = 'FA_ZAHLUNG';
     herkunft = 'abgeleitet';
+  } else if (fv.sperre) {
+    steuerfall = 'SPERRE_STUFE4';
+    sperrgrund = fv.sperre;
+    herkunft = herkunft === 'nutzer' ? 'beleg' : herkunft;
   } else if (nichtLeer(e.sperrgrund) || nichtLeer(e.merkmal)) {
     const g = e.sperrgrund || e.merkmal;
     steuerfall = 'SPERRE_STUFE4';
@@ -656,6 +690,7 @@ export function normalisiereEingabe(eingabe, kontext) {
     const sb = statusAm(profil, leistung.bis).status;
     if (sv !== 'unbekannt' && sb !== 'unbekannt' && sv !== sb && !hinweise.includes('W_LEISTUNGSZEITRAUM_STATUSWECHSEL')) hinweise.push('W_LEISTUNGSZEITRAUM_STATUSWECHSEL');
   }
+  if (fv.hinweis && !hinweise.includes(fv.hinweis)) hinweise.push(fv.hinweis);
   if (hinweise.length) steuer.status_hinweise = hinweise;
 
   const entwurf = { schema_version: 2, id, steuer };

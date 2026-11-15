@@ -11,6 +11,7 @@
 //                                bestaetigte_jahre: [2026, ...] }],
 //     voranmeldung_verlauf:  [{ gueltig_ab, zeitraum: 'monat'|'quartal', dauerfrist, sondervorauszahlung_cent, quelle }],
 //     vorjahr:               { jahr, gesamtumsatz_cent, quelle },
+//     gwg_wahl:              { '2026': 'gwg'|'sammelposten'|'afa', ... }   (KERN-B, BP-04b: Wahl je Wirtschaftsjahr, § 6 Abs. 2, 2a EStG)
 //     limit_bestaetigungen:  { fa_buchfuehrung_mitgeteilt, datum } }
 // Alle Funktionen sind rein, ändern ihre Eingaben nicht und werfen bei fachlich unbrauchbaren Profildaten
 // keine Ausnahme (K-4): sie liefern 'unbekannt' bzw. Hinweiscodes. Hinweiscodes entsprechen der Warnungsliste
@@ -242,6 +243,58 @@ export function sondervorauszahlungCent(summeVorauszahlungenCent, monate) {
   if (summeVorauszahlungenCent <= 0) return 0;
   const teiler = GRENZEN.SONDERVORAUSZAHLUNG_TEILER.wert;
   return rundeHalbAuf(summeVorauszahlungenCent * 12, m * teiler);
+}
+
+// KERN-B (BP-04b, PF-038): § 47 Abs. 3 UStDV (docs/quellen/ustdv-47.md Z. 17, Konfidenz A): Hat der Unternehmer seine Tätigkeit im laufenden
+// Kalenderjahr begonnen, ist die Sondervorauszahlung auf der Grundlage der zu erwartenden Vorauszahlungen dieses Kalenderjahres zu berechnen:
+// ein Elftel der erwarteten Summe (Abs. 1 S. 2 entsprechend). Die erwartete Summe ist eine Schätzung des Nutzers (Kontolux rechnet sie nicht
+// hoch); keine Umrechnung auf ein volles Jahr (das gilt nur für Abs. 2, Tätigkeit im Vorjahr). Erwarteter Überschuss (<= 0): 0.
+export function sondervorauszahlungBeginnJahr(erwarteteVorauszahlungenCent) {
+  if (!istCent(erwarteteVorauszahlungenCent)) throw new RangeError('erwarteteVorauszahlungenCent muss ganze Cent sein');
+  if (erwarteteVorauszahlungenCent <= 0) return 0;
+  return rundeHalbAuf(erwarteteVorauszahlungenCent, GRENZEN.SONDERVORAUSZAHLUNG_TEILER.wert);
+}
+
+// KERN-B (BP-04b, Anleitung USt 1 A 2026 Zeile 49, ELSTER-Hilfe Kz 39 (docs/quellen/elster-hilfe-ustva-2026.md Z. 527), § 48 Abs. 4 UStDV
+// (docs/quellen/ustdv-48.md Z. 18), Konfidenz A): Die Sondervorauszahlung wird in der Voranmeldung des letzten Voranmeldungszeitraums des Jahres
+// abgezogen, für den die Fristverlängerung gilt: grundsätzlich Dezember, bei Verzicht auf die Dauerfrist im Laufe des Jahres der letzte Monat mit
+// Dauerfrist. Rückgabe: Monat 'JJJJ-MM' oder null (keine Dauerfrist mit monatlicher Abgabe im Jahr). Ohne verzicht (optionen.verzicht !== true)
+// nur Dezember (Verhalten bis Kern 2026.11.16-2).
+export function kz39Monat(profil, jahr, optionen) {
+  if (!Number.isSafeInteger(jahr)) return null;
+  const J = String(jahr).padStart(4, '0');
+  const dauerMonat = (m) => { const va = voranmeldungAm(profil, periodenEnde(`${J}-${m}`)); return va.dauerfrist === true && va.zeitraum === 'monat' ? va : null; };
+  if (dauerMonat('12')) return `${J}-12`;
+  if (!(istObjekt(optionen) && optionen.verzicht === true)) return null;
+  for (let m = 11; m >= 1; m--) {
+    const mm = String(m).padStart(2, '0');
+    if (dauerMonat(mm)) return `${J}-${mm}`;
+  }
+  return null;
+}
+
+// KERN-B (BP-04b, PF-044): Wahl für Wirtschaftsgüter je Wirtschaftsjahr (= Kalenderjahr, L1), § 6 Abs. 2, 2a EStG (docs/quellen/estg-6.md
+// Z. 128, 129, Konfidenz A): 'gwg' (Sofortabzug bis 800 EUR netto, darüber Abschreibung), 'sammelposten' (über 250 bis 1.000 EUR netto in den
+// Sammelposten, ein Fünftel je Jahr; einheitlich für alle Wirtschaftsgüter des Jahres, Abs. 2a S. 5; bis 250 EUR sofort, S. 4), 'afa' (keine
+// Sofortabschreibung über 250 EUR, alles über die Nutzungsdauer; der Kern rechnet keine AfA). Ohne Eintrag: null (Wahl fehlt).
+export const GWG_WAHL_WERTE = Object.freeze(['gwg', 'sammelposten', 'afa']);
+export function gwgWahlFuer(profil, jahr) {
+  const m = istObjekt(profil) && istObjekt(profil.gwg_wahl) ? profil.gwg_wahl : null;
+  const v = m && Number.isSafeInteger(jahr) ? m[String(jahr)] : undefined;
+  return GWG_WAHL_WERTE.includes(v) ? v : null;
+}
+
+// Was ist für ein Wirtschaftsgut mit Kosten (netto, ohne Vorsteuer, § 6 Abs. 2 S. 1 EStG) möglich? Für die Oberfläche (Konzept G-B04-01:
+// "GWG-Wahl bei 900,00 netto nicht anbietbar"). Ergebnis je Wahl { moeglich, wirkung: 'sofort'|'sammelposten'|'afa' }.
+export function anlagegutWahlen(kostenCent) {
+  if (!istCent(kostenCent) || kostenCent < 0) return null;
+  const sofort = kostenCent <= GRENZEN.SAMMELPOSTEN_SOFORT.wert_cent;
+  return {
+    gwg: { moeglich: kostenCent <= GRENZEN.GWG_NETTO.wert_cent, wirkung: kostenCent <= GRENZEN.GWG_NETTO.wert_cent ? 'sofort' : 'afa' },
+    sammelposten: { moeglich: kostenCent <= GRENZEN.SAMMELPOSTEN_OBEN.wert_cent, wirkung: sofort ? 'sofort' : (kostenCent <= GRENZEN.SAMMELPOSTEN_OBEN.wert_cent ? 'sammelposten' : 'afa') },
+    afa: { moeglich: true, wirkung: sofort ? 'sofort' : 'afa' },
+    regel_id: 'R-EUER-11',
+  };
 }
 
 // § 48 Abs. 2 UStDV: Anmeldung und Zahlung bis zum gesetzlichen Zeitpunkt der ersten Voranmeldung des Jahres
@@ -493,6 +546,10 @@ export function profilPruefen(profil) {
     if (e.sondervorauszahlung_cent !== undefined && !(istCent(e.sondervorauszahlung_cent) && e.sondervorauszahlung_cent >= 0)) f.push(fehler('SONDERVORAUSZAHLUNG_UNGUELTIG', `voranmeldung_verlauf[${i}].sondervorauszahlung_cent muss ganze Cent >= 0 sein.`));
     if (e.quelle !== 'elster_bestaetigt') w.push('VORANMELDUNG_NICHT_AUS_ELSTER_BESTAETIGT');
   });
+  if (profil.gwg_wahl !== undefined) {
+    if (!istObjekt(profil.gwg_wahl)) f.push(fehler('GWG_WAHL_UNGUELTIG', 'gwg_wahl muss ein Objekt Jahr -> Wahl sein.'));
+    else for (const [j, v] of Object.entries(profil.gwg_wahl)) if (!/^\d{4}$/.test(j) || !GWG_WAHL_WERTE.includes(v)) f.push(fehler('GWG_WAHL_UNGUELTIG', `gwg_wahl[${j}] muss gwg, sammelposten oder afa sein.`));
+  }
   if (profil.vorjahr !== undefined && !(istObjekt(profil.vorjahr) && istCent(profil.vorjahr.gesamtumsatz_cent) && profil.vorjahr.gesamtumsatz_cent >= 0)) f.push(fehler('VORJAHR_UNGUELTIG', 'vorjahr.gesamtumsatz_cent muss ganze Cent >= 0 sein.'));
   if (profil.option_19_3 !== undefined) {
     const o = profil.option_19_3;

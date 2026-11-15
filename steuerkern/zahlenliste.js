@@ -14,7 +14,7 @@
 
 import { KERN_VERSION } from './VERSION.js';
 import { USTVA_ZEILEN, EUER_ZEILEN, RUNDUNG_BASIS } from './tabellen.js';
-import { centZuEuroText, istCent, ustAusBrutto } from './geld.js';
+import { centZuEuroText, istCent, ustAusBrutto, ustAusNetto } from './geld.js';
 import { istDatum } from './daten.js';
 import { RAHMENHINWEIS_W1, PROGRAMMUMFANG, hinweisFuer } from './hinweise.js';
 import { pruefeWirkungen } from './wirkung.js';
@@ -78,7 +78,8 @@ function datumText(d) { return istDatum(d) ? `${d.slice(8, 10)}.${d.slice(5, 7)}
 // ---------------------------------------------------------------------------------------------
 // Umsatzsteuer-Voranmeldung
 // ---------------------------------------------------------------------------------------------
-const BASIS_ZEILEN = Object.freeze([13, 14, 15, 23]);
+const BASIS_ZEILEN = Object.freeze([13, 14, 15, 23, 30, 32, 51]); // 30/32/51: KERN-B (§ 13b Kz 46/84, Kz 50), nur wenn der Kern sie liefert
+const RC_ZEILEN = Object.freeze([30, 32]); // Steuer Kz 47/85 trägt der Nutzer in Euro und Cent ein (keine Berechnung aus der vollen Euro-Basis)
 const STEUER_ZEILEN = Object.freeze([13, 14]);
 const SUMMEN_SCHLUESSEL = Object.freeze({ 37: 'z37_cent', 45: 'z45_cent', 48: 'z48_cent', 50: 'z50_cent' });
 
@@ -107,6 +108,7 @@ export function zahlenlisteUstva(u, optionen) {
       r.eintrag = euroGanzText(z.basis_euro);
       let t = `Zeile ${z.z} (Kz ${z.kz_basis}) ${z.bez || ''}: ${r.eintrag} in ELSTER einzutragen (genau ${euroText(z.basis_cent)} EUR)`;
       if (st) t += `; Steuer ${euroText(st.elster_cent)} EUR (aus dem eingetragenen Betrag), genau ${euroText(st.genau_cent)} EUR`;
+      if (RC_ZEILEN.includes(z.z) && Number.isSafeInteger(z.steuer_cent)) { r.steuer = { genau_cent: z.steuer_cent, elster_cent: z.steuer_cent, kz: z.kz_steuer }; t += `; Steuer (Kz ${z.kz_steuer}) ${euroText(z.steuer_cent)} EUR`; }
       if (z.z === 23 && z.zwischenwert === true) { r.zwischenwert = true; t += `; Zwischenwert: ${z.offen} Umsatz/Umsätze vor dem Wechsel noch nicht voll bezahlt`; }
       r.text = t;
       zeilen.push(r);
@@ -345,6 +347,19 @@ export function drilldownFuer(ergebnis, kz, optionen) {
       for (const [satz, e] of kb) { const d = ustAusBrutto(e.brutto, satz) - e.ust; if (d !== 0) zeilen.push({ beleg_id: null, betrag_cent: d, rolle: 'ausgleich', grund: 'kleinbetrag_ustae_15_4', satz_bp: satz, text: 'Vorsteuer der Kleinbetragsrechnungen je Steuersatz aus der Bruttosumme (UStAE 15.4)', regel_id: 'R-ZP-10' }); }
     } else if (k === 48) {
       for (const w of ws) if (w.welt === 'ust' && w.periode === per && w.rolle === 'ku_steuerfrei' && w.kz48_offen !== true) zeilen.push(zeileAus(w, w.netto_cent));
+    } else if (k === 46 || k === 84 || k === 47 || k === 85 || k === 67) {
+      // KERN-B (§ 13b): Basis je Beleg; Steuer je Beleg plus Ausgleich auf die Steuer aus der Summe je Herkunft und Satz (ustvaFuer, E-2)
+      const basisKz = k === 47 ? 46 : (k === 85 ? 84 : k);
+      const rolle = k === 67 ? 'rc_vorsteuer' : 'rc_umsatz';
+      const gr = new Map();
+      for (const w of ws) {
+        if (w.welt !== 'ust' || w.periode !== per || w.status !== 'berechnet' || w.rolle !== rolle || w.kz !== basisKz) continue;
+        zeilen.push(zeileAus(w, k === 46 || k === 84 ? w.netto_cent : w.ust_cent));
+        if (k !== 46 && k !== 84) { const key = `${w.rc_basis_kz || w.kz}|${w.satz_bp}`; const e = gr.get(key) || { satz: w.satz_bp, b: 0, u: 0 }; e.b += w.netto_cent; e.u += w.ust_cent; gr.set(key, e); }
+      }
+      for (const e of gr.values()) { const d = ustAusNetto(e.b, e.satz) - e.u; if (d !== 0) zeilen.push({ beleg_id: null, betrag_cent: d, rolle: 'ausgleich', grund: 'rc_steuer_aus_summe', satz_bp: e.satz, text: 'Steuer nach § 13b aus der Summe der Bemessungsgrundlagen je Satz (Kz 47/85 und Kz 67 aus derselben Basis)', regel_id: 'R-13B-02' }); }
+    } else if (k === 50 || k === 37) {
+      for (const w of ws) if (w.welt === 'ust' && w.periode === per && w.status === 'berechnet' && w.uneinbringlich === true && w.rolle === (k === 50 ? 'minderung' : 'vorsteuer_minderung')) zeilen.push(zeileAus(w, 0 - (k === 50 ? w.netto_cent : w.ust_cent)));
     } else if (k === 64 || k === 65 || k === 69 || k === 39) {
       if (k === 65 && u && istObjekt(u.kz65_vorschlag) && u.kz65_variante === 'B') {
         for (const b of u.kz65_vorschlag.belege) zeilen.push({ beleg_id: b.beleg_id, betrag_cent: b.kz65_cent, netto_cent: b.anzahlung_netto_cent, rolle: 'kz65_vorschlag', regel_id: 'R-KZ-46', text: 'Steuer auf die Anzahlung aus der Kleinunternehmerzeit (Variante B)' });

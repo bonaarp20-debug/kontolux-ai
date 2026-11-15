@@ -10,9 +10,9 @@
 
 import { ustAusNetto, ustAusBrutto, basisInEuro } from './geld.js';
 import { istDatum, periodenArt, periodenEnde, periodenStart } from './daten.js';
-import { voranmeldungAm, kz70Datum, fristFuerPeriode } from './steuerprofil.js';
+import { voranmeldungAm, kz70Datum, fristFuerPeriode, kz39Monat } from './steuerprofil.js';
 import { RUNDUNG_BASIS, USTVA_ZEILEN, SATZ_REGEL_BP, SATZ_ERMAESSIGT_BP, basisKzFuerSatz } from './tabellen.js';
-import { profilHinweise, pruefeWirkungen } from './wirkung.js';
+import { profilHinweise, pruefeWirkungen, regelAn } from './wirkung.js';
 
 const istObjekt = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 const UMSATZ_ROLLEN = Object.freeze(['umsatz', 'anzahlung', 'minderung']);
@@ -35,9 +35,10 @@ export function ustvaPerioden(wirkungen, profil, jahr, optionen) {
   }
   for (const v of verworfen) if (v.welt === 'ust' && v.periode) p.add(v.periode);
   if (Number.isSafeInteger(jahr) && istObjekt(profil)) {
-    const dez = `${String(jahr).padStart(4, '0')}-12`;
-    const va = voranmeldungAm(profil, periodenEnde(dez));
-    if (va.dauerfrist === true && va.zeitraum === 'monat' && Number.isSafeInteger(va.sondervorauszahlung_cent)) p.add(dez);
+    // KERN-B (BP-04b): mit Kern-Option kz39_verzicht der letzte Monat mit Dauerfrist (kz39Monat), sonst Dezember wie bisher
+    const m39 = kz39Monat(profil, jahr, { verzicht: regelAn(optionen, 'kz39_verzicht') });
+    const va = m39 ? voranmeldungAm(profil, periodenEnde(m39)) : null;
+    if (va && Number.isSafeInteger(va.sondervorauszahlung_cent)) p.add(m39);
   }
   return [...p].sort();
 }
@@ -67,8 +68,8 @@ function zeile(tabelle, z, extra) {
   };
 }
 
-function summen(z13, z14, z15, z38, z41, z44, z46, z47, z49) {
-  const z37 = z13 + z14;
+function summen(z13, z14, z15, z38, z41, z44, z46, z47, z49, zRc) {
+  const z37 = z13 + z14 + (zRc || 0); // zRc: Steuer aus Z.30 bis 32 (Kz 47, 85), KERN-B BP-05a
   const z45 = z37 - (z38 + z41 + z44);
   const z48 = z45 + z46 + z47;
   const z50 = z48 - z49;
@@ -149,10 +150,11 @@ export function kz65Vorschlag(wirkungen, periode) {
   };
 }
 
-function nichtBerechnet(tabelle, steuerfaelle, wechseljahr, kz48Berechnet) {
+function nichtBerechnet(tabelle, steuerfaelle, wechseljahr, kz48Berechnet, zusatz) {
+  const berechnetZ = ZEILEN_BERECHNET.concat(zusatz || []);
   const basis = tabelle
-    ? tabelle.zeilen.filter((r) => !ZEILEN_BERECHNET.includes(r.z) && (r.kz_basis !== null || r.kz_steuer !== null)).map((r) => ({ z: String(r.z), kz: [r.kz_basis, r.kz_steuer].filter((x) => x !== null), stufe: r.stufe || null }))
-    : NICHT_BERECHNET_FEST.map((r) => ({ ...r, stufe: null }));
+    ? tabelle.zeilen.filter((r) => !berechnetZ.includes(r.z) && (r.kz_basis !== null || r.kz_steuer !== null)).map((r) => ({ z: String(r.z), kz: [r.kz_basis, r.kz_steuer].filter((x) => x !== null), stufe: r.stufe || null }))
+    : NICHT_BERECHNET_FEST.filter((r) => !berechnetZ.includes(Number(r.z))).map((r) => ({ ...r, stufe: null }));
   return basis.map((r) => ({
     ...r,
     hinweis: 'wird von Kontolux nicht berechnet',
@@ -270,18 +272,53 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
   else if (hat65 && eingabe65 !== 0) hinweise.push('W_KZ65_DOPPELT');
   if (hat65 && !bestaetigt65) hinweise.push('W_KZ65_VORSCHLAG_OFFEN');
   const z47 = eingabeCent(69);
-  const z41 = 0; // Kz 67 gehört zu Stufe 3a: hier nicht berechnet
+  // --- KERN-B (BP-05a): § 13b Eingang, Z.30 (Kz 46/47), Z.32 (Kz 84/85), Z.41 (Kz 67). Basis Summe der Cent-Werte je Satz; Steuer und Vorsteuer aus
+  // derselben exakten Basis (E-2, Fixture T-S3a-012): Kz 47/85 = Summe je Satz von ustAusNetto(Basis), Kz 67 genauso aus den Wirkungen mit Vorsteuer.
+  // Die Basis wird in vollen Euro eingetragen (basis_euro, RUNDUNG_BASIS); die Steuer trägt der Nutzer in Euro und Cent ein (ELSTER rechnet Kz 47/85
+  // nicht aus der Basis), darum kein Abschneiden der Steuer (Konfidenz B). Nur Wirkungen aus reverseChargeWirkung (Kern-Option rc_eingang).
+  const rcWirk = berechnet.filter((w) => w.rolle === 'rc_umsatz' || w.rolle === 'rc_vorsteuer');
+  const rcZeile = (rolle, kz) => {
+    const l = rcWirk.filter((w) => w.rolle === rolle && w.kz === kz);
+    const jeSatz = new Map();
+    let basis = 0;
+    let belegSteuer = 0;
+    // Gruppen je Herkunftszeile (46 oder 84) und Satz: Kz 67 rundet genau wie Kz 47 und Kz 85 (Summe Kz 47 + Kz 85 = Kz 67 bei Regelbesteuerung)
+    for (const w of l) { basis = addSicher(basis, w.netto_cent); belegSteuer = addSicher(belegSteuer, w.ust_cent); const satz = Number.isSafeInteger(w.satz_bp) ? w.satz_bp : SATZ_REGEL_BP; const k = `${w.rc_basis_kz || w.kz}|${satz}`; const e = jeSatz.get(k) || { satz, b: 0 }; e.b = addSicher(e.b, w.netto_cent); jeSatz.set(k, e); }
+    let steuer = 0;
+    for (const e of jeSatz.values()) steuer = addSicher(steuer, ustAusNetto(e.b, e.satz));
+    if (steuer !== belegSteuer && !hinweise.includes('HN_RD_SUMME')) hinweise.push('HN_RD_SUMME');
+    return { basis, steuer, belege: belege(l), anzahl: l.length };
+  };
+  const rc46 = rcZeile('rc_umsatz', 46);
+  const rc84 = rcZeile('rc_umsatz', 84);
+  const rc67 = rcZeile('rc_vorsteuer', 67);
+  const hatRc = rcWirk.length > 0;
+  const zRc = rc46.steuer + rc84.steuer;
+  const z41 = rc67.steuer; // Kz 67: 0 ohne § 13b-Wirkungen (bis Kern 2026.11.16-2 immer 0)
+  // --- KERN-B (BP-04b): Z.51 Kz 50 und Z.52 Kz 37, Minderungen aus Uneinbringlichkeit (R-KOR-06), positiv (K4c-Standard), zusätzlich zu den in
+  // Z.13/14 bzw. Z.38 enthaltenen Minderungen; ein negativer Saldo wird nicht gemeldet (leer).
+  const unein = berechnet.filter((w) => w.uneinbringlich === true);
+  let kz50 = 0;
+  let kz37 = 0;
+  for (const w of unein) {
+    if (w.rolle === 'minderung') kz50 = addSicher(kz50, 0 - w.netto_cent);
+    else if (w.rolle === 'vorsteuer_minderung') kz37 = addSicher(kz37, 0 - w.ust_cent);
+  }
+  const hatUnein = unein.length > 0;
   let z49 = 0;
   const va = voranmeldungAm(profil, periodenEnde(periode));
-  const istDezember = art === 'monat' && periode.slice(5, 7) === '12';
-  if (va.dauerfrist === true && va.zeitraum === 'monat' && istDezember) {
+  // KERN-B (BP-04b): Kz 39 im letzten Voranmeldungszeitraum mit Dauerfrist (Dezember; mit Kern-Option kz39_verzicht auch der letzte Monat vor dem
+  // Verzicht, Anleitung Zeile 49, § 48 Abs. 4 UStDV)
+  const m39 = art === 'monat' ? kz39Monat(profil, jahr, { verzicht: regelAn(opt, 'kz39_verzicht') }) : null;
+  if (m39 === periode && va.dauerfrist === true && va.zeitraum === 'monat') {
     if (Number.isSafeInteger(va.sondervorauszahlung_cent)) z49 = va.sondervorauszahlung_cent;
     else hinweise.push('SONDERVORAUSZAHLUNG_FEHLT');
+    if (periode.slice(5, 7) !== '12') hinweise.push('HN_KZ39_VERZICHT_DAUERFRIST');
   }
 
   // --- Summen: primär laut RUNDUNG_BASIS.steuer_quelle, die andere Variante daneben (Doppelanzeige) ---
-  const sExakt = summen(zeile13.steuer_cent, zeile14.steuer_cent, 0, z38, z41, z44, z46, z47, z49);
-  const sElster = summen(zeile13.steuer_elster_cent, zeile14.steuer_elster_cent, 0, z38, z41, z44, z46, z47, z49);
+  const sExakt = summen(zeile13.steuer_cent, zeile14.steuer_cent, 0, z38, z41, z44, z46, z47, z49, zRc);
+  const sElster = summen(zeile13.steuer_elster_cent, zeile14.steuer_elster_cent, 0, z38, z41, z44, z46, z47, z49, zRc);
   const primaer = primaerAusGerundet ? sElster : sExakt;
   const alternativ = primaerAusGerundet ? sExakt : sElster;
 
@@ -338,8 +375,11 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
   zeilen.push(zeile13, zeile14);
   if (zeile15.basis_cent !== 0) zeilen.push(zeile15);
   if (kz48Cent_ !== null) zeilen.push(zeile(tabelle, 23, { kz_basis: 48, basis_cent: kz48Cent_, basis_euro: basisInEuro(kz48Cent_, mod), steuer_cent: 0, belege: k48.belege, wechseljahr: true, offen: k48.offen, zwischenwert: k48.offen > 0 }));
+  if (hatRc && rc46.anzahl) zeilen.push(zeile(tabelle, 30, { kz_basis: 46, kz_steuer: 47, basis_cent: rc46.basis, basis_euro: basisInEuro(rc46.basis, mod), steuer_cent: rc46.steuer, belege: rc46.belege }));
+  if (hatRc && rc84.anzahl) zeilen.push(zeile(tabelle, 32, { kz_basis: 84, kz_steuer: 85, basis_cent: rc84.basis, basis_euro: basisInEuro(rc84.basis, mod), steuer_cent: rc84.steuer, belege: rc84.belege }));
   zeilen.push(zeile(tabelle, 37, { betrag_cent: primaer.z37_cent }));
   zeilen.push(zeile38);
+  if (hatRc && rc67.anzahl) zeilen.push(zeile(tabelle, 41, { kz_steuer: 67, betrag_cent: rc67.steuer, belege: rc67.belege }));
   if (z44 !== 0) zeilen.push(zeile(tabelle, 44, { betrag_cent: z44, eingabe: true }));
   zeilen.push(zeile(tabelle, 45, { betrag_cent: primaer.z45_cent }));
   if (z46 !== 0) zeilen.push(zeile(tabelle, 46, { betrag_cent: z46, eingabe: true }));
@@ -347,6 +387,8 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
   zeilen.push(zeile(tabelle, 48, { betrag_cent: primaer.z48_cent }));
   if (z49 !== 0) zeilen.push(zeile(tabelle, 49, { betrag_cent: z49 }));
   zeilen.push(zeile(tabelle, 50, { betrag_cent: primaer.z50_cent }));
+  if (hatUnein && kz50 > 0) zeilen.push(zeile(tabelle, 51, { kz_basis: 50, basis_cent: kz50, basis_euro: basisInEuro(kz50, mod), belege: belege(unein.filter((w) => w.rolle === 'minderung')) }));
+  if (hatUnein && kz37 > 0) zeilen.push(zeile(tabelle, 52, { kz_steuer: 37, betrag_cent: kz37, belege: belege(unein.filter((w) => w.rolle === 'vorsteuer_minderung')) }));
 
   const kennzahlen = {
     '81': zeile13.basis_cent, '81_steuer': primaerAusGerundet ? zeile13.steuer_elster_cent : zeile13.steuer_cent,
@@ -355,6 +397,8 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
     Z37: primaer.z37_cent, Z45: primaer.z45_cent, Z48: primaer.z48_cent, '83': primaer.z50_cent,
   };
   if (kz48Cent_ !== null) kennzahlen['48'] = kz48Cent_;
+  if (hatRc) { kennzahlen['46'] = rc46.basis; kennzahlen['47'] = rc46.steuer; kennzahlen['84'] = rc84.basis; kennzahlen['85'] = rc84.steuer; kennzahlen['67'] = rc67.steuer; }
+  if (hatUnein) { if (kz50 > 0) kennzahlen['50'] = kz50; if (kz37 > 0) kennzahlen['37'] = kz37; }
 
   return {
     periode, jahr, zeilen, kennzahlen,
@@ -369,7 +413,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
     },
     unvollstaendig,
     ausgeschlossene: ausg,
-    nicht_berechnet: nichtBerechnet(tabelle, ausg.map((a) => (a.beleg_id === null || a.beleg_id === undefined ? null : (steuerfallVon.get(a.beleg_id) || null))), alle.includes('W_KU_GRENZE_UEBERSCHRITTEN'), kz48Cent_ !== null),
+    nicht_berechnet: nichtBerechnet(tabelle, ausg.map((a) => (a.beleg_id === null || a.beleg_id === undefined ? null : (steuerfallVon.get(a.beleg_id) || null))), alle.includes('W_KU_GRENZE_UEBERSCHRITTEN'), kz48Cent_ !== null, [...(regelAn(opt, 'rc_eingang') ? [30, 32, 41] : []), ...(regelAn(opt, 'uneinbringlichkeit') ? [51, 52] : [])]),
     ...(hat65 ? { kz65_vorschlag: vorschlag65, kz65_variante: variante65 } : {}),
     hinweise: alle,
     warnungen: alle.filter((c) => c.startsWith('W_')),

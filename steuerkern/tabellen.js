@@ -359,7 +359,7 @@ export const GRENZEN = frieren({
 export const GRENZEN_UNGENUTZT = Object.freeze([
   'PARAGRAPH_15A_JAHRESERKLAERUNG', 'PARAGRAPH_15A_ZEHN_PUNKTE_BP', 'PARAGRAPH_15A_JAHRE_BEWEGLICH',
   'VORANMELDUNG_MONAT_STEUER_VORJAHR', 'VORANMELDUNG_BEFREIUNG_STEUER_VORJAHR', 'VORANMELDUNG_WAHLRECHT_MONAT_UEBERSCHUSS',
-  'SAMMELPOSTEN_UNTEN', 'SAMMELPOSTEN_OBEN', 'SAMMELPOSTEN_SOFORT',
+  'SAMMELPOSTEN_UNTEN',
 ]);
 
 export function grenze(id) {
@@ -368,25 +368,46 @@ export function grenze(id) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// EU-Länder (R-13B-06). Keine amtliche Mitgliedstaatenliste im Repo: UStG § 1 Abs. 2a verweist nur allgemein
-// auf "die übrigen Mitgliedstaaten der Europäischen Union". Die Liste bleibt leer; Belege mit Auslandsbezug
-// werden dadurch UNBEKANNT statt falsch EU oder Drittland (Standard K10/R-PLF-04).
+// EU-Länder (R-13B-06, KERN-B BP-05a). 27 Mitgliedstaaten als ISO-3166-1-Codes (Quelle: docs/quellen/eu-mitgliedstaaten-2026-11-15-rf.md,
+// Länderübersicht der EU und Präfixliste der finnischen Steuerverwaltung, Konfidenz B). Griechenland führt in der USt-IdNr. das Präfix EL:
+// istEuLand('EL') und istEuLand('GR') liefern beide true. Nordirland (XI): für Waren mitgliedstaatsähnlich, für Dienstleistungen Drittland;
+// istEuLand('XI') liefert null (ungeklärt, Nutzerklärung), nie geraten. DE ist Mitgliedstaat (istEuLand('DE') true), für § 13b aber
+// Inland (anbieterLage('DE') = 'inland'). Sondergebiete (§ 1 Abs. 2a UStG, Art. 6 MwStSystRL: Kanaren, Ceuta, Melilla, Åland, Berg Athos u. a.) haben keinen eigenen
+// Code; der Nutzer klärt sie am Beleg.
 // ---------------------------------------------------------------------------------------------
 export const EU_LAENDER = frieren({
-  ...luecke('Keine amtliche Liste der EU-Mitgliedstaaten in docs/quellen/. UStG § 1 Abs. 2a (docs/quellen/ustg-1.md Z. 32) nennt keine Länder. Beschaffung: Amtsblatt/BZSt-Länderliste (USt-IdNr.-Präfixe) mit Abrufdatum in docs/quellen/ ablegen, dann hier eintragen.'),
-  laender: [],
+  id: 'EU_LAENDER',
+  wert: 27,
+  laender: ['AT', 'BE', 'BG', 'CY', 'CZ', 'DE', 'DK', 'EE', 'ES', 'FI', 'FR', 'GR', 'HR', 'HU', 'IE', 'IT', 'LT', 'LU', 'LV', 'MT', 'NL', 'PL', 'PT', 'RO', 'SE', 'SI', 'SK'],
+  aliase: { EL: 'GR' },
+  ungeklaert: ['XI'],
   sonderfaelle_ungeklaert: ['Nordirland', 'Kanarische Inseln', 'Ceuta', 'Melilla', 'Helgoland', 'Büsingen', 'Monaco', 'Insel Man'],
-  hinweis_monaco_man: 'Monaco gilt als Gebiet Frankreichs, die Insel Man als Gebiet des Vereinigten Königreichs (UStG § 1 Abs. 2a S. 2, docs/quellen/ustg-1.md Z. 32). Das ist die einzige belegte Länderaussage.',
-  quelle: 'UStG § 1 Abs. 2a (docs/quellen/ustg-1.md Z. 32)',
-  abruf: D_GESETZ,
+  hinweis_monaco_man: 'Monaco gilt als Gebiet Frankreichs, die Insel Man als Gebiet des Vereinigten Königreichs (UStG § 1 Abs. 2a S. 2, docs/quellen/ustg-1.md Z. 32).',
+  quelle: 'docs/quellen/eu-mitgliedstaaten-2026-11-15-rf.md (european-union.europa.eu, vero.fi); UStG § 1 Abs. 2a (docs/quellen/ustg-1.md Z. 32), § 13b Abs. 7 UStG (docs/quellen/ustg-13b.md)',
+  abruf: '2026-11-15',
   gueltig_von: null,
   gueltig_bis: null,
+  konfidenz: 'B',
 });
 
-// Liefert true/false, solange die Liste leer ist immer null (unbekannt). Nie raten.
+// true: EU-Mitgliedstaat (einschließlich DE), false: Drittland, null: ungeklärt (XI) oder kein Code. Kleinschreibung und Leerzeichen werden toleriert.
 export function istEuLand(code) {
-  if (typeof code !== 'string' || !EU_LAENDER.laender.length) return null;
-  return EU_LAENDER.laender.includes(code);
+  if (typeof code !== 'string') return null;
+  const c = code.trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(c)) return null;
+  if (EU_LAENDER.ungeklaert.includes(c)) return null;
+  const iso = Object.hasOwn(EU_LAENDER.aliase, c) ? EU_LAENDER.aliase[c] : c;
+  return EU_LAENDER.laender.includes(iso);
+}
+
+// § 13b UStG (R-13B-06): Lage des Anbieters aus seinem Land. 'eu' (übriges Gemeinschaftsgebiet, Abs. 1), 'drittland' (Abs. 2 Nr. 1, Abs. 7),
+// 'inland' (DE, kein § 13b nach Abs. 1/2 Nr. 1), null (Land fehlt oder ungeklärt).
+export function anbieterLage(code) {
+  const eu = istEuLand(code);
+  if (eu === null) return null;
+  const c = code.trim().toUpperCase();
+  if (c === 'DE') return 'inland';
+  return eu ? 'eu' : 'drittland';
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1186,16 +1207,22 @@ export const REGELN_NEU = frieren([
 export const UMSETZUNG_STATUS = Object.freeze(['umgesetzt', 'teilweise', 'noch_nicht', 'tests_phase2', 'ui_oder_worker', 'nur_doku']);
 const U = (status, text, stelle) => Object.freeze({ status, text, stelle: stelle || null });
 const NN3A = 'Stufe 3a: Reverse Charge wird vom Kern nicht gerechnet (E_13B_* werden mit HN_NOCH_NICHT_UNTERSTUETZT ausgeschlossen, Kz 83 Zwischenwert); umgesetzt ab Stufe 3a.';
+const RC = 'Hinter der Kern-Option rc_eingang (Feature ausland): ';
 const NN3B = 'Stufe 3b/4: nicht berechnet (Beleg ausgeschlossen, in nicht_berechnet genannt); noch nicht umgesetzt.';
 export const REGEL_UMSETZUNG = Object.freeze({
-  'R-13B-01': U('noch_nicht', NN3A), 'R-13B-02': U('noch_nicht', NN3A), 'R-13B-03': U('noch_nicht', NN3A), 'R-13B-04': U('noch_nicht', NN3A),
-  'R-13B-05': U('noch_nicht', NN3A), 'R-13B-06': U('noch_nicht', NN3A + ' EU_LAENDER ist leer, istEuLand liefert null.'), 'R-13B-07': U('noch_nicht', NN3A),
+  // KERN-B (BP-05a): Reverse Charge Eingang gerechnet hinter der Kern-Option rc_eingang (Feature ausland); ohne Option wie bisher ausgeschlossen
+  'R-13B-01': U('umgesetzt', RC + 'EU-Dienstleister Kz 46/47', 'wirkung.js:function reverseChargeWirkung'), 'R-13B-02': U('umgesetzt', RC + 'Kz 67 aus derselben Basis, nur Status Regel', 'wirkung.js:rc_vorsteuer'),
+  'R-13B-03': U('umgesetzt', RC + 'Drittland Kz 84/85', 'wirkung.js:function reverseChargeWirkung'),
+  'R-13B-04': U('teilweise', 'Ausländische USt: Steuerfall E_VORSTEUER_NICHT_ABZIEHBAR bleibt ausgeschlossen; Erkennung nur in normalisiereEingabe (W_UST_AUSGEWIESEN_14C).'),
+  'R-13B-05': U('umgesetzt', RC + 'Rechnung ohne Hinweis: gerechnet nach dem gewählten Steuerfall (UStAE 13b.14 Abs. 1 S. 4, 13b.15 Abs. 2).', 'wirkung.js:function reverseChargeWirkung'),
+  'R-13B-06': U('umgesetzt', 'EU_LAENDER mit 27 Codes, EL = GR, XI ungeklärt; anbieterLage prüft das Land gegen den Steuerfall.', 'wirkung.js:anbieterLage(land)'),
+  'R-13B-07': U('umgesetzt', RC + 'Kleinunternehmer Kz 46/47 bzw. 84/85 ohne Kz 67 (W_RC_KU_KEIN_VORSTEUERABZUG, HN_RC_KU_VORANMELDUNG).', 'wirkung.js:W_RC_KU_KEIN_VORSTEUERABZUG'),
   'R-13B-08': U('teilweise', 'Sperrgrund ig_erwerb/einfuhr nur per Nutzerwahl (UI), keine Erkennung im Kern.'),
-  'R-13B-09': U('teilweise', 'Sperrgrund 13b_inland (SPERRE_STUFE4) nur per Nutzerwahl, keine Stichwort-Erkennung im Kern.'), 'R-13B-10': U('noch_nicht', NN3A),
-  'R-ZP-12': U('noch_nicht', NN3A + ' Der Entstehungszeitraum der ausgeschlossenen Belege folgt bereits § 13b Abs. 1 bis 4 (Anzeige, TR-ausland-008).'), 'R-ZP-13': U('noch_nicht', NN3A), 'R-ZP-14': U('noch_nicht', NN3A), 'R-ZP-15': U('noch_nicht', NN3A + ' Hinweis HN-13B-DAUER existiert nicht; Anzeige der Dauerleistung zum Ende jedes Kalenderjahres (§ 13b Abs. 3).'),
-  'R-KZ-30': U('noch_nicht', NN3A), 'R-KZ-32': U('noch_nicht', NN3A), 'R-KZ-41': U('noch_nicht', NN3A), 'R-KZ-35': U('noch_nicht', NN3B), 'R-KZ-36': U('noch_nicht', NN3B),
-  'R-KZ-51': U('noch_nicht', 'Stufe 2: Kz 50 (Uneinbringlichkeit) wird nicht berechnet, Korrekturen mit Grund uneinbringlich werden ausgeschlossen; noch nicht umgesetzt.'),
-  'R-KZ-52': U('noch_nicht', 'Stufe 2: Kz 37 (Uneinbringlichkeit) wird nicht berechnet; noch nicht umgesetzt.'),
+  'R-13B-09': U('teilweise', 'Sperrgrund 13b_inland (SPERRE_STUFE4) nur per Nutzerwahl, keine Stichwort-Erkennung im Kern.'), 'R-13B-10': U('umgesetzt', RC + 'EÜR: Zahlung als Ausgabe, nichts in Kz 185', 'wirkung.js:R-13B-10'),
+  'R-ZP-12': U('umgesetzt', RC + '§ 13b Abs. 1: Zeitraum der Leistung', 'wirkung.js:function reverseChargeWirkung'), 'R-ZP-13': U('umgesetzt', RC + '§ 13b Abs. 2 Nr. 1: Rechnung, spätestens Ablauf des Folgemonats', 'wirkung.js:function reverseChargeWirkung'), 'R-ZP-14': U('umgesetzt', RC + '§ 13b Abs. 4 S. 2: Anzahlung im Zeitraum der Zahlung', 'wirkung.js:function reverseChargeWirkung'), 'R-ZP-15': U('teilweise', 'Dauerleistung über ein Jahr (§ 13b Abs. 3) wird auch mit rc_eingang nicht gerechnet (Ausschluss rc_dauerleistung, Zwischenwert).'),
+  'R-KZ-30': U('umgesetzt', RC + 'Z.30', 'ustva.js:rc46'), 'R-KZ-32': U('umgesetzt', RC + 'Z.32', 'ustva.js:rc84'), 'R-KZ-41': U('umgesetzt', RC + 'Z.41', 'ustva.js:rc67'), 'R-KZ-35': U('noch_nicht', NN3B), 'R-KZ-36': U('noch_nicht', NN3B),
+  'R-KZ-51': U('umgesetzt', 'Kz 50 aus Uneinbringlichkeit (positiv), hinter der Kern-Option uneinbringlichkeit (Feature korrektur).', 'ustva.js:kz50'),
+  'R-KZ-52': U('umgesetzt', 'Kz 37 aus Uneinbringlichkeit (positiv), hinter der Kern-Option uneinbringlichkeit (Feature korrektur).', 'ustva.js:kz37'),
   'R-KZ-23': U('teilweise', 'Kz 48 (Z.23) wird nur im Jahr eines unterjährigen Wechsels für die steuerfreien Kleinunternehmer-Umsätze im Zeitraum des Wechsels berechnet (ustva.js kz48Cent); steuerfreie Umsätze nach § 4 Nr. 8 bis 29 bleiben nicht berechnet (nicht_berechnet).', 'ustva.js:kz48Cent'),
   'R-KZ-10': U('noch_nicht', 'Nutzerhaken "berichtigte Anmeldung" liegt in der Oberfläche, nicht im Kern.'),
   'R-KZ-13': U('umgesetzt', 'Z.13 Kz 81', 'ustva.js:umsatzZeile'), 'R-KZ-14': U('umgesetzt', 'Z.14 Kz 86', 'ustva.js:umsatzZeile'), 'R-KZ-15': U('umgesetzt', 'Z.15 Kz 87', 'ustva.js:zeile15'),
@@ -1207,10 +1234,10 @@ export const REGEL_UMSETZUNG = Object.freeze({
   'R-KZ-39': U('teilweise', 'Kz 61/62/63/59 (Z.39, 40, 42, 43) werden nicht berechnet (Stufe 4, in nicht_berechnet).'),
   'R-KZ-44': U('umgesetzt', 'Durchreichen der Nutzereingabe Kz 64', 'ustva.js:eingabeCent(64)'), 'R-KZ-46': U('umgesetzt', 'Nutzereingabe Kz 65 plus Vorschlag nach K5 (Variante B Standard, Bestätigung durch den Nutzer)', 'ustva.js:export function kz65Vorschlag'),
   'R-KZ-47': U('umgesetzt', 'Durchreichen der Nutzereingabe Kz 69', 'ustva.js:eingabeCent(69)'),
-  'R-KZ-49': U('teilweise', 'nur Dezember mit Dauerfrist und Profilwert; Einstellung der Tätigkeit und Verzicht auf die Dauerfrist nicht modelliert.'),
-  'R-KZ-1H': U('teilweise', 'sondervorauszahlungCent liefert den Vorschlag, nur Anzeige.', 'steuerprofil.js:sondervorauszahlungCent'),
+  'R-KZ-49': U('teilweise', 'Dezember mit Dauerfrist und Profilwert; Verzicht auf die Dauerfrist im Jahr mit Kern-Option kz39_verzicht (letzter Monat mit Dauerfrist, kz39Monat); Einstellung der Tätigkeit nicht modelliert.', 'steuerprofil.js:export function kz39Monat'),
+  'R-KZ-1H': U('teilweise', 'sondervorauszahlungCent (Abs. 1, 2) und sondervorauszahlungBeginnJahr (§ 47 Abs. 3 UStDV) liefern den Vorschlag, nur Anzeige.', 'steuerprofil.js:sondervorauszahlungBeginnJahr'),
   'R-EUER-06': U('noch_nicht', 'Nutzereingabe, nicht im Kern.'), 'R-EUER-07': U('noch_nicht', 'Nutzereingabe, nicht im Kern.'), 'R-EUER-08': U('noch_nicht', 'Nutzereingabe, nicht im Kern.'),
-  'R-EUER-09': U('noch_nicht', 'AfA-Kategorie wird ausgeschlossen, der Kern bucht keine Abschreibung.'), 'R-EUER-11': U('noch_nicht', 'Sammelposten wird nicht gebildet (GWG über 800 EUR wird ausgeschlossen).'),
+  'R-EUER-09': U('teilweise', 'Der Kern bucht keine Abschreibung. Ohne Kern-Option anlagegut_vorsteuer_sofort wird der ganze Beleg ausgeschlossen; mit Option rechnet die Voranmeldung, die EÜR-Wirkung der Anschaffungskosten ist ausgeschlossen (W_ANLAGEGUT_AFA_NICHT_BERECHNET).', 'wirkung.js:function anlagegutEuer'), 'R-EUER-11': U('umgesetzt', 'Sammelposten (ein Fünftel je Jahr, Kz 137) nach gwg_wahl, hinter der Kern-Option anlagegut_vorsteuer_sofort (Feature anlagegut).', 'wirkung.js:function anlagegutEuer'),
   'R-EUER-12': U('noch_nicht', 'Restbuchwerte nicht im Kern.'), 'R-EUER-20': U('noch_nicht', 'Keine Kategorie, Kz 162/168/172/163 nicht erreichbar.'),
   'R-EUER-21': U('teilweise', 'nur Kategorie Kfz-Kosten auf Kz 146; Kz 144/145 nicht erreichbar.'),
   'R-EUER-10': U('umgesetzt', 'GWG bis 800 EUR netto', 'wirkung.js:gwg_ueber_800'), 'R-EUER-13': U('umgesetzt', 'Kategorie Telefon/Internet auf Kz 280', 'wirkung.js:ausgabeKz'),
@@ -1218,7 +1245,7 @@ export const REGEL_UMSETZUNG = Object.freeze({
   'R-EUER-33': U('teilweise', 'KATEGORIEN mit EÜR-Kz im Kern, SKR-Konten nur als Lücke U.'),
   'R-KOR-02': U('teilweise', 'Skonto in der Zahlung (skonto_cent) wird gerechnet: Minderung im Zahlungszeitraum (Soll, Eingang) bzw. Zahlbetrag als Entgelt (Ist); Rabatt in der Zahlung (rabatt_cent) und der Korrekturgrund skonto werden ausgeschlossen.', 'wirkung.js:skontoAufteilung'), 'R-KOR-03': U('nur_doku', 'Pflichtangabe auf der Rechnung, keine Kern-Logik.'), 'R-KOR-14': U('nur_doku', 'Hinweisregel (UStAE 1.3 Abs. 16d): keine Kern-Logik, die Zahlung wird als Rechnung erfasst.'),
   'R-EUER-36': U('noch_nicht', 'Vorschau auf das JStG 2026 (gueltig_ab 2027-07-10 unter Vorbehalt der Verkündung); keine Berechnung, Hinweis noch nicht umgesetzt.'),
-  'R-KOR-04': U('teilweise', 'Jahresbonus über gemischte Sätze (§ 17 Abs. 4) wird nicht erkannt.'), 'R-KOR-06': U('noch_nicht', 'Uneinbringlichkeit wird ausgeschlossen, Kz 50/37 nicht gerechnet.'),
+  'R-KOR-04': U('teilweise', 'Jahresbonus über gemischte Sätze (§ 17 Abs. 4) wird nicht erkannt.'), 'R-KOR-06': U('umgesetzt', 'Uneinbringlichkeit (manuell, Datum und Grund) hinter der Kern-Option uneinbringlichkeit (Feature korrektur); ohne Option ausgeschlossen.', 'wirkung.js:function uneinbringlichkeitsWirkung'),
   'R-KOR-07': U('umgesetzt', 'Berichtigung wegen Tippfehler ohne USt-Wirkung', 'wirkung.js:tippfehler_berichtigung'), 'R-KOR-08': U('noch_nicht', 'geschenk_nachtraeglich wird ausgeschlossen (die Rücknahme läuft über R-VS-02).'),
   'R-KOR-09': U('teilweise', 'Sperre und Warnung W_14C_STEUERAUSWEIS_KU, Kz 69 nur Eingabe.'), 'R-KOR-10': U('ui_oder_worker', 'Oberflächenregel; der Kern rechnet Teil-Rückabwicklungen.'),
   'R-KOR-11': U('noch_nicht', 'gutschrift_erhalten wird als Korrekturbeleg geführt; die Abrechnungsgutschrift als Umsatzrechnung und das Pflichtwort sind nicht umgesetzt.'),
@@ -1242,7 +1269,7 @@ export const REGEL_UMSETZUNG = Object.freeze({
   'R-VS-01': U('teilweise', 'Bewirtungsnachweis umgesetzt; wirkung.js nutzt die ID auch für den allgemeinen Dialogfall.'),
   'R-VS-03': U('noch_nicht', 'keine Behandlung "unter 10 % Nutzung".'), 'R-VS-04': U('noch_nicht', 'kein HN-VS-RECHNUNG; nur Kleinbetrag über 250 EUR ohne Rechnung wird vom Abzug ausgeschlossen.'),
   'R-VS-05': U('teilweise', 'nur Nutzer-Sperrgrund mischnutzung.', 'wirkung.js:SPERRE_STUFE4'), 'R-VS-06': U('teilweise', 'nur Nutzer-Sperrgrund.', 'wirkung.js:SPERRE_STUFE4'),
-  'R-VS-07': U('teilweise', 'GWG-Grenze geprüft; AfA und Sammelposten werden nicht gebucht.'), 'R-VS-08': U('noch_nicht', 'Reisekosten-Sonderfälle nicht im Kern.'),
+  'R-VS-07': U('teilweise', 'GWG-Grenze geprüft; Sammelposten und Vorsteuer sofort mit Kern-Option anlagegut_vorsteuer_sofort; AfA wird nicht gebucht.'), 'R-VS-08': U('noch_nicht', 'Reisekosten-Sonderfälle nicht im Kern.'),
   'R-VS-09': U('umgesetzt', 'Bankgebühren ohne Vorsteuer', 'wirkung.js:E_INLAND_OHNE_VORSTEUER'),
   'R-LIM-01': U('umgesetzt', 'grenzpruefung L2 in auswertungFuerJahr (grenzen.buchfuehrung)', 'auswertung.js:grenzpruefung('),
   'R-LIM-02': U('umgesetzt', 'grenzpruefung L3 in auswertungFuerJahr (grenzen.ist_800k)', 'auswertung.js:grenzpruefung('), 'R-LIM-03': U('umgesetzt', 'kuGrenzpruefung über grenzpruefung L4 (grenzen.ku_vorjahr, grenzen.ku_laufend)', 'auswertung.js:grenzpruefung('),

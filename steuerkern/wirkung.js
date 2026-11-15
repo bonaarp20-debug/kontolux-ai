@@ -18,13 +18,25 @@
 // Stufen 2, 3a, 3b, 4: nur soweit hier ausdrücklich gerechnet (Ist, Anzahlung, Storno/Rückzahlung, Finanzamt-Zahlungen);
 // alles andere wird mit Hinweis HN_NOCH_NICHT_UNTERSTUETZT ausgeschlossen, nie stillschweigend falsch gerechnet.
 
-import { istCent, ustAusBrutto, teile, mulDivRund } from './geld.js';
+import { istCent, ustAusBrutto, ustAusNetto, teile, mulDivRund } from './geld.js';
 import { istDatum, jahrVon, addiereMonate, monatsende, periodenEnde, periodenArt, quartalVon, frist10Tag, zehnTageRegelVorjahr, ustPeriodeFuer } from './daten.js';
-import { voranmeldungsperiodeFuer, voranmeldungAm, versteuerungAm, statusAm, statusFuerAusgangsumsatz } from './steuerprofil.js';
-import { regelNachId, KATEGORIEN, GRENZEN, USTVA_ZEILEN, EUER_ZEILEN, STEUERSAETZE, BELEG_ARTEN, KORREKTUR_GRUENDE, basisKzFuerSatz } from './tabellen.js';
+import { voranmeldungsperiodeFuer, voranmeldungAm, versteuerungAm, statusAm, statusFuerAusgangsumsatz, gwgWahlFuer } from './steuerprofil.js';
+import { regelNachId, KATEGORIEN, GRENZEN, USTVA_ZEILEN, EUER_ZEILEN, STEUERSAETZE, BELEG_ARTEN, KORREKTUR_GRUENDE, basisKzFuerSatz, anbieterLage, SATZ_REGEL_BP, SATZ_ERMAESSIGT_BP } from './tabellen.js';
 import { KORREKTUR_ARTEN, tagVonZeit } from './beleg.js';
 
 const istObjekt = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
+
+// KERN-B (Phase 3, Konzept 2.0 Q-2): Regeln mit Zahlenwirkung hinter Kern-Optionen. optionen.regeln.<name> === true schaltet die Regel ein,
+// alles andere (fehlend, false) lässt das Verhalten von Kern 2026.11.16-2 unverändert. Die App setzt die Optionen aus config/features.
+//   uneinbringlichkeit           (Feature korrektur)  § 17 Abs. 2 Nr. 1 UStG, Kz 50/37 (BP-04b)
+//   anlagegut_vorsteuer_sofort   (Feature anlagegut)  Vorsteuer aus Anlagegütern sofort, EÜR nach GWG-/Sammelposten-/AfA-Wahl (BP-04b)
+//   kz39_verzicht                (Integrator)         Kz 39 im letzten Monat mit Dauerfrist bei Verzicht im Jahr (BP-04b)
+//   rc_eingang                   (Feature ausland)    § 13b UStG Eingang: Kz 46/47, 84/85, 67 (BP-05a)
+export const KERN_REGELN = Object.freeze(['uneinbringlichkeit', 'anlagegut_vorsteuer_sofort', 'kz39_verzicht', 'rc_eingang']);
+export function regelAn(optionen, name) {
+  return istObjekt(optionen) && istObjekt(optionen.regeln) && optionen.regeln[name] === true;
+}
+const nurRegeln = (opt) => (istObjekt(opt) && istObjekt(opt.regeln) ? { regeln: opt.regeln } : {});
 
 export const STEUERFAELLE_STUFE_NICHT_GERECHNET = Object.freeze([
   'A_NICHT_STEUERBAR_EU_B2B_DL', 'A_NICHT_STEUERBAR_DRITTLAND_B2B_DL', 'A_WERTABGABE', 'E_13B_EU_DL', 'E_13B_DRITTLAND_DL', 'E_VORSTEUER_NICHT_ABZIEHBAR',
@@ -89,7 +101,9 @@ function mk(ctx, f) {
   if (f.ku_anzahlung) w.ku_anzahlung = f.ku_anzahlung;
   if (f.kz48_offen) w.kz48_offen = true;
   if (f.nur_euer) w.nur_euer = true; // TR4-kern-004: Hinweis wirkt nur über euer_zahlungen auf die EÜR, nie auf eine Voranmeldung
-  if (f.nur_ust) w.nur_ust = true; // K-F (TR5-kern-002): weiterer USt-Zeitraum eines nicht berechneten Belegs, zählt nicht in der EÜR
+  if (f.nur_ust) w.nur_ust = true;
+  if (f.uneinbringlich) w.uneinbringlich = true;
+  if (f.rc_basis_kz) w.rc_basis_kz = f.rc_basis_kz; // KERN-B: Kz 67 je Herkunft (46/84) und Satz aus derselben Basis wie Kz 47/85 // KERN-B: Minderung aus Uneinbringlichkeit (Kz 50/37, ustva.js) // K-F (TR5-kern-002): weiterer USt-Zeitraum eines nicht berechneten Belegs, zählt nicht in der EÜR
   return w;
 }
 
@@ -348,7 +362,7 @@ function belegHinweise(s, profil) {
     if (s.sperrgrund === '13b_inland') add('W_13B_INLAND_STICHWORT');
     if (s.sperrgrund === 'leistungsort_sonderregeln') add('W_LEISTUNGSORT_NICHT_BERECHNET');
   }
-  for (const c of Array.isArray(s.status_hinweise) ? s.status_hinweise : []) if (typeof c === 'string' && c.startsWith('W_')) add(c);
+  for (const c of Array.isArray(s.status_hinweise) ? s.status_hinweise : []) if (typeof c === 'string' && (c.startsWith('W_') || c === 'HN_RC_OHNE_RECHNUNG')) add(c);
   if (anlagegutHinweis(s)) add('W_ANLAGEGUT_PRUEFEN');
   return h;
 }
@@ -362,8 +376,8 @@ const STEUERFAELLE_GERECHNET = Object.freeze(['A_KU', 'A_INLAND_19', 'A_INLAND_7
 // Kategorien, unter denen üblicherweise Anlagegüter (Computer, Möbel, Software-Lizenz) landen (wie AFA_HINWEIS_KATEGORIEN im Altpfad)
 const ANLAGEGUT_VERDAECHTIG = Object.freeze(['Bürobedarf', 'Software/EDV/SaaS']);
 const KORREKTUR_GRUENDE_NICHT_UNTERSTUETZT = Object.freeze(['uneinbringlich', 'ust_falsch_ausgewiesen', 'geschenk_nachtraeglich', 'skonto']);
-const UST_ROLLEN_MIT_KZ = Object.freeze(['umsatz', 'anzahlung', 'minderung', 'vorsteuer', 'vorsteuer_minderung']);
-const UST_KZ_BEKANNT = Object.freeze([81, 86, 87, 66]);
+const UST_ROLLEN_MIT_KZ = Object.freeze(['umsatz', 'anzahlung', 'minderung', 'vorsteuer', 'vorsteuer_minderung', 'rc_umsatz', 'rc_vorsteuer']);
+const UST_KZ_BEKANNT = Object.freeze([81, 86, 87, 66, 46, 84, 67]); // 46/84/67 nur aus reverseChargeWirkung (Kern-Option rc_eingang)
 const satzOk = (x) => x === null || x === undefined || (Number.isSafeInteger(x) && x >= 0 && x <= 10000);
 
 // TR3-kern (Entscheidung 13.11.2026, Welle 3, offene Frage "Software/SaaS über 800 EUR"): Cloud- und Software-Abonnements sind regelmäßig laufende
@@ -398,6 +412,68 @@ function anlagegutHinweis(s) {
     if (gwgKosten(p) > GRENZEN.GWG_NETTO.wert_cent && anlagegutLage(s, k) === 'hinweis') return true;
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------------------------
+// KERN-B (BP-04b, PF-044): Anlagegüter mit Kern-Option anlagegut_vorsteuer_sofort.
+// UStVA: Die Vorsteuer aus der Anschaffung ist nach § 15 Abs. 1 S. 1 Nr. 1 UStG abziehbar, sobald Leistung und Rechnung vorliegen, unabhängig von
+// der Abschreibung (docs/quellen/ustg-15.md, Konfidenz A): Kz 66 wie bei jedem Eingang. EÜR: Die Vorsteuer ist bei Zahlung Betriebsausgabe
+// (Kz 185, R-EUER-15); die Anschaffungskosten wirken nach § 4 Abs. 3 S. 3 EStG nur über § 6 Abs. 2 (GWG), § 6 Abs. 2a (Sammelposten) oder die
+// AfA, im Wirtschaftsjahr der Anschaffung (Lieferung, leistung.bis), nicht bei Zahlung (docs/quellen/estg-6.md Z. 128, 129, Konfidenz A).
+// Je Position (ein Wirtschaftsgut je Position, Annahme) nach gwg_wahl des Anschaffungsjahres (steuerprofil.js gwgWahlFuer):
+//   Kosten (netto, § 6 Abs. 2 S. 1, gwgKosten) bis 250 EUR: sofort (Kz 132), in jeder Wahl (§ 6 Abs. 2a S. 4)
+//   'gwg':          bis 800 EUR sofort (Kz 132), darüber AfA (nicht berechnet)
+//   'sammelposten': über 250 bis 1.000 EUR Sammelposten, ein Fünftel im Jahr der Bildung und den vier Folgejahren (Kz 137, Abs. 2a S. 2), darüber AfA
+//   'afa':          über 250 EUR AfA (nicht berechnet)
+//   keine Wahl:     Kategorie "GWG bis 800€" bis 800 EUR sofort (wie bisher), sonst W_ANLAGEGUT_WAHL_FEHLT (nicht berechnet)
+// "Nicht berechnet" heißt: EÜR-Wirkung ausgeschlossen im Anschaffungsjahr (EÜR unvollständig, W_ANLAGEGUT_AFA_NICHT_BERECHNET bzw.
+// W_ANLAGEGUT_WAHL_FEHLT); die Voranmeldung rechnet trotzdem. Hinweis zu § 15a UStG nur als Text (HN_15A_NUTZUNGSAENDERUNG).
+// Grundlage der Abschreibung/des Sammelpostens: Anschaffungskosten = Netto plus nicht abziehbare Vorsteuer (§ 9b Abs. 1 EStG).
+// ---------------------------------------------------------------------------------------------
+function anlagegutKandidat(s, p) {
+  if (!istObjekt(p) || !istCent(p.netto_cent) || !istCent(p.ust_cent)) return false;
+  const k = p.kategorie || s.kategorie || null;
+  if (k === 'Abschreibung (AfA)' || k === 'GWG bis 800€') return true;
+  return gwgKosten(p) > GRENZEN.GWG_NETTO.wert_cent && anlagegutLage(s, k) === 'ausschluss';
+}
+export function anlagegutPlan(s, profil) {
+  if (!istObjekt(s) || s.richtung !== 'eingang' || KORREKTUR_ARTEN.includes(s.beleg_art) || !Array.isArray(s.positionen)) return null;
+  const bis = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null;
+  const jahr = bis ? jahrVon(bis) : null;
+  const wahl = jahr === null ? null : gwgWahlFuer(profil, jahr);
+  const pos = s.positionen.map((p, i) => {
+    if (!anlagegutKandidat(s, p)) return { i, art: 'normal' };
+    const k = p.kategorie || s.kategorie || null;
+    const kosten = gwgKosten(p);
+    const abz = s.steuerfall === 'E_INLAND_VORSTEUER' && !(s.ausschluss && s.ausschluss.vorsteuer === 'nein') ? (istCent(p.vorsteuer_abziehbar_cent) ? p.vorsteuer_abziehbar_cent : p.ust_cent) : 0;
+    const basis = p.netto_cent + (p.ust_cent - abz);
+    let art;
+    if (kosten <= GRENZEN.SAMMELPOSTEN_SOFORT.wert_cent) art = 'sofort';
+    else if (wahl === 'sammelposten') art = kosten <= GRENZEN.SAMMELPOSTEN_OBEN.wert_cent ? 'sammelposten' : 'afa';
+    else if (wahl === 'gwg') art = kosten <= GRENZEN.GWG_NETTO.wert_cent ? 'sofort' : 'afa';
+    else if (wahl === 'afa') art = 'afa';
+    else art = k === 'GWG bis 800€' && kosten <= GRENZEN.GWG_NETTO.wert_cent ? 'sofort_bisher' : 'wahl_fehlt';
+    return { i, art, kosten, basis, kategorie: k };
+  });
+  return { jahr, wahl, bis, positionen: pos };
+}
+// Geht der Beleg den Anlagegut-Weg? Nur wenn eine Position Anlagegut ist und nicht alle Anlagegut-Positionen GWG bis 800 EUR ohne Wahl sind
+// (die rechnet der Kern wie bisher über die Kategorie, Kz 132 bei Zahlung).
+function anlagegutRelevant(s, profil) {
+  const plan = anlagegutPlan(s, profil);
+  if (!plan) return false;
+  const anl = plan.positionen.filter((x) => x.art !== 'normal');
+  return anl.length > 0 && !anl.every((x) => x.art === 'sofort_bisher');
+}
+// Grund, warum der Anlagegut-Weg diesen Beleg nicht trägt (dann Ausschluss wie bisher), sonst null.
+function anlagegutSperre(s) {
+  if (s.steuerfall !== 'E_INLAND_VORSTEUER' && s.steuerfall !== 'E_INLAND_OHNE_VORSTEUER') return 'anlagegut_steuerfall';
+  if (!istObjekt(s.leistung) || !istDatum(s.leistung.bis)) return 'anlagegut_datum';
+  if (!s.positionen.every((p) => anlagegutKandidat(s, p))) return 'anlagegut_gemischt';
+  if (istTeilleistung(s)) return 'anlagegut_teilleistung';
+  if (s.kleinbetrag === true || istObjekt(s.geschenk) || (Array.isArray(s.kennzeichen) && s.kennzeichen.includes('bewirtung'))) return 'anlagegut_sonderfall';
+  if (aktiveZahlungen(s).some((z) => istCent(z.skonto_cent) && z.skonto_cent > 0)) return 'anlagegut_skonto';
+  return null;
 }
 
 // Datenfehler (F9, N1): Typ- und Bereichsprüfung der Felder, die die Wirkungen lesen. Ergebnis: Text oder null.
@@ -551,7 +627,7 @@ function satzGrund(s, p) {
 }
 
 // Liefert { grund, hinweise[] } für einen Beleg, den der Kern noch nicht rechnet, sonst null.
-function nichtUnterstuetzt(s) {
+function nichtUnterstuetzt(s, opt, profil) {
   const sf = s.steuerfall;
   if (!STEUERFAELLE_GERECHNET.includes(sf)) return null;
   const art = s.beleg_art;
@@ -561,7 +637,8 @@ function nichtUnterstuetzt(s) {
   if (s.waehrung !== undefined && s.waehrung !== null && s.waehrung !== 'EUR') return { grund: 'fremdwaehrung', hinweise: [] };
   const korr = KORREKTUR_ARTEN.includes(art);
   const pos = Array.isArray(s.positionen) ? s.positionen : [];
-  if (korr && KORREKTUR_GRUENDE_NICHT_UNTERSTUETZT.includes(s.korrektur_grund)) return { grund: `korrektur_grund_${s.korrektur_grund}`, hinweise: [] };
+  // KERN-B (BP-04b): Uneinbringlichkeit nur mit Kern-Option uneinbringlichkeit (sonst wie bisher ausgeschlossen)
+  if (korr && KORREKTUR_GRUENDE_NICHT_UNTERSTUETZT.includes(s.korrektur_grund) && !(s.korrektur_grund === 'uneinbringlich' && regelAn(opt, 'uneinbringlichkeit'))) return { grund: `korrektur_grund_${s.korrektur_grund}`, hinweise: [] };
   // Gegenprüfung M4: ohne gültigen Grund aus der Liste (leer, Freitext, unbekannt) wird nicht gerechnet: ein Freitext wie "Kunde insolvent"
   // ist fachlich Uneinbringlichkeit und würde sonst als gewöhnliche Minderung gebucht
   if (korr && !KORREKTUR_GRUENDE.includes(s.korrektur_grund)) return { grund: 'korrektur_grund_fehlt', hinweise: ['W_KORREKTUR_GRUND_FEHLT'] };
@@ -585,6 +662,12 @@ function nichtUnterstuetzt(s) {
   }
   // M5: ausgewiesene Steuer weicht vom Satz ab: bei Ausgang schuldet der Unternehmer die ausgewiesene Steuer (§ 14c), nicht gerechnet
   if (s.richtung === 'ausgang' && Array.isArray(s.status_hinweise) && s.status_hinweise.includes('W_UST_ABWEICHUNG')) return { grund: 'ust_ausgewiesen_weicht_ab', hinweise: [] };
+  // KERN-B (BP-04b): Mit Kern-Option anlagegut_vorsteuer_sofort rechnet eingangWirkungen Anlagegüter (Vorsteuer sofort, EÜR nach Wahl), soweit
+  // anlagegutPlan sie tragen kann; sonst Ausschluss mit eigenem Grund.
+  if (s.richtung === 'eingang' && !korr && regelAn(opt, 'anlagegut_vorsteuer_sofort') && anlagegutRelevant(s, profil)) {
+    const g = anlagegutSperre(s);
+    return g ? { grund: g, hinweise: ['W_ANLAGEGUT_PRUEFEN'] } : null;
+  }
   // F8: Anlagegüter: AfA nie, GWG nur bis zur Grenze (§ 6 Abs. 2 EStG); der Kern bucht keine Abschreibung
   if (s.richtung === 'eingang' && !korr) {
     for (const p of pos) {
@@ -656,7 +739,7 @@ export function belegWirkungen(beleg, profil, optionen) {
     const c2 = { id: ctx.id, steuerfall: sf, beleg_status: 'unbekannt', hinweise: ['HN_KERN_FEHLER'] };
     return [mk(c2, { welt: 'ust', rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-ZP-11', hinweis_detail: `daten_ungueltig: ${df}` })];
   }
-  const nu = nichtUnterstuetzt(s);
+  const nu = nichtUnterstuetzt(s, opt, profil);
   if (nu) {
     ctx.beleg_status = 'ausgeschlossen';
     hinweise.push('HN_NOCH_NICHT_UNTERSTUETZT');
@@ -691,6 +774,8 @@ export function belegWirkungen(beleg, profil, optionen) {
       const perD = datum ? ustPeriode(profil, datum, hinweise) : null;
       out.push(mk(ctx, { welt: 'ust', periode: perD, datum_wirk: datum, rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-VS-01', hinweis_detail: 'dialog_erforderlich', euer_zahlungen: gesperrteZahlungen(s) }));
       if (perD) weitereHinweisWirkungen(s, profil, ctx, out, perD, { status: 'unbekannt', regel_id: 'R-VS-01', hinweis_detail: 'dialog_erforderlich' });
+    } else if ((sf === 'E_13B_EU_DL' || sf === 'E_13B_DRITTLAND_DL') && regelAn(opt, 'rc_eingang')) {
+      reverseChargeWirkung(s, profil, ctx, out);
     } else if (STEUERFAELLE_STUFE_NICHT_GERECHNET.includes(sf)) {
       ctx.beleg_status = 'ausgeschlossen';
       hinweise.push('HN_NOCH_NICHT_UNTERSTUETZT');
@@ -1079,6 +1164,8 @@ function eingangWirkungen(s, profil, ctx, out, opt) {
     : (skontoVor ? zahlungsAnteile(skontoAufteilung(gruppen, zahlungen.map((z, zi) => (skontoVorZ[zi] ? z : { ...z, skonto_cent: 0 }))).eff, zahlungen) : zahlungsAnteile(gruppen, zahlungen));
   const geschenk = istObjekt(s.geschenk) ? s.geschenk.art : null;
   const istBewirtung = (s.kennzeichen || []).includes('bewirtung') || s.kategorie === 'Bewirtung (70%)';
+  // KERN-B (BP-04b): Anlagegut-Weg (Kern-Option anlagegut_vorsteuer_sofort; nichtUnterstuetzt hat Sonderfälle schon ausgeschlossen)
+  const agPlan = regelAn(opt, 'anlagegut_vorsteuer_sofort') && anlagegutRelevant(s, profil) ? anlagegutPlan(s, profil) : null;
   // --- UStVA: Vorsteuer (R-ZP-08 bis R-ZP-10) ---
   if (mitVorsteuer) {
     // Anzahlung vor Leistung mit vorliegender Rechnung: Vorsteuer im Zeitraum von max(Rechnungserhalt, Zahlung) (R-ZP-09)
@@ -1146,7 +1233,9 @@ function eingangWirkungen(s, profil, ctx, out, opt) {
       const abzUst = mitVorsteuer && geschenk !== 'nicht_abziehbar' ? (g.ust_cent === 0 ? 0 : (g.abziehbar_cent === g.ust_cent ? a.ust_cent : mulDivRund(a.ust_cent, g.abziehbar_cent, g.ust_cent))) : 0;
       const kosten = a.netto_cent + (a.ust_cent - abzUst); // nicht abziehbare Vorsteuer gehört zu den Kosten (R-EUER-30)
       const ev = (kz, betrag, spalte, regel, extra) => out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: z.datum, kz, netto_cent: betrag, betrag_cent: betrag, rolle: 'ausgabe', spalte, satz_bp: g.satz_bp, regel_id: regel, ereignis_id: z.id, ...(extra || {}) }));
-      if (istBewirtung) {
+      if (agPlan) {
+        // Anschaffungskosten nicht bei Zahlung, sondern über GWG/Sammelposten/AfA im Anschaffungsjahr (anlagegutEuer unten)
+      } else if (istBewirtung) {
         bewCum.netto += kosten;
         const gesamt = mulDivRund(bewCum.netto, GRENZEN.BEWIRTUNG_ABZIEHBAR_BP.wert_bp, 10000);
         const abz = gesamt - bewCum.abz;
@@ -1170,6 +1259,152 @@ function eingangWirkungen(s, profil, ctx, out, opt) {
       }
     });
   });
+  if (agPlan) anlagegutEuer(s, ctx, out, agPlan);
+}
+
+// KERN-B (BP-04b): EÜR-Wirkung der Anschaffungskosten je Position (siehe anlagegutPlan). Sammelposten: ein Fünftel je Jahr kaufmännisch auf Cent,
+// das fünfte Jahr nimmt den Rest (Summe = Anschaffungskosten). Je Beleg gerechnet; in der Anlage EÜR steht die Summe aller Auflösungsbeträge
+// des Jahres (Kz 137), der Unterschied zur Rundung des ganzen Postens ist höchstens ein Cent je Wirtschaftsgut (Konfidenz B).
+function anlagegutEuer(s, ctx, out, plan) {
+  const y0 = plan.jahr;
+  const ag = (jahr, f) => out.push(mk(ctx, { welt: 'euer', periode: String(jahr), datum_wirk: plan.bis, rolle: 'ausgabe', spalte: 'ausgabe', ...f }));
+  let fehlt = false;
+  let afa = false;
+  for (const x of plan.positionen) {
+    if (x.art === 'normal' || x.basis === 0) continue;
+    if (x.art === 'sofort' || x.art === 'sofort_bisher') ag(y0, { kz: 132, netto_cent: x.basis, betrag_cent: x.basis, regel_id: 'R-EUER-10', ereignis_id: `${ctx.id}#ag${x.i}` });
+    else if (x.art === 'sammelposten') {
+      const fuenftel = rundeHalbAufCent(x.basis, 5);
+      for (let n = 0; n < 5; n++) {
+        const b = n < 4 ? fuenftel : x.basis - 4 * fuenftel;
+        if (b !== 0) ag(y0 + n, { kz: 137, netto_cent: b, betrag_cent: b, regel_id: 'R-EUER-11', ereignis_id: `${ctx.id}#ag${x.i}#${n + 1}`, hinweise: ['HN_SAMMELPOSTEN_FUENFTEL'] });
+      }
+    } else if (x.art === 'afa') afa = true;
+    else fehlt = true;
+  }
+  const hin = [];
+  if (fehlt) hin.push('W_ANLAGEGUT_WAHL_FEHLT');
+  if (afa) hin.push('W_ANLAGEGUT_AFA_NICHT_BERECHNET');
+  if (hin.length) {
+    for (const h of hin) if (!ctx.hinweise.includes(h)) ctx.hinweise.push(h);
+    ag(y0, { kz: null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-EUER-09', hinweis_detail: fehlt ? 'anlagegut_wahl_fehlt' : 'anlagegut_afa_nicht_berechnet' });
+  }
+  if (plan.positionen.some((x) => x.art !== 'normal' && x.kosten > GRENZEN.SAMMELPOSTEN_OBEN.wert_cent) && !ctx.hinweise.includes('HN_15A_NUTZUNGSAENDERUNG')) ctx.hinweise.push('HN_15A_NUTZUNGSAENDERUNG');
+}
+const rundeHalbAufCent = (a, n) => mulDivRund(a, 1, n);
+
+// ---------------------------------------------------------------------------------------------
+// KERN-B (BP-05a, PF-041): Reverse Charge Eingang (§ 13b UStG), nur mit Kern-Option rc_eingang (sonst wie bisher ausgeschlossen).
+// Regeln (04-konzept.md 4.7) und Quellen (docs/quellen/ustg-13b.md, ustg-15.md, ustg-18.md, ustae-13b-handausgabe-2024.md):
+//   R-13B-01 EU-Dienstleister (E_13B_EU_DL, Anbieter im übrigen Gemeinschaftsgebiet): Kz 46 Basis, Kz 47 Steuer; Entstehung mit Ablauf des
+//            Voranmeldungszeitraums der Leistung (§ 13b Abs. 1), unabhängig vom Rechnungsdatum (A).
+//   R-13B-03 Drittland (E_13B_DRITTLAND_DL): Kz 84/85; Entstehung mit Ausstellung der Rechnung, spätestens mit Ablauf des Folgemonats der Leistung
+//            (§ 13b Abs. 2 Nr. 1, A). Rechnung vor der Leistung: Entstehung erst mit der Leistung (eine Steuer für eine nicht ausgeführte Leistung
+//            entsteht nur über Abs. 4 S. 2 bei Zahlung; Konfidenz B). Ohne Rechnung: Ablauf des Folgemonats (T-S3a-004).
+//   Abs. 4 S. 2 Anzahlung (Zahlung vor der Leistung): Steuer auf den gezahlten Teil im Zeitraum der Zahlung, die Vorsteuer dazu "wenn die Zahlung
+//            geleistet worden ist" (§ 15 Abs. 1 S. 1 Nr. 4 S. 2, A); der Rest mit der Leistung. Zahlungen nach der Leistung (Teilzahlung) ändern nichts.
+//   R-13B-02 Vorsteuer Kz 67 im selben Zeitraum und aus derselben Basis wie Kz 47/85 (§ 15 Abs. 1 S. 1 Nr. 4, UStAE 13b.15 Abs. 3 S. 2; E-2
+//            Standard: Kz 47/85 und Kz 67 aus derselben exakten Cent-Basis, Zahllast neutral, B). Nur bei Status Regel am Entstehungstag und ohne
+//            Ausschluss des Vorsteuerabzugs.
+//   R-13B-07 Kleinunternehmer: schuldet die Steuer trotzdem (§ 13b Abs. 5 S. 1, § 13b Abs. 8 und UStAE 13b.13 Abs. 4 S. 2: Satz nach § 12 auch bei
+//            § 19), kein Vorsteuerabzug (§ 19 Abs. 1 S. 4 UStG), Voranmeldung für diese Zeiträume (§ 18 Abs. 4a, A): Kz 46/47 bzw. 84/85 ohne Kz 67,
+//            W_RC_KU_KEIN_VORSTEUERABZUG und HN_RC_KU_VORANMELDUNG.
+//   R-13B-06 Land: gegenpartei.land über anbieterLage (EU_LAENDER); fehlt, ungeklärt (XI) oder passt nicht zum Steuerfall: nicht gerechnet.
+//   R-13B-10 EÜR: Ausgabe in Höhe der Zahlung (keine Umsatzsteuer darin), nichts in Kz 185; die § 13b-Steuer erscheint nicht in der EÜR (Regel:
+//            verrechnet; Kleinunternehmer: Zahlung ans Finanzamt später als Kz 186 über die Finanzamt-Zahlung).
+//   Satz: Standard 19 % (R-13B-01); eine Position mit satz_bp 700 rechnet 7 % mit Warnung W_RC_SATZ_ERMAESSIGT.
+// Nicht gerechnet (Ausschluss mit Grund, Kz 83 Zwischenwert, nie still falsch): Teilleistungen, Dauerleistung über ein Jahr (Abs. 3), Skonto oder
+// Rabatt, negative Zahlungen, Status unbekannt, Geschenk/Bewirtung.
+// ---------------------------------------------------------------------------------------------
+function rcSatz(p) {
+  return p.satz_bp === SATZ_ERMAESSIGT_BP ? SATZ_ERMAESSIGT_BP : SATZ_REGEL_BP;
+}
+function reverseChargeWirkung(s, profil, ctx, out) {
+  const sf = s.steuerfall;
+  const eu = sf === 'E_13B_EU_DL';
+  const land = istObjekt(s.gegenpartei) && typeof s.gegenpartei.land === 'string' ? s.gegenpartei.land : null;
+  const lage = land === null ? null : anbieterLage(land);
+  const zahlungen = aktiveZahlungen(s);
+  const l = s.leistung;
+  const bis = l.bis;
+  const von = istDatum(l.von) && l.von <= bis ? l.von : bis;
+  let grund = null;
+  if (lage === null) grund = land === null ? 'rc_land_fehlt' : 'rc_land_ungeklaert';
+  else if (lage !== (eu ? 'eu' : 'drittland')) grund = 'rc_land_widerspruch';
+  else if (istTeilleistung(s)) grund = 'rc_teilleistung';
+  else if (bis >= addiereMonate(von, 12)) grund = 'rc_dauerleistung';
+  else if (zahlungen.some((z) => (istCent(z.skonto_cent) && z.skonto_cent !== 0) || (istCent(z.rabatt_cent) && z.rabatt_cent !== 0))) grund = 'rc_skonto_rabatt';
+  else if (zahlungen.some((z) => z.betrag_cent < 0)) grund = 'negative_zahlung';
+  else if (istObjekt(s.geschenk) || (Array.isArray(s.kennzeichen) && s.kennzeichen.includes('bewirtung'))) grund = 'rc_sonderfall';
+  else if (s.beleg_art === 'anzahlung' || s.beleg_art === 'schlussrechnung') grund = `beleg_art_${s.beleg_art}`;
+  if (grund) {
+    const extra = [];
+    if (grund === 'rc_land_fehlt') extra.push('W_GEGENPARTEI_LAND_FEHLT');
+    if (grund === 'rc_land_widerspruch') extra.push('W_GEGENPARTEI_LAND_WIDERSPRUCH');
+    if (grund === 'rc_land_ungeklaert') extra.push('W_NORDIRLAND_UNGEKLAERT');
+    schliesseAus(s, profil, ctx, out, grund, extra);
+    for (const z of aktiveZahlungen(s)) {
+      out.push(mk(ctx, { welt: 'euer', periode: String(jahrVon(z.datum)), datum_wirk: z.datum, kz: null, betrag_cent: z.betrag_cent, netto_cent: z.betrag_cent, rolle: 'ausgabe', spalte: 'ausgabe', status: 'unbekannt', regel_id: 'R-EUER-35', unsicher: true, ereignis_id: z.id }));
+    }
+    return;
+  }
+  // Basis je Satz (Positionen ohne Steuer: netto_cent = Rechnungsbetrag)
+  const saetze = new Map();
+  for (const p of s.positionen) saetze.set(rcSatz(p), (saetze.get(rcSatz(p)) || 0) + p.netto_cent);
+  if (saetze.has(SATZ_ERMAESSIGT_BP)) ctx.hinweise.push('W_RC_SATZ_ERMAESSIGT');
+  let gesamt = 0;
+  for (const v of saetze.values()) gesamt += v;
+  // Entstehungstage mit Basis: Anzahlungen (vor der Leistung) und Rest
+  let d0 = bis;
+  if (!eu) {
+    const spaet = monatsende(addiereMonate(bis, 1));
+    if (istDatum(s.rechnungsdatum) && s.rechnungsdatum < spaet) d0 = s.rechnungsdatum > bis ? s.rechnungsdatum : bis;
+    else d0 = spaet;
+  }
+  const teileTage = [];
+  let vorab = 0;
+  for (const z of zahlungen) {
+    if (z.datum >= bis || vorab >= gesamt) continue;
+    const b = Math.min(z.betrag_cent, gesamt - vorab);
+    if (b <= 0) continue;
+    vorab += b;
+    teileTage.push({ datum: z.datum, betrag: b, eid: z.id, regel: 'R-ZP-14' });
+  }
+  if (gesamt - vorab !== 0 || teileTage.length === 0) teileTage.push({ datum: d0, betrag: gesamt - vorab, eid: ctx.id, regel: eu ? 'R-ZP-12' : 'R-ZP-13' });
+  const satzListe = [...saetze.keys()].sort((a, b) => b - a);
+  const gew = satzListe.map((k) => Math.abs(saetze.get(k)));
+  const kzBasis = eu ? 46 : 84;
+  const kein67 = s.ausschluss && s.ausschluss.vorsteuer === 'nein';
+  let ku = false;
+  for (const t of teileTage) {
+    const st = statusAm(profil, t.datum).status;
+    if (st === 'unbekannt') { schliesseAus(s, profil, ctx, out, 'rc_status_unbekannt', ['W_RC_STATUS_UNBEKANNT']); return; }
+    const hinw = [];
+    const per = ustPeriode(profil, t.datum, hinw);
+    const anteile = satzListe.length === 1 ? [t.betrag] : teile(t.betrag, gew);
+    satzListe.forEach((satz, i) => {
+      const n = anteile[i];
+      if (n === 0) return;
+      const u = ustAusNetto(n, satz);
+      out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: t.datum, kz: kzBasis, netto_cent: n, ust_cent: u, rolle: 'rc_umsatz', satz_bp: satz, regel_id: eu ? 'R-13B-01' : 'R-13B-03', hinweise: hinw.slice(), ereignis_id: t.eid }));
+      if (st === 'regel' && !kein67) out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: t.datum, kz: 67, netto_cent: n, ust_cent: u, rolle: 'rc_vorsteuer', satz_bp: satz, regel_id: 'R-13B-02', hinweise: hinw.slice(), ereignis_id: t.eid, rc_basis_kz: kzBasis }));
+    });
+    if (st === 'ku') ku = true;
+  }
+  ctx.hinweise.push('W_RC_HINWEIS');
+  if (ku) { ctx.hinweise.push('W_RC_KU_KEIN_VORSTEUERABZUG'); ctx.hinweise.push('HN_RC_KU_VORANMELDUNG'); }
+  if (kein67) ctx.hinweise.push('HN_RC_VORSTEUER_AUSGESCHLOSSEN');
+  // EÜR (R-13B-10): jede Zahlung in voller Höhe als Ausgabe (Kategorie je Position, bei mehreren Positionen anteilig nach dem Netto)
+  const pos = s.positionen;
+  const pgew = pos.map((p) => Math.abs(p.netto_cent));
+  for (const z of zahlungen) {
+    const jahr = String(jahrVon(z.datum));
+    const anteile = pos.length === 1 ? [z.betrag_cent] : teile(z.betrag_cent, pgew);
+    pos.forEach((p, i) => {
+      if (anteile[i] === 0) return;
+      out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: z.datum, kz: ausgabeKz(s, p), netto_cent: anteile[i], betrag_cent: anteile[i], rolle: 'ausgabe', spalte: 'ausgabe', regel_id: 'R-13B-10', ereignis_id: z.id }));
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1410,6 +1645,7 @@ function korrekturWirkungen(s, profil, ctx, opt, out, beleg) {
     out.push(mk(ctx, { welt: 'ust', rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-KOR-01', hinweis_detail: 'korrektur_' + s.steuerfall }));
     return;
   }
+  if (s.korrektur_grund === 'uneinbringlich') { uneinbringlichkeitsWirkung(s, profil, ctx, opt, out, beleg); return; }
   const wirk = s.wirkdatum;
   const rz = rueckzahlungVon(s);
   const bezug = istObjekt(s.bezug) ? (s.bezug.storniert_beleg_id || s.bezug.korrigiert_beleg_id) : null;
@@ -1469,6 +1705,85 @@ function korrekturWirkungen(s, profil, ctx, opt, out, beleg) {
     // ein Banner zeigen. Der Hinweis wird an alle Wirkungen des Belegs gehängt (siehe Ende von belegWirkungen).
     ctx.hinweise.push('HN_EUER_GUTSCHRIFT_ERHALTEN_NICHT_UNTERSTUETZT');
     out.push(mk(ctx, { welt: 'euer', periode: String(jahrVon(rz.datum)), datum_wirk: rz.datum, kz: null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-25', hinweis_detail: 'gutschrift_erhalten_rueckzahlung' }));
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// KERN-B (BP-04b, PF-037, R-KOR-06): Uneinbringlichkeit, nur mit Kern-Option uneinbringlichkeit (sonst schließt nichtUnterstuetzt aus).
+// § 17 Abs. 2 Nr. 1 S. 1 UStG (docs/quellen/ustg-17.md, Konfidenz A): Ist das vereinbarte Entgelt uneinbringlich geworden, sind Steuer und
+// Vorsteuerabzug zu berichtigen, im Zeitraum, in dem die Änderung eintritt (Abs. 1 S. 8): Wirkdatum der manuellen Aktion (K7: Kontolux bucht nie
+// selbst, nur mit Datum und Grund; Grund steht in korrektur_notiz). Satz 2: Wird das Entgelt nachträglich vereinnahmt, sind Steuer und Vorsteuer
+// erneut zu berichtigen, im Zeitraum der Zahlung.
+//   Ausgang (Soll): Minderung Kz 81/86 (negativ) am Wirkdatum, nur für den bis dahin unbezahlten Teil (korrekturPlan); zusätzlich Kz 50 (Z.51) als
+//     positiver Betrag der Minderung (K4-Standard, k4-rundung-vorzeichen.md K4c, Konfidenz B/C), Kz 83 ändert Kz 50 nicht.
+//   Ausgang (Ist): keine Wirkung, die Steuer entsteht erst mit der Vereinnahmung (T-S2-018).
+//   Eingang: Minderung Kz 66 am Wirkdatum (§ 17 Abs. 2 Nr. 1 i. V. m. Abs. 1 S. 2), zusätzlich Kz 37 (Z.52) positiv.
+//   Spätere Zahlungen auf das Original (nach dem Wirkdatum): erneute Berichtigung je Zahlung im Zahlungszeitraum, höchstens bis zur Minderung,
+//     ohne Kz 50/37 (T-S2-017). Die EÜR kommt aus den Zahlungen des Originals (Zufluss/Abfluss, § 11 EStG); die Uneinbringlichkeit selbst hat keine
+//     EÜR-Wirkung (es floss nichts).
+// Frühere Voranmeldungen ändern sich nie (Property-Test test-steuerkern-stufe2.mjs).
+// ---------------------------------------------------------------------------------------------
+function uneinbringlichkeitsWirkung(s, profil, ctx, opt, out, beleg) {
+  const wirk = s.wirkdatum;
+  const eingang = s.richtung === 'eingang';
+  const grund = typeof s.korrektur_notiz === 'string' ? s.korrektur_notiz.trim() : '';
+  if (grund === '' || !istDatum(wirk)) {
+    ctx.beleg_status = 'dialog_erforderlich';
+    ctx.hinweise.push('W_UNEINBRINGLICH_GRUND_FEHLT');
+    out.push(mk(ctx, { welt: 'ust', periode: istDatum(wirk) ? ustPeriode(profil, wirk, ctx.hinweise) : null, datum_wirk: istDatum(wirk) ? wirk : null, rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-KOR-06', hinweis_detail: 'uneinbringlich_grund_fehlt' }));
+    return;
+  }
+  const bezug = istObjekt(s.bezug) ? (s.bezug.storniert_beleg_id || s.bezug.korrigiert_beleg_id) : null;
+  const orig = opt.korrekturOriginal instanceof Map && opt.korrekturOriginal.has(beleg)
+    ? opt.korrekturOriginal.get(beleg)
+    : (istObjekt(opt.originale) && typeof opt.originale.get === 'function' ? opt.originale.get(bezug) : null);
+  const leistungOrig = orig && orig.steuer && orig.steuer.leistung ? orig.steuer.leistung.bis : wirk;
+  // Uneinbringlich vor der Leistung ist keine Berichtigung nach § 17 Abs. 2 Nr. 1 (Entgelt für eine noch nicht ausgeführte Leistung): Rückfrage
+  if (istDatum(leistungOrig) && wirk < leistungOrig) {
+    ctx.beleg_status = 'dialog_erforderlich';
+    out.push(mk(ctx, { welt: 'ust', periode: ustPeriode(profil, wirk, ctx.hinweise), datum_wirk: wirk, rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-KOR-06', hinweis_detail: 'uneinbringlich_vor_leistung' }));
+    return;
+  }
+  if (!eingang && versteuerungAm(profil, leistungOrig).art === 'ist') { ctx.hinweise.push('HN_UNEINBRINGLICH_IST_OHNE_WIRKUNG'); return; }
+  if (!ctx.hinweise.includes('W_UNEINBRINGLICH_MANUELL')) ctx.hinweise.push('W_UNEINBRINGLICH_MANUELL');
+  const vorher = opt.vorherKorrekturen instanceof Map && opt.vorherKorrekturen.has(beleg) ? opt.vorherKorrekturen.get(beleg) : { brutto: 0, anzahl: 0 };
+  const plan = korrekturPlan({ ...s, rueckzahlung: null }, orig, vorher);
+  const kz = (g) => (eingang ? 66 : (s.steuerfall === 'A_INLAND_0_PV' ? 87 : basisKz(g.satz_bp)));
+  const hinw = [];
+  if (plan.bezahlt_brutto > 0) ctx.hinweise.push('W_UNEINBRINGLICH_TEIL_BEZAHLT');
+  if (plan.unbezahlt_brutto <= 0) return;
+  const per = ustPeriode(profil, wirk, hinw);
+  plan.gruppen.forEach((g, gi) => {
+    const w = plan.je[gi].unbezahlt;
+    if (w.netto === 0 && w.ust === 0) return;
+    out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: wirk, kz: kz(g), netto_cent: w.netto, ust_cent: w.ust, rolle: eingang ? 'vorsteuer_minderung' : 'minderung', satz_bp: g.satz_bp, regel_id: 'R-KOR-06', hinweise: hinw.slice(), uneinbringlich: true }));
+  });
+  // Erneute Berichtigung (§ 17 Abs. 2 Nr. 1 S. 2): Zahlungen des Originals nach dem Wirkdatum, höchstens bis zum geminderten Brutto
+  const os = orig && istObjekt(orig.steuer) ? orig.steuer : null;
+  if (!os) return;
+  let rest = plan.unbezahlt_brutto;
+  const gew = plan.gruppen.map((g, gi) => Math.abs(plan.je[gi].unbezahlt.netto) + Math.abs(plan.je[gi].unbezahlt.ust));
+  for (const z of aktiveZahlungen(os)) {
+    if (z.datum <= wirk || rest <= 0) continue;
+    const b = Math.min(z.betrag_cent, rest);
+    rest -= b;
+    const anteile = b === plan.unbezahlt_brutto ? null : teile(b, gew);
+    const perZ = ustPeriode(profil, z.datum, hinw);
+    plan.gruppen.forEach((g, gi) => {
+      const u = plan.je[gi].unbezahlt;
+      let netto;
+      let ust;
+      if (anteile === null) { netto = 0 - u.netto; ust = 0 - u.ust; }
+      else {
+        const br = anteile[gi];
+        const st = g.satz_bp === null || g.satz_bp === undefined || g.satz_bp === 0 ? 0 : ustAusBrutto(br, g.satz_bp);
+        netto = br - st;
+        ust = eingang ? (Math.abs(g.ust_cent) === 0 ? 0 : (Math.abs(g.abziehbar_cent) === Math.abs(g.ust_cent) ? st : mulDivRund(st, Math.abs(g.abziehbar_cent), Math.abs(g.ust_cent)))) : st;
+      }
+      if (netto === 0 && ust === 0) return;
+      out.push(mk(ctx, { welt: 'ust', periode: perZ, datum_wirk: z.datum, kz: kz(g), netto_cent: netto, ust_cent: ust, rolle: eingang ? 'vorsteuer' : 'umsatz', satz_bp: g.satz_bp, regel_id: 'R-KOR-06', hinweise: hinw.slice(), ereignis_id: `${ctx.id}#nach#${z.id || z.datum}` }));
+    });
+    if (!ctx.hinweise.includes('HN_UNEINBRINGLICH_NACHTRAEGLICH_GEZAHLT')) ctx.hinweise.push('HN_UNEINBRINGLICH_NACHTRAEGLICH_GEZAHLT');
   }
 }
 
@@ -1566,8 +1881,8 @@ function vergleicheWirkungen(a, b) {
 }
 
 // TR3-kern-001: Rechnet der Kern das Original nicht (ausgeschlossen oder unbekannt)? Ein Original ohne jede Wirkung (privat, wirkungslos) zählt als gerechnet.
-function originalNichtGerechnet(orig, profil) {
-  const ws = belegWirkungen(orig, profil, {});
+function originalNichtGerechnet(orig, profil, opt) {
+  const ws = belegWirkungen(orig, profil, nurRegeln(opt));
   return ws.some((w) => w.status === 'ausgeschlossen' || w.status === 'unbekannt');
 }
 
@@ -1577,7 +1892,7 @@ function originalNichtGerechnet(orig, profil) {
 // Korrektur gilt, die zusätzliche wird ausgeschlossen. Berichtigungen ohne USt-Wirkung (tippfehler_berichtigung) und Korrekturen mit
 // ungültigem oder nicht unterstütztem Grund zählen nicht mit (sie werden ohnehin nicht gerechnet).
 // Rückgabe: Map Beleg -> { grund, hinweis }.
-function korrekturPruefung(korrekturen, originale, profil) {
+function korrekturPruefung(korrekturen, originale, profil, opt) {
   const aus = new Map();
   const origVon = new Map(); // Korrekturbeleg -> gefundenes Original (Beleg-ID oder eindeutige Rechnungsnummer)
   const nachRechnungsnr = new Map();
@@ -1590,7 +1905,7 @@ function korrekturPruefung(korrekturen, originale, profil) {
   for (const b of korrekturen) {
     const s = b.steuer;
     if (!istObjekt(s) || s.wirkungslos === true || s.korrektur_grund === 'tippfehler_berichtigung') continue;
-    if (!KORREKTUR_GRUENDE.includes(s.korrektur_grund) || KORREKTUR_GRUENDE_NICHT_UNTERSTUETZT.includes(s.korrektur_grund)) continue;
+    if (!KORREKTUR_GRUENDE.includes(s.korrektur_grund) || (KORREKTUR_GRUENDE_NICHT_UNTERSTUETZT.includes(s.korrektur_grund) && !(s.korrektur_grund === 'uneinbringlich' && regelAn(opt, 'uneinbringlichkeit')))) continue;
     const key = istObjekt(s.bezug) ? (s.bezug.storniert_beleg_id || s.bezug.korrigiert_beleg_id) : null;
     if (typeof key !== 'string' || key === '') continue; // fehlender Bezug ist ein Pflichtfeldfehler (PF_BEZUG)
     if (!gruppen.has(key)) gruppen.set(key, []);
@@ -1612,7 +1927,7 @@ function korrekturPruefung(korrekturen, originale, profil) {
     // TR3-kern-001 (§ 17 Abs. 1 S. 1, Abs. 2 Nr. 3 i. V. m. § 15 Abs. 1 Nr. 1 UStG): Berichtigt wird nur, was zuvor in der Voranmeldung stand. Ist das Original
     // ausgeschlossen oder unbekannt (Anlagegut, Fremdwährung, Stufe 4, Datenfehler, offener Dialog), bucht auch die Korrektur nichts: gemeinsam ausgeschlossen.
     // Der Rechenstatus kommt aus belegWirkungen des Originals selbst, damit beide Seiten nie auseinanderlaufen.
-    if (originalNichtGerechnet(orig, profil)) {
+    if (originalNichtGerechnet(orig, profil, opt)) {
       for (const b of liste) aus.set(b, { grund: 'korrektur_original_nicht_gerechnet', hinweis: 'W_KORREKTUR_ORIGINAL_NICHT_GERECHNET' });
       continue;
     }
@@ -1666,24 +1981,24 @@ function korrekturPruefung(korrekturen, originale, profil) {
 }
 
 // Rechnet der Kern diese Korrektur tatsächlich in die USt-Voranmeldung? (gleiche Bedingungen wie belegWirkungen vor dem Aufruf von korrekturWirkungen)
-function korrekturRechnet(s) {
+function korrekturRechnet(s, opt, profil) {
   if (!istObjekt(s) || s.wirkungslos === true || s.korrektur_grund === 'tippfehler_berichtigung' || s.dialog === 'dialog_erforderlich') return false;
   if (s.steuerfall !== 'A_INLAND_19' && s.steuerfall !== 'A_INLAND_7' && s.steuerfall !== 'A_INLAND_0_PV' && s.steuerfall !== 'E_INLAND_VORSTEUER') return false;
   if (Array.isArray(s.entwurf_blocker) && s.entwurf_blocker.length) return false;
-  return datenFehler(s) === null && nichtUnterstuetzt(s) === null;
+  return datenFehler(s) === null && nichtUnterstuetzt(s, opt, profil) === null;
 }
 
 // Je Original: frühere Korrekturen (Brutto, in der Reihenfolge Wirkdatum, Beleg-ID) und Korrekturen vor der Leistung (TR-orakel-002), deren
 // unbezahlter Teil vom Leistungsposten des Originals abgezogen wird. Rückgabe: { vorher: Map Korrektur -> Cent, vorLeistungAbzug: Map Original-ID ->
 // { voll, gruppen: Map Satz -> { netto_cent, ust_cent } }, vorLeistungKorrekturen: Set Korrektur }.
-function korrekturKontext(akzeptiert, origVon, profil) {
+function korrekturKontext(akzeptiert, origVon, profil, opt) {
   const vorher = new Map();
   const vorLeistungAbzug = new Map();
   const vorLeistungKorrekturen = new Set();
   const nachOrig = new Map();
   for (const b of akzeptiert) {
     const o = origVon.get(b);
-    if (!o || !korrekturRechnet(b.steuer)) continue;
+    if (!o || !korrekturRechnet(b.steuer, opt, profil)) continue;
     if (!nachOrig.has(o)) nachOrig.set(o, []);
     nachOrig.get(o).push(b);
   }
@@ -1694,7 +2009,7 @@ function korrekturKontext(akzeptiert, origVon, profil) {
       return dx !== dy ? (dx < dy ? -1 : 1) : vergleicheBelege(x, y);
     });
     const os = o.steuer;
-    const oRechnet = typeof o.id === 'string' && STEUERFAELLE_GERECHNET.includes(os.steuerfall) && datenFehler(os) === null && nichtUnterstuetzt(os) === null && !(os.wirkungslos === true);
+    const oRechnet = typeof o.id === 'string' && STEUERFAELLE_GERECHNET.includes(os.steuerfall) && datenFehler(os) === null && nichtUnterstuetzt(os, opt, profil) === null && !(os.wirkungslos === true);
     const istOrig = istObjekt(os.leistung) && istDatum(os.leistung.bis) ? versteuerungAm(profil, os.leistung.bis).art === 'ist' : false;
     let cum = 0;
     let anzahl = 0;
@@ -1705,7 +2020,7 @@ function korrekturKontext(akzeptiert, origVon, profil) {
       vorher.set(b, info);
       const eingang = s.richtung === 'eingang';
       const plan = korrekturPlan(s, o, info);
-      if (oRechnet && vorLeistungKorrektur(os, s.wirkdatum, eingang, istOrig)) {
+      if (oRechnet && s.korrektur_grund !== 'uneinbringlich' && vorLeistungKorrektur(os, s.wirkdatum, eingang, istOrig)) {
         vorLeistungKorrekturen.add(b);
         const e = vorLeistungAbzug.get(o.id) || { voll: false, gruppen: new Map() };
         if (plan.voll && cum === 0) e.voll = true;
@@ -1746,8 +2061,8 @@ export function alleWirkungen(belege, profil, optionen) {
   // Korrekturen zuerst prüfen: Die Zerlegung nach Zahlungsstand und der Abzug vom Leistungsposten (Rückgängigmachung vor der Leistung) gehören
   // zum Original, das vor den Korrekturen gerechnet wird.
   const korrekturen = vorbereitet.filter((b) => { const s = b && b.steuer; return istObjekt(s) && KORREKTUR_ARTEN.includes(s.beleg_art); });
-  const { aus: korrAusschluss, origVon } = korrekturPruefung(korrekturen.filter((b) => !doppelt(b)), originale, profil);
-  const kontext = korrekturKontext(korrekturen.filter((b) => !doppelt(b) && !korrAusschluss.has(b)), origVon, profil);
+  const { aus: korrAusschluss, origVon } = korrekturPruefung(korrekturen.filter((b) => !doppelt(b)), originale, profil, optionen);
+  const kontext = korrekturKontext(korrekturen.filter((b) => !doppelt(b) && !korrAusschluss.has(b)), origVon, profil, optionen);
   // Erst alle Belege ohne Korrekturen, damit der Zeitraum des Originals bekannt ist (W_STORNO_ABGESCHLOSSENER_ZEITRAUM)
   const wirk = [];
   const originalPerioden = new Map();
