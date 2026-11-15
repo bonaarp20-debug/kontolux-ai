@@ -83,12 +83,24 @@ function wegNachKlaerung(d, g) {
 
 // Reine Entscheidung je Beleg. kontext: { profil, steuerwahl, zeit, stichtag, anfrage_id, festPerioden }
 // Ergebnis: { id, write|null, code, migriert?, quelle? }
+// APP-B2 (BP-21a-A): Plattformbelege mit Kunde im Ausland (plattform_daten.fall 'auslandskunde', vom Worker beim Webhook gesetzt) klärt dieser Weg
+// nur mit kontext.plattform (regel/klaerung-beleg.js plattformPruefung: Sammelbestätigung „unter der EU-Grenze“ am Profil, EU-Privatkunde).
+// kontext.plattform: { gruende: zusätzlich klärbare Gründe, wahlen: zusätzliche Wahlen, steuerfaelle: erlaubte Ergebnisse, klaerung: Zusatzfelder
+// für steuer.migration.klaerung }. Ohne kontext.plattform bleibt ein solcher Beleg offen (Code 'plattform_grenze_fehlt'), auch über die Aktion 'klaerung'.
+export function istPlattformAuslandsbeleg(d) {
+  return istObjekt(d) && istObjekt(d.plattform_daten) && d.plattform_daten.fall === 'auslandskunde';
+}
+
 export function klaerungEinheit(uid, id, dok, kontext) {
   const { profil, steuerwahl, zeit, stichtag, anfrage_id: anfrageId, festPerioden = [] } = kontext;
   if (!dok) return { id, write: null, code: 'fehlt' };
   const d = istObjekt(dok.daten) ? dok.daten : {};
   const gespeichert = istObjekt(d.steuer) ? d.steuer : null;
   if (d.gesperrt === true || (gespeichert && gespeichert.gesperrt === true)) return { id, write: null, code: 'gesperrt' };
+  const pf = istObjekt(kontext.plattform) ? kontext.plattform : null;
+  if (istPlattformAuslandsbeleg(d) && !pf) return { id, write: null, code: 'plattform_grenze_fehlt' };
+  const zusatzGruende = pf && Array.isArray(pf.gruende) ? pf.gruende : [];
+  const zusatzWahlen = pf && Array.isArray(pf.wahlen) ? pf.wahlen : [];
   // Idempotenz: dieselbe Anfrage hat diesen Beleg schon geklärt
   const k = gespeichert && istObjekt(gespeichert.migration) && istObjekt(gespeichert.migration.klaerung) ? gespeichert.migration.klaerung : null;
   // Grundlage zuerst: die Idempotenz gilt nur, solange der Kern das gespeicherte steuer als gültig bestätigt (Drift 'ok'/'ohne' oder
@@ -99,12 +111,13 @@ export function klaerungEinheit(uid, id, dok, kontext) {
   const s = g.steuer;
   if (s.steuerfall !== 'UNBEKANNT' || s.wirkungslos === true) return { id, write: null, code: 'nicht_offen' };
   if (!KLAERBARE_ARTEN.includes(s.beleg_art)) return { id, write: null, code: 'nicht_aufloesbar' };
-  if ((typeof s.unbekannt_grund === 'string' && !KLAERBARE_GRUENDE.includes(s.unbekannt_grund)) || NIE_KLAERBARE_DETAILS.includes(s.unbekannt_detail)) return { id, write: null, code: 'nicht_aufloesbar' };
-  if (!KLAERUNG_WAHLEN[s.richtung] || !KLAERUNG_WAHLEN[s.richtung].includes(steuerwahl)) return { id, write: null, code: 'wahl_passt_nicht' };
+  if ((typeof s.unbekannt_grund === 'string' && !KLAERBARE_GRUENDE.includes(s.unbekannt_grund) && !zusatzGruende.includes(s.unbekannt_grund)) || NIE_KLAERBARE_DETAILS.includes(s.unbekannt_detail)) return { id, write: null, code: 'nicht_aufloesbar' };
+  if (!KLAERUNG_WAHLEN[s.richtung] || !(KLAERUNG_WAHLEN[s.richtung].includes(steuerwahl) || zusatzWahlen.includes(steuerwahl))) return { id, write: null, code: 'wahl_passt_nicht' };
   let r;
   try { r = Steuerkern.normalisiereEingabe(klaerungEingabe(id, s, steuerwahl), { profil, ...(stichtag ? { stichtag } : {}) }); } catch { return { id, write: null, code: 'kern_fehler' }; }
   const neu = r && r.beleg;
   if (!neu || !istObjekt(neu.steuer) || neu.steuer.steuerfall === 'UNBEKANNT' || (r.pflichtfeld_fehler || []).length) return { id, write: null, code: 'nicht_aufloesbar' };
+  if (pf && Array.isArray(pf.steuerfaelle) && !pf.steuerfaelle.includes(neu.steuer.steuerfall)) return { id, write: null, code: 'wahl_passt_nicht' };
   let v;
   try { v = Steuerkern.validiereBeleg(neu, { modus: 'streng', ...(stichtag ? { stichtag } : {}) }); } catch { return { id, write: null, code: 'kern_fehler' }; }
   if (((v && v.blocker) || []).some((x) => x && typeof x.code === 'string' && FORMAL.test(x.code))) return { id, write: null, code: 'nicht_aufloesbar' };
@@ -119,7 +132,7 @@ export function klaerungEinheit(uid, id, dok, kontext) {
     ...neu.steuer,
     steuerfall_herkunft: 'nutzer',
     herkunft: { ...(istObjekt(s.herkunft) ? s.herkunft : {}), weg: wegNachKlaerung(d, g), kern_version: Steuerkern.KERN_VERSION },
-    migration: { ...m, legacy_hash: legacyHash(d), klaerung: { steuerwahl, am: zeit, vorher: s.unbekannt_grund || null, anfrage_id: anfrageId || null, quelle: g.quelle } },
+    migration: { ...m, legacy_hash: legacyHash(d), klaerung: { steuerwahl, am: zeit, vorher: s.unbekannt_grund || null, anfrage_id: anfrageId || null, quelle: g.quelle, ...(pf && istObjekt(pf.klaerung) ? pf.klaerung : {}) } },
   };
   const v1 = d.schema_version !== 2;
   try {

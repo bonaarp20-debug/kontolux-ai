@@ -23,7 +23,7 @@ import { schreibe, vorbedingungAus } from './firestore.js';
 import { auditSchreibvorgaenge, kopfPfad, hashVon } from './audit.js';
 
 export const PROFIL_KERN_FELDER = ['version', 'gewinnermittlung', 'beruf_art', 'gruendung', 'status_verlauf', 'option_19_3', 'versteuerung_verlauf',
-  'voranmeldung_verlauf', 'vorjahr', 'limit_bestaetigungen'];
+  'voranmeldung_verlauf', 'vorjahr', 'limit_bestaetigungen', 'eu_b2c_grenze'];
 const VERLAUF_MAX = 50;
 const AKTIONEN = ['anlegen', 'eintrag', 'ist_jahr_bestaetigen', 'bestaetigen', 'stammdaten'];
 const GRUNDLAGEN_EINGABE = ['nr1', 'nr2', 'nr3', 'weiss_nicht']; // K2; Ist nur mit nr1/nr3 (Kern GRUNDLAGEN_IST)
@@ -109,8 +109,31 @@ export function eintragBereinigen(bereich, e, kontext) {
   return { fehler: [F('BEREICH_UNBEKANNT')] };
 }
 
-export function stammdatenBereinigen(s) {
-  if (!istObjekt(s) || !nurSchluessel(s, ['beruf_art', 'gruendung', 'vorjahr', 'limit_bestaetigungen'])) return { fehler: [F('FELD_NICHT_ERLAUBT')] };
+// APP-B2 (BP-21a-A): Sammelbestätigung „EU-Privatkunden unter der Grenze“ je Kalenderjahr (§ 3c Abs. 4, § 3a Abs. 5 S. 3 UStG). Eingabe nur
+// { 'JJJJ': { unter_grenze: true|false } } für das laufende Jahr oder das Vorjahr; Datum (bestaetigt_am) und herkunft 'nutzer' setzt der Worker
+// (euB2cGrenzeMischen), gleiche Antwort behält ihr Datum, andere Jahre bleiben erhalten. Es ist eine Angabe des Nutzers, Kontolux prüft sie nicht.
+export function euB2cGrenzeBereinigen(v, heute) {
+  const jahrHeute = Number(String(heute || '').slice(0, 4));
+  if (!istObjekt(v) || !Object.keys(v).length || Object.keys(v).length > 2) return null;
+  const x = {};
+  for (const [k, e] of Object.entries(v)) {
+    if (!/^\d{4}$/.test(k) || !Number.isSafeInteger(jahrHeute) || Number(k) < jahrHeute - 1 || Number(k) > jahrHeute) return null;
+    if (!istObjekt(e) || !nurSchluessel(e, ['unter_grenze']) || typeof e.unter_grenze !== 'boolean') return null;
+    x[k] = { unter_grenze: e.unter_grenze };
+  }
+  return x;
+}
+export function euB2cGrenzeMischen(alt, neu, heute) {
+  const x = istObjekt(alt) ? { ...alt } : {};
+  for (const [k, e] of Object.entries(neu)) {
+    const vorher = x[k];
+    x[k] = istObjekt(vorher) && vorher.unter_grenze === e.unter_grenze && istDatum(vorher.bestaetigt_am) ? vorher : { unter_grenze: e.unter_grenze, bestaetigt_am: heute, herkunft: 'nutzer' };
+  }
+  return x;
+}
+
+export function stammdatenBereinigen(s, heute) {
+  if (!istObjekt(s) || !nurSchluessel(s, ['beruf_art', 'gruendung', 'vorjahr', 'limit_bestaetigungen', 'eu_b2c_grenze'])) return { fehler: [F('FELD_NICHT_ERLAUBT')] };
   const x = {};
   const fehler = [];
   if (s.beruf_art !== undefined) { if (Steuerkern.BERUF_ARTEN.includes(s.beruf_art)) x.beruf_art = s.beruf_art; else fehler.push(F('BERUF_ART_UNGUELTIG')); }
@@ -130,6 +153,10 @@ export function stammdatenBereinigen(s) {
     if (istObjekt(l) && nurSchluessel(l, ['fa_buchfuehrung_mitgeteilt', 'datum']) && typeof l.fa_buchfuehrung_mitgeteilt === 'boolean' && (l.datum === undefined || istDatum(l.datum))) {
       x.limit_bestaetigungen = { fa_buchfuehrung_mitgeteilt: l.fa_buchfuehrung_mitgeteilt, ...(l.datum ? { datum: l.datum } : {}) };
     } else fehler.push(F('LIMIT_BESTAETIGUNGEN_UNGUELTIG'));
+  }
+  if (s.eu_b2c_grenze !== undefined) {
+    const e = euB2cGrenzeBereinigen(s.eu_b2c_grenze, heute);
+    if (e) x.eu_b2c_grenze = e; else fehler.push(F('EU_B2C_GRENZE_UNGUELTIG'));
   }
   return fehler.length ? { fehler } : { stammdaten: x };
 }
@@ -158,8 +185,9 @@ export function neuesProfil(aktion, body, alt, kontext) {
     const p = body.profil;
     if (!istObjekt(p) || !nurSchluessel(p, ['beruf_art', 'gruendung', 'vorjahr', 'limit_bestaetigungen', 'status_verlauf', 'versteuerung_verlauf', 'voranmeldung_verlauf'])) return { fehler: [F('FELD_NICHT_ERLAUBT')] };
     const { status_verlauf, versteuerung_verlauf, voranmeldung_verlauf, ...stamm } = p;
-    const sd = stammdatenBereinigen(stamm);
+    const sd = stammdatenBereinigen(stamm, kontext.heute);
     if (sd.fehler) return { fehler: sd.fehler };
+    if (sd.stammdaten.eu_b2c_grenze) sd.stammdaten.eu_b2c_grenze = euB2cGrenzeMischen(null, sd.stammdaten.eu_b2c_grenze, kontext.heute);
     let profil = { gewinnermittlung: 'euer', ...sd.stammdaten, version: 0 };
     const fehler = [];
     for (const [bereich, liste] of [['status', status_verlauf], ['versteuerung', versteuerung_verlauf], ['voranmeldung', voranmeldung_verlauf]]) {
@@ -232,9 +260,10 @@ export function neuesProfil(aktion, body, alt, kontext) {
   }
 
   if (aktion === 'stammdaten') {
-    const sd = stammdatenBereinigen(body.stammdaten);
+    const sd = stammdatenBereinigen(body.stammdaten, kontext.heute);
     if (sd.fehler) return { fehler: sd.fehler };
     if (!Object.keys(sd.stammdaten).length) return { fehler: [F('STAMMDATEN_LEER')] };
+    if (sd.stammdaten.eu_b2c_grenze) sd.stammdaten.eu_b2c_grenze = euB2cGrenzeMischen(altKern.eu_b2c_grenze, sd.stammdaten.eu_b2c_grenze, kontext.heute);
     return { profil: { ...altKern, ...sd.stammdaten, version: altVersion + 1 }, warnungen, audit: 'steuerprofil_stammdaten' };
   }
   return { fehler: [F('AKTION_UNBEKANNT')] };

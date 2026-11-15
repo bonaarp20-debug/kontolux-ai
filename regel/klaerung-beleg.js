@@ -33,9 +33,49 @@ import { schreibe, dekodiereFelder, FirestoreFehler, BudgetFehler } from './fire
 import { auditSchreibvorgaenge, kopfPfad } from './audit.js';
 import { aktuellPfad } from './steuerprofil.js';
 import { legacyHash } from './drift.js';
-import { klaerungEinheit, KLAERUNG_MAX, KLAERUNG_WAHLEN } from './klaerung.js';
+import { klaerungEinheit, KLAERUNG_MAX, KLAERUNG_WAHLEN, istPlattformAuslandsbeleg } from './klaerung.js';
 import { klaerungFreigegeben } from './migration.js';
 import { altFestMonate, altMonateSperren } from './klaerung-altmonat.js';
+
+// APP-B2 (BP-21a-A, 15.11.2026): Plattformbelege mit Kunde im Ausland (plattform_daten.fall 'auslandskunde', BP-21a-W). Deutsche Steuer nur mit
+// antwort.grundlage 'eu_b2c_unter_grenze' UND der Sammelbestätigung des Nutzers am Steuerprofil für das Belegjahr (eu_b2c_grenze[jahr].unter_grenze
+// === true; § 3c Abs. 4, § 3a Abs. 5 S. 3 UStG: 10.000 EUR im Vorjahr nicht überschritten und im laufenden Jahr nicht überschritten, Konfidenz A).
+// Der Worker prüft selbst und traut dem Browser nur die Wahl: alle gelieferten Länder EU (Steuerkern.istEuLand, XI ungeklärt = nein), kein
+// Unternehmerkunde (unternehmer 'ja' oder USt-IdNr. = B2B, BZSt, B), nur Einnahmen ohne Erstattungsbezug (Erstattungen bleiben einzeln), Wahl passend
+// zum Status am Leistungstag (Regel: inland_19/inland_7, Kleinunternehmer: 'ku'). Das Ergebnis trägt steuer.migration.klaerung.grundlage
+// 'eu_b2c_unter_grenze_bestaetigt' und grenze_jahr (Release C zählt diese Belege zur Schwelle). Alles andere bleibt offen (Zwischenwert).
+export const GRUNDLAGE_EU_B2C = 'eu_b2c_unter_grenze';
+export const KENNZEICHEN_EU_B2C = 'eu_b2c_unter_grenze_bestaetigt';
+const PLATTFORM_WAHLEN = Object.freeze({ regel: ['inland_19', 'inland_7'], ku: ['ku'] });
+const PLATTFORM_STEUERFAELLE = Object.freeze({ inland_19: ['A_INLAND_19'], inland_7: ['A_INLAND_7'], ku: ['A_KU'] });
+const istDatumText = (x) => typeof x === 'string' && Steuerkern.istDatum(x.slice(0, 10));
+
+function plattformJahr(d) {
+  const pd = d.plattform_daten;
+  const kandidaten = [istObjekt(pd.leistung) ? pd.leistung.datum : null, istObjekt(d.steuer) && istObjekt(d.steuer.leistung) ? d.steuer.leistung.von : null, d.bezahlt_am, d.datum];
+  const t = kandidaten.find(istDatumText);
+  return t ? { jahr: Number(t.slice(0, 4)), datum: t.slice(0, 10) } : null;
+}
+
+// Rein. Ergebnis { ok: true, jahr, status } oder { code }.
+export function plattformPruefung(d, profil, steuerwahl, grundlage) {
+  if (!istPlattformAuslandsbeleg(d)) return { code: 'wahl_passt_nicht' };
+  if (grundlage !== GRUNDLAGE_EU_B2C) return { code: 'plattform_grenze_fehlt' };
+  const pd = d.plattform_daten;
+  if (d.typ !== 'rechnung_ausgehend' || pd.bezug) return { code: 'wahl_passt_nicht' };
+  const gp = istObjekt(pd.gegenpartei) ? pd.gegenpartei : {};
+  const laender = ['land', 'land_rechnung', 'land_karte'].map((k) => gp[k]).filter((x) => typeof x === 'string' && x);
+  if (!laender.length || laender.some((l) => Steuerkern.istEuLand(l) !== true) || laender.every((l) => l.toUpperCase() === 'DE')) return { code: 'plattform_drittland' };
+  if (gp.unternehmer === 'ja' || (typeof gp.ust_id === 'string' && gp.ust_id)) return { code: 'plattform_b2b' };
+  const j = plattformJahr(d);
+  if (!j) return { code: 'nicht_aufloesbar' };
+  const bestaetigung = istObjekt(profil) && istObjekt(profil.eu_b2c_grenze) ? profil.eu_b2c_grenze[String(j.jahr)] : null;
+  if (!istObjekt(bestaetigung) || bestaetigung.unter_grenze !== true) return { code: 'plattform_grenze_fehlt' };
+  let status = null;
+  try { status = Steuerkern.statusAm(profil, j.datum).status; } catch { status = null; }
+  if (!PLATTFORM_WAHLEN[status] || !PLATTFORM_WAHLEN[status].includes(steuerwahl)) return { code: 'wahl_passt_nicht' };
+  return { ok: true, jahr: j.jahr, status };
+}
 
 export const KLAERUNG_BELEG_AKTION = 'klaerung_beleg';
 const DOK_ID_MUSTER = /^[A-Za-z0-9_.-]{1,200}$/; // wie regel/migration.js
@@ -55,8 +95,12 @@ export function eingabeFehler(body) {
   if (!ANFRAGE_ID_MUSTER.test(String(body.anfrage_id || ''))) return 'ANFRAGE_ID_UNGUELTIG';
   const ids = body.beleg_ids;
   if (!Array.isArray(ids) || ids.length === 0 || ids.length > KLAERUNG_MAX || ids.some((x) => typeof x !== 'string' || !DOK_ID_MUSTER.test(x)) || new Set(ids).size !== ids.length) return 'BELEG_IDS_UNGUELTIG';
-  // Nur eine ausdrückliche Wahl; 'weiss_nicht', leer oder Zusatzangaben sind keine Klärung (nichts raten)
-  if (!istObjekt(body.antwort) || !nurSchluessel(body.antwort, ['steuerwahl']) || !WAHLEN.includes(body.antwort.steuerwahl)) return 'ANTWORT_UNGUELTIG';
+  // Nur eine ausdrückliche Wahl; 'weiss_nicht', leer oder Zusatzangaben sind keine Klärung (nichts raten). grundlage nur mit bekanntem Wert (APP-B2).
+  const a = body.antwort;
+  if (!istObjekt(a) || !nurSchluessel(a, ['steuerwahl', 'grundlage'])) return 'ANTWORT_UNGUELTIG';
+  if (a.grundlage !== undefined) {
+    if (a.grundlage !== GRUNDLAGE_EU_B2C || ![...PLATTFORM_WAHLEN.regel, ...PLATTFORM_WAHLEN.ku].includes(a.steuerwahl)) return 'ANTWORT_UNGUELTIG';
+  } else if (!WAHLEN.includes(a.steuerwahl)) return 'ANTWORT_UNGUELTIG';
   return null;
 }
 
@@ -93,6 +137,13 @@ export function legacyErgaenzen(uid, id, dok, einheit) {
 }
 
 function einheitFuer(uid, id, dok, kontext) {
+  const d = dok && istObjekt(dok.daten) ? dok.daten : null;
+  if (d && (istPlattformAuslandsbeleg(d) || kontext.grundlage !== undefined)) {
+    const p = plattformPruefung(d, kontext.profil, kontext.steuerwahl, kontext.grundlage);
+    if (!p.ok) return { id, write: null, code: p.code };
+    const plattform = { gruende: ['auslandskunde'], wahlen: ['ku'], steuerfaelle: PLATTFORM_STEUERFAELLE[kontext.steuerwahl], klaerung: { grundlage: KENNZEICHEN_EU_B2C, grenze_jahr: p.jahr } };
+    return legacyErgaenzen(uid, id, dok, klaerungEinheit(uid, id, dok, { ...kontext, plattform }));
+  }
   return legacyErgaenzen(uid, id, dok, klaerungEinheit(uid, id, dok, kontext));
 }
 
@@ -102,6 +153,7 @@ async function audit(uid, kopfDok, body, steuerwahl, einheiten, zeit) {
   const details = {
     weg: 'klaerung_beleg', steuerwahl, anzahl: g.length, migriert: g.filter((e) => e.migriert).length, neu: g.filter((e) => !e.migriert).length,
     aus_legacy: g.filter((e) => e.quelle !== 'v2').length, legacy_geschrieben: g.filter((e) => e.legacy).length,
+    ...(body.antwort && body.antwort.grundlage ? { grundlage: body.antwort.grundlage } : {}),
   };
   return (await auditSchreibvorgaenge(uid, kopfDok, { aktion: 'migration_klaerung', ziel: body.anfrage_id, vorher: null, nachher: { steuerwahl, ids: g.map((e) => e.id) }, zeit, details })).writes;
 }
@@ -121,7 +173,7 @@ export async function regelKlaerungBeleg(body, env, cors = {}, deps = {}) {
     if (!klaerungFreigegeben(configBereinigen(docs.get(CONFIG_PFAD)?.daten))) return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
     const profil = docs.get(aktuellPfad(uid))?.daten;
     if (!profilBereit(profil)) return fehlerAntwort(409, 'PROFIL_NICHT_BESTAETIGT', cors);
-    const kontext = { profil, steuerwahl, zeit, stichtag: zeit.slice(0, 10), anfrage_id: body.anfrage_id, festPerioden: [] };
+    const kontext = { profil, steuerwahl, grundlage: body.antwort.grundlage, zeit, stichtag: zeit.slice(0, 10), anfrage_id: body.anfrage_id, festPerioden: [] };
     let einheiten = ids.map((id) => einheitFuer(uid, id, docs.get(dokPfad(uid, id)), kontext));
     if (einheiten.some((e) => e.write)) {
       const liste = await fs.list(`users/${uid}/festschreibung`, { pageSize: 300 });
