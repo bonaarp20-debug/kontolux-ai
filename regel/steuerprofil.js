@@ -10,7 +10,7 @@
 //   aktion 'eintrag'               { bereich: 'status'|'versteuerung'|'voranmeldung', eintrag: {...}, entsperr_grund? }   append-only (E6)
 //   aktion 'ist_jahr_bestaetigen'  { jahr }   Kalenderjahr in bestaetigte_jahre des Ist-Eintrags (R-PR-04, K2 Jahreswechsel)
 //   aktion 'bestaetigen'           {}        Nutzer bestätigt das Profil (Bereitschaft des Kontos, scope NP-02)
-//   aktion 'stammdaten'            { stammdaten: { beruf_art?, gruendung?, vorjahr?, limit_bestaetigungen? } }
+//   aktion 'stammdaten'            { stammdaten: { beruf_art?, gruendung?, vorjahr?, limit_bestaetigungen?, eu_b2c_grenze?, oss? } } (oss nur mit Feature oss)
 // Ist-Versteuerung nur mit Grundlage Nr. 1 oder Nr. 3, Genehmigungsdatum, Nachweis (Aktenzeichen oder eigenes Schreiben im Speicher)
 // und bestätigtem Kalenderjahr; Felder nach K2: genehmigung.art (ausdruecklich/konkludent/weiss_nicht), bei Nr. 3 fuehrt_buecher_freiberuf
 // und gewerbliche_umsaetze (nur Warnlogik). Kontolux prüft die Genehmigung nicht, es speichert die Angabe (Wortwahl W4).
@@ -24,7 +24,8 @@ import { auditSchreibvorgaenge, kopfPfad, hashVon } from './audit.js';
 
 export const PROFIL_KERN_FELDER = ['version', 'gewinnermittlung', 'beruf_art', 'gruendung', 'status_verlauf', 'option_19_3', 'versteuerung_verlauf',
   'voranmeldung_verlauf', 'vorjahr', 'limit_bestaetigungen', 'eu_b2c_grenze',
-  'gwg_wahl']; // E-B: GWG-/Sammelposten-/AfA-Wahl je Jahr (BP-04b, Kern profilPruefen GWG_WAHL_UNGUELTIG); ohne Eintrag ginge sie bei jeder Profiländerung verloren
+  'gwg_wahl', // E-B: GWG-/Sammelposten-/AfA-Wahl je Jahr (BP-04b, Kern profilPruefen GWG_WAHL_UNGUELTIG); ohne Eintrag ginge sie bei jeder Profiländerung verloren
+  'oss']; // APP-C (BP-28): OSS-Angaben des Nutzers { jahre_cent, verzicht_ab, registriert_ab } (steuerkern/oss.js), nur über aktion 'stammdaten' mit Feature oss
 const VERLAUF_MAX = 50;
 const AKTIONEN = ['anlegen', 'eintrag', 'ist_jahr_bestaetigen', 'bestaetigen', 'stammdaten'];
 const GRUNDLAGEN_EINGABE = ['nr1', 'nr2', 'nr3', 'weiss_nicht']; // K2; Ist nur mit nr1/nr3 (Kern GRUNDLAGEN_IST)
@@ -133,8 +134,52 @@ export function euB2cGrenzeMischen(alt, neu, heute) {
   return x;
 }
 
+// APP-C (BP-28, Release C): OSS-Angaben des Nutzers, gelesen von steuerkern/oss.js (Schwelle und Zuordnung). Eingabe (jeder Teil optional, null löscht):
+//   jahre_cent { 'JJJJ': Cent|null }   Summe der Verkäufe an Privatkunden in anderen EU-Ländern eines abgeschlossenen Jahres (netto, § 3c Abs. 4 S. 1,
+//                                      § 3a Abs. 5 S. 3 UStG); nur die drei Vorjahre (der Kern braucht das Vorjahr), 0 bis 1 Mrd. EUR
+//   verzicht_ab 'JJJJ-MM-TT'|null      Verzicht auf die Grenze gegenüber dem Finanzamt (§ 3c Abs. 4 S. 2, 3 UStG)
+//   registriert_ab 'JJJJ-MM-TT'|null   Teilnahme am OSS-Verfahren beim BZSt (§ 18j Abs. 1 UStG)
+// Daten frühestens 01.07.2021 (Beginn OSS), spätestens Ende des Folgejahres. Es sind Angaben des Nutzers; Kontolux prüft sie nicht beim BZSt.
+const OSS_START = '2021-07-01';
+const OSS_CENT_MAX = 100000000000; // 1 Mrd. EUR
+export function ossBereinigen(v, heute) {
+  const jahrHeute = Number(String(heute || '').slice(0, 4));
+  if (!istObjekt(v) || !Object.keys(v).length || !nurSchluessel(v, ['jahre_cent', 'verzicht_ab', 'registriert_ab']) || !Number.isSafeInteger(jahrHeute)) return null;
+  const x = {};
+  if (v.jahre_cent !== undefined) {
+    const j = v.jahre_cent;
+    if (!istObjekt(j) || !Object.keys(j).length || Object.keys(j).length > 3) return null;
+    x.jahre_cent = {};
+    for (const [k, c] of Object.entries(j)) {
+      if (!/^\d{4}$/.test(k) || Number(k) < jahrHeute - 3 || Number(k) > jahrHeute - 1) return null;
+      if (c !== null && !(Number.isSafeInteger(c) && c >= 0 && c <= OSS_CENT_MAX)) return null;
+      x.jahre_cent[k] = c;
+    }
+  }
+  for (const k of ['verzicht_ab', 'registriert_ab']) {
+    if (v[k] === undefined) continue;
+    if (v[k] !== null && !(istDatum(v[k]) && v[k] >= OSS_START && v[k] <= `${jahrHeute + 1}-12-31`)) return null;
+    x[k] = v[k];
+  }
+  return x;
+}
+// Mischt bereinigte Angaben in den gespeicherten Stand; null löscht. Ergebnis null, wenn nichts übrig bleibt (Feld entfällt).
+export function ossMischen(alt, neu) {
+  const x = istObjekt(alt) ? { ...alt } : {};
+  if (neu.jahre_cent) {
+    const j = istObjekt(x.jahre_cent) ? { ...x.jahre_cent } : {};
+    for (const [k, c] of Object.entries(neu.jahre_cent)) { if (c === null) delete j[k]; else j[k] = c; }
+    if (Object.keys(j).length) x.jahre_cent = j; else delete x.jahre_cent;
+  }
+  for (const k of ['verzicht_ab', 'registriert_ab']) {
+    if (neu[k] === undefined) continue;
+    if (neu[k] === null) delete x[k]; else x[k] = neu[k];
+  }
+  return Object.keys(x).length ? x : null;
+}
+
 export function stammdatenBereinigen(s, heute) {
-  if (!istObjekt(s) || !nurSchluessel(s, ['beruf_art', 'gruendung', 'vorjahr', 'limit_bestaetigungen', 'eu_b2c_grenze'])) return { fehler: [F('FELD_NICHT_ERLAUBT')] };
+  if (!istObjekt(s) || !nurSchluessel(s, ['beruf_art', 'gruendung', 'vorjahr', 'limit_bestaetigungen', 'eu_b2c_grenze', 'oss'])) return { fehler: [F('FELD_NICHT_ERLAUBT')] };
   const x = {};
   const fehler = [];
   if (s.beruf_art !== undefined) { if (Steuerkern.BERUF_ARTEN.includes(s.beruf_art)) x.beruf_art = s.beruf_art; else fehler.push(F('BERUF_ART_UNGUELTIG')); }
@@ -158,6 +203,10 @@ export function stammdatenBereinigen(s, heute) {
   if (s.eu_b2c_grenze !== undefined) {
     const e = euB2cGrenzeBereinigen(s.eu_b2c_grenze, heute);
     if (e) x.eu_b2c_grenze = e; else fehler.push(F('EU_B2C_GRENZE_UNGUELTIG'));
+  }
+  if (s.oss !== undefined) {
+    const o = ossBereinigen(s.oss, heute);
+    if (o) x.oss = o; else fehler.push(F('OSS_UNGUELTIG'));
   }
   return fehler.length ? { fehler } : { stammdaten: x };
 }
@@ -265,7 +314,9 @@ export function neuesProfil(aktion, body, alt, kontext) {
     if (sd.fehler) return { fehler: sd.fehler };
     if (!Object.keys(sd.stammdaten).length) return { fehler: [F('STAMMDATEN_LEER')] };
     if (sd.stammdaten.eu_b2c_grenze) sd.stammdaten.eu_b2c_grenze = euB2cGrenzeMischen(altKern.eu_b2c_grenze, sd.stammdaten.eu_b2c_grenze, kontext.heute);
-    return { profil: { ...altKern, ...sd.stammdaten, version: altVersion + 1 }, warnungen, audit: 'steuerprofil_stammdaten' };
+    const profil = { ...altKern, ...sd.stammdaten, version: altVersion + 1 };
+    if (sd.stammdaten.oss) { const o = ossMischen(altKern.oss, sd.stammdaten.oss); if (o) profil.oss = o; else delete profil.oss; }
+    return { profil, warnungen, audit: 'steuerprofil_stammdaten' };
   }
   return { fehler: [F('AKTION_UNBEKANNT')] };
 }
@@ -311,6 +362,8 @@ export async function regelSteuerprofil(body, env, cors = {}, deps = {}) {
     const docs = await fs.batchGet([aktuellPfad(uid), kopfPfad(uid), CONFIG_PFAD]);
     const config = configBereinigen(docs.get(CONFIG_PFAD)?.daten);
     if (!featureAktiv(config, 'steuerprofil')) return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
+    // APP-C (BP-28): OSS-Angaben nur mit Feature oss (Release C, Standard aus; fehlend = aus)
+    if (body.aktion === 'stammdaten' && istObjekt(body.stammdaten) && body.stammdaten.oss !== undefined && !featureAktiv(config, 'oss')) return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
     const altDok = docs.get(aktuellPfad(uid));
     const alt = altDok ? altDok.daten : null;
     // Idempotenz: dieselbe anfrage_id ein zweites Mal (Netzabbruch, Doppelklick) schreibt nichts und bestätigt den Stand
