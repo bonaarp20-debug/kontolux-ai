@@ -33,7 +33,7 @@ function befuelle(fs, uid) {
 }
 
 test('ARCHIV_SAMMLUNGEN in worker.js enthält die neuen Sammlungen; Speicher-Umzug und Export nutzen die Unterkollektionen', () => {
-  assert.deepEqual([...REGEL_SAMMLUNGEN].sort(), ['audit_v2', 'festschreibung', 'migration', 'rechnungsnummern', 'steuerprofil', 'zaehler']);
+  assert.deepEqual([...REGEL_SAMMLUNGEN].sort(), ['audit_v2', 'festschreibung', 'migration', 'oss_meldung', 'rechnungsnummern', 'steuerprofil', 'zaehler']);
   const quelle = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
   assert.match(quelle, /const ARCHIV_SAMMLUNGEN = \[[\s\S]*?\.\.\.REGEL_SAMMLUNGEN\s*\];/);
   assert.match(quelle, /\[\.\.\.ARCHIV_SAMMLUNGEN, 'messages', \.\.\.REGEL_UNTERSAMMLUNGEN\]/, 'Speicher-Umzug');

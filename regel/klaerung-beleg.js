@@ -28,6 +28,7 @@
 import * as Steuerkern from '../steuerkern/index.js';
 import {
   antwort, fehlerAntwort, grundpruefung, istObjekt, nurSchluessel, CONFIG_PFAD, configBereinigen, jetztIso, schichtFuer, regelFehler, ANFRAGE_ID_MUSTER, kernOptionenFuerKontoLaden,
+  featureAktiv,
 } from './gemeinsam.js';
 import { schreibe, dekodiereFelder, FirestoreFehler, BudgetFehler } from './firestore.js';
 import { auditSchreibvorgaenge, kopfPfad } from './audit.js';
@@ -77,6 +78,54 @@ export function plattformPruefung(d, profil, steuerwahl, grundlage) {
   return { ok: true, jahr: j.jahr, status };
 }
 
+// WORKER-C (Release C, BP-28, Vertrag inbox-ORCH APP-C (3c)): Plattformbelege mit Privatkunde im EU-Ausland als OSS-Fall klären.
+// antwort { steuerwahl 'b2c_ausland', grundlage 'oss_plattform', leistungsart 'ware' (Fernverkauf, § 3c Abs. 1 UStG) | 'tbe' (Telekommunikation,
+// Rundfunk, elektronische Leistung, § 3a Abs. 5 S. 2 UStG) }. Nur mit Feature oss; ohne Feature genau wie vorher 400 ANTWORT_UNGUELTIG (die App
+// zeigt dazu eine ruhige Meldung). Der Worker traut dem Browser nur die Leistungsart und prüft selbst (ossPruefung): Plattform-Auslandsbeleg,
+// Einnahme ohne Erstattungsbezug, alle gelieferten Länder EU (XI ungeklärt = nein), Kundenland (plattform_daten.gegenpartei.land) gesetzt und nicht
+// DE, kein Firmenkunde (unternehmer 'ja' oder USt-IdNr.), Betrag in Euro (fremde Währung braucht den Monatskurs, nichts geraten), höchstens ein Satz
+// der Plattform, bestätigtes Profil mit bekanntem Status (Regel oder Kleinunternehmer) am Leistungstag. Der Kern normalisiert mit steuerwahl
+// 'b2c_ausland' (Betrag, Leistungstag, Zahlungen aus dem Beleg; Satz der Plattform, ohne Satz ohne satz_bp) und prüft streng; erwartet wird
+// steuer.oss mit demselben Land, Lage eu und der gewählten Leistungsart, der Beleg bleibt UNBEKANNT/auslandskunde (Zuordnung Inland/OSS über alle
+// Belege nur mit Kern-Option oss, steuerkern/oss.js). steuer.migration.klaerung trägt grundlage 'oss_plattform' und leistungsart. Legacy doppelt
+// wie V-D (legacyErgaenzen). Sperren, Idempotenz und Konfliktfall wie alle Klärungen (regel/klaerung.js klaerungEinheit).
+export const GRUNDLAGE_OSS = 'oss_plattform';
+export const OSS_STEUERWAHL = 'b2c_ausland';
+export const OSS_LEISTUNGSARTEN = Object.freeze(['ware', 'tbe']);
+const OSS_STATUS = Object.freeze(['regel', 'ku']);
+
+function plattformSatz(pd) {
+  const ps = istObjekt(pd.plattform_steuer) ? pd.plattform_steuer : null;
+  const liste = new Set();
+  if (ps && Array.isArray(ps.saetze)) for (const x of ps.saetze) if (Number.isSafeInteger(x)) liste.add(x);
+  if (ps && Array.isArray(ps.positionen)) for (const p of ps.positionen) if (istObjekt(p) && Number.isSafeInteger(p.satz_bp)) liste.add(p.satz_bp);
+  if (liste.size > 1) return { mehrere: true };
+  const bp = liste.size ? [...liste][0] : null;
+  return { satz_bp: bp !== null && bp >= 0 && bp <= 10000 ? bp : null };
+}
+
+// Rein. Ergebnis { ok: true, land, satz_bp, status } oder { code }.
+export function ossPruefung(d, profil) {
+  if (!istPlattformAuslandsbeleg(d)) return { code: 'wahl_passt_nicht' };
+  const pd = d.plattform_daten;
+  if (d.typ !== 'rechnung_ausgehend' || pd.bezug) return { code: 'wahl_passt_nicht' };
+  const gp = istObjekt(pd.gegenpartei) ? pd.gegenpartei : {};
+  const laender = ['land', 'land_rechnung', 'land_karte'].map((k) => gp[k]).filter((x) => typeof x === 'string' && x);
+  if (!laender.length || laender.some((l) => Steuerkern.istEuLand(l) !== true) || laender.every((l) => l.toUpperCase() === 'DE')) return { code: 'plattform_drittland' };
+  const land = typeof gp.land === 'string' && /^[A-Za-z]{2}$/.test(gp.land.trim()) ? gp.land.trim().toUpperCase() : null;
+  if (!land || land === 'DE') return { code: 'plattform_land_unklar' };
+  if (gp.unternehmer === 'ja' || (typeof gp.ust_id === 'string' && gp.ust_id)) return { code: 'plattform_b2b' };
+  if (typeof pd.waehrung === 'string' && pd.waehrung && pd.waehrung.toUpperCase() !== 'EUR') return { code: 'plattform_fremdwaehrung' };
+  const satz = plattformSatz(pd);
+  if (satz.mehrere) return { code: 'plattform_mehrere_saetze' };
+  const j = plattformJahr(d);
+  if (!j) return { code: 'nicht_aufloesbar' };
+  let status = null;
+  try { status = Steuerkern.statusAm(profil, j.datum).status; } catch { status = null; }
+  if (!OSS_STATUS.includes(status)) return { code: 'wahl_passt_nicht' };
+  return { ok: true, land, satz_bp: satz.satz_bp, status };
+}
+
 export const KLAERUNG_BELEG_AKTION = 'klaerung_beleg';
 const DOK_ID_MUSTER = /^[A-Za-z0-9_.-]{1,200}$/; // wie regel/migration.js
 const SCHLUESSEL = ['userId', 'aktion', 'anfrage_id', 'beleg_ids', 'antwort', 'token']; // token setzt der Router bei jedem geschützten Pfad (wird hier nicht verwendet)
@@ -108,7 +157,12 @@ export function eingabeFehler(body) {
   if (!Array.isArray(ids) || ids.length === 0 || ids.length > KLAERUNG_MAX || ids.some((x) => typeof x !== 'string' || !DOK_ID_MUSTER.test(x)) || new Set(ids).size !== ids.length) return 'BELEG_IDS_UNGUELTIG';
   // Nur eine ausdrückliche Wahl; 'weiss_nicht', leer oder Zusatzangaben sind keine Klärung (nichts raten). grundlage nur mit bekanntem Wert (APP-B2).
   const a = body.antwort;
-  if (!istObjekt(a) || !nurSchluessel(a, ['steuerwahl', 'grundlage', 'land', 'gebiet'])) return 'ANTWORT_UNGUELTIG';
+  if (!istObjekt(a) || !nurSchluessel(a, ['steuerwahl', 'grundlage', 'land', 'gebiet', 'leistungsart'])) return 'ANTWORT_UNGUELTIG';
+  // WORKER-C: OSS-Antwort nur vollständig und ohne Land; leistungsart gibt es nur dort. Ob das Feature an ist, prüft regelKlaerungBeleg nach dem
+  // Lesen von config/features (aus: dieselbe Antwort wie hier für eine unbekannte Wahl).
+  if (a.grundlage === GRUNDLAGE_OSS || a.steuerwahl === OSS_STEUERWAHL || a.leistungsart !== undefined) {
+    return a.grundlage === GRUNDLAGE_OSS && a.steuerwahl === OSS_STEUERWAHL && OSS_LEISTUNGSARTEN.includes(a.leistungsart) && a.land === undefined && a.gebiet === undefined ? null : 'ANTWORT_UNGUELTIG';
+  }
   if ((a.land !== undefined || a.gebiet !== undefined) && !landAusAntwort(a)) return 'ANTWORT_UNGUELTIG';
   if (a.grundlage !== undefined) {
     if (a.grundlage !== GRUNDLAGE_EU_B2C || ![...PLATTFORM_WAHLEN.regel, ...PLATTFORM_WAHLEN.ku].includes(a.steuerwahl)) return 'ANTWORT_UNGUELTIG';
@@ -150,6 +204,23 @@ export function legacyErgaenzen(uid, id, dok, einheit) {
 
 function einheitFuer(uid, id, dok, kontext) {
   const d = dok && istObjekt(dok.daten) ? dok.daten : null;
+  if (kontext.oss) {
+    if (!d) return { id, write: null, code: 'fehlt' };
+    const p = ossPruefung(d, kontext.profil);
+    if (!p.ok) return { id, write: null, code: p.code };
+    const la = kontext.oss.leistungsart;
+    const plattform = {
+      gruende: ['auslandskunde'], wahlen: [OSS_STEUERWAHL],
+      eingabe: (e) => ({ ...e, leistungsart: la, gegenpartei: { land: p.land }, ...(p.satz_bp !== null ? { satz_bp: p.satz_bp } : {}) }),
+      ergebnis: (neu) => {
+        const s = neu.steuer;
+        return s.steuerfall === 'UNBEKANNT' && s.unbekannt_grund === 'auslandskunde' && !s.sperrgrund && istObjekt(s.oss) && (s.oss.land === p.land || (p.land === 'EL' && s.oss.land === 'GR'))
+          && s.oss.lage === 'eu' && s.oss.leistungsart === la && Array.isArray(s.oss.zeilen) && s.oss.zeilen.length > 0;
+      },
+      klaerung: { grundlage: GRUNDLAGE_OSS, leistungsart: la },
+    };
+    return legacyErgaenzen(uid, id, dok, klaerungEinheit(uid, id, dok, { ...kontext, plattform }));
+  }
   if (d && (istPlattformAuslandsbeleg(d) || kontext.grundlage !== undefined)) {
     const p = plattformPruefung(d, kontext.profil, kontext.steuerwahl, kontext.grundlage);
     if (!p.ok) return { id, write: null, code: p.code };
@@ -166,6 +237,7 @@ async function audit(uid, kopfDok, body, steuerwahl, einheiten, zeit) {
     weg: 'klaerung_beleg', steuerwahl, anzahl: g.length, migriert: g.filter((e) => e.migriert).length, neu: g.filter((e) => !e.migriert).length,
     aus_legacy: g.filter((e) => e.quelle !== 'v2').length, legacy_geschrieben: g.filter((e) => e.legacy).length,
     ...(body.antwort && body.antwort.grundlage ? { grundlage: body.antwort.grundlage } : {}),
+    ...(body.antwort && body.antwort.leistungsart ? { leistungsart: body.antwort.leistungsart } : {}),
   };
   return (await auditSchreibvorgaenge(uid, kopfDok, { aktion: 'migration_klaerung', ziel: body.anfrage_id, vorher: null, nachher: { steuerwahl, ids: g.map((e) => e.id) }, zeit, details })).writes;
 }
@@ -182,10 +254,13 @@ export async function regelKlaerungBeleg(body, env, cors = {}, deps = {}) {
   try {
     const fs = await schichtFuer(deps);
     const docs = await fs.batchGet([aktuellPfad(uid), CONFIG_PFAD, kopfPfad(uid), ...ids.map((id) => dokPfad(uid, id))]);
+    // WORKER-C: OSS-Antwort ohne Feature oss = wie vor Release C (unbekannte Wahl), vor jeder anderen Prüfung
+    const ossAntwort = body.antwort.grundlage === GRUNDLAGE_OSS;
+    if (ossAntwort && !featureAktiv(configBereinigen(docs.get(CONFIG_PFAD)?.daten), 'oss')) return fehlerAntwort(400, 'ANTWORT_UNGUELTIG', cors);
     if (!klaerungFreigegeben(configBereinigen(docs.get(CONFIG_PFAD)?.daten))) return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
     const profil = docs.get(aktuellPfad(uid))?.daten;
     if (!profilBereit(profil)) return fehlerAntwort(409, 'PROFIL_NICHT_BESTAETIGT', cors);
-    const kontext = { profil, steuerwahl, grundlage: body.antwort.grundlage, ...(landAusAntwort(body.antwort) ? { land: landAusAntwort(body.antwort) } : {}), zeit, stichtag: zeit.slice(0, 10), anfrage_id: body.anfrage_id, festPerioden: [], kernOptionen: await kernOptionenFuerKontoLaden(uid, configBereinigen(docs.get(CONFIG_PFAD)?.daten), { fs }) }; // E-B (A1): Kern-Optionen für die Sperrprüfung; FIX-EB (F4): Zustimmung je Konto wie die Festschreibung
+    const kontext = { profil, steuerwahl, grundlage: body.antwort.grundlage, ...(ossAntwort ? { oss: { leistungsart: body.antwort.leistungsart } } : {}), ...(landAusAntwort(body.antwort) ? { land: landAusAntwort(body.antwort) } : {}), zeit, stichtag: zeit.slice(0, 10), anfrage_id: body.anfrage_id, festPerioden: [], kernOptionen: await kernOptionenFuerKontoLaden(uid, configBereinigen(docs.get(CONFIG_PFAD)?.daten), { fs }) }; // E-B (A1): Kern-Optionen für die Sperrprüfung; FIX-EB (F4): Zustimmung je Konto wie die Festschreibung
     let einheiten = ids.map((id) => einheitFuer(uid, id, docs.get(dokPfad(uid, id)), kontext));
     if (einheiten.some((e) => e.write)) {
       const liste = await fs.list(`users/${uid}/festschreibung`, { pageSize: 300 });

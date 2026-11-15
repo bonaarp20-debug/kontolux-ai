@@ -13,7 +13,9 @@ export const AUDIT_AKTIONEN = ['steuerprofil_anlegen', 'steuerprofil_eintrag', '
   // BP-13 Teil 2: Ablauf der Festschreibung in Blöcken, Abbruch, Übernahme der Alt-Monatsabschlüsse, nachgeholte Sperre, Konsistenzwächter
   'festschreibung_start', 'festschreibung_abbruch', 'festschreibung_entsperrt', 'festschreibung_legacy', 'festschreibung_sperre', 'festschreibung_abgegeben',
   // E1 (Zuruf BP-14): Sammelklärung unklarer migrierter Belege (regel/migration.js aktion 'klaerung')
-  'migration_klaerung'];
+  'migration_klaerung',
+  // WORKER-C (Release C, BP-29): Abgabe-Schnappschuss eines OSS-Quartals (regel/oss-meldung.js), details ohne Beträge
+  'oss_abgabe'];
 
 export function kopfPfad(uid) {
   return `users/${uid}/audit_v2/_kopf`;

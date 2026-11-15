@@ -7,7 +7,9 @@
 // unabhängig von der Zahl der Elterndokumente (Free-Plan: 50 Unteranfragen; eine Liste je Beleg wäre bei 5.000 Belegen nicht machbar).
 export const FIRESTORE_WURZEL = 'https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents';
 // FIX-RB N6 (G-RB): zaehler (benannte Zähler, regel/zaehler.js) gehört mit in Archiv, Löschlauf, Speicher-Umzug und Export
-export const REGEL_SAMMLUNGEN = Object.freeze(['steuerprofil', 'festschreibung', 'audit_v2', 'migration', 'rechnungsnummern', 'zaehler']);
+// WORKER-C (Release C, Q-5): oss_meldung (Abgabe-Schnappschüsse der OSS-Quartale, regel/oss-meldung.js), Aufbewahrung zehn Jahre ab Ende des
+// Kalenderjahres der Abgabe (§ 22 Abs. 1 S. 4 UStG); Unterkollektion oss_meldung/{periode}/verlauf läuft über REGEL_UNTERSAMMLUNGEN ('verlauf').
+export const REGEL_SAMMLUNGEN = Object.freeze(['steuerprofil', 'festschreibung', 'audit_v2', 'migration', 'rechnungsnummern', 'zaehler', 'oss_meldung']);
 // FIX-L (G-RECHT-B F-D3): Profil-Dokumente ohne Aufbewahrungspflicht, die schon die Kontolöschung (/konto-archivieren) entfernt.
 // selbsttest: Ergebnis des Abgleichs im Hintergrund (Zählwerte, Zeitpunkt, Version, Fingerabdruck), keine Unterlage nach § 147 AO.
 // Für vorher archivierte Konten räumt der Nachlauf nach der Kontolöschung es ab (NACHLAUF_PROFIL in regel/loeschlaeufe-konto.js).
@@ -23,7 +25,7 @@ export async function profilRestLoeschen(uid, token, fetchFn = globalThis.fetch)
   return ARCHIV_LOESCHEN_PROFIL.length;
 }
 // Unterkollektionen je Sammlung (chats/messages räumt der Löschlauf schon heute je Chat ab)
-export const UNTERSAMMLUNGEN = Object.freeze({ chats: ['messages'], steuerprofil: ['verlauf'], dokumente: ['versionen'] });
+export const UNTERSAMMLUNGEN = Object.freeze({ chats: ['messages'], steuerprofil: ['verlauf'], dokumente: ['versionen'], oss_meldung: ['verlauf'] });
 // Für den Löschlauf und den Export über allDescendants (messages bleibt beim bisherigen Weg je Chat)
 export const REGEL_UNTERSAMMLUNGEN = Object.freeze(['verlauf', 'versionen']);
 const SEITE = 300;

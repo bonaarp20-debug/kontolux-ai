@@ -15,6 +15,8 @@ import { regelMigration } from './regel/migration.js';
 import { regelKlaerungBeleg } from './regel/klaerung-beleg.js'; // KX-VD
 import { regelZaehler, ZAEHLER_PFADE } from './regel/zaehler.js'; // KX-RB (BP-19)
 import { regelAdminFeatures } from './regel/admin-features.js';
+import { regelOssMeldung } from './regel/oss-meldung.js'; // WORKER-C (Release C, BP-29)
+import { regelEzbKurs } from './regel/ezb-kurs.js'; // WORKER-C (Release C, BP-29)
 import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto } from './regel/prompts.js'; // BP-22B
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
@@ -381,6 +383,9 @@ const UID_LIMITS = {
   '/migration':                      { limit: 120, windowMs: 10 * 60 * 1000 },
   // R2: Zustimmungsnachweis (Dialog, Registrierung, Wiederholung beim nächsten Start)
   '/agb-zustimmung':                 { limit: 10, windowMs: 10 * 60 * 1000 },
+  // WORKER-C (Release C): OSS-Abgabe je Quartal selten; Kursvorschlag je Währung und Quartal (Cache im KV)
+  '/oss-meldung':                    { limit: 20, windowMs: 10 * 60 * 1000 },
+  '/ezb-kurs':                       { limit: 30, windowMs: 10 * 60 * 1000 },
 };
 for (const p of ZAEHLER_PFADE) UID_LIMITS[p] = { limit: 60, windowMs: 10 * 60 * 1000 }; // KX-RB: Nummern je Nutzer (Wiederholungen bei Konflikt eingerechnet)
 
@@ -576,6 +581,7 @@ export default {
       // Adressen auslösen (Spam-Vektor).
       const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/stripe-gebuehren', '/usage', '/abo', '/konto-archivieren', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/auszug-rueckmeldung', '/pruefer-zugang', '/freigabe-status', '/steuerprofil', '/festschreibung', '/entsperren', '/migration', '/agb-zustimmung'];
       protectedPaths.push(...ZAEHLER_PFADE); // KX-RB
+      protectedPaths.push('/oss-meldung', '/ezb-kurs'); // WORKER-C
 
       if (protectedPaths.includes(url.pathname)) {
         try {
@@ -613,6 +619,7 @@ export default {
           // direkt ansprechen und den Block umgehen.
           const emailVerifiedRequiredPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/steuerprofil', '/festschreibung', '/entsperren', '/migration', '/agb-zustimmung'];
           emailVerifiedRequiredPaths.push(...ZAEHLER_PFADE); // KX-RB
+          emailVerifiedRequiredPaths.push('/oss-meldung', '/ezb-kurs'); // WORKER-C
           if (emailVerifiedRequiredPaths.includes(url.pathname) && !verified.emailVerified) {
             const errorCors = getCORS(origin);
             return new Response(JSON.stringify({ error: 'E-Mail nicht verifiziert', code: 'email-not-verified' }), {
@@ -715,6 +722,9 @@ export default {
       // R2: Zustimmungsnachweis zu den Nutzungsbedingungen (Serverzeit, nur Worker schreibt users/{uid}/agb_zustimmung)
       if (url.pathname === '/agb-zustimmung') return handleAgbZustimmung(body, env, cors);
       if (ZAEHLER_PFADE.includes(url.pathname)) return handleRechnungsnummerReservieren(url.pathname, body, env, cors); // KX-RB
+      // WORKER-C (Release C, BP-29): Abgabe-Schnappschuss OSS (nur Worker schreibt users/{uid}/oss_meldung) und EZB-Kursvorschlag; beide Feature oss
+      if (url.pathname === '/oss-meldung') return regelOssMeldung(body, env, cors, regelAbhaengigkeiten(env));
+      if (url.pathname === '/ezb-kurs') return regelEzbKurs(body, env, cors, { ...regelAbhaengigkeiten(env), kv: env.PROFIL_KV });
       if (url.pathname === '/admin/features') return regelAdminFeatures(request, authHeader, env, cors, regelAbhaengigkeiten(env));
       // Bewusst NICHT in protectedPaths: ein Betriebsprüfer hat keinen Firebase-Login, der
       // Zugriffsnachweis ist der Besitz des Tokens selbst (siehe handlePrueferDaten unten).

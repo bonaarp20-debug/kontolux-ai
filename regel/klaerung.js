@@ -109,7 +109,9 @@ export function klaerungEinheit(uid, id, dok, kontext) {
   if (d.schema_version === 2 && k && nichtLeer(anfrageId) && k.anfrage_id === anfrageId && !g.code && g.quelle === 'v2') return { id, write: null, code: 'geklaert', idempotent: true };
   if (g.code) return { id, write: null, code: g.code };
   const s = g.steuer;
-  if (s.steuerfall !== 'UNBEKANNT' || s.wirkungslos === true) return { id, write: null, code: 'nicht_offen' };
+  // WORKER-C: ein schon als OSS-Fall erfasster Beleg (steuer.oss, bleibt UNBEKANNT bis zur Zuordnung über alle Belege) ist nicht mehr offen; keine
+  // Sammelklärung (auch nicht die APP-B2-Grundlage „unter der Grenze“) deutet ihn still um. Ändern nur über den Beleg selbst.
+  if (s.steuerfall !== 'UNBEKANNT' || s.wirkungslos === true || istObjekt(s.oss)) return { id, write: null, code: 'nicht_offen' };
   if (!KLAERBARE_ARTEN.includes(s.beleg_art)) return { id, write: null, code: 'nicht_aufloesbar' };
   if ((typeof s.unbekannt_grund === 'string' && !KLAERBARE_GRUENDE.includes(s.unbekannt_grund) && !zusatzGruende.includes(s.unbekannt_grund)) || NIE_KLAERBARE_DETAILS.includes(s.unbekannt_detail)) return { id, write: null, code: 'nicht_aufloesbar' };
   if (!KLAERUNG_WAHLEN[s.richtung] || !(KLAERUNG_WAHLEN[s.richtung].includes(steuerwahl) || zusatzWahlen.includes(steuerwahl))) return { id, write: null, code: 'wahl_passt_nicht' };
@@ -124,9 +126,16 @@ export function klaerungEinheit(uid, id, dok, kontext) {
     sEin = { ...s, gegenpartei: { ...gp, land: kontext.land.land, ...(kontext.land.gebiet ? { gebiet: kontext.land.gebiet } : {}) } };
   }
   let r;
-  try { r = Steuerkern.normalisiereEingabe(klaerungEingabe(id, sEin, steuerwahl), { profil, ...(stichtag ? { stichtag } : {}) }); } catch { return { id, write: null, code: 'kern_fehler' }; }
+  try {
+    // WORKER-C (Release C): pf.eingabe ergänzt die Kern-Eingabe (OSS: leistungsart, Kundenland, Satz der Plattform), nie Beträge oder Daten
+    const ein = klaerungEingabe(id, sEin, steuerwahl);
+    r = Steuerkern.normalisiereEingabe(pf && typeof pf.eingabe === 'function' ? pf.eingabe(ein) : ein, { profil, ...(stichtag ? { stichtag } : {}) });
+  } catch { return { id, write: null, code: 'kern_fehler' }; }
   const neu = r && r.beleg;
-  if (!neu || !istObjekt(neu.steuer) || neu.steuer.steuerfall === 'UNBEKANNT' || (r.pflichtfeld_fehler || []).length) return { id, write: null, code: 'nicht_aufloesbar' };
+  // WORKER-C: pf.ergebnis(neu) ersetzt die Regel "nicht mehr UNBEKANNT" (OSS: der Beleg bleibt UNBEKANNT/auslandskunde mit steuer.oss, die Zuordnung
+  // rechnet der Kern über alle Belege). Ohne pf.ergebnis unverändert.
+  const ergebnisOk = neu && istObjekt(neu.steuer) && (pf && typeof pf.ergebnis === 'function' ? pf.ergebnis(neu) === true : neu.steuer.steuerfall !== 'UNBEKANNT');
+  if (!ergebnisOk || (r.pflichtfeld_fehler || []).length) return { id, write: null, code: 'nicht_aufloesbar' };
   if (pf && Array.isArray(pf.steuerfaelle) && !pf.steuerfaelle.includes(neu.steuer.steuerfall)) return { id, write: null, code: 'wahl_passt_nicht' };
   let v;
   try { v = Steuerkern.validiereBeleg(neu, { modus: 'streng', ...(stichtag ? { stichtag } : {}) }); } catch { return { id, write: null, code: 'kern_fehler' }; }

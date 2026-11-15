@@ -16,18 +16,24 @@ export function antwort(objekt, status, cors = {}) {
 export function fehlerAntwort(status, code, cors, extra = {}) {
   return antwort({ ok: false, fehler: [{ code }], ...extra }, status, cors);
 }
+// WORKER-C: Endpunkt eines ausgeschalteten Features (Release C: oss). Code wie alle abgeschalteten regel/-Wege (die App zeigt dazu die ruhige
+// Meldung "vorübergehend abgeschaltet", regel/oss-ui.js fehlerArt); grund FEATURE_AUS unterscheidet es vom Notaus kern_max/migration.
+export function featureAusAntwort(cors) {
+  return antwort({ ok: false, fehler: [{ code: 'VORUEBERGEHEND_ABGESCHALTET', grund: 'FEATURE_AUS' }] }, 503, cors);
+}
 
 export const istObjekt = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 export const istText = (s, max) => typeof s === 'string' && s.length <= max;
 export const istDatum = (s) => typeof s === 'string' && Steuerkern.istDatum(s) && s >= '2000-01-01' && s <= '2100-12-31';
 
 // Grundprüfung jedes regel-Endpunkts: UID aus dem geprüften Token (body.userId setzt der Router), Größe, anfrage_id
-export function grundpruefung(body, { anfrageIdPflicht = true } = {}) {
+// WORKER-C: maxZeichen für Endpunkte mit größeren, streng geprüften Listen (POST /oss-meldung: bis 200 Zeilen und 200 Berichtigungen)
+export function grundpruefung(body, { anfrageIdPflicht = true, maxZeichen = BODY_MAX_ZEICHEN } = {}) {
   if (!istObjekt(body)) return 'BODY_UNGUELTIG';
   if (!UID_MUSTER.test(String(body.userId || ''))) return 'NICHT_ANGEMELDET';
   let groesse = 0;
   try { groesse = JSON.stringify(body).length; } catch { return 'BODY_UNGUELTIG'; }
-  if (groesse > BODY_MAX_ZEICHEN) return 'BODY_ZU_GROSS';
+  if (groesse > maxZeichen) return 'BODY_ZU_GROSS';
   if (anfrageIdPflicht && !ANFRAGE_ID_MUSTER.test(String(body.anfrage_id || ''))) return 'ANFRAGE_ID_UNGUELTIG';
   return null;
 }
@@ -73,16 +79,28 @@ export function agbFassungVergleich(a, b) {
 }
 // Funktionen aus Release B (gleich regel/loader.js FEATURES_AGB_RELEASE_B der App): ihre Kern-Regeln gelten nur mit Zustimmung ab AGB_FASSUNG_RELEASE_B.
 export const FEATURES_AGB_RELEASE_B = Object.freeze(['zahlung', 'korrektur', 'anlagegut', 'ausland', 'plattform', 'auszahlung', 'rechnung', 'erechnung', 'datev_import']);
+// WORKER-C (KERN-C Zuruf (2), vorbereitet): Kern-Regeln von Release-C-Funktionen (oss) sollen wie die Release-B-Regeln nur mit Zustimmung zur
+// AGB-Fassung von Release C wirken. Die Fassung bestimmen L-C/E-C (gleich regel/loader.js der App); bis dahin null = Bindung aus, Verhalten wie heute
+// (oss hängt nur am Feature). Aktivieren: AGB_FASSUNG_RELEASE_C auf die Fassung setzen (eine Stelle), Tests in test/worker-c-agb-release-c.test.mjs.
+// Liste aus dem Kern (KERN-C2 H8: Steuerkern.KERN_FEATURES_AGB.C), damit Kern, Lader und Worker dieselben Namen haben.
+export const FEATURES_AGB_RELEASE_C = Object.freeze([...(Steuerkern.KERN_FEATURES_AGB && Array.isArray(Steuerkern.KERN_FEATURES_AGB.C) ? Steuerkern.KERN_FEATURES_AGB.C : ['oss'])]);
+export const AGB_FASSUNG_RELEASE_C = null;
 // Kern-Optionen eines Kontos (E-B A2): wie kernOptionenFuer, aber Regeln von Release-B-Funktionen nur mit zustimmungB (sonst aus), wie der Lader.
-export function kernOptionenFuerKonto(config, zustimmungB) {
+// WORKER-C: mit fassungC (Standard AGB_FASSUNG_RELEASE_C) zusätzlich Release-C-Regeln nur mit zustimmungC.
+export function kernOptionenFuerKonto(config, zustimmungB, { zustimmungC = false, fassungC = AGB_FASSUNG_RELEASE_C } = {}) {
   const o = kernOptionenFuer(config);
   if (zustimmungB !== true) for (const [regel, feature] of Object.entries(Steuerkern.KERN_OPTION_FEATURES)) if (FEATURES_AGB_RELEASE_B.includes(feature)) o.regeln[regel] = false;
+  if (fassungC && zustimmungC !== true) for (const [regel, feature] of Object.entries(Steuerkern.KERN_OPTION_FEATURES)) if (FEATURES_AGB_RELEASE_C.includes(feature)) o.regeln[regel] = false;
   return o;
 }
-// Braucht diese Konfiguration die Zustimmung (ist mindestens eine Release-B-Regel global an)? Dann eine Unteranfrage, sonst keine.
-export function kernOptionenBrauchenZustimmung(config) {
+function regelAn(config, features) {
   const o = kernOptionenFuer(config);
-  return Object.entries(Steuerkern.KERN_OPTION_FEATURES).some(([regel, feature]) => o.regeln[regel] === true && FEATURES_AGB_RELEASE_B.includes(feature));
+  return Object.entries(Steuerkern.KERN_OPTION_FEATURES).some(([regel, feature]) => o.regeln[regel] === true && features.includes(feature));
+}
+// Braucht diese Konfiguration die Zustimmung (ist mindestens eine Release-B-Regel, mit fassungC auch eine Release-C-Regel, global an)? Dann eine
+// Unteranfrage, sonst keine.
+export function kernOptionenBrauchenZustimmung(config, { fassungC = AGB_FASSUNG_RELEASE_C } = {}) {
+  return regelAn(config, FEATURES_AGB_RELEASE_B) || (!!fassungC && regelAn(config, FEATURES_AGB_RELEASE_C));
 }
 // Hat das Konto einer Fassung ab mindest zugestimmt? Eine Unteranfrage (Liste agb_zustimmung, wenige Einträge je Konto). Fehler = nein (Altverhalten).
 // fs: vorhandene Schicht (Budget des Aufrufers), sonst eigene mit token/fetchFn.
@@ -98,9 +116,24 @@ export async function agbZustimmungAb(uid, mindest, { token, fetchFn, fs: schich
 }
 // FIX-EB (G-EB F1/F4): Kern-Optionen eines Kontos an EINER Stelle (Festschreibung und Sperrprüfung beim Schreiben): config/features plus Zustimmung
 // je Konto aus agb_zustimmung (dieselbe Quelle wie der Lader der App). Eine Unteranfrage nur, wenn eine Release-B-Regel global an ist.
-export async function kernOptionenFuerKontoLaden(uid, config, { fs, streng = false } = {}) {
-  const zustimmung = kernOptionenBrauchenZustimmung(config) ? await agbZustimmungAb(uid, AGB_FASSUNG_RELEASE_B, { fs, streng }) : false;
-  return kernOptionenFuerKonto(config, zustimmung);
+export async function kernOptionenFuerKontoLaden(uid, config, { fs, streng = false, fassungC = AGB_FASSUNG_RELEASE_C } = {}) {
+  if (!(fassungC && regelAn(config, FEATURES_AGB_RELEASE_C))) {
+    const zustimmung = kernOptionenBrauchenZustimmung(config, { fassungC: null }) ? await agbZustimmungAb(uid, AGB_FASSUNG_RELEASE_B, { fs, streng }) : false;
+    return kernOptionenFuerKonto(config, zustimmung, { fassungC });
+  }
+  // WORKER-C: Release-C-Bindung aktiv: EINE Unteranfrage (Liste agb_zustimmung) für beide Fassungen
+  const fassungen = await agbFassungenLaden(uid, { fs, streng });
+  const ab = (mindest) => fassungen.some((v) => (agbFassungVergleich(v, mindest) ?? -1) >= 0);
+  return kernOptionenFuerKonto(config, ab(AGB_FASSUNG_RELEASE_B), { zustimmungC: ab(fassungC), fassungC });
+}
+// Alle zugestimmten Fassungen eines Kontos (eine Unteranfrage). Fehler = keine (Altverhalten), mit streng geworfen.
+export async function agbFassungenLaden(uid, { token, fetchFn, fs: schicht, streng = false } = {}) {
+  try {
+    if (!UID_MUSTER.test(String(uid || ''))) return [];
+    const fs = schicht || erzeugeSchicht({ token, fetchFn, budget: 1 });
+    const l = await fs.list(`users/${uid}/agb_zustimmung`, { pageSize: 100 });
+    return l.dokumente.map((d) => (istObjekt(d && d.daten) ? d.daten.version : null)).filter((v) => typeof v === 'string');
+  } catch (e) { if (streng) throw e; return []; }
 }
 
 // Bereinigt ein gelesenes config/features-Dokument. Unbekannte oder kaputte Werte gelten als 'aus' (migration-rollout.md 6.2).
