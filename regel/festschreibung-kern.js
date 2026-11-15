@@ -149,6 +149,8 @@ export function vorfilterFenster(periodeId) {
 // Monat (JJJJ-MM) einer EÜR-Wirkung: das Jahr kommt aus der Kern-Wirkung (periode, nach der Zehn-Tage-Regel ggf. das Nachbarjahr des Zahlungstags),
 // der Monat aus datum_wirk; liegt datum_wirk außerhalb des zugeordneten Jahres, der Rand dieses Jahres (Zahlung bis 10.01. fürs Vorjahr: Dezember;
 // Zahlung kurz vor dem 31.12. fürs Folgejahr: Januar). So ergeben die zwölf Monate zusammen genau die Jahres-EÜR des Kerns (euerFuer).
+// N1 (15.11.2026): QUELLTEXT GLEICH Kontolux/regel/euer-ui-daten.js euerMonatDerWirkung (EÜR-Ansicht, Dashboard, Monatsabschluss-Vergleich);
+// Kontolux/scripts/test-n1-euer-monat-zehntage.mjs vergleicht den Quelltext und füttert beide Pfade mit denselben Fällen. Nur gemeinsam ändern.
 export function euerMonatDerWirkung(w) {
   if (!w || typeof w.datum_wirk !== 'string' || !/^\d{4}-\d{2}-\d{2}/.test(w.datum_wirk) || typeof w.periode !== 'string' || !/^\d{4}$/.test(w.periode)) return null;
   const j = w.periode;
@@ -178,8 +180,13 @@ export function snapshotFuer(zeilenAlle, profil, periodeId, { gefiltert = true }
   } else {
     const jahr = Number(p.periode.slice(0, 4));
     // EÜR-Wirkungen nach ihrem Monat im zugeordneten Jahr (euerMonatDerWirkung, Zehn-Tage-Regel), übrige Wirkungen (USt-Welt, nur für die Liste
-    // der nicht berücksichtigten Belege) mit Wirkdatum im Monat. Wirkungen ohne Wirkdatum gehören zu keinem Monat (Jahres-EÜR: nicht berechnet)
-    const imMonat = wirkungen.filter((w) => (w && w.welt === 'euer' ? euerMonatDerWirkung(w) === p.periode : typeof w.datum_wirk === 'string' && w.datum_wirk >= start && w.datum_wirk <= ende));
+    // der nicht berücksichtigten Belege) mit Wirkdatum im Monat oder (N1) mit einer gesperrten Zahlung (euer_zahlungen) in diesem Monat: euerFuer
+    // sperrt die Jahres-EÜR über diese Zahlungen (R-EUER-37), also muss auch der Monat der Zahlung unvollständig sein. Jahr der Zahlung wie euerFuer
+    // (z.jahr: Zehn-Tage-Fenster einer Finanzamt-Zahlung ohne Art, sonst das Zahlungsjahr), Monat nach euerMonatDerWirkung. Gleiche Zuordnung wie
+    // die App (regel/euer-ui-daten.js abweichungMonatsabschluss). Ohne Wirkdatum und ohne solche Zahlung gehört eine Wirkung zu keinem Monat.
+    const zahlungImMonat = (w) => (w.status === 'ausgeschlossen' || w.status === 'unbekannt') && Array.isArray(w.euer_zahlungen) && w.euer_zahlungen.some((z) => z && typeof z.datum === 'string'
+      && euerMonatDerWirkung({ periode: typeof z.jahr === 'string' ? z.jahr.padStart(4, '0') : z.datum.slice(0, 4), datum_wirk: z.datum }) === p.periode);
+    const imMonat = wirkungen.filter((w) => (w && w.welt === 'euer' ? euerMonatDerWirkung(w) === p.periode : (typeof w.datum_wirk === 'string' && w.datum_wirk >= start && w.datum_wirk <= ende) || (w && w.welt === 'ust' && zahlungImMonat(w))));
     const e = Steuerkern.euerFuer(imMonat, profil, jahr);
     for (const w of imMonat) if (w.welt === 'euer' && w.periode === String(jahr) && typeof w.beleg_id === 'string' && w.beleg_id) ids.add(w.beleg_id);
     const z = zeilenAus(e.kennzahlen);
