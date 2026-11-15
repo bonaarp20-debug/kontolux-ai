@@ -8,6 +8,20 @@
 export const FIRESTORE_WURZEL = 'https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents';
 // FIX-RB N6 (G-RB): zaehler (benannte Zähler, regel/zaehler.js) gehört mit in Archiv, Löschlauf, Speicher-Umzug und Export
 export const REGEL_SAMMLUNGEN = Object.freeze(['steuerprofil', 'festschreibung', 'audit_v2', 'migration', 'rechnungsnummern', 'zaehler']);
+// FIX-L (G-RECHT-B F-D3): Profil-Dokumente ohne Aufbewahrungspflicht, die schon die Kontolöschung (/konto-archivieren) entfernt.
+// selbsttest: Ergebnis des Abgleichs im Hintergrund (Zählwerte, Zeitpunkt, Version, Fingerabdruck), keine Unterlage nach § 147 AO.
+// Für vorher archivierte Konten räumt der Nachlauf nach der Kontolöschung es ab (NACHLAUF_PROFIL in regel/loeschlaeufe-konto.js).
+export const ARCHIV_LOESCHEN_PROFIL = Object.freeze(['selbsttest']);
+
+// Löscht die Dokumente aus ARCHIV_LOESCHEN_PROFIL mit einer Anfrage (batchWrite; ein fehlendes Dokument ist kein Fehler)
+export async function profilRestLoeschen(uid, token, fetchFn = globalThis.fetch) {
+  const res = await fetchFn(`${FIRESTORE_WURZEL}:batchWrite`, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ writes: ARCHIV_LOESCHEN_PROFIL.map((d) => ({ delete: `projects/kontolux-ai/databases/(default)/documents/users/${uid}/profil/${d}` })) }),
+  });
+  if (!res.ok) throw new Error(`Profil-Rest löschen fehlgeschlagen (${res.status})`);
+  return ARCHIV_LOESCHEN_PROFIL.length;
+}
 // Unterkollektionen je Sammlung (chats/messages räumt der Löschlauf schon heute je Chat ab)
 export const UNTERSAMMLUNGEN = Object.freeze({ chats: ['messages'], steuerprofil: ['verlauf'], dokumente: ['versionen'] });
 // Für den Löschlauf und den Export über allDescendants (messages bleibt beim bisherigen Weg je Chat)

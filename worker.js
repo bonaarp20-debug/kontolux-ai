@@ -23,7 +23,7 @@ import { v2Vorbereiten, clientSteuerVorbereiten, v2RestFelder } from './regel/sc
 import { agbZustimmungAb, AGB_FASSUNG_RELEASE_B } from './regel/gemeinsam.js'; // KX-EB A6
 import { plattformAuswerten, plattformFeatureAn, plattformEingabe, plattformSteuerKennzeichnen, plattformDatenFeld, originalZurErstattung, stripeChargeLaden, paypalOrderLaden, refBereinigen, waehrungCode, hinweisAusland, HINWEIS_LAND_FEHLT } from './regel/plattform.js';
 import { kodiereWert as kodiereFirestoreWert } from './regel/firestore.js';
-import { REGEL_SAMMLUNGEN, REGEL_UNTERSAMMLUNGEN, untersammlungenLoeschen, untersammlungenExport, untersammlungLesen } from './regel/archiv.js';
+import { REGEL_SAMMLUNGEN, REGEL_UNTERSAMMLUNGEN, untersammlungenLoeschen, untersammlungenExport, untersammlungLesen, profilRestLoeschen } from './regel/archiv.js';
 // KX-N7: Speicherdauer-Löschläufe (regel/loeschlaeufe*.js), alle hinter Schaltern LOESCHLAUF_* (Standard aus)
 import { loeschModus, kontext as loeschKontext } from './regel/loeschlaeufe.js';
 import { integrationTrennen } from './regel/loeschlaeufe-konto.js';
@@ -3888,6 +3888,8 @@ async function handleKontoArchivieren(env, cors = {}, verifiedUid, verifiedEmail
     for (const coll of ARCHIV_LOESCHEN_COLLECTIONS) {
       await loescheAlleUnterPfad(`users/${userId}/${coll}`, adminToken);
     }
+    // FIX-L (G-RECHT-B F-D3): Selbsttest-Ergebnis am Konto (profil/selbsttest) ist keine Buchungsunterlage, geht mit der Kontolöschung
+    await profilRestLoeschen(userId, adminToken, fetch);
 
     // Newsletter/Erinnerung: Adresse aus der Abo-Liste nehmen, sonst bekäme ein gesperrtes Konto weiter Mails
     try { if (verifiedEmail && env.ABO_KV) await env.ABO_KV.delete(verifiedEmail); } catch (e) { console.warn('Abo-Eintrag nicht entfernt:', e.message); }

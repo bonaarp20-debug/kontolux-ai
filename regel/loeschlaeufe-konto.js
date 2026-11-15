@@ -182,9 +182,10 @@ export async function kontoLoeschenSchritt(ctx, uid, art, modus) {
 
 // ── Nachlauf nach der Kontolöschung (A5, B2, B8, B5) ───────────────────────────────────────────────────────────
 // Nur für archivierte Konten (profil/konto_archiv mit grund kontoloeschung). Belege, Steuerprofil, Festschreibung, audit_v2 und alle
-// Belegdateien bleiben; gelöscht werden nur: nachrichtenlimit/{uid}, Feedback mit userId, profil/kalender, profil/prognose und Dateien
+// Belegdateien bleiben; gelöscht werden nur: nachrichtenlimit/{uid}, Feedback mit userId, profil/kalender, profil/prognose,
+// profil/selbsttest (FIX-L, G-RECHT-B F-D3: für Konten, die vor dem Löschen in /konto-archivieren archiviert wurden) und Dateien
 // unter users/{uid}/uploads/, auf die kein Dokument des Kontos verweist (Pfad, URL-kodierter Pfad oder Dateiname im Dokument).
-export const NACHLAUF_PROFIL = Object.freeze(['kalender', 'prognose']);
+export const NACHLAUF_PROFIL = Object.freeze(['kalender', 'prognose', 'selbsttest']);
 const UPLOAD_KANDIDATEN_MAX = 2000;
 
 export async function nachlaufSchritt(ctx, uid, modus, archivWert = null) {
