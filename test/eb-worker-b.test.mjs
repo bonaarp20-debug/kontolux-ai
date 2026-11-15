@@ -111,3 +111,21 @@ test('(3) Release-B-Features: im Worker ohne Eintrag aus, Namen gültig', () => 
     assert.equal(featureAktiv(configBereinigen({ kern_max: 'an', features: { [name]: 'an' } }), name), true, name);
   }
 });
+
+test('(4) A6: agbFassungVergleich numerisch, agbZustimmungAb aus agb_zustimmung (Fehler/fehlend = nein)', async () => {
+  const { agbFassungVergleich, agbZustimmungAb, AGB_FASSUNG_RELEASE_B } = await import('../regel/gemeinsam.js');
+  assert.equal(AGB_FASSUNG_RELEASE_B, '2026-11-15-1');
+  assert.ok(agbFassungVergleich('2026-11-15-1', '2026-11-14-1') > 0);
+  assert.ok(agbFassungVergleich('2026-11-15-10', '2026-11-15-9') > 0, 'n numerisch');
+  assert.equal(agbFassungVergleich('2026-11-15-1', '2026-11-15-1'), 0);
+  assert.equal(agbFassungVergleich('x', '2026-11-15-1'), null);
+  const fs = fakeFirestore();
+  const opt = { token: 't', fetchFn: fs.fetchFn };
+  assert.equal(await agbZustimmungAb(UID, '2026-11-15-1', opt), false, 'kein Nachweis');
+  fs.setze(`users/${UID}/agb_zustimmung/z1`, { version: '2026-11-14-1', quelle: 'dialog' });
+  assert.equal(await agbZustimmungAb(UID, '2026-11-15-1', opt), false, 'ältere Fassung');
+  fs.setze(`users/${UID}/agb_zustimmung/z2`, { version: '2026-11-15-1', quelle: 'dialog' });
+  assert.equal(await agbZustimmungAb(UID, '2026-11-15-1', opt), true);
+  assert.equal(await agbZustimmungAb('../x', '2026-11-15-1', opt), false, 'ungültige UID');
+  assert.equal(await agbZustimmungAb(UID, '2026-11-15-1', { token: 't', fetchFn: async () => { throw new Error('netz'); } }), false, 'Fehler = nein');
+});

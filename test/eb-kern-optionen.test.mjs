@@ -37,9 +37,10 @@ const A = { typ: 'rechnung_ausgehend', betrag: 119, betrag_netto: 100, mwst_satz
 const AN = { kern_max: 'an', features: { festschreibung: 'an', ausland: 'an' } };
 const AUS = { kern_max: 'an', features: { festschreibung: 'an' } };
 
-function umgebung(config) {
+function umgebung(config, { zustimmung = '2026-11-15-1' } = {}) {
   const fs = fakeFirestore();
   fs.setze('config/features', config);
+  if (zustimmung) fs.setze(`users/${UID}/agb_zustimmung/z1`, { version: zustimmung, quelle: 'dialog' }); // E-B A2: Release-B-Regeln nur mit Zustimmung
   fs.setze(`users/${UID}/steuerprofil/aktuell`, PROFIL);
   fs.setze(D('a'), A);
   fs.setze(D('rc1'), rc());
@@ -145,4 +146,22 @@ test('wirkPerioden mit Optionen: Reverse-Charge-Beleg wirkt mit rc_eingang in se
   const mit = wirkPerioden(b, PROFIL, kernOptionenFuer(configBereinigen(AN)));
   assert.ok(mit.includes('ust-2026-Q3'), JSON.stringify(mit));
   assert.deepEqual(wirkPerioden(b, PROFIL, Steuerkern.optionenAusFeatures({})), ohne);
+});
+
+test('A2: ohne Zustimmung zur Fassung 2026-11-15-1 rechnet die Festschreibung ohne Release-B-Regeln (wie der Lader der App), mit Zustimmung mit', async () => {
+  const opt = kernOptionenFuer(configBereinigen(AN));
+  const aus = Steuerkern.optionenAusFeatures({});
+  let u = umgebung(AN, { zustimmung: '2026-11-14-1' });
+  let r = await u.rufe({ aktion: 'festschreiben', unvollstaendig_bestaetigt: true, periode_id: 'ust-2026-Q3', snapshot: u.snapClient('ust-2026-Q3', aus), kern_optionen: aus });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(u.fs.lies(F('ust-2026-Q3')).kern_optionen.regeln.rc_eingang, false);
+  u = umgebung(AN, { zustimmung: null });
+  r = await u.rufe({ aktion: 'festschreiben', unvollstaendig_bestaetigt: true, periode_id: 'ust-2026-Q3', snapshot: u.snapClient('ust-2026-Q3', opt), kern_optionen: opt });
+  assert.equal(r.json.fehler[0].code, 'KERN_OPTIONEN_ABWEICHUNG');
+  assert.equal(r.json.kern_optionen.regeln.rc_eingang, false);
+  // kz39_verzicht hängt an voranmeldung (Release A) und gilt ohne neue Zustimmung
+  const { kernOptionenFuerKonto } = await import('../regel/gemeinsam.js');
+  const alle = configBereinigen({ kern_max: 'an', features: { ausland: 'an', korrektur: 'an', anlagegut: 'an', voranmeldung: 'an' } });
+  assert.deepEqual(kernOptionenFuerKonto(alle, false).regeln, { anlagegut_vorsteuer_sofort: false, kz39_verzicht: true, rc_eingang: false, uneinbringlichkeit: false });
+  assert.deepEqual(kernOptionenFuerKonto(alle, true), kernOptionenFuer(alle));
 });

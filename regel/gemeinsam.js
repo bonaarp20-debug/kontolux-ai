@@ -57,6 +57,43 @@ const FEATURE_STANDARD = { steuerprofil: true, migration: false, festschreibung:
 // Die Liste dient Drehbuch, Vorprüfung und dem Paritätstest gegen regel/loader.js FEATURES (App); sie schaltet nichts.
 export const FEATURES_RELEASE_B = Object.freeze(['korrektur', 'anlagegut', 'auszahlung']);
 
+// E-B (G-RECHT-B F-M3, Auflage A6): Mindestfassung der Nutzungsbedingungen für Release-B-Funktionen, die der Worker selbst anwendet (plattform im
+// Webhook). Maßgeblich ist der Zustimmungsnachweis users/{uid}/agb_zustimmung (nur der Worker schreibt, POST /agb-zustimmung), nicht das vom Client
+// schreibbare profil/settings.agbVersion. Gleiche Fassung wie regel/loader.js AGB_MINDESTFASSUNG_B (App).
+export const AGB_FASSUNG_RELEASE_B = '2026-11-15-1';
+const AGB_FASSUNG = /^(\d{4}-\d{2}-\d{2})-([1-9]\d{0,2})$/;
+// Vergleich zweier Fassungen 'JJJJ-MM-TT-n' (n numerisch): <0, 0, >0; null bei ungültiger Form.
+export function agbFassungVergleich(a, b) {
+  const x = typeof a === 'string' ? AGB_FASSUNG.exec(a) : null;
+  const y = typeof b === 'string' ? AGB_FASSUNG.exec(b) : null;
+  if (!x || !y) return null;
+  if (x[1] !== y[1]) return x[1] < y[1] ? -1 : 1;
+  return Number(x[2]) - Number(y[2]);
+}
+// Funktionen aus Release B (gleich regel/loader.js FEATURES_AGB_RELEASE_B der App): ihre Kern-Regeln gelten nur mit Zustimmung ab AGB_FASSUNG_RELEASE_B.
+export const FEATURES_AGB_RELEASE_B = Object.freeze(['zahlung', 'korrektur', 'anlagegut', 'ausland', 'plattform', 'auszahlung', 'rechnung', 'erechnung', 'datev_import']);
+// Kern-Optionen eines Kontos (E-B A2): wie kernOptionenFuer, aber Regeln von Release-B-Funktionen nur mit zustimmungB (sonst aus), wie der Lader.
+export function kernOptionenFuerKonto(config, zustimmungB) {
+  const o = kernOptionenFuer(config);
+  if (zustimmungB !== true) for (const [regel, feature] of Object.entries(Steuerkern.KERN_OPTION_FEATURES)) if (FEATURES_AGB_RELEASE_B.includes(feature)) o.regeln[regel] = false;
+  return o;
+}
+// Braucht diese Konfiguration die Zustimmung (ist mindestens eine Release-B-Regel global an)? Dann eine Unteranfrage, sonst keine.
+export function kernOptionenBrauchenZustimmung(config) {
+  const o = kernOptionenFuer(config);
+  return Object.entries(Steuerkern.KERN_OPTION_FEATURES).some(([regel, feature]) => o.regeln[regel] === true && FEATURES_AGB_RELEASE_B.includes(feature));
+}
+// Hat das Konto einer Fassung ab mindest zugestimmt? Eine Unteranfrage (Liste agb_zustimmung, wenige Einträge je Konto). Fehler = nein (Altverhalten).
+// fs: vorhandene Schicht (Budget des Aufrufers), sonst eigene mit token/fetchFn.
+export async function agbZustimmungAb(uid, mindest, { token, fetchFn, fs: schicht } = {}) {
+  try {
+    if (!UID_MUSTER.test(String(uid || ''))) return false;
+    const fs = schicht || erzeugeSchicht({ token, fetchFn, budget: 1 });
+    const l = await fs.list(`users/${uid}/agb_zustimmung`, { pageSize: 100 });
+    return l.dokumente.some((d) => istObjekt(d && d.daten) && (agbFassungVergleich(d.daten.version, mindest) ?? -1) >= 0);
+  } catch { return false; }
+}
+
 // Bereinigt ein gelesenes config/features-Dokument. Unbekannte oder kaputte Werte gelten als 'aus' (migration-rollout.md 6.2).
 export function configBereinigen(roh) {
   if (!istObjekt(roh)) return null;

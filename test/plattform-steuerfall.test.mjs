@@ -76,7 +76,8 @@ globalThis.fetch = async (input, init = {}) => {
     const q = new URLSearchParams(query);
     if (method === 'GET') {
       if (pfad === 'config/features') zaehler.configGet++;
-      if (q.has('pageSize')) return json(200, { documents: [] });
+      // E-B (A6): Liste einer Untersammlung (agb_zustimmung) aus den gespeicherten Dokumenten; sonst leer wie bisher
+      if (q.has('pageSize')) return json(200, { documents: [...docs.entries()].filter(([x]) => x.startsWith(pfad + '/') && x.split('/').length === pfad.split('/').length + 1).map(([x, f]) => ({ name: NAME + x, fields: f, updateTime: '2026-11-15T00:00:00Z' })) });
       return docs.has(pfad) ? json(200, { name: NAME + pfad, fields: docs.get(pfad), updateTime: '2026-11-15T00:00:00Z' }) : json(404, {});
     }
     if (method === 'PATCH') {
@@ -154,7 +155,12 @@ const PP_H = () => ({ 'Content-Type': 'application/json', 'PAYPAL-AUTH-ALGO': 'S
 async function paypal(uid, event) { return post(uid, 'paypal', JSON.stringify(event), PP_H()); }
 async function ablefy(uid, payload) { return post(uid, 'ablefy', JSON.stringify(payload), { 'Content-Type': 'application/json' }); }
 
-function einrichten(uid) {
+// E-B (A6, G-RECHT-B F-M3): Feature plattform wirkt nur für Konten mit Zustimmung zur Fassung ab 2026-11-15-1 (users/{uid}/agb_zustimmung, nur Worker)
+function zustimmen(uid, version = '2026-11-15-1') {
+  docs.set(`users/${uid}/agb_zustimmung/z${version.replace(/-/g, '')}`, { version: S(version), quelle: S('dialog'), zeitquelle: S('worker') });
+}
+function einrichten(uid, { zustimmung = '2026-11-15-1' } = {}) {
+  if (zustimmung) zustimmen(uid, zustimmung);
   config(uid, 'shopify', { webhook_secret: SHOPIFY_KEY });
   config(uid, 'stripe', { stripe_signing_secret: STRIPE_KEY });
   config(uid, 'mollie', { api_key: 'live_mollie_bp21a' });
@@ -369,6 +375,26 @@ test('Feature aus (kein config/features, plattform aus, kaputter Wert): Dokument
   assert.deepEqual(ergebnisse[2], ergebnisse[0]);
 });
 
+test('E-B A6: Feature an, aber ohne Zustimmung zur Fassung 2026-11-15-1 (keine oder nur 2026-11-14-1): Dokumente byte-gleich wie Feature aus, kein Abruf', async () => {
+  env = { ...BASIS_ENV };
+  setzeFeatures(null);
+  const ref = uidNeu('a6ref');
+  einrichten(ref, { zustimmung: null });
+  await alleSenden(ref);
+  const soll = vergleichbar(ref);
+  for (const zustimmung of [null, '2026-11-14-1']) {
+    setzeFeatures({ kern_max: 'aus', features: { plattform: 'an' } });
+    const uid = uidNeu('a6');
+    einrichten(uid, { zustimmung });
+    const vorher = { ...zaehler };
+    await alleSenden(uid);
+    assert.equal(zaehler.stripeCharge, vorher.stripeCharge, 'kein Stripe-Abruf');
+    assert.equal(zaehler.paypalOrder, vorher.paypalOrder, 'kein Order-Abruf');
+    for (const { d } of belege(uid)) assert.equal(d.plattform_daten, undefined, String(zustimmung));
+    assert.deepEqual(vergleichbar(uid), soll, `Zustimmung ${zustimmung}: wie Feature aus`);
+  }
+});
+
 test('Feature an: Auslandskunden nie mit deutschem Satz, DE wie heute, fehlendes Land mit Hinweis, Erstattungen mit Bezug', async () => {
   env = { ...BASIS_ENV };
   setzeFeatures({ kern_max: 'aus', features: { plattform: 'an' } });
@@ -459,6 +485,7 @@ test('Stripe-Abruf: mit Schlüssel und kaputter API -> Land fehlt, Beleg gespeic
   env = { ...BASIS_ENV };
   setzeFeatures({ kern_max: 'aus', features: { plattform: 'an' } });
   const uid = uidNeu('stripe');
+  zustimmen(uid); // E-B A6
   config(uid, 'stripe', { stripe_signing_secret: STRIPE_KEY, api_key: 'rk_live_bp21a_nur_lesen' });
   stripeCharges.set('ch_pf_at_003', FX('stripe-charge-at'));
   const v = zaehler.stripeCharge;
@@ -484,6 +511,7 @@ test('PayPal-Abruf scheitert -> Beleg gespeichert, Satz aus der Einstellung, Hin
   env = { ...BASIS_ENV };
   setzeFeatures({ kern_max: 'aus', features: { plattform: 'an' } });
   const uid = uidNeu('pp');
+  zustimmen(uid); // E-B A6
   config(uid, 'paypal', { client_id: 'AbCdLiveBP21a', client_secret: 'live_secret_bp21a', webhook_id: 'WH-BP21A' });
   const ev = { ...FX('paypal-fr'), id: 'WH-PF-X', resource: { ...FX('paypal-fr').resource, id: 'CAP-X', supplementary_data: { related_ids: { order_id: 'ORDER-GIBTS-NICHT' } } } };
   assert.equal((await paypal(uid, ev)).status, 200);

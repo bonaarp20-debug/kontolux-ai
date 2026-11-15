@@ -20,6 +20,7 @@ import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLese
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
 import { v2Vorbereiten, clientSteuerVorbereiten, v2RestFelder } from './regel/schreibweg-v2.js';
 // BP-21a-W (Phase 3): Steuerdaten je Plattformbeleg, OSS-Datenbasis, hinter Feature 'plattform'
+import { agbZustimmungAb, AGB_FASSUNG_RELEASE_B } from './regel/gemeinsam.js'; // KX-EB A6
 import { plattformAuswerten, plattformFeatureAn, plattformEingabe, plattformSteuerKennzeichnen, plattformDatenFeld, originalZurErstattung, stripeChargeLaden, paypalOrderLaden, refBereinigen, waehrungCode, hinweisAusland, HINWEIS_LAND_FEHLT } from './regel/plattform.js';
 import { kodiereWert as kodiereFirestoreWert } from './regel/firestore.js';
 import { REGEL_SAMMLUNGEN, REGEL_UNTERSAMMLUNGEN, untersammlungenLoeschen, untersammlungenExport, untersammlungLesen } from './regel/archiv.js';
@@ -7328,7 +7329,7 @@ async function handleStripeWebhook(request, url, env, cors) {
     // bewusst KEINE Einnahmen-Kategorie — die Nutzer-Einstellung "Meine Stripe-EINNAHMEN
     // unterliegen..." bezieht sich nur auf Zahlungseingänge.
     // BP-21a-W: Kundenland (PaymentIntent.shipping; Charge nur mit optionalem Schlüssel des Nutzers), Erstattung mit Bezug
-    const plattformAn = await plattformFeatureAktiv(adminToken);
+    const plattformAn = await plattformFeatureAktiv(adminToken, userId); // KX-EB A6
     let pfKategorie = null;
     if (plattformAn) {
       const obj = event.data?.object || {};
@@ -7633,7 +7634,7 @@ async function handleMollieWebhook(request, url, env, cors) {
     // Duplikat-Check der Zahlung, Erstattungen gingen so nie in die Buchhaltung. Jetzt: Zahlung nur
     // einmal buchen, danach bei JEDEM Aufruf Erstattungen/Rückbuchungen der Zahlung abgleichen.
     let docId = null;
-    const plattformAn = await plattformFeatureAktiv(adminToken);
+    const plattformAn = await plattformFeatureAktiv(adminToken, userId); // KX-EB A6
     if (!(await isAlreadyProcessed(userId, payment.id, adminToken))) {
       const belegData = mollieEventToBeleg(payment);
 
@@ -8374,7 +8375,7 @@ async function handlePaypalWebhook(request, url, env, cors) {
 
     const belegData = paypalEventToBeleg(event);
     // BP-21a-W: Kundenland aus der Order (Capture hat keine Adresse), Erstattung mit Bezug auf die Capture (nur bei Feature 'plattform' an)
-    const plattformAn = await plattformFeatureAktiv(adminToken);
+    const plattformAn = await plattformFeatureAktiv(adminToken, userId); // KX-EB A6
     let pfKategorie = null;
     if (plattformAn) {
       const res = event.resource || {};
@@ -8897,7 +8898,7 @@ async function handleAblefyWebhook(request, url, env, cors) {
     // ── MwSt-Setting + Sachkonto — nur für die Einnahme, nicht für die Rückerstattung, analog
     // zu handleStripeWebhook (charge.refunded bekommt dort ebenfalls keine Einnahmen-Kategorie).
     // BP-21a-W: nur im Seller-Modell (eigener Name) ist der Endkunde Vertragspartner; Reseller-Modell unverändert, keine Kundendaten
-    const plattformAn = ablefyModell === 'eigener_name' && await plattformFeatureAktiv(adminToken);
+    const plattformAn = ablefyModell === 'eigener_name' && await plattformFeatureAktiv(adminToken, userId); // KX-EB A6
     let pfKategorie = null;
     if (plattformAn) {
       ({ kategorie: pfKategorie } = await steuerfallFuerPlattformBeleg('ablefy', belegData, payload, {
@@ -8973,8 +8974,11 @@ async function handleAblefyWebhook(request, url, env, cors) {
 // ── BP-21a-W (Phase 3 Release B): Steuerdaten je Plattformbeleg, OSS-Datenbasis (PF-087) ─────────────────────────────────────
 // Gemeinsam für Stripe, Mollie, PayPal, Ablefy (eigener Name) und Shopify; Logik in regel/plattform.js. Nur bei Feature 'plattform' an
 // (config/features, Standard aus; aus = Verhalten wie heute, kein Feld, kein Abruf). Land ungleich DE -> nie Satz aus der Einstellung.
-async function plattformFeatureAktiv(adminToken) {
-  return plattformFeatureAn({ token: adminToken, fetchFn: (...a) => fetch(...a) });
+// KX-EB (G-RECHT-B F-M3, A6): plattform nur für Konten mit Zustimmung zur Fassung ab AGB_FASSUNG_RELEASE_B; die Prüfung (eine Unteranfrage) läuft nur,
+// wenn das Feature global an ist. Ohne Zustimmung: Altverhalten (Satz aus der Integrationseinstellung, kein plattform_daten).
+async function plattformFeatureAktiv(adminToken, userId) {
+  if (!(await plattformFeatureAn({ token: adminToken, fetchFn: (...a) => fetch(...a) }))) return false;
+  return agbZustimmungAb(userId, AGB_FASSUNG_RELEASE_B, { token: adminToken, fetchFn: (...a) => fetch(...a) });
 }
 
 /**
@@ -9167,7 +9171,7 @@ async function handleShopifyWebhook(request, url, env, cors) {
     }
 
     // BP-21a-W: Kundenland, Steuerzeilen, Währung, Erstattung mit Bezug (nur bei Feature 'plattform' an)
-    const plattformAn = await plattformFeatureAktiv(adminToken);
+    const plattformAn = await plattformFeatureAktiv(adminToken, userId); // KX-EB A6
     let pfKategorie = null;
     if (plattformAn) {
       const istErst = topic === 'refunds/create';
