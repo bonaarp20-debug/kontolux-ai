@@ -3799,8 +3799,14 @@ async function handleKontoArchivieren(env, cors = {}, verifiedUid, verifiedEmail
     // Chats samt Nachrichten-Unterkollektion (keine Aufbewahrungspflicht)
     const chatsPfad = `users/${userId}/chats`;
     // KX-N7 (A4): Nachrichten aller Chats gebündelt (allDescendants je 300, batchWrite je 400), dann die Chats; unabhängig von der Chatzahl
-    await untersammlungenLoeschen(userId, adminToken, fetch, ['messages']);
-    await loescheAlleUnterPfad(chatsPfad, adminToken);
+    // KX-N7-Rückfall: lehnt Firestore die gebündelte Abfrage ab, läuft der bisherige Weg (je Chat), damit die Kontolöschung nie daran scheitert
+    try {
+      await untersammlungenLoeschen(userId, adminToken, fetch, ['messages']);
+      await loescheAlleUnterPfad(chatsPfad, adminToken);
+    } catch (e) {
+      console.warn('Chat-Löschung gebündelt fehlgeschlagen, bisheriger Weg:', e.message);
+      await loescheAlleUnterPfad(chatsPfad, adminToken, 'messages');
+    }
 
     for (const coll of ARCHIV_LOESCHEN_COLLECTIONS) {
       await loescheAlleUnterPfad(`users/${userId}/${coll}`, adminToken);
