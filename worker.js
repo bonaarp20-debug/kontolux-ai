@@ -13,6 +13,7 @@ import { regelSteuerprofil } from './regel/steuerprofil.js';
 import { regelFestschreibung } from './regel/festschreibung.js';
 import { regelMigration } from './regel/migration.js';
 import { regelKlaerungBeleg } from './regel/klaerung-beleg.js'; // KX-VD
+import { regelZaehler, ZAEHLER_PFADE } from './regel/zaehler.js'; // KX-RB (BP-19)
 import { regelAdminFeatures } from './regel/admin-features.js';
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
@@ -379,6 +380,7 @@ const UID_LIMITS = {
   // R2: Zustimmungsnachweis (Dialog, Registrierung, Wiederholung beim nächsten Start)
   '/agb-zustimmung':                 { limit: 10, windowMs: 10 * 60 * 1000 },
 };
+for (const p of ZAEHLER_PFADE) UID_LIMITS[p] = { limit: 60, windowMs: 10 * 60 * 1000 }; // KX-RB: Nummern je Nutzer (Wiederholungen bei Konflikt eingerechnet)
 
 // ── Haupt-Router ──────────────────────────────────────────
 export default {
@@ -571,6 +573,7 @@ export default {
       // Token, nie vom Client, sonst könnte jeder Verifizierungsmails an beliebige
       // Adressen auslösen (Spam-Vektor).
       const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/stripe-gebuehren', '/usage', '/abo', '/konto-archivieren', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/auszug-rueckmeldung', '/pruefer-zugang', '/freigabe-status', '/steuerprofil', '/festschreibung', '/entsperren', '/migration', '/agb-zustimmung'];
+      protectedPaths.push(...ZAEHLER_PFADE); // KX-RB
 
       if (protectedPaths.includes(url.pathname)) {
         try {
@@ -607,6 +610,7 @@ export default {
           // Token die kostenpflichtigen Endpoints (Anthropic-API-Aufrufe, E-Mail-Versand)
           // direkt ansprechen und den Block umgehen.
           const emailVerifiedRequiredPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/steuerprofil', '/festschreibung', '/entsperren', '/migration', '/agb-zustimmung'];
+          emailVerifiedRequiredPaths.push(...ZAEHLER_PFADE); // KX-RB
           if (emailVerifiedRequiredPaths.includes(url.pathname) && !verified.emailVerified) {
             const errorCors = getCORS(origin);
             return new Response(JSON.stringify({ error: 'E-Mail nicht verifiziert', code: 'email-not-verified' }), {
@@ -708,6 +712,7 @@ export default {
       if (url.pathname === '/migration') return handleMigrationAusfuehren(body, env, cors);
       // R2: Zustimmungsnachweis zu den Nutzungsbedingungen (Serverzeit, nur Worker schreibt users/{uid}/agb_zustimmung)
       if (url.pathname === '/agb-zustimmung') return handleAgbZustimmung(body, env, cors);
+      if (ZAEHLER_PFADE.includes(url.pathname)) return handleRechnungsnummerReservieren(url.pathname, body, env, cors); // KX-RB
       if (url.pathname === '/admin/features') return regelAdminFeatures(request, authHeader, env, cors, regelAbhaengigkeiten(env));
       // Bewusst NICHT in protectedPaths: ein Betriebsprüfer hat keinen Firebase-Login, der
       // Zugriffsnachweis ist der Besitz des Tokens selbst (siehe handlePrueferDaten unten).
@@ -6072,6 +6077,8 @@ export function steuerkernWarnung(env, weg, belegRoh, profil = null, optionen = 
 // ── Festschreibung (BP-13, PF-080): /festschreibung (alle Aktionen, regel/festschreibung.js) und /entsperren (Konzept 10.3: Rücknahme mit
 // Grund; gleichbedeutend mit aktion 'ruecknahme', mit aktion 'entsperren' die Fortsetzung der Entsperrblöcke). UID kommt aus dem Token (Router).
 // E1 (PF-083, Zuruf BP-14): Hülle für POST /migration (Migration ausführen, Rückweg, Klärung, Kenntnis); Logik in regel/migration.js.
+// KX-RB (RECHNUNG-B, BP-19, PF-085): Hülle für POST /zaehler/reservieren und /zaehler/verwenden; Logik in regel/zaehler.js.
+async function handleRechnungsnummerReservieren(pfad, body, env, cors) { return regelZaehler(pfad, body, env, cors, regelAbhaengigkeiten(env)); }
 async function handleMigrationAusfuehren(body, env, cors) {
   return regelMigration(body, env, cors, regelAbhaengigkeiten(env));
 }
