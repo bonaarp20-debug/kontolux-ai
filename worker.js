@@ -18,6 +18,10 @@ import { regelAdminFeatures } from './regel/admin-features.js';
 import { v2Vorbereiten, clientSteuerVorbereiten } from './regel/schreibweg-v2.js';
 import { kodiereWert as kodiereFirestoreWert } from './regel/firestore.js';
 import { REGEL_SAMMLUNGEN, REGEL_UNTERSAMMLUNGEN, untersammlungenLoeschen, untersammlungenExport, untersammlungLesen } from './regel/archiv.js';
+// KX-N7: Speicherdauer-Löschläufe (regel/loeschlaeufe*.js), alle hinter Schaltern LOESCHLAUF_* (Standard aus)
+import { loeschModus, kontext as loeschKontext } from './regel/loeschlaeufe.js';
+import { integrationTrennen } from './regel/loeschlaeufe-konto.js';
+import { loeschlaeufeStuendlich, adminArchivLoeschen, LOESCH_CRON } from './regel/loeschlaeufe-plan.js';
 
 const ALLOWED_ORIGINS = [
   'https://app.kontolux-ai.de',
@@ -656,6 +660,11 @@ export default {
       if (url.pathname === '/datev-export') return handleDatevExport(body, env, cors);
       // Abgeschaltet: Gebühren würden ohne Umsatzsteuer-Behandlung gebucht (Gebührenrechnung der Plattform fehlt). Kommt mit der Regelbesteuerung zurück.
       if (url.pathname === '/stripe-gebuehren') return new Response(JSON.stringify({ error: 'Diese Funktion ist vorübergehend abgeschaltet.' }), { status: 410, headers: { ...cors, 'Content-Type': 'application/json' } });
+      // KX-N7 (B6): Integration trennen, nur mit Schalter LOESCHLAUF_TRENNEN (Standard aus -> 503)
+      if (url.pathname === '/webhook-settings' && body.action === 'trennen') {
+        const r = await integrationTrennen(loeschKontext(loeschDeps(env)), verifiedUid, String(body.plattform || ''), loeschModus(env, 'TRENNEN'), Object.keys(WEBHOOK_SECRET_FELDER));
+        return new Response(JSON.stringify(r.body), { status: r.status, headers: { ...cors, 'Content-Type': 'application/json' } });
+      }
       if (url.pathname === '/webhook-settings') return handleWebhookSettings(body, env, cors, verifiedUid, url.origin);
       if (url.pathname === '/pruefer-zugang') return handlePrueferZugang(body, env, cors, verifiedUid);
       if (url.pathname === '/kontakt')   return handleKontakt(body, env, cors);
@@ -666,6 +675,7 @@ export default {
       if (url.pathname === '/admin/uebersicht') return handleAdminUebersicht(authHeader, env, cors);
       if (url.pathname === '/admin/archiv-register') return handleAdminArchivRegister(authHeader, env, cors);
       if (url.pathname === '/admin/loeschlauf-jetzt') return handleAdminLoeschlaufJetzt(authHeader, env, cors);
+      if (url.pathname === '/admin/archiv-loeschen') return adminArchivLoeschen(request, authHeader, env, cors, loeschDeps(env)); // KX-N7 (B1/A7)
       if (url.pathname === '/admin/speicher-umzug') return handleAdminSpeicherUmzug(request, authHeader, env, cors);
       if (url.pathname === '/admin/protokoll') return handleAdminProtokoll(request, authHeader, env, cors);
       if (url.pathname === '/admin/protokoll-migrieren') return handleAdminProtokollMigrieren(authHeader, env, cors);
@@ -727,8 +737,14 @@ export default {
       await syncAlleSumupNutzer(env);
       return;
     }
+    // KX-N7 (A6): eigener stündlicher Lauf für alle Speicherdauer-Löschläufe; Fehler brechen den Cron nie ab
+    if (event.cron === LOESCH_CRON) {
+      await loeschlaeufeStuendlich(env, loeschDeps(env)).catch(e => console.error('Löschläufe:', e.message));
+      return;
+    }
     if (event.cron === GESPERRT_LOESCH_CRON) {
-      await gesperrteKontenLoeschen(env);
+      // KX-N7 (A6): mit LOESCHLAUF_WEGWERF = 'an' übernimmt der stündliche Lauf (ein Konto in Stücken); sonst wie bisher hier
+      if (loeschModus(env, 'WEGWERF') !== 'an') await gesperrteKontenLoeschen(env).catch(e => console.error('Wegwerf-Löschung:', e.message));
       await fristErinnerungenSenden(env).catch(e => console.error('Fristen-Erinnerung:', e.message));
       await archivLoeschlauf(env).catch(e => console.error('Archivlauf:', e.message));
       return;
@@ -3782,7 +3798,9 @@ async function handleKontoArchivieren(env, cors = {}, verifiedUid, verifiedEmail
 
     // Chats samt Nachrichten-Unterkollektion (keine Aufbewahrungspflicht)
     const chatsPfad = `users/${userId}/chats`;
-    await loescheAlleUnterPfad(chatsPfad, adminToken, 'messages');
+    // KX-N7 (A4): Nachrichten aller Chats gebündelt (allDescendants je 300, batchWrite je 400), dann die Chats; unabhängig von der Chatzahl
+    await untersammlungenLoeschen(userId, adminToken, fetch, ['messages']);
+    await loescheAlleUnterPfad(chatsPfad, adminToken);
 
     for (const coll of ARCHIV_LOESCHEN_COLLECTIONS) {
       await loescheAlleUnterPfad(`users/${userId}/${coll}`, adminToken);
@@ -4972,7 +4990,8 @@ export async function archivDatenLoeschen(uid, env, adminToken, { markerBehalten
 async function archivLoeschlauf(env) {
   const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
   const heute = heuteBerlinIso();
-  const loeschenAktiv = env.ARCHIV_LOESCHEN_AKTIV === 'true';
+  // KX-N7 (B1): gelöscht wird nur noch über den wiederaufnehmbaren Lauf (LOESCHLAUF_ARCHIV); dieser alte Weg passt nicht ins Free-Limit
+  const loeschenAktiv = false;
   const zaehler = { vorgewarnt: 0, berichtet: 0, geloescht: 0, fehler: 0 };
 
   for (const konto of await archivMarkierungenLaden(adminToken, env)) {
@@ -5266,7 +5285,7 @@ async function adminLogEintragen(env, admin, aktion, uid, details = {}) {
 // ── Protokoll (Option C) ─────────────────────────────────────────────────
 // Zwei Orte, beide in Firestore und nur vom Worker beschreibbar:
 //  - admin_protokoll: jeder Admin-Vorgang und jeder Prüferabruf, mit Betreiber-Kennung.
-//    Nur der Betreiber sieht es (Admin-Seite). Wird nie gelöscht.
+//    Nur der Betreiber sieht es (Admin-Seite). KX-N7 (B4): Löschung nach drei Jahren ab Jahresende über LOESCHLAUF_PROTOKOLL.
 //  - users/{uid}/audit_log: die Vorgänge, die den Nutzer betreffen, mit einem Satz in Klartext.
 //    Der Nutzer sieht sie unter Einstellungen, Mein Konto. Löschen kann er sie nicht.
 // Die Einträge enthalten keine IP-Adressen.
@@ -8286,6 +8305,21 @@ async function handlePaypalWebhook(request, url, env, cors) {
 const SUMUP_API = 'https://api.sumup.com';
 const SUMUP_SYNC_CRON = '15 */3 * * *';
 const GESPERRT_LOESCH_CRON = '0 3 * * *'; // täglich 03:00 UTC, siehe wrangler.toml // alle 3 Stunden — muss exakt zu wrangler.toml [triggers] passen
+
+// KX-N7: Abhängigkeiten der Löschläufe (regel/loeschlaeufe*.js). Protokoll nur ins Betreiber-Protokoll (Kennung 'loeschlauf').
+function loeschDeps(env) {
+  return {
+    fetch: (u, i) => fetch(u, i),
+    token: (scope) => getGoogleAccessToken(env, scope),
+    scopes: { firestore: FIRESTORE_SCOPE, storage: STORAGE_SCOPE, auth: undefined },
+    kv: env.PROFIL_KV, kvPdf: env.PDF_RESULTS, kvAbo: env.ABO_KV,
+    buckets: STORAGE_BUCKETS,
+    protokoll: (aktion, uid, details) => protokollSchreiben(env, { admin: 'loeschlauf', aktion, uid, details }),
+    verifiziere: (h) => verifyFirebaseToken(h, env),
+    istAdmin: (v) => istAdmin(v, env),
+    adminLog: (email, aktion, uid, details) => adminLogEintragen(env, email, aktion, uid, details),
+  };
+}
 // KV-Schlüssel mit allen Nutzer-IDs, deren SumUp-Abruf aktiv ist (für den Cron-Durchlauf) —
 // Firestore bietet ohne Collection-Group-Index keine "alle Nutzer mit SumUp aktiv"-Abfrage.
 const SUMUP_SYNC_KV_KEY = 'sumup_sync_uids';

@@ -21,7 +21,8 @@ binding = "PDF_RESULTS"
 id = "ee721a489b6f41ada490ff65e31104ed"
 
 [triggers]
-crons = ["0 8 1 * *", "15 */3 * * *", "0 3 * * *"]
+# KX-N7: "30 * * * *" = stündlicher Löschplaner (regel/loeschlaeufe-plan.js, LOESCH_CRON); tut nichts, solange alle LOESCHLAUF_* aus sind
+crons = ["0 8 1 * *", "15 */3 * * *", "0 3 * * *", "30 * * * *"]
 
 [vars]
 KI_OPTIMIERUNG_AKTIV = "true"
@@ -30,3 +31,17 @@ KI_OPTIMIERUNG_AKTIV = "true"
 STEUERKERN_MODUS = "aus"
 # Admin-Konsole: nur diese verifizierten Konten dürfen /admin/* aufrufen
 ADMIN_EMAILS = "johannkorn7@gmail.com"
+# KX-N7: Speicherdauer-Löschläufe (docs/regelbesteuerung/18-nacht-2026-11-15/n7-bericht.md). Werte: "aus" | "trocken" | "an".
+# Löschen ist nicht rückholbar. Erst "trocken" (zählt und loggt nur), Bericht prüfen, dann einzeln "an". Jede Änderung: eigener Commit plus Deploy.
+# LOESCHLAEUFE_MAX ist die gemeinsame Obergrenze (strengere Einstellung gewinnt): "aus" schaltet alle Läufe ab (Notaus).
+LOESCHLAEUFE_MAX = "aus"
+LOESCHLAUF_WEGWERF = "aus"
+LOESCHLAUF_ARCHIV = "aus"
+LOESCHLAUF_ADMIN = "aus"
+LOESCHLAUF_KONTOLOESCHUNG = "aus"
+LOESCHLAUF_FEEDBACK = "aus"
+LOESCHLAUF_ANFRAGEN = "aus"
+LOESCHLAUF_PROTOKOLL = "aus"
+LOESCHLAUF_PROTOKOLL_KV_ALT = "aus"
+LOESCHLAUF_UNBESTAETIGT = "aus"
+LOESCHLAUF_TRENNEN = "aus"
