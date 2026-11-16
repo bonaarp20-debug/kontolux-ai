@@ -10,14 +10,15 @@
 //   aktion 'eintrag'               { bereich: 'status'|'versteuerung'|'voranmeldung', eintrag: {...}, entsperr_grund? }   append-only (E6)
 //   aktion 'ist_jahr_bestaetigen'  { jahr }   Kalenderjahr in bestaetigte_jahre des Ist-Eintrags (R-PR-04, K2 Jahreswechsel)
 //   aktion 'bestaetigen'           {}        Nutzer bestätigt das Profil (Bereitschaft des Kontos, scope NP-02)
-//   aktion 'stammdaten'            { stammdaten: { beruf_art?, gruendung?, vorjahr?, limit_bestaetigungen?, eu_b2c_grenze?, oss? } } (oss nur mit Feature oss)
+//   aktion 'stammdaten'            { stammdaten: { beruf_art?, gruendung?, vorjahr?, limit_bestaetigungen?, eu_b2c_grenze?, oss?, gwg_wahl? } } (oss nur mit
+//                                    Feature oss; gwg_wahl { 'JJJJ': 'gwg'|'sammelposten'|'afa'|null } nur mit Feature anlagegut, FIX-G)
 // Ist-Versteuerung nur mit Grundlage Nr. 1 oder Nr. 3, Genehmigungsdatum, Nachweis (Aktenzeichen oder eigenes Schreiben im Speicher)
 // und bestätigtem Kalenderjahr; Felder nach K2: genehmigung.art (ausdruecklich/konkludent/weiss_nicht), bei Nr. 3 fuehrt_buecher_freiberuf
 // und gewerbliche_umsaetze (nur Warnlogik). Kontolux prüft die Genehmigung nicht, es speichert die Angabe (Wortwahl W4).
 import * as Steuerkern from '../steuerkern/index.js';
 import {
   antwort, fehlerAntwort, grundpruefung, istObjekt, istText, istDatum, nurSchluessel, CONFIG_PFAD, configBereinigen, featureAktiv,
-  festgeschriebenBis, jetztIso, codesBereinigen, schichtFuer, regelFehler,
+  festgeschriebenBis, jetztIso, codesBereinigen, schichtFuer, regelFehler, periodeAusId,
 } from './gemeinsam.js';
 import { schreibe, vorbedingungAus } from './firestore.js';
 import { auditSchreibvorgaenge, kopfPfad, hashVon } from './audit.js';
@@ -178,8 +179,53 @@ export function ossMischen(alt, neu) {
   return Object.keys(x).length ? x : null;
 }
 
+// FIX-G (BP-04b): Wahl für Wirtschaftsgüter je Wirtschaftsjahr (§ 6 Abs. 2, 2a EStG; Kern gwgWahlFuer, anlagegutPlan). Eingabe
+// { 'JJJJ': 'gwg'|'sammelposten'|'afa'|null } mit ein oder zwei Jahren, laufendes Jahr bis vier Jahre zurück (ältere EÜR liegen außerhalb des
+// Rechenbereichs der App); null löscht die Wahl (die EÜR des Jahres bleibt dann Zwischenwert, W_ANLAGEGUT_WAHL_FEHLT). Werteliste aus dem Kern.
+// Es ist eine Angabe des Nutzers, Kontolux prüft sie nicht. Nur mit Feature anlagegut (regelSteuerprofil).
+export const GWG_WAHL_JAHRE_ZURUECK = 4;
+export function gwgWahlBereinigen(v, heute) {
+  const jahrHeute = Number(String(heute || '').slice(0, 4));
+  if (!istObjekt(v) || !Number.isSafeInteger(jahrHeute)) return null;
+  const schluessel = Object.keys(v);
+  if (!schluessel.length || schluessel.length > 2) return null;
+  const x = {};
+  for (const k of schluessel) {
+    if (!/^\d{4}$/.test(k) || Number(k) < jahrHeute - GWG_WAHL_JAHRE_ZURUECK || Number(k) > jahrHeute) return null;
+    const w = v[k];
+    if (w !== null && !Steuerkern.GWG_WAHL_WERTE.includes(w)) return null;
+    x[k] = w;
+  }
+  return x;
+}
+// Mischt bereinigte Wahlen in den gespeicherten Stand; null löscht. Ergebnis null, wenn nichts übrig bleibt (Feld entfällt).
+export function gwgWahlMischen(alt, neu) {
+  const x = {};
+  if (istObjekt(alt)) for (const [k, w] of Object.entries(alt)) if (/^\d{4}$/.test(k) && Steuerkern.GWG_WAHL_WERTE.includes(w)) x[k] = w;
+  for (const [k, w] of Object.entries(neu)) { if (w === null) delete x[k]; else x[k] = w; }
+  return Object.keys(x).length ? x : null;
+}
+// Die Wahl wirkt auf die EÜR des Jahres J und (Sammelposten, § 6 Abs. 2a S. 2 EStG: Auflösung im Jahr der Bildung und den vier Folgejahren) der
+// Jahre J+1 bis J+4. Ändert sich die Wahl eines Jahres und ist in J bis J+4 ein EÜR-Monat festgeschrieben, wird abgelehnt (Rückgabe: dessen Id).
+// Gleiche Wahl erneut senden ändert nichts und ist erlaubt. USt-Zeiträume sperren hier nicht: die Vorsteuer (Kz 66) hängt nicht von der Wahl ab
+// (Randfall im Kern, siehe docs/regelbesteuerung/19-phase3/fix-g-bericht.md; die App prüft ihn vor dem Senden mit dem Kern).
+export function gwgWahlFestgeschrieben(neu, alt, festDokumente) {
+  const a = istObjekt(alt) ? alt : {};
+  const geaendert = Object.entries(neu).filter(([k, w]) => (Steuerkern.GWG_WAHL_WERTE.includes(a[k]) ? a[k] : null) !== w).map(([k]) => Number(k));
+  if (!geaendert.length) return null;
+  for (const d of festDokumente || []) {
+    if (!d || !istObjekt(d.daten) || d.daten.status !== 'festgeschrieben') continue;
+    const id = String(d.pfad || '').split('/').pop();
+    const p = periodeAusId(id);
+    if (!p || p.art !== 'euer') continue;
+    const y = Number(p.periode.slice(0, 4));
+    if (geaendert.some((j) => y >= j && y <= j + 4)) return id;
+  }
+  return null;
+}
+
 export function stammdatenBereinigen(s, heute) {
-  if (!istObjekt(s) || !nurSchluessel(s, ['beruf_art', 'gruendung', 'vorjahr', 'limit_bestaetigungen', 'eu_b2c_grenze', 'oss'])) return { fehler: [F('FELD_NICHT_ERLAUBT')] };
+  if (!istObjekt(s) || !nurSchluessel(s, ['beruf_art', 'gruendung', 'vorjahr', 'limit_bestaetigungen', 'eu_b2c_grenze', 'oss', 'gwg_wahl'])) return { fehler: [F('FELD_NICHT_ERLAUBT')] };
   const x = {};
   const fehler = [];
   if (s.beruf_art !== undefined) { if (Steuerkern.BERUF_ARTEN.includes(s.beruf_art)) x.beruf_art = s.beruf_art; else fehler.push(F('BERUF_ART_UNGUELTIG')); }
@@ -207,6 +253,10 @@ export function stammdatenBereinigen(s, heute) {
   if (s.oss !== undefined) {
     const o = ossBereinigen(s.oss, heute);
     if (o) x.oss = o; else fehler.push(F('OSS_UNGUELTIG'));
+  }
+  if (s.gwg_wahl !== undefined) {
+    const g = gwgWahlBereinigen(s.gwg_wahl, heute);
+    if (g) x.gwg_wahl = g; else fehler.push(F('GWG_WAHL_UNGUELTIG'));
   }
   return fehler.length ? { fehler } : { stammdaten: x };
 }
@@ -314,8 +364,13 @@ export function neuesProfil(aktion, body, alt, kontext) {
     if (sd.fehler) return { fehler: sd.fehler };
     if (!Object.keys(sd.stammdaten).length) return { fehler: [F('STAMMDATEN_LEER')] };
     if (sd.stammdaten.eu_b2c_grenze) sd.stammdaten.eu_b2c_grenze = euB2cGrenzeMischen(altKern.eu_b2c_grenze, sd.stammdaten.eu_b2c_grenze, kontext.heute);
+    if (sd.stammdaten.gwg_wahl) {
+      const fest = gwgWahlFestgeschrieben(sd.stammdaten.gwg_wahl, altKern.gwg_wahl, kontext.festDokumente);
+      if (fest) return { fehler: [F('GWG_WAHL_FESTGESCHRIEBEN', { periode: fest })], status: 409 };
+    }
     const profil = { ...altKern, ...sd.stammdaten, version: altVersion + 1 };
     if (sd.stammdaten.oss) { const o = ossMischen(altKern.oss, sd.stammdaten.oss); if (o) profil.oss = o; else delete profil.oss; }
+    if (sd.stammdaten.gwg_wahl) { const g = gwgWahlMischen(altKern.gwg_wahl, sd.stammdaten.gwg_wahl); if (g) profil.gwg_wahl = g; else delete profil.gwg_wahl; }
     return { profil, warnungen, audit: 'steuerprofil_stammdaten' };
   }
   return { fehler: [F('AKTION_UNBEKANNT')] };
@@ -364,6 +419,9 @@ export async function regelSteuerprofil(body, env, cors = {}, deps = {}) {
     if (!featureAktiv(config, 'steuerprofil')) return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
     // APP-C (BP-28): OSS-Angaben nur mit Feature oss (Release C, Standard aus; fehlend = aus)
     if (body.aktion === 'stammdaten' && istObjekt(body.stammdaten) && body.stammdaten.oss !== undefined && !featureAktiv(config, 'oss')) return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
+    // FIX-G (BP-04b): GWG-/Sammelposten-/AfA-Wahl nur mit Feature anlagegut (Release B, Standard aus; fehlend = aus)
+    const mitGwgWahl = body.aktion === 'stammdaten' && istObjekt(body.stammdaten) && body.stammdaten.gwg_wahl !== undefined;
+    if (mitGwgWahl && !featureAktiv(config, 'anlagegut')) return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
     const altDok = docs.get(aktuellPfad(uid));
     const alt = altDok ? altDok.daten : null;
     // Idempotenz: dieselbe anfrage_id ein zweites Mal (Netzabbruch, Doppelklick) schreibt nichts und bestätigt den Stand
@@ -372,8 +430,10 @@ export async function regelSteuerprofil(body, env, cors = {}, deps = {}) {
     }
     // Festgeschriebene Zeiträume schützen den Zeitstrahl vor Rückdatierung (pruefeWechsel festgeschriebenBis)
     const brauchtFest = ['anlegen', 'eintrag', 'ist_jahr_bestaetigen'].includes(body.aktion);
-    const fest = brauchtFest ? festgeschriebenBis((await fs.list(`users/${uid}/festschreibung`, { pageSize: 300 })).dokumente) : null;
-    const kontext = { heute, uid, storageUrlOk: deps.storageUrlOk || (() => false), festgeschriebenBis: fest };
+    // FIX-G: die GWG-Wahl braucht die Liste ebenfalls (EÜR-Monate des Jahres und der vier Folgejahre, gwgWahlFestgeschrieben)
+    const festDokumente = brauchtFest || mitGwgWahl ? (await fs.list(`users/${uid}/festschreibung`, { pageSize: 300 })).dokumente : null;
+    const fest = brauchtFest ? festgeschriebenBis(festDokumente) : null;
+    const kontext = { heute, uid, storageUrlOk: deps.storageUrlOk || (() => false), festgeschriebenBis: fest, festDokumente: festDokumente || [] };
     const r = neuesProfil(body.aktion, body, alt, kontext);
     if (r.fehler) return antwort({ ok: false, fehler: r.fehler }, r.status || 400, cors);
 
