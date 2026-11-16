@@ -78,7 +78,7 @@ function datumText(d) { return istDatum(d) ? `${d.slice(8, 10)}.${d.slice(5, 7)}
 // ---------------------------------------------------------------------------------------------
 // Umsatzsteuer-Voranmeldung
 // ---------------------------------------------------------------------------------------------
-const BASIS_ZEILEN = Object.freeze([13, 14, 15, 23, 30, 32, 51]); // 30/32/51: KERN-B (§ 13b Kz 46/84, Kz 50), nur wenn der Kern sie liefert
+const BASIS_ZEILEN = Object.freeze([13, 14, 15, 23, 30, 32, 36, 51]); // 30/32/51: KERN-B (§ 13b Kz 46/84, Kz 50); 36: KERN-C4 (Kz 45, nur mit Option oss); nur wenn der Kern sie liefert
 const RC_ZEILEN = Object.freeze([30, 32]); // Steuer Kz 47/85 trägt der Nutzer in Euro und Cent ein (keine Berechnung aus der vollen Euro-Basis)
 const STEUER_ZEILEN = Object.freeze([13, 14]);
 const SUMMEN_SCHLUESSEL = Object.freeze({ 37: 'z37_cent', 45: 'z45_cent', 48: 'z48_cent', 50: 'z50_cent' });
@@ -109,6 +109,8 @@ export function zahlenlisteUstva(u, optionen) {
       let t = `Zeile ${z.z} (Kz ${z.kz_basis}) ${z.bez || ''}: ${r.eintrag} in ELSTER einzutragen (genau ${euroText(z.basis_cent)} EUR)`;
       if (st) t += `; Steuer ${euroText(st.elster_cent)} EUR (aus dem eingetragenen Betrag), genau ${euroText(st.genau_cent)} EUR`;
       if (RC_ZEILEN.includes(z.z) && Number.isSafeInteger(z.steuer_cent)) { r.steuer = { genau_cent: z.steuer_cent, elster_cent: z.steuer_cent, kz: z.kz_steuer }; t += `; Steuer (Kz ${z.kz_steuer}) ${euroText(z.steuer_cent)} EUR`; }
+      // KERN-C4 (E4): Zeile 36 Kz 45 ist nur Bemessungsgrundlage (Nettoumsätze, Anleitung USt 1 A 2026 Zeile 36), keine Steuer; ustvaFuer liefert sie nur mit Option oss
+      if (z.z === 36) t += '; keine Steuer in dieser Zeile';
       if (z.z === 23 && z.zwischenwert === true) { r.zwischenwert = true; t += `; Zwischenwert: ${z.offen} Umsatz/Umsätze vor dem Wechsel noch nicht voll bezahlt`; }
       r.text = t;
       zeilen.push(r);
@@ -358,6 +360,9 @@ export function drilldownFuer(ergebnis, kz, optionen) {
         if (k !== 46 && k !== 84) { const key = `${w.rc_basis_kz || w.kz}|${w.satz_bp}`; const e = gr.get(key) || { satz: w.satz_bp, b: 0, u: 0 }; e.b += w.netto_cent; e.u += w.ust_cent; gr.set(key, e); }
       }
       for (const e of gr.values()) { const d = ustAusNetto(e.b, e.satz) - e.u; if (d !== 0) zeilen.push({ beleg_id: null, betrag_cent: d, rolle: 'ausgleich', grund: 'rc_steuer_aus_summe', satz_bp: e.satz, text: 'Steuer nach § 13b aus der Summe der Bemessungsgrundlagen je Satz (Kz 47/85 und Kz 67 aus derselben Basis)', regel_id: 'R-13B-02' }); }
+    } else if (k === 45 && (kzSumme !== null || ws.some((w) => w.welt === 'ust' && w.periode === per && w.status === 'berechnet' && w.rolle === 'nst_umsatz'))) {
+      // KERN-C4: Kz 45 (Zeile 36) aus ossWirkungen (rolle nst_umsatz, nur mit Option oss); ohne sie wie bisher "Summe anderer Zeilen" (Zeile 45 hat keine Kz)
+      for (const w of ws) if (w.welt === 'ust' && w.periode === per && w.status === 'berechnet' && w.rolle === 'nst_umsatz' && w.kz === 45) zeilen.push(zeileAus(w, w.netto_cent));
     } else if (k === 50 || k === 37) {
       for (const w of ws) if (w.welt === 'ust' && w.periode === per && w.status === 'berechnet' && w.uneinbringlich === true && w.rolle === (k === 50 ? 'minderung' : 'vorsteuer_minderung')) zeilen.push(zeileAus(w, 0 - (k === 50 ? w.netto_cent : w.ust_cent)));
     } else if (k === 64 || k === 65 || k === 69 || k === 39) {

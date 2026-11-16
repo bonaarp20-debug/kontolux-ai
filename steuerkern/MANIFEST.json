@@ -1,7 +1,7 @@
 {
-  "kern_version": "2026.11.16-7",
+  "kern_version": "2026.11.16-8",
   "dateien": {
-    "VERSION.js": "9de73acd8e0ef8e9d55beee5d83df3689446f063da5aa667ad7c544460ebfa50",
+    "VERSION.js": "21e23dcdfd14fe9b7a5d5008ef1c60f47b34180a50cdfce2c80823c5dcc2db4a",
     "auswertung.js": "d3a3c85ec25e9468da5a2e65d160bcb4050ed04a4c06d91c6c1b1fde12ba5307",
     "beleg.js": "4af385937fb52242e27f6e2c4b5b3f183310d4ba484369d1ebb779d2c911c63f",
     "daten.js": "ca7e034d0da8d36c0f67c835038c545f8ae9f7590047ecde75a43791ddf56543",
@@ -17,12 +17,12 @@
     "tabellen.js": "aa7015673c0f87135d1f91de28f791592b013054f9eee30af38e940d0f8b071d",
     "ustva.js": "90fcb93f4013391a64df91dd5aa1009aaff41c2d036757d30c63373f6ce9c1fd",
     "wirkung.js": "1632a5dbcdd14da56b1ad8a9cfab2bcdd065e0fbd99a38f77834bf2b62958590",
-    "zahlenliste.js": "c06c0edf1164851c0b92b3787cc1693711aa71c333047f4d84bff1cbd7a93423",
-    "golden/beleg-adapter.json": "4f6ac56f6eda422e63d27137cc5b54ec1ef3e4f7a79b171c63c401e68d019355",
-    "golden/pruefberichte.json": "a7d4ee70ea469f58d36f97b92adb3c5a63b49102a17de78408e7d30a9bf902e1",
-    "golden/referenzfaelle.json": "26f9cd0bcecb4a8464278a6313316b7a7361dafee2fc6fb35c63a0720e7b17a9"
+    "zahlenliste.js": "2951d971456bed68e32b0fc7417b5eef61d945d83a0b2b9778b7d4173681f252",
+    "golden/beleg-adapter.json": "e454800e687e857ab7f1c8bc5c967ebaad254895af91ab5419d65db4254f252e",
+    "golden/pruefberichte.json": "b9ead2d872cd311995e898369ba6737c1363ace2f79e3bc1d88408b97f427ddd",
+    "golden/referenzfaelle.json": "91a67d8fcaaa185f5f22d32f6915c271f48afba6674a4210828f082447a46a31"
   },
-  "erzeugt": "2026-11-15T18:46:48.595Z",
+  "erzeugt": "2026-11-16T17:52:14.217Z",
   "nur_app": [
     "schatten.js"
   ]

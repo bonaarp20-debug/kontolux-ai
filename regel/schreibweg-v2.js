@@ -128,7 +128,7 @@ export const STEUER_SCHLUESSEL = Object.freeze(['richtung', 'beleg_art', 'steuer
   'leistung', 'leistung_flags', 'rechnung_erhalt_am', 'erhalt_angenommen', 'zahlungen', 'gegenpartei', 'bezug', 'kennzeichen', 'ausschluss',
   'sperrgrund', 'unbekannt_grund', 'unbekannt_detail', 'kleinbetrag', 'version', 'herkunft', 'bewirtung', 'geschenk', 'dialog', 'status_beleg',
   'versteuerung_beleg', 'wirkdatum', 'korrektur_grund', 'rueckzahlung', 'fa', 'kategorie', 'rechnungsnr', 'status_hinweise', 'legacy_typ',
-  'migration', 'perioden', 'korrektur_notiz', 'entwurf_blocker']);
+  'migration', 'perioden', 'korrektur_notiz', 'entwurf_blocker', 'oss']); // KERN-C4: oss wie firestore.rules (E-C, Release C)
 
 export function clientSteuerPruefen({ steuer, legacy, stichtag, festPerioden = [], profil = null, kernOptionen }) {
   if (!istObjekt(steuer) || !Object.keys(steuer).every((k) => STEUER_SCHLUESSEL.includes(k)) || typeof steuer.steuerfall !== 'string') return { ablehnen: true, codes: ['PF_SCHEMA'], steuer: null };

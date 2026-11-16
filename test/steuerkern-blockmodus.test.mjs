@@ -284,3 +284,16 @@ test('STEUER_SCHLUESSEL entspricht steuerSchluesselErlaubt() in firestore.rules 
   const block = /function steuerSchluesselErlaubt\(\) \{\s*return \[([\s\S]*?)\];/.exec(readFileSync(pfad, 'utf8'))[1];
   assert.deepEqual([...STEUER_SCHLUESSEL].sort(), [...block.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort());
 });
+
+// KERN-C4: E-C hat `oss` in steuerSchluesselErlaubt() (beide Stufen) ergänzt; der Schreibweg v2 nimmt steuer.oss aus dem Kern ebenso an
+// (Schema gleich Rules). Der Beleg bleibt laut Kern UNBEKANNT/auslandskunde, ohne Kern-Option oss wirkt steuer.oss nicht (oss_ohne_option).
+test('KERN-C4: STEUER_SCHLUESSEL enthält oss; Kern-Steuer eines Verkaufs an Privatkunden im EU-Ausland (steuer.oss) besteht die Schemaprüfung', () => {
+  assert.ok(STEUER_SCHLUESSEL.includes('oss'));
+  const s = KernBF.normalisiereEingabe({ weg: 'beleg_formular_v2', richtung: 'ausgang', steuerwahl: 'b2c_ausland', leistungsart: 'ware', gegenpartei: { land: 'FR' }, betrag: { cent: 10000, art: 'netto' }, satz_bp: 2000, rechnungsdatum: '2026-11-02', leistungsdatum: '2026-11-02', erfasst_am: '2026-11-14' }, { profil: PROFIL, stichtag: '2026-11-14' }).beleg.steuer;
+  assert.ok(s.oss, 'Kern liefert steuer.oss');
+  const e = clientSteuerPruefen({ steuer: s, legacy: { betrag: s.summe.brutto_cent / 100 }, stichtag: '2026-11-14', profil: PROFIL });
+  assert.equal(e.ablehnen, false, JSON.stringify(e.codes));
+  assert.deepEqual(e.steuer.oss, s.oss);
+  assert.equal(e.steuer.steuerfall, 'UNBEKANNT');
+  assert.deepEqual(clientSteuerPruefen({ steuer: { ...s, oss_boese: 1 }, legacy: { betrag: s.summe.brutto_cent / 100 }, stichtag: '2026-11-14', profil: PROFIL }).codes, ['PF_SCHEMA']);
+});
