@@ -502,23 +502,110 @@ export function anlagegutPlan(s, profil) {
     const kosten = gwgKosten(p);
     const abz = s.steuerfall === 'E_INLAND_VORSTEUER' && !(s.ausschluss && s.ausschluss.vorsteuer === 'nein') ? (istCent(p.vorsteuer_abziehbar_cent) ? p.vorsteuer_abziehbar_cent : p.ust_cent) : 0;
     const basis = p.netto_cent + (p.ust_cent - abz);
-    let art;
-    if (kosten <= GRENZEN.SAMMELPOSTEN_SOFORT.wert_cent) art = 'sofort';
-    else if (wahl === 'sammelposten') art = kosten <= GRENZEN.SAMMELPOSTEN_OBEN.wert_cent ? 'sammelposten' : 'afa';
-    else if (wahl === 'gwg') art = kosten <= GRENZEN.GWG_NETTO.wert_cent ? 'sofort' : 'afa';
-    else if (wahl === 'afa') art = 'afa';
-    else art = k === 'GWG bis 800€' && kosten <= GRENZEN.GWG_NETTO.wert_cent ? 'sofort_bisher' : 'wahl_fehlt';
-    return { i, art, kosten, basis, kategorie: k };
+    return { i, art: anlagegutArt(kosten, wahl, k), kosten, basis, kategorie: k };
   });
   return { jahr, wahl, bis, positionen: pos };
 }
+function anlagegutArt(kosten, wahl, k) {
+  if (kosten <= GRENZEN.SAMMELPOSTEN_SOFORT.wert_cent) return 'sofort';
+  if (wahl === 'sammelposten') return kosten <= GRENZEN.SAMMELPOSTEN_OBEN.wert_cent ? 'sammelposten' : 'afa';
+  if (wahl === 'gwg') return kosten <= GRENZEN.GWG_NETTO.wert_cent ? 'sofort' : 'afa';
+  if (wahl === 'afa') return 'afa';
+  return k === 'GWG bis 800€' && kosten <= GRENZEN.GWG_NETTO.wert_cent ? 'sofort_bisher' : 'wahl_fehlt';
+}
 // Geht der Beleg den Anlagegut-Weg? Nur wenn eine Position Anlagegut ist und nicht alle Anlagegut-Positionen GWG bis 800 EUR ohne Wahl sind
 // (die rechnet der Kern wie bisher über die Kategorie, Kz 132 bei Zahlung).
-function anlagegutRelevant(s, profil) {
-  const plan = anlagegutPlan(s, profil);
+function planRelevant(plan) {
   if (!plan) return false;
   const anl = plan.positionen.filter((x) => x.art !== 'normal');
   return anl.length > 0 && !anl.every((x) => x.art === 'sofort_bisher');
+}
+
+// ---------------------------------------------------------------------------------------------
+// KERN-D (16.11.2026, FIX-G 1): Die Wahl nach § 6 Abs. 2, 2a EStG betrifft nur die EÜR (Anschaffungskosten). Die Vorsteuer hängt nicht an ihr
+// (§ 15 Abs. 1 S. 1 Nr. 1 UStG, ustg-15.md, A); Skonto mindert sie im Zeitraum der Zahlung (§ 17 Abs. 1 S. 1, 2, 8 UStG, ustg-17.md, A). Bis
+// 2026.11.16-8 machte eine gespeicherte Wahl einen GWG-Beleg (Kategorie "GWG bis 800€") zum Anlagegut-Beleg; bei Skonto, gemischten Positionen,
+// Teilleistung oder Sonderfall schloss anlagegutSperre ihn dann GANZ aus, auch die Vorsteuer (Stuhl 595,00 mit Skonto: Kz 66 93,10 -> 0).
+// Weg eines Eingangs mit Kern-Option anlagegut_vorsteuer_sofort (null: kein Anlagegut-Weg, wie ohne Option):
+//   plan           reiner Anlagegut-Beleg ohne Sperre: Vorsteuer normal, EÜR nach anlagegutEuer (wie bisher)
+//   sperre         Sperre und für das Anschaffungsjahr keine Wahl gespeichert: ganzer Beleg ausgeschlossen (wie bisher, Rückfall)
+//   wie_ohne_wahl  Sperre, Wahl gespeichert, der Beleg ist nur wegen der Wahl ein Anlagegut-Beleg und jede Anlagegut-Position ist unter der Wahl
+//                  ohnehin Sofortabzug: genau wie ohne Wahl (normaler Weg, Kz 132 bei Zahlung). Der Beleg wird durch die Wahl nicht anders.
+//   nur_ust        Sperre, Wahl gespeichert, sonst: Voranmeldung im normalen Weg (Skonto, Teilleistung, Kleinbetrag, gemischte Sätze wie ohne
+//                  Anlagegut). EÜR: bei reinem Skonto-Fall (alle Positionen Anlagegut) nach der Wahl mit um das Skonto geminderten
+//                  Anschaffungskosten (§ 255 Abs. 1 S. 3 HGB, Konfidenz B), wenn jedes Skonto im Anschaffungsjahr gezogen wird und die Art je
+//                  Position (Sofort/Sammelposten/AfA) vom Skonto nicht abhängt. Sonst (Konfidenz C, vorsichtig): die EÜR-Wirkungen des Belegs ausser
+//                  der gezahlten Vorsteuer (Kz 185) entfallen, Zwischenwert mit W_ANLAGEGUT_EUER_ZWISCHENWERT (anlagegutEuerZwischenwert).
+// ---------------------------------------------------------------------------------------------
+function profilOhneWahl(profil, jahr) {
+  if (!istObjekt(profil) || !istObjekt(profil.gwg_wahl)) return profil;
+  const g = { ...profil.gwg_wahl };
+  delete g[String(jahr)];
+  return { ...profil, gwg_wahl: g };
+}
+function anlagegutWeg(s, opt, profil) {
+  if (!istObjekt(s) || s.richtung !== 'eingang' || KORREKTUR_ARTEN.includes(s.beleg_art) || !regelAn(opt, 'anlagegut_vorsteuer_sofort')) return null;
+  const plan = anlagegutPlan(s, profil);
+  if (!planRelevant(plan)) return null;
+  const grund = anlagegutSperre(s);
+  if (!grund) return { art: 'plan', plan };
+  if (plan.wahl === null) return { art: 'sperre', grund };
+  const anl = plan.positionen.filter((x) => x.art !== 'normal');
+  if (!planRelevant(anlagegutPlan(s, profilOhneWahl(profil, plan.jahr))) && anl.every((x) => x.art === 'sofort')) return { art: 'wie_ohne_wahl', grund };
+  return { art: 'nur_ust', grund, plan: grund === 'anlagegut_skonto' ? anlagegutSkontoPlan(s, plan) : null };
+}
+// Skonto als Minderung der Anschaffungskosten (§ 255 Abs. 1 S. 3 HGB) je Position: Skonto je Satzgruppe wie in der Voranmeldung (skontoAufteilung),
+// innerhalb der Gruppe nach der Basis der Positionen verteilt (teile). Basis minus (Skonto brutto minus abziehbarer Vorsteueranteil). Die Grenzen
+// des § 6 Abs. 2, 2a EStG prüft der Kern netto (gwgKosten); die Art muss für die Kosten ohne Skonto und für die Kosten minus dem ganzen
+// Brutto-Skontoanteil gleich sein (dann auch für jeden Wert dazwischen). Ergebnis: Plan mit geminderter Basis oder null (nicht sauber rechenbar).
+function anlagegutSkontoPlan(s, plan) {
+  const zs = aktiveZahlungen(s);
+  if (zs.some((z) => istCent(z.skonto_cent) && z.skonto_cent > 0 && jahrVon(z.datum) !== plan.jahr)) return null;
+  const mitVst = s.steuerfall === 'E_INLAND_VORSTEUER' && !(s.ausschluss && s.ausschluss.vorsteuer === 'nein');
+  const gruppen = gruppiere(s, false);
+  const sk = skontoAufteilung(gruppen, zs, false);
+  const key = (x) => (x === null || x === undefined ? 'null' : String(x));
+  const pos = plan.positionen.map((x) => ({ ...x }));
+  for (let gi = 0; gi < gruppen.length; gi++) {
+    let red = 0;
+    let brutto = 0;
+    for (const je of sk.je) {
+      if (!je) continue;
+      red += je[gi].netto_cent + je[gi].ust_cent - (mitVst ? je[gi].abziehbar_cent : 0);
+      brutto += je[gi].netto_cent + je[gi].ust_cent;
+    }
+    if (red === 0 && brutto === 0) continue;
+    const idx = s.positionen.map((p, i) => i).filter((i) => key(s.positionen[i].satz_bp) === key(gruppen[gi].satz_bp));
+    const gew = idx.map((i) => pos[i].basis);
+    if (gew.some((x) => !Number.isSafeInteger(x) || x < 0) || gew.every((x) => x === 0) || red < 0 || brutto < 0) return null;
+    const redT = teile(red, gew);
+    const bT = teile(brutto, gew);
+    for (let k = 0; k < idx.length; k++) {
+      const x = pos[idx[k]];
+      if (x.art === 'normal') return null;
+      if (anlagegutArt(x.kosten - bT[k], plan.wahl, x.kategorie) !== x.art) return null;
+      x.basis -= redT[k];
+      if (x.basis < 0) return null;
+    }
+  }
+  return { ...plan, positionen: pos, skonto: true };
+}
+// Zwischenwert nur für den EÜR-Teil (nur_ust ohne rechenbaren Plan): berechnete EÜR-Wirkungen ausser Kz 185 (gezahlte Vorsteuer, R-EUER-15)
+// entfallen; je betroffenem Jahr (Anschaffungsjahr und Zahlungsjahre) ein Hinweis 'ausgeschlossen' ohne Kennzahl (EÜR unvollständig).
+function anlagegutEuerZwischenwert(s, ctx, out, weg) {
+  const bis = s.leistung.bis;
+  const jahre = new Map([[String(jahrVon(bis)), bis]]);
+  for (let i = out.length - 1; i >= 0; i--) {
+    const w = out[i];
+    if (w.welt !== 'euer' || w.status !== 'berechnet' || w.kz === 185) continue;
+    const d = jahre.get(w.periode);
+    if (d === undefined || w.datum_wirk < d) jahre.set(w.periode, w.datum_wirk);
+    out.splice(i, 1);
+  }
+  if (!ctx.hinweise.includes('W_ANLAGEGUT_EUER_ZWISCHENWERT')) ctx.hinweise.push('W_ANLAGEGUT_EUER_ZWISCHENWERT');
+  for (const [j, d] of [...jahre.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    out.push(mk(ctx, { welt: 'euer', periode: j, datum_wirk: d, kz: null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-EUER-09', hinweis_detail: `anlagegut_euer_zwischenwert:${weg.grund}` }));
+  }
 }
 // Grund, warum der Anlagegut-Weg diesen Beleg nicht trägt (dann Ausschluss wie bisher), sonst null.
 function anlagegutSperre(s) {
@@ -757,10 +844,10 @@ function nichtUnterstuetzt(s, opt, profil) {
   if (s.richtung === 'ausgang' && Array.isArray(s.status_hinweise) && s.status_hinweise.includes('W_UST_ABWEICHUNG')) return { grund: 'ust_ausgewiesen_weicht_ab', hinweise: [] };
   // KERN-B (BP-04b): Mit Kern-Option anlagegut_vorsteuer_sofort rechnet eingangWirkungen Anlagegüter (Vorsteuer sofort, EÜR nach Wahl), soweit
   // anlagegutPlan sie tragen kann; sonst Ausschluss mit eigenem Grund.
-  if (s.richtung === 'eingang' && !korr && regelAn(opt, 'anlagegut_vorsteuer_sofort') && anlagegutRelevant(s, profil)) {
-    const g = anlagegutSperre(s);
-    return g ? { grund: g, hinweise: ['W_ANLAGEGUT_PRUEFEN'] } : null;
-  }
+  // KERN-D: Sperre nur noch ohne Wahl; mit Wahl rechnet die Voranmeldung (nur_ust) oder der Beleg wie ohne Wahl (wie_ohne_wahl: weiter zu F8).
+  const agWeg = s.richtung === 'eingang' && !korr ? anlagegutWeg(s, opt, profil) : null;
+  if (agWeg && agWeg.art === 'sperre') return { grund: agWeg.grund, hinweise: ['W_ANLAGEGUT_PRUEFEN'] };
+  if (agWeg && (agWeg.art === 'plan' || agWeg.art === 'nur_ust')) return null;
   // F8: Anlagegüter: AfA nie, GWG nur bis zur Grenze (§ 6 Abs. 2 EStG); der Kern bucht keine Abschreibung
   if (s.richtung === 'eingang' && !korr) {
     for (const p of pos) {
@@ -924,6 +1011,11 @@ export function belegWirkungen(beleg, profil, optionen) {
       ctx.beleg_status = 'unbekannt';
       hinweise.push('HN_STEUERFALL_UNBEKANNT');
       out.push(mk(ctx, { welt: 'ust', rolle: 'hinweis', status: 'unbekannt', regel_id: 'R-ZP-11' }));
+    }
+    // KERN-D: Anlagegut mit Wahl und Sperre, EÜR-Teil nicht sauber rechenbar: Zwischenwert nur in der EÜR (Voranmeldung bleibt gerechnet)
+    if (ctx.beleg_status === 'ok') {
+      const agWeg = anlagegutWeg(s, opt, profil);
+      if (agWeg && agWeg.art === 'nur_ust' && !agWeg.plan) anlagegutEuerZwischenwert(s, ctx, out, agWeg);
     }
   } catch (e) {
     // K-4: Programm- oder Datenfehler im Beleg führen nie zu einer Ausnahme beim Aufrufer
@@ -1337,7 +1429,9 @@ function eingangWirkungen(s, profil, ctx, out, opt) {
   const geschenk = istObjekt(s.geschenk) ? s.geschenk.art : null;
   const istBewirtung = (s.kennzeichen || []).includes('bewirtung') || s.kategorie === 'Bewirtung (70%)';
   // KERN-B (BP-04b): Anlagegut-Weg (Kern-Option anlagegut_vorsteuer_sofort; nichtUnterstuetzt hat Sonderfälle schon ausgeschlossen)
-  const agPlan = regelAn(opt, 'anlagegut_vorsteuer_sofort') && anlagegutRelevant(s, profil) ? anlagegutPlan(s, profil) : null;
+  // KERN-D: nur_ust mit Skonto-Plan rechnet die EÜR nach der Wahl; nur_ust ohne Plan: normaler Weg, EÜR danach Zwischenwert (belegWirkungen)
+  const agWeg = anlagegutWeg(s, opt, profil);
+  const agPlan = agWeg && (agWeg.art === 'plan' || agWeg.art === 'nur_ust') ? agWeg.plan : null;
   // --- UStVA: Vorsteuer (R-ZP-08 bis R-ZP-10) ---
   if (mitVorsteuer) {
     // Anzahlung vor Leistung mit vorliegender Rechnung: Vorsteuer im Zeitraum von max(Rechnungserhalt, Zahlung) (R-ZP-09)

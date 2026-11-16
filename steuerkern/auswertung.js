@@ -207,7 +207,14 @@ export function pruefeKonsistenz(auswertungen) {
     // Q4: jede Voranmeldung hat Z.50 gleich Summe der Teile, bei Unvollständigkeit als Zwischenwert gekennzeichnet
     for (const u of a.ustva) {
       const s = u.summen;
-      if (s.z45_cent !== s.z37_cent - s.z38_cent) verletzt.push(`Q4 ${u.periode}: Z.45 stimmt nicht (nur ohne Kz 44/67)`);
+      // KERN-D (BH-01): Anleitung USt 1 A 2026: Z.37 = Steuer aus Z.13 bis 32 (Kz 81, 86, 47, 85); Z.45 = Z.37 minus Z.38 bis 44 (der Kern
+      // rechnet daraus Kz 66, Kz 67 aus § 13b und die Eingabe Kz 64; Z.39, 40, 42, 43 nicht); Z.48 = Z.45 plus Z.46, 47 (Kz 65, 69). Bis -8 prüfte
+      // Q4 nur Z.45 = Z.37 - Kz 66 und scheiterte an jedem § 13b-Eingang mit Kz 67 (und an einer Eingabe Kz 64).
+      const k = istObjekt(u.kennzahlen) ? u.kennzahlen : {};
+      const c = (n) => (Number.isSafeInteger(k[n]) ? k[n] : 0);
+      if (s.z37_cent !== c('81_steuer') + c('86_steuer') + c('47') + c('85')) verletzt.push(`Q4 ${u.periode}: Z.37 stimmt nicht`);
+      if (s.z38_cent !== c('66') || s.z45_cent !== s.z37_cent - (c('66') + c('67') + c('64'))) verletzt.push(`Q4 ${u.periode}: Z.45 stimmt nicht`);
+      if (s.z48_cent !== s.z45_cent + c('65') + c('69')) verletzt.push(`Q4 ${u.periode}: Z.48 stimmt nicht`);
       if (s.z50_cent !== s.z48_cent - s.z49_cent) verletzt.push(`Q4 ${u.periode}: Z.50 stimmt nicht`);
       if (u.unvollstaendig && u.kz83.status !== 'zwischenwert') verletzt.push(`Q4 ${u.periode}: unvollständig, aber Kz 83 nicht als Zwischenwert markiert`);
       inv.I1_summe83 += s.z50_cent;
