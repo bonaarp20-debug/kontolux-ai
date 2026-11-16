@@ -216,6 +216,9 @@ export function pruefeKonsistenz(auswertungen) {
       if (s.z38_cent !== c('66') || s.z45_cent !== s.z37_cent - (c('66') + c('67') + c('64'))) verletzt.push(`Q4 ${u.periode}: Z.45 stimmt nicht`);
       if (s.z48_cent !== s.z45_cent + c('65') + c('69')) verletzt.push(`Q4 ${u.periode}: Z.48 stimmt nicht`);
       if (s.z50_cent !== s.z48_cent - s.z49_cent) verletzt.push(`Q4 ${u.periode}: Z.50 stimmt nicht`);
+      // KERN-E (G-KD-4, Anleitung USt 1 A 2026): Z.49 ist Kz 39 (Sondervorauszahlung), Z.50 ist Kz 83 (Kennzahl und kz83-Betrag)
+      if (s.z49_cent !== c('39')) verletzt.push(`Q4 ${u.periode}: Z.49 stimmt nicht mit Kz 39`);
+      if (c('83') !== s.z50_cent || !istObjekt(u.kz83) || u.kz83.betrag_cent !== s.z50_cent) verletzt.push(`Q4 ${u.periode}: Kz 83 stimmt nicht mit Z.50`);
       if (u.unvollstaendig && u.kz83.status !== 'zwischenwert') verletzt.push(`Q4 ${u.periode}: unvollständig, aber Kz 83 nicht als Zwischenwert markiert`);
       inv.I1_summe83 += s.z50_cent;
       inv.I3_ust_steuer += s.z37_cent;
@@ -229,9 +232,32 @@ export function pruefeKonsistenz(auswertungen) {
     // Q10: Anzahl "nicht berechnet" in Dashboard und Auswertung gleich
     const dash = a.dashboard.nicht_beruecksichtigte_belege || 0;
     if (dash !== a.nicht_berechnet.length) verletzt.push(`Q10 ${a.jahr}: Dashboard ${dash} gegen Liste ${a.nicht_berechnet.length}`);
+    // KERN-E (G-KD-3): Ein nicht berechneter Beleg kann eine Voranmeldung des Jahres nur über einen weiteren USt-Zeitraum berühren (nur_ust: Hinweis
+    // im Folgemonat nach § 13b Abs. 2 Nr. 1 UStG, Rechnungserhalt, Teilleistung, Skonto). Das ist kein Zu- oder Abfluss (§ 11 EStG); die EÜR des
+    // Jahres nennt ihn darum zu Recht nicht (euerFuer). Bis -9 meldete Q10 dann "EÜR nennt keine" (Fehlalarm, Dashboard brach ab). Jetzt: Jeder
+    // Beleg der Voranmeldung, der im Jahr einen eigenen USt-Hinweis hat (nicht nur nur_ust/nur_euer, oder ohne Zeitraum), muss in der EÜR-Liste
+    // stehen. Ohne Wirkungsliste (ältere Aufrufer) gilt jeder Beleg der Voranmeldung als eigener.
+    const ws = Array.isArray(a.wirkungen) ? a.wirkungen : null;
+    const nurWeitere = new Set();
+    if (ws) {
+      const eigen = new Set();
+      for (const w of ws) {
+        if (!istObjekt(w) || w.welt !== 'ust' || (w.status !== 'ausgeschlossen' && w.status !== 'unbekannt') || w.nur_euer === true) continue;
+        const j = typeof w.periode === 'string' ? Number(w.periode.slice(0, 4)) : null;
+        if (j !== null && j !== a.jahr) continue;
+        (w.nur_ust === true && j !== null ? nurWeitere : eigen).add(String(w.beleg_id));
+      }
+      for (const id of eigen) nurWeitere.delete(id);
+    }
+    const inEuer = new Set(a.nicht_berechnet.map((x) => String(x.beleg_id)));
     for (const u of a.ustva) {
-      const n = u.ausgeschlossene.length;
+      const l = u.ausgeschlossene.filter((x) => !nurWeitere.has(String(x.beleg_id)));
+      const n = l.length;
       if (n > 0 && a.nicht_berechnet.length === 0) verletzt.push(`Q10 ${u.periode}: Voranmeldung nennt ${n} nicht berücksichtigte Belege, EÜR nennt keine`);
+      else {
+        const fehlt = l.filter((x) => x.beleg_id !== null && x.beleg_id !== undefined && !inEuer.has(String(x.beleg_id)));
+        if (fehlt.length) verletzt.push(`Q10 ${u.periode}: ${fehlt.length} nicht berücksichtigte Belege der Voranmeldung fehlen in der EÜR-Liste`);
+      }
     }
   }
   return { ok: verletzt.length === 0, verletzt, invarianten: inv };

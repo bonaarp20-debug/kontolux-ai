@@ -531,6 +531,7 @@ function planRelevant(plan) {
 //   sperre         Sperre und für das Anschaffungsjahr keine Wahl gespeichert: ganzer Beleg ausgeschlossen (wie bisher, Rückfall)
 //   wie_ohne_wahl  Sperre, Wahl gespeichert, der Beleg ist nur wegen der Wahl ein Anlagegut-Beleg und jede Anlagegut-Position ist unter der Wahl
 //                  ohnehin Sofortabzug: genau wie ohne Wahl (normaler Weg, Kz 132 bei Zahlung). Der Beleg wird durch die Wahl nicht anders.
+//                  KERN-E (G-KD-1): nur, wenn der Beleg im Anschaffungsjahr vollständig bezahlt ist (vollBezahltIm), sonst nur_ust.
 //   nur_ust        Sperre, Wahl gespeichert, sonst: Voranmeldung im normalen Weg (Skonto, Teilleistung, Kleinbetrag, gemischte Sätze wie ohne
 //                  Anlagegut). EÜR: bei reinem Skonto-Fall (alle Positionen Anlagegut) nach der Wahl mit um das Skonto geminderten
 //                  Anschaffungskosten (§ 255 Abs. 1 S. 3 HGB, Konfidenz B), wenn jedes Skonto im Anschaffungsjahr gezogen wird und die Art je
@@ -551,8 +552,22 @@ function anlagegutWeg(s, opt, profil) {
   if (!grund) return { art: 'plan', plan };
   if (plan.wahl === null) return { art: 'sperre', grund };
   const anl = plan.positionen.filter((x) => x.art !== 'normal');
-  if (!planRelevant(anlagegutPlan(s, profilOhneWahl(profil, plan.jahr))) && anl.every((x) => x.art === 'sofort')) return { art: 'wie_ohne_wahl', grund };
+  // KERN-E (G-KD-1, § 6 Abs. 2 S. 1 EStG "im Wirtschaftsjahr der Anschaffung", § 4 Abs. 3 S. 3 EStG, A): "wie ohne Wahl" bucht Kz 132 bei Zahlung.
+  // Das ist nur dann das Anschaffungsjahr, wenn der Beleg in diesem Jahr vollständig bezahlt ist; sonst nur_ust (Skonto-Plan im Anschaffungsjahr
+  // oder EÜR-Zwischenwert).
+  if (!planRelevant(anlagegutPlan(s, profilOhneWahl(profil, plan.jahr))) && anl.every((x) => x.art === 'sofort') && vollBezahltIm(s, plan.jahr)) return { art: 'wie_ohne_wahl', grund };
   return { art: 'nur_ust', grund, plan: grund === 'anlagegut_skonto' ? anlagegutSkontoPlan(s, plan) : null };
+}
+// KERN-E (G-KD-1): Ist der Beleg im Jahr vollständig bezahlt (alle aktiven Zahlungen in diesem Jahr, Zahlungen plus Skonto decken das Brutto)?
+function vollBezahltIm(s, jahr) {
+  let brutto = 0;
+  for (const p of s.positionen) brutto += p.netto_cent + p.ust_cent;
+  let gezahlt = 0;
+  for (const z of aktiveZahlungen(s)) {
+    if (jahrVon(z.datum) !== jahr) return false;
+    gezahlt += z.betrag_cent + (istCent(z.skonto_cent) && z.skonto_cent > 0 ? z.skonto_cent : 0);
+  }
+  return gezahlt >= brutto;
 }
 // Skonto als Minderung der Anschaffungskosten (§ 255 Abs. 1 S. 3 HGB) je Position: Skonto je Satzgruppe wie in der Voranmeldung (skontoAufteilung),
 // innerhalb der Gruppe nach der Basis der Positionen verteilt (teile). Basis minus (Skonto brutto minus abziehbarer Vorsteueranteil). Die Grenzen
@@ -592,7 +607,8 @@ function anlagegutSkontoPlan(s, plan) {
 }
 // Zwischenwert nur für den EÜR-Teil (nur_ust ohne rechenbaren Plan): berechnete EÜR-Wirkungen ausser Kz 185 (gezahlte Vorsteuer, R-EUER-15)
 // entfallen; je betroffenem Jahr (Anschaffungsjahr und Zahlungsjahre) ein Hinweis 'ausgeschlossen' ohne Kennzahl (EÜR unvollständig).
-function anlagegutEuerZwischenwert(s, ctx, out, weg) {
+// KERN-E (G-KD-7, § 19 Abs. 1 S. 4 UStG): Kleinunternehmer (Status am Anschaffungstag) bekommen einen Text ohne Vorsteuer.
+function anlagegutEuerZwischenwert(s, ctx, out, weg, profil) {
   const bis = s.leistung.bis;
   const jahre = new Map([[String(jahrVon(bis)), bis]]);
   for (let i = out.length - 1; i >= 0; i--) {
@@ -602,10 +618,24 @@ function anlagegutEuerZwischenwert(s, ctx, out, weg) {
     if (d === undefined || w.datum_wirk < d) jahre.set(w.periode, w.datum_wirk);
     out.splice(i, 1);
   }
-  if (!ctx.hinweise.includes('W_ANLAGEGUT_EUER_ZWISCHENWERT')) ctx.hinweise.push('W_ANLAGEGUT_EUER_ZWISCHENWERT');
+  const code = statusAm(profil, bis).status === 'ku' ? 'W_ANLAGEGUT_EUER_ZWISCHENWERT_KU' : 'W_ANLAGEGUT_EUER_ZWISCHENWERT';
+  if (!ctx.hinweise.includes(code)) ctx.hinweise.push(code);
   for (const [j, d] of [...jahre.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
     out.push(mk(ctx, { welt: 'euer', periode: j, datum_wirk: d, kz: null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-EUER-09', hinweis_detail: `anlagegut_euer_zwischenwert:${weg.grund}` }));
   }
+}
+// KERN-E (G-KD-2): Hat ein § 13b-Eingang eine Position, die im Inland nach F8 (nichtUnterstuetzt) ausgeschlossen würde? (AfA-Kategorie, GWG-Kategorie
+// über 800 EUR, Anlagegut über 800 EUR; Grenze netto nach gwgKosten, beim § 13b-Eingang ist das Netto der Rechnungsbetrag)
+function rcAnlagegut(s) {
+  if (!istObjekt(s.leistung) || !istDatum(s.leistung.bis)) return false;
+  for (const p of Array.isArray(s.positionen) ? s.positionen : []) {
+    if (!istObjekt(p) || !istCent(p.netto_cent) || !istCent(p.ust_cent)) continue;
+    const k = p.kategorie || s.kategorie || null;
+    const kosten = gwgKosten(p);
+    if (k === 'Abschreibung (AfA)') return true;
+    if (k === 'GWG bis 800€' ? kosten > GRENZEN.GWG_NETTO.wert_cent : (kosten > GRENZEN.GWG_NETTO.wert_cent && anlagegutLage(s, k) === 'ausschluss')) return true;
+  }
+  return false;
 }
 // Grund, warum der Anlagegut-Weg diesen Beleg nicht trägt (dann Ausschluss wie bisher), sonst null.
 function anlagegutSperre(s) {
@@ -1015,7 +1045,13 @@ export function belegWirkungen(beleg, profil, optionen) {
     // KERN-D: Anlagegut mit Wahl und Sperre, EÜR-Teil nicht sauber rechenbar: Zwischenwert nur in der EÜR (Voranmeldung bleibt gerechnet)
     if (ctx.beleg_status === 'ok') {
       const agWeg = anlagegutWeg(s, opt, profil);
-      if (agWeg && agWeg.art === 'nur_ust' && !agWeg.plan) anlagegutEuerZwischenwert(s, ctx, out, agWeg);
+      if (agWeg && agWeg.art === 'nur_ust' && !agWeg.plan) anlagegutEuerZwischenwert(s, ctx, out, agWeg, profil);
+      // KERN-E (G-KD-2, § 4 Abs. 3 S. 3 EStG, A): § 13b-Eingang (Kern-Option rc_eingang) mit Anlagegut ohne rechenbaren Anlagegut-Weg (keine Wahl
+      // oder ohne Option anlagegut): die Anschaffungskosten wirken nur über GWG/Sammelposten/AfA, nie als gewöhnliche Ausgabe bei Zahlung. Wie im
+      // Inland (F8: afa_kategorie, gwg_ueber_800, anlagegut_ueber_800) nicht still voll buchen: EÜR-Teil Zwischenwert, Voranmeldung gerechnet.
+      else if ((sf === 'E_13B_EU_DL' || sf === 'E_13B_DRITTLAND_DL') && regelAn(opt, 'rc_eingang') && !(agWeg && agWeg.art === 'nur_ust') && rcAnlagegut(s)) {
+        anlagegutEuerZwischenwert(s, ctx, out, { grund: 'anlagegut_steuerfall' }, profil);
+      }
     }
   } catch (e) {
     // K-4: Programm- oder Datenfehler im Beleg führen nie zu einer Ausnahme beim Aufrufer
@@ -1975,6 +2011,33 @@ function korrekturWirkungen(s, profil, ctx, opt, out, beleg) {
     ctx.hinweise.push('HN_EUER_GUTSCHRIFT_ERHALTEN_NICHT_UNTERSTUETZT');
     out.push(mk(ctx, { welt: 'euer', periode: String(jahrVon(rz.datum)), datum_wirk: rz.datum, kz: null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-25', hinweis_detail: 'gutschrift_erhalten_rueckzahlung' }));
   }
+  if (eingang) anlagegutKorrekturEuer(s, profil, ctx, opt, out, orig, rz);
+}
+
+// KERN-E (G-KD-6): Korrektur (Storno, Gutschrift, Preisnachlass) auf ein Original, dessen Anschaffungskosten der Anlagegut-Weg als GWG (Kz 132) oder
+// Sammelposten (Kz 137, Anschaffungsjahr und vier Folgejahre) bucht. Die Korrektur mindert die Anschaffungskosten (§ 255 Abs. 1 S. 3 HGB) bzw. hebt
+// die Anschaffung auf; § 6 Abs. 2a S. 3 EStG ("Scheidet ein Wirtschaftsgut ... aus, wird der Sammelposten nicht vermindert") regelt nur das Ausscheiden,
+// nicht die Rückgängigmachung (Konfidenz C). Vorsichtigste Variante: Die EÜR jedes Jahres ab dem Jahr der Korrektur, in dem das Original
+// Anlagegut-Kosten bucht, ist ein Zwischenwert (Hinweis ohne Kennzahl, W_ANLAGEGUT_KORREKTUR); die Kennzahlen des Originals bleiben stehen.
+function anlagegutKorrekturEuer(s, profil, ctx, opt, out, orig, rz) {
+  if (!istObjekt(orig) || !istObjekt(orig.steuer) || !istDatum(s.wirkdatum)) return;
+  const weg = anlagegutWeg(orig.steuer, opt, profil);
+  const plan = weg && (weg.art === 'plan' || weg.art === 'nur_ust') ? weg.plan : null;
+  if (!plan) return;
+  const jahre = new Set();
+  for (const x of plan.positionen) {
+    if (x.basis === 0) continue;
+    if (x.art === 'sofort' || x.art === 'sofort_bisher') jahre.add(plan.jahr);
+    else if (x.art === 'sammelposten') for (let n = 0; n < 5; n++) jahre.add(plan.jahr + n);
+  }
+  const wj = jahrVon(s.wirkdatum);
+  const rzJ = rz ? jahrVon(rz.datum) : null; // F4: im Jahr der Rückzahlung steht schon ein EÜR-Hinweis
+  const liste = [...jahre].filter((j) => j >= wj && j !== rzJ).sort((a, b) => a - b);
+  if (!liste.length && !(rzJ !== null && jahre.has(rzJ) && rzJ >= wj)) return;
+  if (!ctx.hinweise.includes('W_ANLAGEGUT_KORREKTUR')) ctx.hinweise.push('W_ANLAGEGUT_KORREKTUR');
+  for (const j of liste) {
+    out.push(mk(ctx, { welt: 'euer', periode: String(j), datum_wirk: j === wj ? s.wirkdatum : `${String(j).padStart(4, '0')}-01-01`, kz: null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-EUER-09', hinweis_detail: 'anlagegut_korrektur' }));
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2150,9 +2213,11 @@ function vergleicheWirkungen(a, b) {
 }
 
 // TR3-kern-001: Rechnet der Kern das Original nicht (ausgeschlossen oder unbekannt)? Ein Original ohne jede Wirkung (privat, wirkungslos) zählt als gerechnet.
+// KERN-E (G-KD-5, § 17 Abs. 1 S. 1, 2, 8 UStG, A): maßgeblich ist nur die Voranmeldung (welt 'ust'). Ein reiner EÜR-Ausschluss des Originals
+// (Anlagegut mit EÜR-Zwischenwert, AfA nicht berechnet, Wahl fehlt) lässt die Minderung der Vorsteuer sonst still wegfallen.
 function originalNichtGerechnet(orig, profil, opt) {
   const ws = belegWirkungen(orig, profil, nurRegeln(opt));
-  return ws.some((w) => w.status === 'ausgeschlossen' || w.status === 'unbekannt');
+  return ws.some((w) => w.welt === 'ust' && (w.status === 'ausgeschlossen' || w.status === 'unbekannt'));
 }
 
 // Gegenprüfung M4: Plausibilität der Korrekturen je Original. Ohne vorhandenes Original (Beleg-ID, ersatzweise eindeutige Rechnungsnummer)
