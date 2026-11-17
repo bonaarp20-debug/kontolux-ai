@@ -1199,7 +1199,10 @@ const SACHKONTO_MAPPING = {
   'Gezahlte Umsatzsteuer':      { SKR03: '1780', SKR04: '3820', euer_zeile: 'Z.59' },
   'Einnahmen 19%':              { SKR03: '8400', SKR04: '4400', euer_zeile: 'Z.15' },
   'Einnahmen 7%':               { SKR03: '8300', SKR04: '4300', euer_zeile: 'Z.15' },
-  'Einnahmen steuerfrei':       { SKR03: '8200', SKR04: '4200', euer_zeile: 'Z.12' }
+  'Einnahmen steuerfrei':       { SKR03: '8200', SKR04: '4200', euer_zeile: 'Z.12' },
+  // OSS-FORM 3: Verkauf an Privatkunden in anderen EU-Ländern (Satz des Kundenlands), gleich wie index.html; der DATEV-Export mit Feature oss nimmt das
+  // Konto aus dem Steuerteil (regel/datev-oss.js), dies ist nur der Altpfad
+  'Einnahmen EU-Privatkunden (OSS)': { SKR03: '8320', SKR04: '4320', euer_zeile: 'Z.15' }
 };
 
 function resolveSachkonto(kategorie, skr) {

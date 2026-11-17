@@ -638,6 +638,10 @@ export const KATEGORIEN = frieren([
   kat('Einnahmen 19%', 'einnahme', 112),
   kat('Einnahmen 7%', 'einnahme', 112),
   kat('Einnahmen steuerfrei', 'einnahme', 103, { euer_kz_kleinunternehmer: 111 }),
+  // OSS-FORM 3 (Kern 2026.11.16-11): Verkauf an Privatkunden in anderen EU-Ländern mit dem Satz des Kundenlands (steuer.oss, A_OSS_EU_B2C). Die Zahlen
+  // kommen aus dem Steuerfall (wirkung.js ossWirkungen: Kz 45, EÜR netto Kz 112, Steuer Kz 140, Konfidenz C); die Kategorie ordnet nur und trägt dieselbe
+  // EÜR-Kennzahl wie der Steuerfall. DATEV-Konto 8320/4320 bzw. 8331/4331 nach Leistungsart (KontoluxWorker/regel/datev-oss.js), nicht aus der Kategorie.
+  kat('Einnahmen EU-Privatkunden (OSS)', 'einnahme', 112, { euer_kz_kleinunternehmer: 111, hinweis: 'Satz des Kundenlands (OSS); EÜR wie A_OSS_EU_B2C' }),
   kat('Vereinnahmte Umsatzsteuer', 'einnahme', 140),
   kat('Umsatzsteuer-Erstattung', 'einnahme', 141),
   kat('Vorsteuer', 'ausgabe', 185),
