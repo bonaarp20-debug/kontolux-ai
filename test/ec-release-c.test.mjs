@@ -1,6 +1,6 @@
 // E-C (Integrator Release C): (1) Bindung der Kern-Regel oss an die Zustimmung zur Fassung von Release C über den Kern (Steuerkern.KERN_FEATURES_AGB.C,
-// Steuerkern.optionenFuerZustimmung; KERN-C2 H8), eine Quelle mit dem Lader der App. AGB_FASSUNG_RELEASE_C bleibt null, bis L-C die Fassung setzt;
-// beide Zustände sind hier geprüft. (2) WORKER-C2 Zuruf 1: kiLandAbgleichen im Filter pruefeBetragZeile (DOKUMENT_SPEICHERN) vor dem
+// Steuerkern.optionenFuerZustimmung; KERN-C2 H8), eine Quelle mit dem Lader der App. AGB_FASSUNG_RELEASE_C ist seit E1 (G-RECHT-C) '2026-11-15-2';
+// beide Zustände (fassungC null/gesetzt) sind hier geprüft. (2) WORKER-C2 Zuruf 1: kiLandAbgleichen im Filter pruefeBetragZeile (DOKUMENT_SPEICHERN) vor dem
 // Steuerwahl-Abgleich; der Satz für das Modell (KI_RC_LAND_BEFEHL_AKTIV) bleibt aus (Client speichert land nicht, Begründung im Bericht e-c-bericht.md).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -23,10 +23,10 @@ function alleKonfigurationen() {
   return liste;
 }
 
-test('Liste Release C kommt aus dem Kern (KERN_FEATURES_AGB.C = oss); Fassung C heute nicht gesetzt', () => {
+test('Liste Release C kommt aus dem Kern (KERN_FEATURES_AGB.C = oss); Fassung C seit E1 = 2026-11-15-2', () => {
   assert.deepEqual([...FEATURES_AGB_RELEASE_C], [...Steuerkern.KERN_FEATURES_AGB.C]);
   assert.deepEqual([...FEATURES_AGB_RELEASE_C], ['oss']);
-  assert.equal(AGB_FASSUNG_RELEASE_C, null);
+  assert.equal(AGB_FASSUNG_RELEASE_C, '2026-11-15-2'); // E1
   assert.equal(typeof Steuerkern.optionenFuerZustimmung, 'function');
 });
 
@@ -47,9 +47,10 @@ test('beide Zustände: ohne Fassung C wie vorher (oss nur am Feature), mit Fassu
         for (const [regel, feature] of Object.entries(Steuerkern.KERN_OPTION_FEATURES)) if (zB !== true && FEATURES_AGB_RELEASE_B.includes(feature)) erwartetB.regeln[regel] = false;
         // ohne Fassung C: genau wie vorher, zC egal
         assert.deepEqual(kernOptionenFuerKonto(config, zB, { zustimmungC: zC, fassungC: null }), erwartetB);
-        assert.deepEqual(kernOptionenFuerKonto(config, zB, { zustimmungC: zC }), erwartetB, 'Standard = AGB_FASSUNG_RELEASE_C (null)');
         // mit Fassung C: Kern entscheidet für C, B wird durchgereicht
         const mitC = kernOptionenFuerKonto(config, zB, { zustimmungC: zC, fassungC: C });
+        // E1: Standard = AGB_FASSUNG_RELEASE_C ('2026-11-15-2') verhält sich wie eine gesetzte Fassung C
+        assert.deepEqual(kernOptionenFuerKonto(config, zB, { zustimmungC: zC }), mitC, 'Standard = AGB_FASSUNG_RELEASE_C (gesetzt)');
         assert.deepEqual(mitC, Steuerkern.optionenFuerZustimmung(erwartetB, { B: true, C: zC }));
         assert.equal(mitC.regeln.oss, roh.regeln.oss === true && zC, 'oss nur mit Zustimmung C');
         for (const [regel, feature] of Object.entries(Steuerkern.KERN_OPTION_FEATURES)) if (feature !== 'oss') assert.equal(mitC.regeln[regel], erwartetB.regeln[regel], regel + ' bleibt an Zustimmung B (kz39 Release-A-Regel)');

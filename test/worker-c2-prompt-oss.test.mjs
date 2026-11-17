@@ -55,11 +55,17 @@ test('Wortliste und Textmuster: OSS-Abschnitt, Plattform-Fassung und Land-Satz o
   }
 });
 
-test('Zustimmung je Konto: oss bleibt beim Stand der Release-B-Zustimmung, solange keine Fassung C gesetzt ist; ohne Zustimmung alles aus', async () => {
+test('Zustimmung je Konto (E1: Fassung C = 2026-11-15-2): -1 = Release B an, oss aus; -2 = alles an; ohne Zustimmung oder Lesefehler alles aus', async () => {
   kiZustimmungCacheLeeren();
   const liste = (v) => ({ documents: v.map((x, i) => ({ name: `projects/p/databases/(default)/documents/users/u/agb_zustimmung/z${i}`, fields: { version: { stringValue: x } } })) });
   const r = (v) => async () => new Response(JSON.stringify(liste(v)));
-  assert.deepEqual(await kiFeatureStandKonto({ uid: 'nutzerWC2prompt000000001', stand: KI_FEATURES_AN, tokenFn: async () => 't', fetchFn: r(['2026-11-15-1']), jetzt: 1 }), KI_FEATURES_AN);
+  assert.deepEqual(await kiFeatureStandKonto({ uid: 'nutzerWC2prompt000000001', stand: KI_FEATURES_AN, tokenFn: async () => 't', fetchFn: r(['2026-11-15-1']), jetzt: 1 }), { ...KI_FEATURES_AN, oss: false });
+  kiZustimmungCacheLeeren();
+  assert.deepEqual(await kiFeatureStandKonto({ uid: 'nutzerWC2prompt000000001', stand: KI_FEATURES_AN, tokenFn: async () => 't', fetchFn: r(['2026-11-15-1', '2026-11-15-2']), jetzt: 1 }), KI_FEATURES_AN);
+  kiZustimmungCacheLeeren();
+  assert.deepEqual(await kiFeatureStandKonto({ uid: 'nutzerWC2prompt000000001', stand: KI_FEATURES_AN, tokenFn: async () => 't', fetchFn: r(['2026-11-15-2']), jetzt: 1 }), KI_FEATURES_AN, 'Fassung 2 schließt Fassung 1 ein');
+  kiZustimmungCacheLeeren();
+  assert.deepEqual(await kiFeatureStandKonto({ uid: 'nutzerWC2prompt000000001', stand: KI_FEATURES_AN, tokenFn: async () => 't', fetchFn: async () => new Response('{}', { status: 500 }), jetzt: 1 }), KI_FEATURES_AUS, 'Lesefehler');
   kiZustimmungCacheLeeren();
   assert.deepEqual(await kiFeatureStandKonto({ uid: 'nutzerWC2prompt000000001', stand: KI_FEATURES_AN, tokenFn: async () => 't', fetchFn: r([]), jetzt: 1 }), KI_FEATURES_AUS);
   kiZustimmungCacheLeeren();

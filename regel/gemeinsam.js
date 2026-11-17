@@ -84,7 +84,7 @@ export const FEATURES_AGB_RELEASE_B = Object.freeze(['zahlung', 'korrektur', 'an
 // (oss hängt nur am Feature). Aktivieren: AGB_FASSUNG_RELEASE_C auf die Fassung setzen (eine Stelle), Tests in test/worker-c-agb-release-c.test.mjs.
 // Liste aus dem Kern (KERN-C2 H8: Steuerkern.KERN_FEATURES_AGB.C), damit Kern, Lader und Worker dieselben Namen haben.
 export const FEATURES_AGB_RELEASE_C = Object.freeze([...(Steuerkern.KERN_FEATURES_AGB && Array.isArray(Steuerkern.KERN_FEATURES_AGB.C) ? Steuerkern.KERN_FEATURES_AGB.C : ['oss'])]);
-export const AGB_FASSUNG_RELEASE_C = null;
+export const AGB_FASSUNG_RELEASE_C = '2026-11-15-2'; // E1 (G-RECHT-C): OSS braucht die Zustimmung zur Fassung 2 (gleich App AGB_MINDESTFASSUNG_C)
 // Kern-Optionen eines Kontos (E-B A2): wie kernOptionenFuer, aber Regeln von Release-B-Funktionen nur mit zustimmungB (sonst aus), wie der Lader.
 // WORKER-C: mit fassungC (Standard AGB_FASSUNG_RELEASE_C) zusätzlich Release-C-Regeln nur mit zustimmungC.
 export function kernOptionenFuerKonto(config, zustimmungB, { zustimmungC = false, fassungC = AGB_FASSUNG_RELEASE_C } = {}) {

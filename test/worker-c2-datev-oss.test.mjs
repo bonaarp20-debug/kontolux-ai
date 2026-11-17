@@ -2,12 +2,15 @@
 // Mit Kern-Option oss: A_OSS_EU_B2C Ware 8320/4320 BU 10, TBE 8331/4331 BU 44, Spalte 40 Land, Spalte 41 Satz; A_DRITTLAND_B2C_TBE 8338/4338 ohne
 // Schlüssel; offene Fälle nicht exportiert mit Grund in der Warnung. Ohne Option (Feature aus, fehlt, kern_max aus, keine Konfiguration): Stapel
 // byte-gleich bis auf den Erzeugungszeitpunkt im Kopf (Differenztest). In-Memory-Firestore, kein Netz.
+// E1 (G-RECHT-C): oss wirkt nur mit Zustimmung zur Fassung AGB_FASSUNG_RELEASE_C ('2026-11-15-2'); die Attrappe setzt sie standardmäßig
+// (agb_zustimmung), die Gegenprobe ohne sie (oder nur mit Fassung -1) erwartet den Stapel wie ohne oss.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import * as K from '../steuerkern/index.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
 import { datevOssBuchungen, datevOssPlan, datevSatz, datevLand, DATEV_OSS_KONTEN } from '../regel/datev-oss.js';
+import { AGB_FASSUNG_RELEASE_B, AGB_FASSUNG_RELEASE_C } from '../regel/gemeinsam.js';
 
 const UID = 'nutzerWC2datev0000000001';
 const REGEL = {
@@ -46,16 +49,20 @@ globalThis.fetch = async (input, init = {}) => {
 };
 const worker = (await import('../worker.js')).default;
 
-async function exportiere(belege, { skr = 'SKR03', profil = UEBER, config = OSS_AN, fehler = null } = {}) {
+let aufrufNr = 0;
+const ZUSTIMMUNG_C = [AGB_FASSUNG_RELEASE_B, AGB_FASSUNG_RELEASE_C];
+async function exportiere(belege, { skr = 'SKR03', profil = UEBER, config = OSS_AN, fehler = null, zustimmung = ZUSTIMMUNG_C } = {}) {
   const fs = fakeFirestore();
   aktuellesFs = fs;
   if (config) fs.setze('config/features', config);
+  zustimmung.forEach((v, i) => fs.setze(`users/${UID}/agb_zustimmung/z${i}`, { version: v }));
   if (profil) fs.setze(`users/${UID}/steuerprofil/aktuell`, profil);
   fs.setze(`users/${UID}/profil/settings`, { datev_skr: skr, datev_bankkonto: skr === 'SKR04' ? '1800' : '1200', datev_berater_nr: '1001', datev_mandanten_nr: '1', kleinunternehmer: 'Nein' });
   for (const [id, d] of Object.entries(belege)) fs.setze(`users/${UID}/dokumente/${id}`, d);
   if (fehler) fs.haken.fehler = fehler;
   const r = await worker.fetch(new Request('https://worker.test/datev-export', {
-    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://app.kontolux-ai.de', Authorization: 'Bearer tok' },
+    // E1: eigene Test-IP je Aufruf (die Gegenprobe braucht mehr Aufrufe als das 20er-Limit je IP erlaubt)
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://app.kontolux-ai.de', Authorization: 'Bearer tok', 'CF-Connecting-IP': `198.51.100.${++aufrufNr}` },
     body: JSON.stringify({ userId: UID, jahr: 2026, token: 'tok' }),
   }), env, { waitUntil() {} });
   const text = new TextDecoder('utf-8').decode(new Uint8Array(await r.arrayBuffer()));
@@ -182,6 +189,29 @@ test('Differenztest: ohne Kern-Option oss byte-gleich (oss aus, fehlt, kern_max 
   // Konten ohne OSS-Belege: mit oss an byte-gleich zu oss aus
   const nurInland = { i: inland('I-1', 119, '19'), e: { ...inland('E-1', 50, '19'), typ: 'rechnung_eingehend', kategorie: 'Bürobedarf' } };
   assert.equal((await exportiere(nurInland, { config: OSS_AN })).ohneZeit, (await exportiere(nurInland, { config: OSS_AUS })).ohneZeit);
+});
+
+test('E1 Gegenprobe: oss an, aber ohne Zustimmung zur Fassung 2026-11-15-2 (keine oder nur -1): Stapel byte-gleich wie ohne oss, OSS-Belege auf 8200', async () => {
+  assert.equal(AGB_FASSUNG_RELEASE_C, '2026-11-15-2');
+  const belege = { w: ossBeleg({ nr: 'W-1' }), t: ossBeleg({ nr: 'T-1', leistungsart: 'tbe' }), d: ossBeleg({ nr: 'D-1', land: 'CH', leistungsart: 'tbe', satz: null, brutto: 10000 }), i: inland('I-1', 119, '19') };
+  for (const skr of ['SKR03', 'SKR04']) {
+    const basis = await exportiere(belege, { skr, config: OSS_AUS });
+    assert.equal(zeile(basis, 'W-1')[0][7], skr === 'SKR03' ? '8200' : '4200');
+    for (const zustimmung of [[], [AGB_FASSUNG_RELEASE_B], ['2026-11-14-1', AGB_FASSUNG_RELEASE_B]]) {
+      const z = await exportiere(belege, { skr, config: OSS_AN, zustimmung });
+      assert.equal(z.status, 200);
+      assert.equal(z.ohneZeit, basis.ohneZeit, skr + ' ' + JSON.stringify(zustimmung));
+      assert.equal(z.warnung, basis.warnung);
+    }
+    // mit Zustimmung -2: OSS-Aufteilung (Gegenprobe zur Gegenprobe)
+    const mit = await exportiere(belege, { skr, config: OSS_AN });
+    assert.equal(zeile(mit, 'W-1')[0][7], skr === 'SKR03' ? '8320' : '4320');
+  }
+});
+
+test('E1: Zustimmungsliste unlesbar bei oss an: 503 statt eines Stapels ohne OSS-Aufteilung', async () => {
+  const z = await exportiere({ w: ossBeleg({ nr: 'W-1' }) }, { fehler: (url) => (url.includes('/agb_zustimmung') ? json(500, { error: { status: 'INTERNAL' } }) : null) });
+  assert.equal(z.status, 503);
 });
 
 test('Lesefehler bei oss: 503 statt eines Stapels ohne OSS-Aufteilung', async () => {
