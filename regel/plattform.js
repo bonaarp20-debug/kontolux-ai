@@ -35,7 +35,8 @@ export const POSITION_SCHLUESSEL = Object.freeze(['satz_bp', 'brutto_cent', 'net
 export const LEISTUNG_SCHLUESSEL = Object.freeze(['datum', 'herkunft']);
 export const BEZUG_SCHLUESSEL = Object.freeze(['ref', 'beleg_id']);
 export const HINWEIS_CODES = Object.freeze(['auslandskunde', 'land_fehlt', 'land_widerspruch', 'b2b_status_unklar', 'abruf_fehlgeschlagen',
-  'original_nicht_gefunden', 'nicht_eur', 'positionen_summe_abweichend', 'reverse_charge_befreiung']);
+  'original_nicht_gefunden', 'nicht_eur', 'positionen_summe_abweichend', 'reverse_charge_befreiung',
+  'original_ungeprueft']); // POLITUR-B: Original gefunden, aber plattform_daten ohne gültiges Kennzeichen (regel/plattform-signatur.js)
 
 // Texte im Buchungstext (Legacy-Weg, kurz, ohne Einzelfallaussage; K1 5.4)
 export const hinweisAusland = (land) => `Kunde im Ausland (${land}): Umsatzsteuer nicht berechnet, bitte im Beleg klären.`;
@@ -382,7 +383,9 @@ export async function plattformFeatureAn({ token, fetchFn, jetzt = Date.now() } 
 }
 
 // Original einer Erstattung über plattform_daten.ref (eine Unteranfrage). Ergebnis { beleg_id, gegenpartei } oder null.
-export async function originalZurErstattung({ uid, token, fetchFn, ref }) {
+// POLITUR-B: pruefe(belegId, daten) -> { ok } prüft das HMAC-Kennzeichen (regel/plattform-signatur.js). Ohne Prüfer oder bei ungültigem Kennzeichen:
+// { ungeprueft: grund } (der Aufrufer nutzt weder Land noch Beleg-ID; ein Client kann plattform_daten.ref an eigene Belege schreiben).
+export async function originalZurErstattung({ uid, token, fetchFn, ref, pruefe }) {
   if (!uid || !ref) return null;
   try {
     const fs = erzeugeSchicht({ token, fetchFn, budget: 1 });
@@ -394,7 +397,11 @@ export async function originalZurErstattung({ uid, token, fetchFn, ref }) {
     const d = treffer[0];
     if (!d) return null;
     const pd = istObjekt(d.daten?.plattform_daten) ? d.daten.plattform_daten : {};
-    return { beleg_id: String(d.pfad).split('/').pop(), gegenpartei: istObjekt(pd.gegenpartei) ? pd.gegenpartei : null };
+    const belegId = String(d.pfad).split('/').pop();
+    if (typeof pruefe !== 'function') return { ungeprueft: 'schluessel_fehlt' };
+    const p = await pruefe(belegId, d.daten);
+    if (!p || p.ok !== true) return { ungeprueft: (p && p.grund) || 'signatur_ungueltig' };
+    return { beleg_id: belegId, gegenpartei: istObjekt(pd.gegenpartei) ? pd.gegenpartei : null };
   } catch {
     return null;
   }

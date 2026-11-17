@@ -38,6 +38,7 @@ import { klaerungEinheit, KLAERUNG_MAX, KLAERUNG_WAHLEN, istPlattformAuslandsbel
 import { klaerungFreigegeben } from './migration.js';
 import { altFestMonate, altMonateSperren } from './klaerung-altmonat.js';
 import { belegeFuerKern } from './festschreibung-kern.js';
+import { plattformDatenDesBelegs, CODE_UNGEPRUEFT } from './plattform-signatur.js';
 
 // APP-B2 (BP-21a-A, 15.11.2026): Plattformbelege mit Kunde im Ausland (plattform_daten.fall 'auslandskunde', BP-21a-W). Deutsche Steuer nur mit
 // antwort.grundlage 'eu_b2c_unter_grenze' UND der Sammelbestätigung des Nutzers am Steuerprofil für das Belegjahr (eu_b2c_grenze[jahr].unter_grenze
@@ -225,8 +226,29 @@ export function legacyErgaenzen(uid, id, dok, einheit) {
   }
 }
 
+// POLITUR-B: plattform_daten nur mit gültiger Signatur des Workers (regel/plattform-signatur.js). Ergebnis: Map Beleg-ID -> Grund für jeden Beleg,
+// der plattform_daten trägt und nicht geprüft werden kann (signatur_fehlt | signatur_ungueltig | schluessel_fehlt). Ohne plattform_daten: kein Eintrag.
+async function plattformDatenUngeprueft(env, uid, ids, docs) {
+  const m = new Map();
+  for (const id of ids) {
+    const d = docs.get(dokPfad(uid, id))?.daten;
+    const p = await plattformDatenDesBelegs(env, uid, id, d);
+    if (p && !p.ok) m.set(id, p.grund);
+  }
+  if (m.size) {
+    const gruende = {};
+    for (const g of m.values()) zaehle(gruende, g);
+    console.warn('plattform_daten_ungeprueft ' + JSON.stringify({ weg: 'klaerung_beleg', anzahl: m.size, gruende }));
+  }
+  return m;
+}
+
 function einheitFuer(uid, id, dok, kontext) {
   const d = dok && istObjekt(dok.daten) ? dok.daten : null;
+  // POLITUR-B: unbestätigte Plattformdaten zählen wie nicht vorhanden; der Beleg bleibt auf jedem Weg dieser Aktion offen (keine Plattform-Entscheidung,
+  // kein Nachweis-Kennzeichen, und auch keine allgemeine Wahl, weil ein Verkauf ins Ausland nicht auszuschließen ist). Nichts geschrieben.
+  const pdGrund = kontext.pdUngeprueft instanceof Map ? kontext.pdUngeprueft.get(id) : undefined;
+  if (pdGrund) return { id, write: null, code: CODE_UNGEPRUEFT, grund: pdGrund };
   if (kontext.oss) {
     if (!d) return { id, write: null, code: 'fehlt' };
     const p = ossPruefung(d, kontext.profil);
@@ -294,7 +316,8 @@ export async function regelKlaerungBeleg(body, env, cors = {}, deps = {}) {
     if (!klaerungFreigegeben(configBereinigen(docs.get(CONFIG_PFAD)?.daten))) return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
     const profil = docs.get(aktuellPfad(uid))?.daten;
     if (!profilBereit(profil)) return fehlerAntwort(409, 'PROFIL_NICHT_BESTAETIGT', cors);
-    const kontext = { profil, steuerwahl, grundlage: body.antwort.grundlage, ...(ossAntwort ? { oss: { leistungsart: body.antwort.leistungsart } } : {}), ...(landAusAntwort(body.antwort) ? { land: landAusAntwort(body.antwort) } : {}), zeit, stichtag: zeit.slice(0, 10), anfrage_id: body.anfrage_id, festPerioden: [], kernOptionen: await kernOptionenFuerKontoLaden(uid, configBereinigen(docs.get(CONFIG_PFAD)?.daten), { fs }) }; // E-B (A1): Kern-Optionen für die Sperrprüfung; FIX-EB (F4): Zustimmung je Konto wie die Festschreibung
+    const pdUngeprueft = await plattformDatenUngeprueft(env, uid, ids, docs);
+    const kontext = { pdUngeprueft, profil, steuerwahl, grundlage: body.antwort.grundlage, ...(ossAntwort ? { oss: { leistungsart: body.antwort.leistungsart } } : {}), ...(landAusAntwort(body.antwort) ? { land: landAusAntwort(body.antwort) } : {}), zeit, stichtag: zeit.slice(0, 10), anfrage_id: body.anfrage_id, festPerioden: [], kernOptionen: await kernOptionenFuerKontoLaden(uid, configBereinigen(docs.get(CONFIG_PFAD)?.daten), { fs }) }; // E-B (A1): Kern-Optionen für die Sperrprüfung; FIX-EB (F4): Zustimmung je Konto wie die Festschreibung
     // KERN-C3 (G-OSS F1): bei der OSS-Klärung bestätigte Belege nach dem Überschreiten bestimmen (Kontext selbst gelesen, siehe umstellbareIds)
     if (ossAntwort) {
       const angefragt = ids.map((id) => ({ id, daten: docs.get(dokPfad(uid, id))?.daten })).filter((z) => istObjekt(z.daten));
@@ -332,7 +355,7 @@ export async function regelKlaerungBeleg(body, env, cors = {}, deps = {}) {
     }
     const ergebnis = {};
     for (const x of einheiten) zaehle(ergebnis, x.code);
-    return antwort({ ok: true, steuerwahl, ergebnis, je_beleg: einheiten.map((x) => ({ id: x.id, code: x.code })), legacy_geschrieben: einheiten.filter((x) => x.write && x.legacy).length }, 200, cors);
+    return antwort({ ok: true, steuerwahl, ergebnis, je_beleg: einheiten.map((x) => ({ id: x.id, code: x.code, ...(x.grund ? { grund: x.grund } : {}) })), legacy_geschrieben: einheiten.filter((x) => x.write && x.legacy).length }, 200, cors);
   } catch (e) {
     if (e instanceof FirestoreFehler && e.klasse === 'PARALLEL') return fehlerAntwort(409, 'PARALLELER_AUFRUF', cors);
     if (e instanceof BudgetFehler) return fehlerAntwort(503, 'BUDGET_ERSCHOEPFT', cors);

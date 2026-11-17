@@ -11,6 +11,7 @@ import * as K from '../steuerkern/index.js';
 import { regelKlaerungBeleg, KLAERUNG_BELEG_AKTION, GRUNDLAGE_EU_B2C, KENNZEICHEN_EU_B2C, plattformPruefung } from '../regel/klaerung-beleg.js';
 import { regelSteuerprofil, neuesProfil, PROFIL_KERN_FELDER } from '../regel/steuerprofil.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
+import { TEST_ENV, signiert } from './plattform-signatur-hilfe.mjs'; // POLITUR-B: Plattformbelege wie vom Worker signiert
 
 const UID = 'nutzerAPPB2000000000000001';
 const REGEL = {
@@ -53,10 +54,10 @@ function umgebung(belege, { profil = { ...REGEL, eu_b2c_grenze: BESTAETIGT }, co
   const fs = fakeFirestore();
   if (config) fs.setze('config/features', config);
   if (profil) fs.setze(`users/${UID}/steuerprofil/aktuell`, profil);
-  for (const [id, d] of Object.entries(belege)) fs.setze(pfad(id), d);
+  for (const [id, d] of Object.entries(belege)) fs.setze(pfad(id), signiert(UID, id, d));
   const deps = { fetchFn: fs.fetchFn, adminToken: async () => 't', jetzt: () => '2026-11-15T10:00:00.000Z', heute: () => '2026-11-15' };
   const rufe = async (antwort, ids) => {
-    const r = await regelKlaerungBeleg({ userId: UID, aktion: KLAERUNG_BELEG_AKTION, anfrage_id: aid(), beleg_ids: ids, antwort }, {}, {}, deps);
+    const r = await regelKlaerungBeleg({ userId: UID, aktion: KLAERUNG_BELEG_AKTION, anfrage_id: aid(), beleg_ids: ids, antwort }, TEST_ENV, {}, deps);
     return { status: r.status, json: await r.json() };
   };
   const profilRufe = async (body) => {

@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { erzeugeTestEnv, anfrage } from './harness.mjs';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
+import { TEST_ENV, signiert } from './plattform-signatur-hilfe.mjs'; // POLITUR-B
 import { ezbCacheLeeren } from '../regel/ezb-kurs.js';
 import * as K from '../steuerkern/index.js';
 
@@ -37,7 +38,7 @@ function installiere(fs) {
   return { zaehler, zurueck: () => { globalThis.fetch = original; } };
 }
 async function envMitKvZaehler(zaehler) {
-  const env = await erzeugeTestEnv({});
+  const env = await erzeugeTestEnv({ ...TEST_ENV });
   for (const name of ['PROFIL_KV', 'ABO_KV']) {
     const kv = env[name];
     for (const m of ['get', 'put', 'delete', 'list']) { const f = kv[m].bind(kv); kv[m] = (...a) => { zaehler.kv++; return f(...a); }; }
@@ -121,8 +122,8 @@ test('klaerung_beleg mit OSS-Antwort über den Router (token-Feld): geklärt unt
   fs.setze('config/features', AN);
   fs.setze(`users/${A}/steuerprofil/aktuell`, { version: 1, bestaetigt_am: '2026-11-14T08:00:00Z', status_verlauf: [{ gueltig_ab: '2024-01-01', status: 'regel', grund: 'beginn' }], versteuerung_verlauf: [{ gueltig_ab: '2024-01-01', art: 'soll' }] });
   const d = '2026-10-05';
-  fs.setze(`users/${A}/dokumente/p1`, { name: 'Shop', typ: 'rechnung_ausgehend', betrag: 120, betrag_netto: 120, mwst_satz: 'keine', datum: d, bezahlt: true, bezahlt_am: d, quelle: 'shopify', createdAt: `${d}T09:00:00.000Z`,
-    plattform_daten: { version: 1, plattform: 'shopify', ref: 'shopify:1', fall: 'auslandskunde', gegenpartei: { land: 'FR', unternehmer: 'unbekannt' }, plattform_steuer: { quelle: 'shopify', saetze: [2000] }, leistung: { datum: d, herkunft: 'bestelldatum' } } });
+  fs.setze(`users/${A}/dokumente/p1`, signiert(A, 'p1', { name: 'Shop', typ: 'rechnung_ausgehend', betrag: 120, betrag_netto: 120, mwst_satz: 'keine', datum: d, bezahlt: true, bezahlt_am: d, quelle: 'shopify', createdAt: `${d}T09:00:00.000Z`,
+    plattform_daten: { version: 1, plattform: 'shopify', ref: 'shopify:1', fall: 'auslandskunde', gegenpartei: { land: 'FR', unternehmer: 'unbekannt' }, plattform_steuer: { quelle: 'shopify', saetze: [2000] }, leistung: { datum: d, herkunft: 'bestelldatum' } } }));
   const { zaehler, zurueck } = installiere(fs);
   try {
     const env = await envMitKvZaehler(zaehler);
