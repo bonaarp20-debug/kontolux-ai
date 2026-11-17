@@ -3037,7 +3037,9 @@ async function handleDocument(body, env, cors = {}, ctx) {
       if (!v2) v2 = await schreibwegV2(env, 'beleg_manuell', userId, token, { typ, betrag, mwst_satz, datum: metadata.fields.datum.stringValue, bezahlt, bezahlt_am: metadata.fields.bezahlt_am?.stringValue }, metadata.fields);
       if (v2 && v2.ablehnen) {
         const gesperrt = (v2.codes || []).includes('PF_ZAHLUNG_GESPERRT');
-        return new Response(JSON.stringify({ error: gesperrt ? 'Das Zahlungsdatum liegt in einem festgeschriebenen Zeitraum. Bitte den Zeitraum zuerst entsperren oder ein Datum in einem offenen Zeitraum wählen.' : 'Beleg nicht gespeichert: die Angaben sind formal ungültig.', codes: v2.codes }), {
+        // OSS-FORM (M1): Steuerwahl OSS ohne Freigabe für dieses Konto (Feature oss aus oder Zustimmung zur Fassung C fehlt)
+        const ossAus = (v2.codes || []).includes('PF_OSS_NICHT_FREIGEGEBEN');
+        return new Response(JSON.stringify({ error: gesperrt ? 'Das Zahlungsdatum liegt in einem festgeschriebenen Zeitraum. Bitte den Zeitraum zuerst entsperren oder ein Datum in einem offenen Zeitraum wählen.' : ossAus ? 'Verkäufe an Privatkunden in anderen EU-Ländern (OSS) sind für dein Konto gerade nicht freigeschaltet. Der Beleg ist nicht gespeichert; wähle bitte eine andere Steuerangabe oder „Weiß ich nicht“.' : 'Beleg nicht gespeichert: die Angaben sind formal ungültig.', codes: v2.codes }), {
           status: gesperrt ? 409 : 400,
           headers: { ...cors, 'Content-Type': 'application/json' }
         });

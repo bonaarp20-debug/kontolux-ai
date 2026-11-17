@@ -130,8 +130,42 @@ export const STEUER_SCHLUESSEL = Object.freeze(['richtung', 'beleg_art', 'steuer
   'versteuerung_beleg', 'wirkdatum', 'korrektur_grund', 'rueckzahlung', 'fa', 'kategorie', 'rechnungsnr', 'status_hinweise', 'legacy_typ',
   'migration', 'perioden', 'korrektur_notiz', 'entwurf_blocker', 'oss']); // KERN-C4: oss wie firestore.rules (E-C, Release C)
 
+// OSS-FORM (Gegenprüfung M1/N1): steuer.oss aus dem Formular (Verkauf an Privatkunden in anderen EU-Ländern) nur mit Kern-Option oss des Kontos
+// (Feature oss, kern_max, Zustimmung zur Fassung C; kernOptionenFuerKontoLaden), sonst PF_OSS_NICHT_FREIGEGEBEN. Die Zeilen müssen in Euro sein und zu
+// Summe und Legacy-Brutto passen; die Steuer je Zeile muss zum Satz passen (aus Brutto oder Netto gerechnet, Kern-Rundung), sonst PF_OSS_ZEILEN.
+export const OSS_CODE_AUS = 'PF_OSS_NICHT_FREIGEGEBEN';
+export const OSS_CODE_ZEILEN = 'PF_OSS_ZEILEN';
+export function ossZeilenOk(s, legacy) {
+  const o = s && s.oss;
+  if (!istObjekt(o) || o.waehrung !== 'EUR' || !Array.isArray(o.zeilen) || o.zeilen.length < 1 || o.zeilen.length > 200) return false;
+  let brutto = 0;
+  let netto = 0;
+  for (const z of o.zeilen) {
+    if (!istObjekt(z) || !Number.isSafeInteger(z.netto_cent) || !Number.isSafeInteger(z.ust_cent)) return false;
+    const n = Math.abs(z.netto_cent);
+    const u = Math.abs(z.ust_cent);
+    if (z.satz_bp === null || z.satz_bp === undefined) { if (u !== 0) return false; }
+    else {
+      if (!Number.isSafeInteger(z.satz_bp) || z.satz_bp < 0 || z.satz_bp > 10000) return false;
+      if (u !== Steuerkern.ustAusBrutto(n + u, z.satz_bp) && u !== Steuerkern.ustAusNetto(n, z.satz_bp)) return false;
+    }
+    brutto += z.netto_cent + z.ust_cent;
+    netto += z.netto_cent;
+  }
+  // Der Kern führt in summe den eingegebenen Betrag: brutto (Formular, Klärung) oder netto (Eingabe „netto“); beides muss zu den Zeilen passen
+  const summe = istObjekt(s.summe) && Number.isSafeInteger(s.summe.brutto_cent) ? Math.abs(s.summe.brutto_cent) : null;
+  const passt = (x) => x === Math.abs(brutto) || x === Math.abs(netto);
+  if (summe === null || !passt(summe)) return false;
+  const lb = Steuerkern.euroZuCent(Number(legacy && legacy.betrag));
+  return lb === null || Math.abs(lb) === summe;
+}
+
 export function clientSteuerPruefen({ steuer, legacy, stichtag, festPerioden = [], profil = null, kernOptionen }) {
   if (!istObjekt(steuer) || !Object.keys(steuer).every((k) => STEUER_SCHLUESSEL.includes(k)) || typeof steuer.steuerfall !== 'string') return { ablehnen: true, codes: ['PF_SCHEMA'], steuer: null };
+  if (steuer.oss !== undefined && steuer.oss !== null) {
+    if (!(istObjekt(kernOptionen) && istObjekt(kernOptionen.regeln) && kernOptionen.regeln.oss === true)) return { ablehnen: true, codes: [OSS_CODE_AUS], steuer: null };
+    if (!ossZeilenOk(steuer, legacy)) return { ablehnen: true, codes: [OSS_CODE_ZEILEN], steuer: null };
+  }
   const s = JSON.parse(JSON.stringify(steuer));
   delete s.perioden; // reserviert für den Worker
   const v = Steuerkern.validiereBeleg({ schema_version: 2, steuer: s }, { modus: 'streng', stichtag });
