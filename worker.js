@@ -4554,6 +4554,9 @@ async function handleDatevExport(body, env, cors = {}) {
     // Einnahmen ohne Kategorie: Erlöskonto nach mwst_satz (erloeskontoExport) — vorher immer
     // 8400/4400, ein Automatikkonto, auf dem DATEV auch steuerfreien/7-%-Einnahmen 19 % USt anrechnet.
     const alleErloeskonten = new Set(Object.values(DATEV_ERLOESKONTEN[skr] || DATEV_ERLOESKONTEN.SKR03));
+    // OSS-FORM 4 (F5): Altpfad (Feature oss aus) mit Kategorie „Einnahmen EU-Privatkunden (OSS)“ (8320/4320): auch ein Erlöskonto, damit Kleinunternehmer
+    // auf das KU-Konto umgelenkt werden und kein Steuerschlüssel daran hängt
+    alleErloeskonten.add(skr === 'SKR04' ? '4320' : '8320');
 
     // Steuersatz je Integration aus deren Einnahmen (zuletzt verwendeter Satz, wie
     // berechneUstSchaetzwert in index.html) — für Erstattungen, die ohne Satz gespeichert werden.
