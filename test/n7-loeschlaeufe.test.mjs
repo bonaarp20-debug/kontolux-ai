@@ -100,9 +100,11 @@ test('Schalter: ohne Variable ist jeder Lauf aus; LOESCHLAEUFE_MAX deckelt; unbe
   assert.equal(loeschModus({ LOESCHLAEUFE_MAX: 'an' }, 'GIBTSNICHT'), 'aus');
 });
 
-test('wrangler.toml: alle Schalter stehen auf "aus", stündlicher Cron passt zu LOESCH_CRON, höchstens 5 Cron-Trigger (Free)', () => {
+// LOESCHLAUF-TROCKEN: Stufe 1 (loeschlaeufe-pruefung.md Abschnitt 5): kein Schalter steht auf "an"; alle außer TRENNEN "trocken", TRENNEN "aus"
+test('wrangler.toml: kein Schalter auf "an" (Stufe 1 trocken, TRENNEN aus), stündlicher Cron passt zu LOESCH_CRON, höchstens 5 Cron-Trigger (Free)', () => {
   const toml = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
-  for (const v of ['LOESCHLAEUFE_MAX', ...Object.values(SCHALTER)]) assert.match(toml, new RegExp(`^${v} = "aus"$`, 'm'), v);
+  for (const v of ['LOESCHLAEUFE_MAX', ...Object.values(SCHALTER)]) assert.match(toml, new RegExp(`^${v} = "${v === SCHALTER.TRENNEN ? 'aus' : 'trocken'}"$`, 'm'), v);
+  assert.doesNotMatch(toml, /^LOESCH\w* = "an"$/m);
   const crons = JSON.parse(toml.match(/^crons = (\[.*\])$/m)[1]);
   assert.ok(crons.includes(LOESCH_CRON));
   assert.ok(crons.length <= 5);
@@ -508,4 +510,34 @@ test('Nachlauf: entsperrtes Konto mit übrig gebliebenem archiv:-Schlüssel wird
   kv._m.set('archiv:entspE0000000001', '2027-03-01T00:00:00.000Z');
   await loeschlaeufeStuendlich(e, deps(g, kv, STUNDE(12)));
   assert.equal(g.lies('nachrichtenlimit/entspE0000000001'), null);
+});
+
+// LOESCHLAUF-TROCKEN (Stufe 1, loeschlaeufe-pruefung.md Abschnitt 5): die Werte aus wrangler.toml [vars] selbst. Alle Läufe außer TRENNEN
+// stehen auf 'trocken', TRENNEN auf 'aus'; mit genau diesen Werten wird zur Fristen-Stunde nichts geschrieben oder gelöscht.
+test('wrangler.toml Stufe 1: alle Löschläufe trocken (TRENNEN aus), mit diesen Werten wird nichts gelöscht', async () => {
+  const toml = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
+  const vars = {};
+  for (const m of toml.matchAll(/^(LOESCHLAEUFE_MAX|LOESCHLAUF_[A-Z_]+) = "([^"]*)"$/gm)) vars[m[1]] = m[2];
+  assert.equal(vars.LOESCHLAEUFE_MAX, 'trocken');
+  for (const [lauf, name] of Object.entries(SCHALTER)) {
+    assert.ok(name in vars, `${name} fehlt in wrangler.toml`);
+    assert.equal(vars[name], lauf === 'TRENNEN' ? 'aus' : 'trocken', name);
+    assert.equal(loeschModus(vars, lauf), lauf === 'TRENNEN' ? 'aus' : 'trocken', `wirksamer Modus ${lauf}`);
+  }
+  const g = fakeGoogle(); const kv = fakeKv();
+  konto(g, kv, 'archivA0000000001');
+  konto(g, kv, 'wegwerfW000000001', { archiviert: null }); g.konten.get('wegwerfW000000001').disabled = true;
+  for (const p of g.pfade('users/wegwerfW000000001/')) if (istAufbewahrungsPfad(p)) g.docs.delete(p);
+  kv._m.set('gesperrt:wegwerfW000000001', String(STUNDE(4).getTime() - 40 * 86400000));
+  g.setze('feedback/alt_1', { userId: 'x', datum: '2030-01-01T00:00:00.000Z' });
+  g.setze('anfragen/a1', { status: 'erledigt', status_am: '2031-05-01T00:00:00.000Z', erstellt_am: '2031-04-01T00:00:00.000Z' });
+  g.setze('admin_protokoll/p1', { zeit: '2031-01-01T00:00:00.000Z', uid: 'irgendwer000', aktion: 'x' });
+  g.nutzerAnlegen({ localId: 'unbestU000000001', email: 'u@test.invalid', emailVerified: false, createdAt: String(Date.parse('2036-01-01')) });
+  g.setze('users/unbestU000000001/profil/settings', { name: 'x' });
+  const vorher = JSON.stringify([...g.docs]) + JSON.stringify(g.dateienMit(B)) + JSON.stringify([...g.konten.keys()]);
+  const r = await loeschlaeufeStuendlich(vars, deps(g, kv, STUNDE(4)));
+  for (let i = 0; i < 5; i++) await loeschlaeufeStuendlich(vars, deps(g, kv, STUNDE(5)));
+  assert.deepEqual(g.log.schreibend, []);
+  assert.equal(JSON.stringify([...g.docs]) + JSON.stringify(g.dateienMit(B)) + JSON.stringify([...g.konten.keys()]), vorher);
+  assert.equal(r.feedback.gefunden, 1); assert.equal(r.unbestaetigt.wuerde_loeschen, 1);
 });
