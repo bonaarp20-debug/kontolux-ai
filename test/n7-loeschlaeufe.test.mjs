@@ -541,3 +541,36 @@ test('wrangler.toml Stufe 1: alle Löschläufe trocken (TRENNEN aus), mit diesen
   assert.equal(JSON.stringify([...g.docs]) + JSON.stringify(g.dateienMit(B)) + JSON.stringify([...g.konten.keys()]), vorher);
   assert.equal(r.feedback.gefunden, 1); assert.equal(r.unbestaetigt.wuerde_loeschen, 1);
 });
+
+// LOESCHWEG-SCHUTZ (B1 der Gegenlesung, 18.11.2026): der alte 03:00-Weg (gesperrteKontenLoeschen) läuft, solange WEGWERF nicht 'an' ist (also auch bei
+// 'trocken'). Er löscht ein fälliges gesperrtes Konto nur noch, wenn es KEINE Aufbewahrungsdaten hat (dokumente, festschreibung, monatsabschluesse);
+// Konten mit solchen Daten bleiben unangetastet (gezählt, geloggt, Markierung bleibt: Prüfung von Hand). Konten ohne diese Daten werden wie bisher
+// nach 30 Tagen gelöscht (Zusage der Datenschutzerklärung). loescheKvSpuren räumt loeschstand:{uid} mit.
+test('Altweg 03:00 (WEGWERF trocken): Konto mit Belegen bleibt (nichts gelöscht), Konto ohne Aufbewahrungsdaten wird gelöscht, loeschstand-Schlüssel geräumt', async () => {
+  const g = fakeGoogle(); const kv = fakeKv();
+  const t = Date.now();
+  const w = (uid, mitBelegen) => {
+    konto(g, kv, uid, { archiviert: null, belege: mitBelegen ? 3 : 0, uploads: 0, dateien: 0 });
+    if (!mitBelegen) for (const p of g.pfade(`users/${uid}/`)) if (/\/(dokumente|festschreibung|monatsabschluesse)\//.test(p)) g.docs.delete(p);
+    kv._m.set(`gesperrt:${uid}`, String(t - 40 * 86400000)); kv._m.set(`status:${uid}`, 'abgelehnt');
+  };
+  w('altBeleg00000001', true);
+  w('altLeer000000002', false);
+  kv._m.set('loeschstand:altLeer000000002', JSON.stringify({ phase: 'pruefen' }));
+  const vorherBelege = geschuetzt(g, 'altBeleg00000001');
+  const vorherAlle = g.pfade('users/altBeleg00000001/').length;
+  const env3 = await erzeugeTestEnv({ PROFIL_KV: kv, LOESCHLAEUFE_MAX: 'trocken', LOESCHLAUF_WEGWERF: 'trocken' });
+  const alt = globalThis.fetch; globalThis.fetch = g.fetchFn;
+  const altErr = console.error; const altLog = console.log; console.error = () => {}; console.log = () => {};
+  try { await worker.scheduled({ cron: '0 3 * * *' }, env3, {}); } finally { globalThis.fetch = alt; console.error = altErr; console.log = altLog; }
+  // Konto mit Belegen: nichts gelöscht, Login und Markierung bleiben
+  assert.equal(geschuetzt(g, 'altBeleg00000001'), vorherBelege);
+  assert.equal(g.pfade('users/altBeleg00000001/').length, vorherAlle, 'auch Chats/Profil unangetastet');
+  assert.ok(g.konten.has('altBeleg00000001'));
+  assert.ok(kv._m.has('gesperrt:altBeleg00000001'));
+  assert.equal(g.log.schreibend.filter(([, u]) => String(u).includes('altBeleg00000001')).length, 0, 'keine Schreibanfrage für das Konto mit Belegen');
+  // Konto ohne Aufbewahrungsdaten: wie bisher gelöscht, KV-Spuren inklusive loeschstand weg
+  assert.deepEqual(g.pfade('users/altLeer000000002/'), []);
+  assert.equal(g.konten.has('altLeer000000002'), false);
+  for (const k of ['gesperrt:', 'status:', 'loeschstand:']) assert.equal(kv._m.has(k + 'altLeer000000002'), false, k);
+});
