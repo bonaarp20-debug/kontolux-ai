@@ -564,8 +564,8 @@ function gwgJahrWeg(s) {
   // Kosten bis 250 EUR plant anlagegutArt in jeder Wahl als 'sofort'; nur die Kategorie GWG (AfA-Kategorie schließt F8 ohne Option aus)
   if (!anl.length || !anl.every((x) => x.kategorie === 'GWG bis 800€' && (x.art === 'sofort_bisher' || x.art === 'sofort'))) return null;
   if (aktiveZahlungen(s).every((z) => jahrVon(z.datum) === plan0.jahr)) return null;
-  // Plan ohne Wahl: 'sofort_bisher'/'sofort' bucht anlagegutEuer wie die Wahl gwg (Kz 132); eine Skonto-Minderung ändert die Art nicht (bis 800 EUR)
-  const plan = plan0;
+  // Plan wie mit Wahl gwg (alle Positionen 'sofort'): die Art hängt dann nicht von einer Skonto-Minderung an der 250-EUR-Grenze ab (Skonto-Plan)
+  const plan = anlagegutPlan(s, { gwg_wahl: { [String(plan0.jahr)]: 'gwg' } });
   const grund = anlagegutSperre(s);
   if (!grund) return { art: 'plan', plan };
   return { art: 'nur_ust', grund, plan: grund === 'anlagegut_skonto' ? anlagegutSkontoPlan(s, plan) : null };
@@ -599,9 +599,16 @@ function vollBezahltIm(s, jahr) {
 // innerhalb der Gruppe nach der Basis der Positionen verteilt (teile). Basis minus (Skonto brutto minus abziehbarer Vorsteueranteil). Die Grenzen
 // des § 6 Abs. 2, 2a EStG prüft der Kern netto (gwgKosten); die Art muss für die Kosten ohne Skonto und für die Kosten minus dem ganzen
 // Brutto-Skontoanteil gleich sein (dann auch für jeden Wert dazwischen). Ergebnis: Plan mit geminderter Basis oder null (nicht sauber rechenbar).
+// GWG-FIX 2 (Kern -15, A2 der Gegenlesung): Skonto, das erst NACH dem Anschaffungsjahr gezogen wird, mindert die Anschaffungskosten erst im Zeitpunkt
+// der Inanspruchnahme (H 6.2 EStH „Skonto“, BFH 27.02.1991 I R 176/84, BStBl II S. 456; Konfidenz B). Bei reinem Sofortabzug (GWG, bis 250 EUR)
+// bleibt das Anschaffungsjahr deshalb mit den vollen Kosten gerechnet (Kz 132), nur das Jahr des späteren Skontos wird EÜR-Zwischenwert
+// (skonto_spaet, anlagegutEuer; wie die nachträgliche Minderung dort wirkt, belegt keine Quelle im Repo: C). Skonto im Anschaffungsjahr oder
+// davor (Vorauszahlung) mindert die Kosten wie bisher (§ 255 Abs. 1 S. 3 HGB, B). Sammelposten/AfA mit späterem Skonto: weiter null (Zwischenwert).
 function anlagegutSkontoPlan(s, plan) {
-  const zs = aktiveZahlungen(s);
-  if (zs.some((z) => istCent(z.skonto_cent) && z.skonto_cent > 0 && jahrVon(z.datum) !== plan.jahr)) return null;
+  const alle = aktiveZahlungen(s);
+  const spaet = alle.filter((z) => istCent(z.skonto_cent) && z.skonto_cent > 0 && jahrVon(z.datum) > plan.jahr);
+  if (spaet.length && !plan.positionen.every((x) => x.art === 'normal' || x.art === 'sofort' || x.art === 'sofort_bisher')) return null;
+  const zs = alle.map((z) => (spaet.includes(z) ? { ...z, skonto_cent: 0 } : z));
   const mitVst = s.steuerfall === 'E_INLAND_VORSTEUER' && !(s.ausschluss && s.ausschluss.vorsteuer === 'nein');
   const gruppen = gruppiere(s, false);
   const sk = skontoAufteilung(gruppen, zs, false);
@@ -629,7 +636,7 @@ function anlagegutSkontoPlan(s, plan) {
       if (x.basis < 0) return null;
     }
   }
-  return { ...plan, positionen: pos, skonto: true };
+  return { ...plan, positionen: pos, skonto: true, ...(spaet.length ? { skonto_spaet: spaet.map((z) => z.datum) } : {}) };
 }
 // Zwischenwert nur für den EÜR-Teil (nur_ust ohne rechenbaren Plan): berechnete EÜR-Wirkungen ausser Kz 185 (gezahlte Vorsteuer, R-EUER-15)
 // entfallen; je betroffenem Jahr (Anschaffungsjahr und Zahlungsjahre) ein Hinweis 'ausgeschlossen' ohne Kennzahl (EÜR unvollständig).
@@ -1587,13 +1594,13 @@ function eingangWirkungen(s, profil, ctx, out, opt) {
       }
     });
   });
-  if (agPlan) anlagegutEuer(s, ctx, out, agPlan);
+  if (agPlan) anlagegutEuer(s, ctx, out, agPlan, profil);
 }
 
 // KERN-B (BP-04b): EÜR-Wirkung der Anschaffungskosten je Position (siehe anlagegutPlan). Sammelposten: ein Fünftel je Jahr kaufmännisch auf Cent,
 // das fünfte Jahr nimmt den Rest (Summe = Anschaffungskosten). Je Beleg gerechnet; in der Anlage EÜR steht die Summe aller Auflösungsbeträge
 // des Jahres (Kz 137), der Unterschied zur Rundung des ganzen Postens ist höchstens ein Cent je Wirtschaftsgut (Konfidenz B).
-function anlagegutEuer(s, ctx, out, plan) {
+function anlagegutEuer(s, ctx, out, plan, profil) {
   const y0 = plan.jahr;
   const ag = (jahr, f) => out.push(mk(ctx, { welt: 'euer', periode: String(jahr), datum_wirk: plan.bis, rolle: 'ausgabe', spalte: 'ausgabe', ...f }));
   let fehlt = false;
@@ -1618,6 +1625,14 @@ function anlagegutEuer(s, ctx, out, plan) {
     ag(y0, { kz: null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-EUER-09', hinweis_detail: fehlt ? 'anlagegut_wahl_fehlt' : 'anlagegut_afa_nicht_berechnet' });
   }
   if (plan.positionen.some((x) => x.art !== 'normal' && x.kosten > GRENZEN.SAMMELPOSTEN_OBEN.wert_cent) && !ctx.hinweise.includes('HN_15A_NUTZUNGSAENDERUNG')) ctx.hinweise.push('HN_15A_NUTZUNGSAENDERUNG');
+  // GWG-FIX 2: Skonto nach dem Anschaffungsjahr: EÜR nur des Skonto-Jahres Zwischenwert (Hinweis ohne Kennzahl, C)
+  if (Array.isArray(plan.skonto_spaet) && plan.skonto_spaet.length) {
+    const code = statusAm(profil, plan.bis).status === 'ku' ? 'W_ANLAGEGUT_EUER_ZWISCHENWERT_KU' : 'W_ANLAGEGUT_EUER_ZWISCHENWERT';
+    if (!ctx.hinweise.includes(code)) ctx.hinweise.push(code);
+    const jahre = new Map();
+    for (const d of plan.skonto_spaet) { const j = String(jahrVon(d)); if (!jahre.has(j) || d < jahre.get(j)) jahre.set(j, d); }
+    for (const [j, d] of [...jahre.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) out.push(mk(ctx, { welt: 'euer', periode: j, datum_wirk: d, kz: null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-EUER-09', hinweis_detail: 'anlagegut_euer_zwischenwert:anlagegut_skonto_folgejahr' }));
+  }
 }
 const rundeHalbAufCent = (a, n) => mulDivRund(a, 1, n);
 
