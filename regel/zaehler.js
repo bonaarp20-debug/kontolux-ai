@@ -81,6 +81,35 @@ async function nachSchluessel(fs, uid, def, schluessel) {
   return treffer.length ? treffer[0] : null;
 }
 
+// REST-G3 (BH-30-Restfall): Von Hand erfasste Nummern (z. B. RE-2026-029 bis 033 aus einem früheren Programm) kennt der Zähler nicht.
+// Vor der automatischen Vergabe wird deshalb die höchste Laufnummer unter den eigenen AUSGEHENDEN, nicht gelöschten Rechnungen im Zählerformat
+// (RE-JJJJ-N) gelesen; der Stand ist dann mindestens diese Zahl. Eingehende Rechnungen und fremde Nummernformate zählen nicht mit.
+// Eine Unteranfrage (Textbereich 'RE-' bis 'RE.', absteigend, höchstens 30 Dokumente; Einzelfeld-Index genügt). Bei Fehler: ohne Abgleich weiter.
+export async function hoechsteErfassteNummer(fs, uid, def) {
+  try {
+    const treffer = await fs.runQuery(`users/${uid}`, {
+      from: [{ collectionId: 'dokumente' }],
+      where: { compositeFilter: { op: 'AND', filters: [
+        { fieldFilter: { field: { fieldPath: 'rechnungsnr' }, op: 'GREATER_THAN_OR_EQUAL', value: { stringValue: `${def.praefix}-` } } },
+        { fieldFilter: { field: { fieldPath: 'rechnungsnr' }, op: 'LESS_THAN', value: { stringValue: `${def.praefix}.` } } },
+      ] } },
+      orderBy: [{ field: { fieldPath: 'rechnungsnr' }, direction: 'DESCENDING' }],
+      limit: 30,
+    });
+    let hoechste = 0;
+    for (const t of treffer) {
+      const d = t.daten || {};
+      if (d.typ !== 'rechnung_ausgehend' || d.deleted === true) continue;
+      const n = laufnummerAusFormat(def, d.rechnungsnr);
+      if (n && n > hoechste) hoechste = n;
+    }
+    return hoechste;
+  } catch (e) {
+    console.warn('regel_zaehler_abgleich_fehlt ' + String(e && e.message).slice(0, 80));
+    return 0;
+  }
+}
+
 function jahrAus(deps) {
   const h = typeof deps.heute === 'function' ? String(deps.heute()) : '';
   if (/^\d{4}-\d{2}-\d{2}$/.test(h)) return h.slice(0, 4);
@@ -104,6 +133,7 @@ async function reservieren(body, cors, deps) {
     const zp = zaehlerPfad(uid, name);
     const ap = altPfad(uid, def);
     let mindest = 0;
+    let erfasst = null;
     for (let versuch = 0; versuch < ZAEHLER_VERSUCHE; versuch++) {
       // V-F (N-1, G-VE): erst lesen (Zähler mit updateTime), DANN nach dem Schlüssel suchen, dann mit der Vorbedingung schreiben. Hat ein
       // paralleler Lauf mit demselben Schlüssel vor der Suche geschrieben, findet ihn die Suche; schreibt er danach, hat er den Zähler nach
@@ -151,7 +181,8 @@ async function reservieren(body, cors, deps) {
       // FIX-RB Z1: belegt ist eine Nummer auch, wenn es ihr Dokument schon gibt (Altbestand vor dem Fix). Scheitert das create-only Anlegen
       // (ALREADY_EXISTS), springt der nächste Versuch über diese Laufnummer, statt sie zehnmal zu wiederholen. Ohne Zusatzanfrage: kam der
       // Fehler in Wahrheit vom gleichzeitigen Anlegen des Zählers, steht der Zähler beim nächsten Lesen ohnehin mindestens dort.
-      const laufnummer = Math.max(stand, mindest - 1) + 1;
+      if (erfasst === null) erfasst = await hoechsteErfassteNummer(fs, uid, def); // REST-G3: einmal je Aufruf, nur bei automatischer Vergabe
+      const laufnummer = Math.max(stand, erfasst, mindest - 1) + 1;
       const jahr = jahrAus(deps);
       const nummer = nummerFormat(def.praefix, jahr, laufnummer, def.stellen);
       const d = { nummer, zaehler: name, laufnummer, jahr, zweck: body.zweck, schluessel, status: 'reserviert', herkunft: 'zaehler', reserviert_am: zeit };

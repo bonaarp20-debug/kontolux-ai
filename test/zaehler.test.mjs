@@ -72,7 +72,7 @@ test('Erste Reservierung: RE-2026-001, Zähler und Altzähler geschrieben, Numme
   assert.equal(d.zweck, 'rechnung');
   assert.equal(d.laufnummer, 1);
   assert.equal(d.reserviert_am, '2026-11-16T09:00:00.000Z');
-  assert.ok(r.anfragen <= 3, `Unteranfragen ${r.anfragen}`);
+  assert.ok(r.anfragen <= 4, `Unteranfragen ${r.anfragen}`); // REST-G3: plus Abgleich mit erfassten Nummern
 });
 
 test('Bestand: der Altzähler (profil/rechnungsCounter) zählt mit, keine Nummer wird doppelt vergeben', async () => {
@@ -350,4 +350,27 @@ test('Router Ende zu Ende: ohne Token 401, mit Token Nummer unter der UID aus de
     const v = await anfrage(env, { path: '/zaehler/verwenden', body: { anfrage_id: key(), zaehler: 'RE', nummer: fs.lies(fs.pfade(`users/${UID}/rechnungsnummern/`)[0]).nummer, aktion: 'verwendet', beleg_id: 'b1' }, headers: { Authorization: 'Bearer tok-a' }, ip: '203.0.113.77' });
     assert.equal(v.status, 200, await v.clone().text());
   } finally { globalThis.fetch = original; }
+});
+
+test('REST-G3: von Hand erfasste Nummern RE-2026-029..033 schieben die automatische Vergabe auf RE-2026-034', async () => {
+  const { fs, rufe } = umgebung();
+  for (const n of [29, 30, 31, 32, 33]) fs.setze(`users/${UID}/dokumente/h${n}`, { typ: 'rechnung_ausgehend', rechnungsnr: `RE-2026-0${n}` });
+  // eingehende Rechnung eines Lieferanten mit ähnlicher Nummer, gelöschte Rechnung und fremdes Format zählen nicht
+  fs.setze(`users/${UID}/dokumente/e1`, { typ: 'rechnung_eingehend', rechnungsnr: 'RE-2026-099' });
+  fs.setze(`users/${UID}/dokumente/g1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-077', deleted: true });
+  fs.setze(`users/${UID}/dokumente/f1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'KD-17' });
+  const r = await rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.nummer, 'RE-2026-034');
+  assert.equal(fs.lies(`users/${UID}/zaehler/RE`).letzte, 34);
+  const r2 = await rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' });
+  assert.equal(r2.json.nummer, 'RE-2026-035');
+});
+
+test('REST-G3: ohne erfasste Rechnungen bleibt es bei RE-2026-001; Nummer aus dem Vorjahr zählt jahresübergreifend', async () => {
+  const a = umgebung();
+  assert.equal((await a.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' })).json.nummer, 'RE-2026-001');
+  const b = umgebung();
+  b.fs.setze(`users/${UID}/dokumente/v1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2025-120' });
+  assert.equal((await b.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' })).json.nummer, 'RE-2026-121');
 });
