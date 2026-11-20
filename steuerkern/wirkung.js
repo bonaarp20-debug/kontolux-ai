@@ -2287,7 +2287,7 @@ function originalNichtGerechnet(orig, profil, opt) {
 // Korrektur gilt, die zusätzliche wird ausgeschlossen. Berichtigungen ohne USt-Wirkung (tippfehler_berichtigung) und Korrekturen mit
 // ungültigem oder nicht unterstütztem Grund zählen nicht mit (sie werden ohnehin nicht gerechnet).
 // Rückgabe: Map Beleg -> { grund, hinweis }.
-function korrekturPruefung(korrekturen, originale, profil, opt) {
+function korrekturPruefung(korrekturen, originale, profil, opt, doppelteIds) {
   const aus = new Map();
   const origVon = new Map(); // Korrekturbeleg -> gefundenes Original (Beleg-ID oder eindeutige Rechnungsnummer)
   const nachRechnungsnr = new Map();
@@ -2308,6 +2308,11 @@ function korrekturPruefung(korrekturen, originale, profil, opt) {
   }
   for (const [key, liste] of gruppen) {
     const orig = originale.get(key) || nachRechnungsnr.get(key) || null;
+    // KERN-19 (F2-M1): Ist die ID des Originals doppelt vergeben, sind alle Kopien ausgeschlossen (N8); dann bucht auch die Korrektur nichts
+    if (doppelteIds && doppelteIds.size > 0 && (doppelteIds.has(key) || (istObjekt(orig) && typeof orig.id === 'string' && doppelteIds.has(orig.id)))) {
+      for (const b of liste) aus.set(b, { grund: 'korrektur_original_nicht_gerechnet', hinweis: 'W_KORREKTUR_ORIGINAL_NICHT_GERECHNET' });
+      continue;
+    }
     if (!istObjekt(orig) || !istObjekt(orig.steuer)) {
       for (const b of liste) aus.set(b, { grund: 'korrektur_ohne_original', hinweis: 'W_KORREKTUR_OHNE_ORIGINAL' });
       continue;
@@ -2463,7 +2468,7 @@ export function alleWirkungen(belege, profil, optionen) {
   const ossKorr = (s) => istObjekt(s) && regelAn(optionen, 'oss') && (OSS_FAELLE.includes(s.steuerfall)
     || (s.steuerfall === 'UNBEKANNT' && istObjekt(s.oss) && istObjekt(s.oss.zuordnung) && OSS_KORR_OFFEN.includes(s.oss.zuordnung.grund)));
   const korrekturen = vorbereitet.filter((b) => { const s = b && b.steuer; return istObjekt(s) && KORREKTUR_ARTEN.includes(s.beleg_art) && !ossKorr(s); });
-  const { aus: korrAusschluss, origVon } = korrekturPruefung(korrekturen.filter((b) => !doppelt(b)), originale, profil, optionen);
+  const { aus: korrAusschluss, origVon } = korrekturPruefung(korrekturen.filter((b) => !doppelt(b)), originale, profil, optionen, new Set([...idZaehler].filter(([, n]) => n > 1).map(([k]) => k)));
   const kontext = korrekturKontext(korrekturen.filter((b) => !doppelt(b) && !korrAusschluss.has(b)), origVon, profil, optionen);
   // Erst alle Belege ohne Korrekturen, damit der Zeitraum des Originals bekannt ist (W_STORNO_ABGESCHLOSSENER_ZEITRAUM)
   const wirk = [];
