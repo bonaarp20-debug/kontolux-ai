@@ -94,9 +94,9 @@ const USTVA_2026 = [
   uz(27, 90, null, 'Steuerpflichtige innergemeinschaftliche Erwerbe zu 0 %', 'C', '4', 'R-KZ-24'),
   uz(28, 95, 98, 'Steuerpflichtige innergemeinschaftliche Erwerbe zu anderen Steuersätzen', 'C', '4', 'R-KZ-24'),
   uz(29, 94, 96, 'Innergemeinschaftliche Erwerbe neuer Fahrzeuge von Lieferern ohne USt-IdNr.', 'C', '4', 'R-KZ-24'),
-  uz(30, 46, 47, 'Sonstige Leistungen nach § 3a Abs. 2 eines im übrigen Gemeinschaftsgebiet ansässigen Unternehmers (§ 13b Abs. 1)', 'D', '3a', 'R-KZ-30'),
+  uz(30, 46, 47, 'Sonstige Leistungen nach § 3a Abs. 2 eines im übrigen Gemeinschaftsgebiet ansässigen Unternehmers (§ 13b Abs. 1)', 'D', '3a', 'R-KZ-30', { hinweis: 'Die Steuer (Kz 47 und 85) wird aus dem genauen Betrag in Cent berechnet, die Bemessungsgrundlage (Kz 46 und 84) trägst du in vollen Euro ein. Deshalb ist die Steuer nicht genau 19 Prozent der eingetragenen Euro; das ist so gewollt.' }),
   uz(31, 73, 74, 'Umsätze, die unter das GrEStG fallen (§ 13b Abs. 2 Nr. 3)', 'D', '4', 'R-KZ-31'),
-  uz(32, 84, 85, 'Andere Leistungen (§ 13b Abs. 2 Nr. 1, 2, 4 bis 12)', 'D', '3a', 'R-KZ-32', { hinweis: 'Stufe 3a nur für Nr. 1 (Drittland-Dienstleister); übrige Nummern Stufe 4' }),
+  uz(32, 84, 85, 'Andere Leistungen (§ 13b Abs. 2 Nr. 1, 2, 4 bis 12)', 'D', '3a', 'R-KZ-32', { hinweis: 'Stufe 3a nur für Nr. 1 (Drittland-Dienstleister); übrige Nummern Stufe 4. Die Steuer (Kz 47 und 85) wird aus dem genauen Betrag in Cent berechnet, die Bemessungsgrundlage (Kz 46 und 84) trägst du in vollen Euro ein. Deshalb ist die Steuer nicht genau 19 Prozent der eingetragenen Euro; das ist so gewollt.' }),
   uz(33, 42, null, 'Lieferungen des ersten Abnehmers bei innergemeinschaftlichen Dreiecksgeschäften (§ 25b)', 'E', '4', 'R-KZ-33'),
   uz(34, 60, null, 'Steuerpflichtige Umsätze des leistenden Unternehmers, für die der Leistungsempfänger die Steuer nach § 13b Abs. 5 schuldet', 'E', '4', 'R-KZ-33'),
   uz(35, 21, null, 'Nicht steuerbare sonstige Leistungen gemäß § 18b Satz 1 Nr. 2 UStG', 'E', '3b', 'R-KZ-35'),
@@ -110,7 +110,7 @@ const USTVA_2026 = [
   uz(43, null, 59, 'Vorsteuerabzug für innergemeinschaftliche Lieferungen neuer Fahrzeuge außerhalb eines Unternehmens (§ 2a) sowie von Kleinunternehmern (§ 15 Abs. 4a)', 'F', '4', 'R-KZ-39'),
   uz(44, null, 64, 'Berichtigung des Vorsteuerabzugs (§ 15a UStG)', 'F', '3c', 'R-KZ-44', { hinweis: 'Zurückzuzahlende Vorsteuer mit Minuszeichen (Anleitung Zeile 44)' }),
   uz(45, null, null, 'Verbleibender Betrag (Zeile 37 abzüglich der Zeilen 38 bis 44)', 'G', '1', 'R-KZ-45', { rechenart: 'differenz', formel: 'Z.37 - (Z.38 + Z.39 + Z.40 + Z.41 + Z.42 + Z.43 + Z.44)' }),
-  uz(46, null, 65, 'Steuer infolge des Wechsels der Besteuerungsform sowie Nachsteuer auf versteuerte Anzahlungen', 'G', '2', 'R-KZ-46', { eingabe: true, hinweis: 'K5: Eingabefeld; der Kern liefert einen Vorschlag (kz65Vorschlag, Variante B Standard: Anzahlung brutto mal Satz/(100 + Satz), Kz 81 nur Restentgelt), der Nutzer bestätigt, bis dahin ist Kz 83 Zwischenwert' }),
+  uz(46, null, 65, 'Steuer infolge des Wechsels der Besteuerungsform sowie Nachsteuer auf versteuerte Anzahlungen und ähnlichem wegen Steuersatzänderung', 'G', '2', 'R-KZ-46', { eingabe: true, hinweis: 'K5: Eingabefeld; der Kern liefert einen Vorschlag (kz65Vorschlag, Variante B Standard: Anzahlung brutto mal Satz/(100 + Satz), Kz 81 nur Restentgelt), der Nutzer bestätigt, bis dahin ist Kz 83 Zwischenwert' }),
   uz(47, null, 69, 'In Rechnungen unrichtig oder unberechtigt ausgewiesene Steuerbeträge (§ 14c) sowie weitere Steuerbeträge', 'G', '4', 'R-KZ-47', { eingabe: true }),
   uz(48, null, null, 'Umsatzsteuer-Vorauszahlung/Überschuss (Summe der Zeilen 45 bis 47)', 'H', '1', 'R-KZ-48', { rechenart: 'summe', formel: 'Z.45 + Z.46 + Z.47' }),
   uz(49, null, 39, 'Abzug der festgesetzten Sondervorauszahlung für Dauerfristverlängerung', 'H', '2', 'R-KZ-49'),
@@ -626,7 +626,7 @@ export const KATEGORIEN = frieren([
   kat('Telefon/Internet', 'ausgabe', 280),
   kat('Reisekosten', 'ausgabe', 221, { hinweis: 'nur Übernachtungs- und Reisenebenkosten' }),
   kat('Fortbildung', 'ausgabe', 281),
-  kat('Kfz-Kosten', 'ausgabe', 146, { hinweis: 'sonstige tatsächliche Fahrtkosten ohne AfA und Zinsen' }),
+  kat('Kfz-Kosten', 'ausgabe', 146, { hinweis: 'sonstige tatsächliche Fahrtkosten ohne AfA und Zinsen. Leasing gehört in die Kategorie Kfz-Leasing (Kz 144), Kfz-Steuer und Versicherung in Kfz-Steuern/Versicherung (Kz 145). Der Gewinn bleibt gleich.' }),
   // KERN-20 (N3 Zweitprüfung F1): Kz 144 und 145 sind jetzt über eigene Kategorien erreichbar. Bestehende Belege der Kategorie 'Kfz-Kosten' bleiben auf Kz 146.
   kat('Kfz-Leasing', 'ausgabe', 144, { hinweis: 'Kfz: Leasingkosten (Anlage EÜR 2026 Zeile 69, 2025 Zeile 68)' }),
   kat('Kfz-Steuern/Versicherung', 'ausgabe', 145, { hinweis: 'Kfz: Steuern, Versicherungen und Maut (Anlage EÜR 2026 Zeile 70, 2025 Zeile 69)' }),
@@ -643,7 +643,7 @@ export const KATEGORIEN = frieren([
   kat('Fremdleistungen', 'ausgabe', 110),
   kat('Fahrtkosten (Kilometerpauschale)', 'ausgabe', 147, { hinweis: 'Zeile 72 (2026), Zeile 71 (2025); die Zuordnung "Z.71" in SACHKONTO_MAPPING ist für 2026 um eine Zeile verschoben (ABWEICHUNGEN.md)' }),
   kat('Verpflegungsmehraufwand', 'ausgabe', 171),
-  kat('Abschreibung (AfA)', 'ausgabe', 130),
+  kat('Abschreibung (AfA)', 'ausgabe', 130, { hinweis: 'Die AfA beweglicher Wirtschaftsgüter steht in Kz 130, die AfA auf Software (immaterielles Wirtschaftsgut, Art software) in Kz 131. Der Gewinn bleibt gleich.' }),
   kat('Einnahmen 19%', 'einnahme', 112),
   kat('Einnahmen 7%', 'einnahme', 112),
   kat('Einnahmen steuerfrei', 'einnahme', 103, { euer_kz_kleinunternehmer: 111 }),
@@ -739,7 +739,7 @@ export const REGELN_KORREKTUREN = frieren([
   {
     regel_id: 'R-KU-03',
     felder: {
-      regel: 'Wechsel KU zu Regel: Umsätze vor dem Wechsel bleiben steuerfrei (Außenstände); Vorsteuer nur für nach dem Wechsel ausgeführte Leistungen (R-PR-03); Wirtschaftsgüter und Waren: § 15a-Hinweis, Berichtigung als Nutzereingabe Kz 64 (Rechtsgrundlage ist § 15a Abs. 1 bis 3 über UStAE 15a.2 Abs. 2 S. 3 Nr. 1 Buchst. d, NICHT § 15a Abs. 7, der nur §§ 23a/24 betrifft). Anzahlungen aus der KU-Zeit für Leistungen nach dem Wechsel: Kz 65 Eingabe, Betrag nicht berechnet (Basis brutto oder netto offen).',
+      regel: 'Wechsel KU zu Regel: Umsätze vor dem Wechsel bleiben steuerfrei (Außenstände); Vorsteuer nur für nach dem Wechsel ausgeführte Leistungen (R-PR-03); Wirtschaftsgüter und Waren: § 15a-Hinweis, Berichtigung als Nutzereingabe Kz 64 (Rechtsgrundlage ist § 15a Abs. 1 bis 3 über UStAE 15a.2 Abs. 2 S. 3 Nr. 1 Buchst. d, NICHT § 15a Abs. 7, der nur §§ 23a/24 betrifft). Anzahlungen aus der KU-Zeit für Leistungen nach dem Wechsel: Kz 65 mit Vorschlag des Kerns (Anzahlung brutto mal Satz/(100 + Satz), R-KZ-46, Konfidenz B), den der Nutzer bestätigt; bis dahin ist Kz 83 Zwischenwert.',
       quelle: 'UStAE 19.7 Abs. 1, 15.1 Abs. 5 (docs/quellen/uStAE-19-7.md, uStAE-15-1-abs5-6.md); UStAE 15a.2 (docs/quellen/uStAE-15a-wechsel.md); § 15a Abs. 7 (docs/quellen/ustg-15a.md); Anleitung USt 1 E Zeile 46 (Datei-Zeile 2140ff)',
       konfidenz: 'A',
       blockiert_durch: ['K5'],
@@ -947,12 +947,22 @@ export const REGELN_KORREKTUREN = frieren([
     begruendung: 'Gesamtprüfung 10 (F5): richtige Satznummer (S. 5/6, nicht S. 2), Konfidenz B, Belegart-Trennung als offener Modellfehler benannt.',
   },
   {
+    regel_id: 'R-KZ-52',
+    felder: {
+      regel: 'Σ Minderung Vorsteuer aus Ausbuchungen (in Z.38, 42, 43 enthalten); Vorzeichen im Formular ANNAHME positiv (die Anleitung zu Zeile 52 sagt dazu nichts, wie bei Zeile 51)',
+      konfidenz: 'C',
+      blockiert_durch: ['MESSUNG_L11'],
+    },
+    begruendung: 'Zweitprüfung C2 N-4: Das Vorzeichen von Kz 37 ist genauso unbelegt wie das von Kz 50 (R-KZ-51, C); beide gelten als Annahme.',
+  },
+  {
     regel_id: 'R-FR-07',
     felder: {
+      konfidenz: 'B',
       regel: 'USt-Jahreserklärung: § 18 Abs. 3; Frist nach § 149 Abs. 2 AO sieben Monate (Folgerung E: 31.07. des Folgejahres, bei Wochenende nächster Werktag); keine Kz der USt 2 A. Kleinunternehmer nach § 19 Abs. 1 S. 2 haben keine Erklärungspflicht, Ausnahme: Wer Steuer nach § 13b Abs. 5 schuldet, gibt Voranmeldungen (für die betroffenen Zeiträume) und Jahreserklärung ab (§ 18 Abs. 4a UStG, UStAE 19.1 Abs. 7 S. 1); das Finanzamt kann eine Erklärung außerdem nach § 149 Abs. 1 S. 2 AO anfordern (UStAE 19.1 Abs. 7 S. 2). Bei unterjährigem Überschreiten der Grenzen gelten ab dann die allgemeinen Pflichten (S. 3).',
       quelle: '§ 18 Abs. 3, 4a (docs/quellen/ustg-18.md Z. 26); § 149 Abs. 1, 2 AO (docs/quellen/ao-149.md); UStAE 19.1 Abs. 7 (docs/quellen/uStAE-19-1-bis-19-3.md Z. 21); § 19',
     },
-    begruendung: 'Gesamtprüfung 10 (F6): "Kleinunternehmer ohne Erklärungspflicht" gilt nicht bei Steuer nach § 13b Abs. 5 (§ 18 Abs. 4a UStG).',
+    begruendung: 'Gesamtprüfung 10 (F6): "Kleinunternehmer ohne Erklärungspflicht" gilt nicht bei Steuer nach § 13b Abs. 5 (§ 18 Abs. 4a UStG). Zweitprüfung C2 N-7: Konfidenz B wie der Hinweis (hinweise.js jahreserklaerungHinweis); die Frist folgt aus § 149 Abs. 2 AO.',
   },
   {
     regel_id: 'R-FR-04',
@@ -1131,7 +1141,7 @@ export const REGELN_KORREKTUREN = frieren([
   {
     regel_id: 'R-LIM-04',
     felder: {
-      regel: 'OSS-Schwelle: Die Schwelle von 10.000 EUR zählt nur die in § 3a Abs. 5 S. 2 genannten Leistungen und Fernverkäufe an EU-Verbraucher (nicht alle Entgelte); Sperre erst bei Überschreiten (mehr als 10.000,00 EUR; genau 10.000,00 EUR ist nur Warnung W_OSS_8000). Funktion grenzpruefung, nur in Tests aufgerufen (Phase 2).',
+      regel: 'OSS-Schwelle: Die Schwelle von 10.000 EUR zählt nur die in § 3a Abs. 5 S. 2 genannten Leistungen und Fernverkäufe an EU-Verbraucher (nicht alle Entgelte); Sperre erst bei Überschreiten (mehr als 10.000,00 EUR; genau 10.000,00 EUR ist nur Warnung). Produktiv rechnet oss.js (ossSchwelle: W_OSS_SCHWELLE_80 ab 8.000 EUR, W_OSS_SCHWELLE_UEBERSCHRITTEN über 10.000 EUR); die ältere Funktion grenzpruefung (W_OSS_8000) wird nur in Tests aufgerufen.',
     },
     begruendung: 'Gesamtprüfung 10 (N4): "ab 10.000" ersetzt durch "über 10.000" (§ 3a Abs. 5 S. 3: "nicht überschreitet"), Zählbasis präzisiert.',
   },
@@ -1488,7 +1498,7 @@ export const REGEL_UMSETZUNG = Object.freeze({
   'R-VS-09': U('umgesetzt', 'Bankgebühren ohne Vorsteuer', 'wirkung.js:E_INLAND_OHNE_VORSTEUER'),
   'R-LIM-01': U('umgesetzt', 'grenzpruefung L2 in auswertungFuerJahr (grenzen.buchfuehrung)', 'auswertung.js:grenzpruefung('),
   'R-LIM-02': U('umgesetzt', 'grenzpruefung L3 in auswertungFuerJahr (grenzen.ist_800k)', 'auswertung.js:grenzpruefung('), 'R-LIM-03': U('umgesetzt', 'kuGrenzpruefung über grenzpruefung L4 (grenzen.ku_vorjahr, grenzen.ku_laufend)', 'auswertung.js:grenzpruefung('),
-  'R-LIM-04': U('umgesetzt', 'grenzpruefung L8, nur wenn optionen.oss_b2c_vorjahr_cent/oss_b2c_laufend_cent geliefert sind (grenzen.oss)', 'auswertung.js:grenzpruefung('), 'R-LIM-05': U('umgesetzt', 'grenzpruefung L9, nur mit optionen.beleg_13b_nr10_11_summe_cent (grenzen.weitere)', 'auswertung.js:grenzpruefung('),
+  'R-LIM-04': U('umgesetzt', 'Produktiv: ossSchwelle in oss.js (Hinweise W_OSS_SCHWELLE_80, W_OSS_SCHWELLE_UEBERSCHRITTEN). Zusätzlich grenzpruefung L8, nur wenn optionen.oss_b2c_vorjahr_cent/oss_b2c_laufend_cent geliefert sind (grenzen.oss, in Tests).', 'auswertung.js:grenzpruefung('), 'R-LIM-05': U('umgesetzt', 'grenzpruefung L9, nur mit optionen.beleg_13b_nr10_11_summe_cent (grenzen.weitere)', 'auswertung.js:grenzpruefung('),
   'R-LIM-06': U('umgesetzt', 'grenzpruefung L10, nur mit optionen.anschaffung_vorsteuer_max_cent (grenzen.weitere)', 'auswertung.js:grenzpruefung('), 'R-LIM-07': U('noch_nicht', 'Plausibilität des Satzes beim Eingang hat keinen Code (W_UST_ABWEICHUNG deckt es teilweise).'),
   'R-PR-08': U('umgesetzt', 'Außenstände beim Wechsel zum 1.1.', 'steuerprofil.js:statusFuerAusgangsumsatz'),
   'R-HN-01': U('umgesetzt', 'KI-Vorschlag ohne Bestätigung bleibt UNBEKANNT', 'beleg.js:W_KI_UNBESTAETIGT'),
