@@ -7,10 +7,10 @@ import { pruefeBetragZeile, estimateCostCents, webhookZeitstempelAbgelaufen, api
 import { erzeugeTestEnv, mockExterneDienste, anfrage } from './harness.mjs';
 
 test('Haiku 5.5: 0,10 / 0,50 / Cache-Lesen 0,01 $ je MTok (docs/reports/eu-ki-wechsel-mistral.md)', () => {
-  // 1 MTok Eingabe = 0,10 $ = 10 Cent; 1 MTok Ausgabe = 0,50 $ = 50 Cent; 1 MTok Cache-Lesen = 1 Cent
-  assert.equal(estimateCostCents('claude-haiku-5-5', { input_tokens: 1e6 }), '10.000');
+  // Bis 100.000 Prompt-Token (NL-G6: darüber Langtarif, siehe nl-g6-preis.test.mjs): 100.000 Eingabe = 0,01 $ = 1 Cent; 1 MTok Ausgabe = 0,50 $ = 50 Cent; 100.000 Cache-Lesen = 0,1 Cent
+  assert.equal(estimateCostCents('claude-haiku-5-5', { input_tokens: 1e5 }), '1.000');
   assert.equal(estimateCostCents('claude-haiku-5-5', { output_tokens: 1e6 }), '50.000');
-  assert.equal(estimateCostCents('claude-haiku-5-5', { cache_read_input_tokens: 1e6 }), '1.000');
+  assert.equal(estimateCostCents('claude-haiku-5-5', { cache_read_input_tokens: 1e5 }), '0.100');
   assert.equal(estimateCostCents('claude-sonnet-5-5', { input_tokens: 1e6 }), '300.000');
 });
 
