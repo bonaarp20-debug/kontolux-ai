@@ -23,8 +23,8 @@ test('worker.js: beide Beleg-Antworten (BELEG_MANUELL, BELEG_SPEICHERN) geben de
 // ABSCHLUSS-FIX C3-M1/H1/N1: dieselbe Nummernprüfung am Befehl im Worker (Schlüsselliste je Befehl wie im Client)
 const ANGRIFF = '<img src=x onerror=alert(1)>';
 test('C3-M1 Worker: gültige Nummern laufen unverändert durch, Angriffsstring wird mit fester Meldung ersetzt', () => {
-  for (const ok of ['RECHNUNG_ERSTELLEN: empfaenger_name=Meier, rechnungsnummer=RE-2026-7, betrag_netto=100', 'RECHNUNG_ERSTELLEN: empfaenger_name=Meier, rechnungsnummer=auto, betrag_netto=100',
-    'RECHNUNG_ERSTELLEN: rechnungsnummer=RE#12, betrag_netto=5', 'RECHNUNG_ERSTELLEN: rechnungsnummer=Rü-1, betrag_netto=5', 'RECHNUNG_ERSTELLEN: rechnungsnummer=R/2026/17, betrag_netto=5']) {
+  for (const ok of ['RECHNUNG_ERSTELLEN: leistungsdatum=15. August 2026, empfaenger_name=Meier, rechnungsnummer=RE-2026-7, betrag_netto=100', 'RECHNUNG_ERSTELLEN: leistungsdatum=15. August 2026, empfaenger_name=Meier, rechnungsnummer=auto, betrag_netto=100',
+    'RECHNUNG_ERSTELLEN: leistungsdatum=15. August 2026, rechnungsnummer=RE#12, betrag_netto=5', 'RECHNUNG_ERSTELLEN: leistungsdatum=15. August 2026, rechnungsnummer=Rü-1, betrag_netto=5', 'RECHNUNG_ERSTELLEN: leistungsdatum=15. August 2026, rechnungsnummer=R/2026/17, betrag_netto=5']) {
     assert.equal(pruefeBetragZeile(ok), ok);
   }
   for (const b of ['RECHNUNG_ERSTELLEN', 'MAHNUNG_ERSTELLEN', 'ANGEBOT_ERSTELLEN', 'ANGEBOT_KONVERTIEREN', 'ZEIT_ABRECHNEN', 'REISE_ABRECHNEN', 'RECHNUNG_STORNIEREN']) {
@@ -46,10 +46,10 @@ test('H1 Worker: Umgehung über Zusatzschlüssel, die der Befehl nicht kennt, wi
   const r = pruefeBetragZeile(m);
   assert.equal(r, 'MAHNUNG_ERSTELLEN: empfaenger_name=X, rechnungsnummer=RE-1, betrag=100, mahnstufe=1');
   assert.ok(!r.includes('<img'));
-  const r2 = pruefeBetragZeile(`RECHNUNG_ERSTELLEN: empfaenger_name=Y, rechnungsnummer=RE-2, kunde=${ANGRIFF}, betrag_netto=50`);
-  assert.equal(r2, 'RECHNUNG_ERSTELLEN: empfaenger_name=Y, rechnungsnummer=RE-2, betrag_netto=50');
-  const r3 = pruefeBetragZeile(`RECHNUNG_ERSTELLEN: betrag_netto=5, rechnungsnummer=RE-3, kunde=${ANGRIFF}`);
-  assert.equal(r3, 'RECHNUNG_ERSTELLEN: betrag_netto=5, rechnungsnummer=RE-3');
+  const r2 = pruefeBetragZeile(`RECHNUNG_ERSTELLEN: leistungsdatum=15. August 2026, empfaenger_name=Y, rechnungsnummer=RE-2, kunde=${ANGRIFF}, betrag_netto=50`);
+  assert.equal(r2, 'RECHNUNG_ERSTELLEN: leistungsdatum=15. August 2026, empfaenger_name=Y, rechnungsnummer=RE-2, betrag_netto=50');
+  const r3 = pruefeBetragZeile(`RECHNUNG_ERSTELLEN: leistungsdatum=15. August 2026, betrag_netto=5, rechnungsnummer=RE-3, kunde=${ANGRIFF}`);
+  assert.equal(r3, 'RECHNUNG_ERSTELLEN: leistungsdatum=15. August 2026, betrag_netto=5, rechnungsnummer=RE-3');
   // Angriff in der Nummer selbst bleibt abgelehnt
   assert.match(pruefeBetragZeile(`MAHNUNG_ERSTELLEN: rechnungsnummer=${ANGRIFF}, mwst_satz=19, betrag=5`), /^Die Nummer enthält ungültige Zeichen\.$/);
 });

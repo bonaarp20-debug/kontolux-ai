@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deflateSync } from 'node:zlib';
 import { PDFDocument, PDFName } from 'pdf-lib';
-import { estimateCostCents, webhookZeitstempelAbgelaufen, apiFehlerKlasse, eingebettetEntpacken, findEmbeddedXml } from '../worker.js';
+import { pruefeBetragZeile, estimateCostCents, webhookZeitstempelAbgelaufen, apiFehlerKlasse, eingebettetEntpacken, findEmbeddedXml } from '../worker.js';
 import { erzeugeTestEnv, mockExterneDienste, anfrage } from './harness.mjs';
 
 test('Haiku 5.5: 0,10 / 0,50 / Cache-Lesen 0,01 $ je MTok (docs/reports/eu-ki-wechsel-mistral.md)', () => {
@@ -61,4 +61,17 @@ test('/anfrage: globales Limit (60 je Stunde) greift über viele IPs', async () 
     for (let i = 0; i < 61; i++) letzter = await anfrage(env, { path: '/anfrage', body: { art: 'x' }, ip: `10.77.${i}.1` });
     assert.equal(letzter.status, 429);
   } finally { dienste.restore(); }
+});
+
+test('Chat-Rechnung ohne Leistungsdatum: keine Rechnung, feste Rückfrage; mit Datum oder Zeitraum unverändert', () => {
+  const mit = 'RECHNUNG_ERSTELLEN: empfaenger_name=Meier, leistung=Beratung, leistungsdatum=15. August 2026, betrag_netto=100';
+  assert.equal(pruefeBetragZeile(mit), mit);
+  const zeitraum = 'RECHNUNG_ERSTELLEN: empfaenger_name=Meier, leistungsdatum=01.09.2026 - 30.09.2026, betrag_netto=100';
+  assert.equal(pruefeBetragZeile(zeitraum), zeitraum);
+  for (const ohne of ['RECHNUNG_ERSTELLEN: empfaenger_name=Meier, leistung=Beratung, betrag_netto=100', 'RECHNUNG_ERSTELLEN: empfaenger_name=Meier, leistungsdatum=, betrag_netto=100', 'RECHNUNG_ERSTELLEN: empfaenger_name=Meier, leistungsdatum=auto, betrag_netto=100']) {
+    const r = pruefeBetragZeile('Ok. ' + ohne);
+    assert.equal(r, 'Ok. Mir fehlt noch das Leistungsdatum oder der Leistungszeitraum für diese Rechnung. Nenne es mir bitte, dann erstelle ich sie.', ohne);
+  }
+  // andere Befehle sind nicht betroffen
+  assert.equal(pruefeBetragZeile('MAHNUNG_ERSTELLEN: empfaenger_name=X, rechnungsnummer=RE-1, betrag=100'), 'MAHNUNG_ERSTELLEN: empfaenger_name=X, rechnungsnummer=RE-1, betrag=100');
 });

@@ -986,6 +986,13 @@ export function pruefeBetragZeile(line) {
     if (!Number.isFinite(betrag) || betrag <= 0 || betrag > 10000000) {
       return line.slice(0, rechnungMatch.index) + 'Ich kann diese Rechnung nicht erstellen — der Betrag muss größer als 0 sein. Bitte nenne mir einen gültigen Betrag.';
     }
+    // REST-G3 (Chat-Rechnung ohne Leistungsdatum): Das Leistungsdatum oder der Leistungszeitraum ist Pflichtangabe (§ 14 Abs. 4 Nr. 6 UStG) und
+    // wird laut Prompt immer erfragt. Fehlt es trotzdem im Befehl, erstellt Kontolux keine Rechnung ohne die Angabe, sondern fragt nach.
+    const ld = rechnungMatch[1].match(/(?:^|,)\s*leistungsdatum\s*=\s*([^,]*)/i);
+    const ldWert = ld ? ld[1].trim() : '';
+    if (!ldWert || /^(auto|-|—|n\/?a|keins?|unbekannt)$/i.test(ldWert)) {
+      return line.slice(0, rechnungMatch.index) + 'Mir fehlt noch das Leistungsdatum oder der Leistungszeitraum für diese Rechnung. Nenne es mir bitte, dann erstelle ich sie.';
+    }
   }
   const mahnungMatch = line.match(/MAHNUNG_ERSTELLEN:(.*)$/i);
   if (mahnungMatch) {
