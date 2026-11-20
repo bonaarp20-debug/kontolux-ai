@@ -13,7 +13,7 @@ function schneide(kopf) {
   throw new Error('Klammern: ' + kopf);
 }
 const { stripeAuszahlungAbrufen, stripeAuszahlungPositionen, stripeGebuehrDokumente, stripeFelderZuFirestore } = new Function(
-  schneide('async function stripeAuszahlungAbrufen(') + '\n' + schneide('function stripeAuszahlungPositionen(') + '\n' + schneide('function stripeGebuehrDokumente(') + '\n' + schneide('function stripeFelderZuFirestore(') + '\nreturn { stripeAuszahlungAbrufen, stripeAuszahlungPositionen, stripeGebuehrDokumente, stripeFelderZuFirestore };'
+  "const BERLIN_DATUM_FORMATTER = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit' });" + '\n' + schneide('function berlinDatumAlsString(') + '\n' + schneide('function unixToDatumString(') + '\n' + schneide('async function stripeAuszahlungAbrufen(') + '\n' + schneide('function stripeAuszahlungPositionen(') + '\n' + schneide('function stripeGebuehrDokumente(') + '\n' + schneide('function stripeFelderZuFirestore(') + '\nreturn { stripeAuszahlungAbrufen, stripeAuszahlungPositionen, stripeGebuehrDokumente, stripeFelderZuFirestore };'
 )();
 
 let ok = 0, fehler = 0;

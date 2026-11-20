@@ -415,6 +415,9 @@ const UID_LIMITS = {
   // WORKER-C (Release C): OSS-Abgabe je Quartal selten; Kursvorschlag je Währung und Quartal (Cache im KV)
   '/oss-meldung':                    { limit: 20, windowMs: 10 * 60 * 1000 },
   '/ezb-kurs':                       { limit: 30, windowMs: 10 * 60 * 1000 },
+  // G6-M5: kostenpflichtige Datei-Aufrufe je Nutzer (zusätzlich zum atomaren Monatskontingent)
+  '/image':                          { limit: 30, windowMs: 10 * 60 * 1000 },
+  '/document':                       { limit: 300, windowMs: 10 * 60 * 1000 },
 };
 for (const p of ZAEHLER_PFADE) UID_LIMITS[p] = { limit: 60, windowMs: 10 * 60 * 1000 }; // KX-RB: Nummern je Nutzer (Wiederholungen bei Konflikt eingerechnet)
 
@@ -842,6 +845,99 @@ async function incrementUploadLimit(userId, env) {
   }
 }
 
+// G6-M5: Atomare Kontingent-Reservierung unmittelbar vor dem kostenpflichtigen Anthropic-Aufruf. Der KV-Zähler (peek/increment) ist
+// nicht atomar (get+put, eventuell konsistent): 100 parallele Uploads würden alle an der Grenze vorbeikommen. Deshalb zählt zusätzlich
+// ein Firestore-Dokument je Nutzer und Monat (uploadlimit/{uid}_{JJJJ-MM}) mit Vorbedingung currentDocument.updateTime (wie
+// checkNachrichtenLimit): nur wer den Zähler wirklich fortschreibt, darf aufrufen. Scheitert der Aufruf, gibt gibUploadZurueck die
+// Reservierung (Firestore und KV) wieder frei. Fail-closed: ohne Zähler kein Anthropic-Aufruf.
+const UPLOAD_FS_COLLECTION = 'uploadlimit';
+export function uploadReservierungsKey(userId, jetzt = new Date()) {
+  return `${userId}_${berlinDatumAlsString(jetzt).slice(0, 7)}`;
+}
+export async function reserviereUpload(userId, env, optionen = {}) {
+  const limit = Number.isInteger(optionen.limit) ? optionen.limit : UPLOAD_LIMIT;
+  const key = uploadReservierungsKey(userId);
+  const maxVersuche = 6;
+  if (!userId) return { erlaubt: false, grund: 'infra' };
+  let token;
+  try { token = await getGoogleAccessToken(env, FIRESTORE_SCOPE); } catch (e) { console.error('reserviereUpload: Token fehlgeschlagen:', e.message); return { erlaubt: false, grund: 'infra' }; }
+  const basis = `${NACHRICHT_FS}/${UPLOAD_FS_COLLECTION}`;
+  for (let versuch = 0; versuch < maxVersuche; versuch++) {
+    let doc;
+    try { doc = await nachrichtenDocLesenIn(UPLOAD_FS_COLLECTION, key, token); } catch (e) { console.error('reserviereUpload lesen:', e.message, 'key=', kurz(key)); return { erlaubt: false, grund: 'infra' }; }
+    if (!doc) {
+      const res = await fetch(`${basis}?documentId=${encodeURIComponent(key)}`, {
+        method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields: { anzahl: { integerValue: '1' } } })
+      });
+      if (res.ok) return { erlaubt: true, anzahl: 1 };
+      if (res.status !== 409) { console.error('reserviereUpload INSERT:', res.status, 'key=', kurz(key)); return { erlaubt: false, grund: 'infra' }; }
+      continue;
+    }
+    const anzahl = parseInt(doc.fields?.anzahl?.integerValue || '0', 10);
+    if (anzahl >= limit) return { erlaubt: false, grund: 'limit', anzahl };
+    const res = await fetch(`${basis}/${encodeURIComponent(key)}?updateMask.fieldPaths=anzahl&currentDocument.updateTime=${encodeURIComponent(doc.updateTime)}`, {
+      method: 'PATCH', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields: { anzahl: { integerValue: String(anzahl + 1) } } })
+    });
+    if (res.ok) return { erlaubt: true, anzahl: anzahl + 1 };
+    if (res.status === 400 || res.status === 409 || res.status === 412) continue; // paralleler Aufruf hat gezählt: neu lesen
+    console.error('reserviereUpload PATCH:', res.status, 'key=', kurz(key));
+    return { erlaubt: false, grund: 'infra' };
+  }
+  return { erlaubt: false, grund: 'infra' };
+}
+export async function gibUploadZurueck(userId, env) {
+  if (!userId) return;
+  try {
+    const key = uploadReservierungsKey(userId);
+    const token = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    for (let versuch = 0; versuch < 4; versuch++) {
+      const doc = await nachrichtenDocLesenIn(UPLOAD_FS_COLLECTION, key, token);
+      if (!doc) break;
+      const anzahl = Math.max(0, parseInt(doc.fields?.anzahl?.integerValue || '0', 10) - 1);
+      const res = await fetch(`${NACHRICHT_FS}/${UPLOAD_FS_COLLECTION}/${encodeURIComponent(key)}?updateMask.fieldPaths=anzahl&currentDocument.updateTime=${encodeURIComponent(doc.updateTime)}`, {
+        method: 'PATCH', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields: { anzahl: { integerValue: String(anzahl) } } })
+      });
+      if (res.ok) break;
+      if (!(res.status === 400 || res.status === 409 || res.status === 412)) break;
+    }
+  } catch (e) { console.warn('gibUploadZurueck (Firestore):', e.message); }
+  try { // KV-Zähler: der Aufrufer hat ihn vorab hochgezählt, ein gescheiterter Aufruf zählt nicht
+    const kvKey = uploadLimitKey(userId, new Date());
+    const val = await env.PROFIL_KV.get(kvKey);
+    const n = val ? parseInt(val) : 0;
+    if (n > 0) await env.PROFIL_KV.put(kvKey, String(n - 1), { expirationTtl: 35 * 86400 });
+  } catch (_) { /* im Zweifel stehen lassen */ }
+}
+// Ersetzt fetch() an den Anthropic-Aufrufen mit Datei: reserviert vorher atomar, gibt bei Fehler (Netz, 4xx/5xx) zurück.
+// kontoUid = null: ohne Reservierung (Chat ohne Anhang). Gesperrt: 429-Antwort im Textformat, ohne Anthropic-Aufruf.
+export async function anthropicFetchMitKontingent(kontoUid, env, url, init, optionen = {}) {
+  const fetchFn = optionen.fetchFn || fetch;
+  if (!kontoUid) return fetchFn(url, init);
+  const r = await reserviereUpload(kontoUid, env, optionen);
+  if (!r.erlaubt) {
+    await gibKvZaehlerZurueck(kontoUid, env);
+    const text = r.grund === 'limit'
+      ? 'Du hast dein monatliches Upload-Limit erreicht. Du kannst Kontolux AI weiterhin vollständig nutzen — Chat, Finanzkalender und manuelle Monatsabschlüsse funktionieren wie gewohnt.'
+      : 'Kontolux ist gerade nicht erreichbar. Bitte versuche es in ein paar Minuten noch einmal.';
+    return new Response(text, { status: r.grund === 'limit' ? 429 : 503, headers: { 'Content-Type': 'text/plain' } });
+  }
+  let res;
+  try { res = await fetchFn(url, init); } catch (e) { await gibUploadZurueck(kontoUid, env); throw e; }
+  if (!res.ok) await gibUploadZurueck(kontoUid, env);
+  return res;
+}
+async function gibKvZaehlerZurueck(userId, env) {
+  try {
+    const kvKey = uploadLimitKey(userId, new Date());
+    const val = await env.PROFIL_KV.get(kvKey);
+    const n = val ? parseInt(val) : 0;
+    if (n > 0) await env.PROFIL_KV.put(kvKey, String(n - 1), { expirationTtl: 35 * 86400 });
+  } catch (_) { /* im Zweifel stehen lassen */ }
+}
+
 // ── Datei-Upload serverseitig validieren (Größe + Typ) ────
 // Der Frontend-Check (index.html, MAX_MB=5-Alert) ist rein kosmetisch und trivial per direktem
 // API-Call an /chat, /image oder /document umgehbar — die eigentliche Grenze muss hier stehen,
@@ -1156,8 +1252,9 @@ function validateDatei(Datei, { allowedTypes = DATEI_ERLAUBTE_TYPEN } = {}) {
 const NACHRICHT_FS = 'https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents';
 const NACHRICHT_COLLECTION = 'nachrichtenlimit';
 
-async function nachrichtenDocLesen(key, token) {
-  const res = await fetch(`${NACHRICHT_FS}/${NACHRICHT_COLLECTION}/${encodeURIComponent(key)}`, {
+async function nachrichtenDocLesen(key, token) { return nachrichtenDocLesenIn(NACHRICHT_COLLECTION, key, token); }
+async function nachrichtenDocLesenIn(sammlung, key, token) {
+  const res = await fetch(`${NACHRICHT_FS}/${sammlung}/${encodeURIComponent(key)}`, {
     headers: { 'Authorization': `Bearer ${token}` }
   });
   if (res.status === 404) return null;
@@ -2442,7 +2539,7 @@ async function handleChat(body, env, cors = {}, ctx) {
   const kxSpeedStart = Date.now();
 
   // Claude aufrufen und SSE parsen → reinen Text streamen
-  const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
+  const claudeRes = await anthropicFetchMitKontingent(Datei && Datei.base64 ? userId : null, env, 'https://api.anthropic.com/v1/messages', {
     method: 'POST',
     signal: AbortSignal.timeout(120000), // hängender Upstream darf die Anfrage nicht endlos offen halten
     headers: {
@@ -2674,7 +2771,7 @@ async function handleImage(body, env, cors = {}, ctx) {
 
   // Gleiches Modell wie Chat und Dokument (die Variable ANTHROPIC_MODEL in wrangler.toml zeigte auf ein älteres)
   const imageModel = 'claude-haiku-5-5';
-  const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
+  const claudeRes = await anthropicFetchMitKontingent(userId, env, 'https://api.anthropic.com/v1/messages', {
     method: 'POST',
     signal: AbortSignal.timeout(120000), // hängender Upstream darf die Anfrage nicht endlos offen halten
     headers: {
@@ -3533,7 +3630,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
       });
     }
     await incrementUploadLimit(userId, env);
-    const systemPrompt = `Du bist ein Datenextraktions-Assistent. Extrahiere aus dem Dokument die Finanzdaten und antworte NUR mit einem JSON-Objekt ohne Backticks oder Markdown, in diesem Format: {"monat": "Januar", "jahr": 2026, "einnahmen_gesamt": 0, "ausgaben_gesamt": 0, "einnahmen_positionen": [{"bezeichnung": "...", "betrag": 0}], "ausgaben_positionen": [{"bezeichnung": "...", "betrag": 0}]}`;
+    const systemPrompt = `Du bist ein Datenextraktions-Assistent. Extrahiere aus dem Dokument die Finanzdaten und antworte NUR mit einem JSON-Objekt ohne Backticks oder Markdown, in diesem Format: {"monat": "Januar", "jahr": ${berlinDatumAlsString().slice(0, 4)}, "einnahmen_gesamt": 0, "ausgaben_gesamt": 0, "einnahmen_positionen": [{"bezeichnung": "...", "betrag": 0}], "ausgaben_positionen": [{"bezeichnung": "...", "betrag": 0}]}`;
 
     const messages = [{
       role: 'user',
@@ -3544,7 +3641,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
     }];
 
       // Haiku für PDF-Extraktion (kostengünstiger)
-      const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
+      const claudeRes = await anthropicFetchMitKontingent(userId, env, 'https://api.anthropic.com/v1/messages', {
         method: 'POST',
         signal: AbortSignal.timeout(120000), // hängender Upstream darf die Anfrage nicht endlos offen halten
         headers: {
@@ -3653,7 +3750,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
 
   const messages = [{ role: 'user', content: userContent }];
 
-  const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
+  const claudeRes = await anthropicFetchMitKontingent(userId, env, 'https://api.anthropic.com/v1/messages', {
     method: 'POST',
     signal: AbortSignal.timeout(120000), // hängender Upstream darf die Anfrage nicht endlos offen halten
     headers: {
@@ -4412,12 +4509,12 @@ async function stripeAuszahlungAbrufen(payoutId, schluessel, fetchImpl = fetch) 
 
 // Stripe-Gebühren als Ausgaben-Belege. Feste IDs (stripe_fee_<Transaktion>) machen den Vorgang idempotent:
 // ein zweiter Lauf überschreibt dieselben Dokumente, es entstehen keine Doppelungen.
-function stripeGebuehrDokumente(positionen, txsById) {
+export function stripeGebuehrDokumente(positionen, txsById) {
   return positionen
     .filter(p => p.typ === 'charge' && p.gebuehr > 0 && p.referenz)
     .map(p => {
       const created = Number((txsById[p.referenz] || {}).created) || 0;
-      const datum = created ? new Date(created * 1000).toISOString().slice(0, 10) : '';
+      const datum = created ? unixToDatumString(created) : ''; // G6-N1: Berliner Kalendertag, nicht UTC (Jahreswechsel, Voranmeldungszeitraum)
       return {
         id: 'stripe_fee_' + p.referenz.replace(/[^A-Za-z0-9_]/g, ''),
         felder: {
