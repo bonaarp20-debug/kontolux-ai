@@ -28,7 +28,7 @@
 import * as Steuerkern from '../steuerkern/index.js';
 import {
   antwort, fehlerAntwort, grundpruefung, istObjekt, nurSchluessel, CONFIG_PFAD, configBereinigen, jetztIso, schichtFuer, regelFehler, ANFRAGE_ID_MUSTER, kernOptionenFuerKontoLaden,
-  featureAktiv,
+  featureAktiv, listeAlle
 } from './gemeinsam.js';
 import { schreibe, dekodiereFelder, FirestoreFehler, BudgetFehler } from './firestore.js';
 import { auditSchreibvorgaenge, kopfPfad } from './audit.js';
@@ -325,7 +325,7 @@ export async function regelKlaerungBeleg(body, env, cors = {}, deps = {}) {
     }
     let einheiten = ids.map((id) => einheitFuer(uid, id, docs.get(dokPfad(uid, id)), kontext));
     if (einheiten.some((e) => e.write)) {
-      const liste = await fs.list(`users/${uid}/festschreibung`, { pageSize: 300 });
+      const liste = await listeAlle(fs, `users/${uid}/festschreibung`);
       kontext.festPerioden = liste.dokumente.filter((d) => ['festgeschrieben', 'sperre_laeuft'].includes(d.daten && d.daten.status)).map((d) => String(d.pfad).split('/').pop());
       const alt = await altFestMonate(fs, uid);
       if (alt.monate.length || alt.unvollstaendig) kontext.altFest = alt;

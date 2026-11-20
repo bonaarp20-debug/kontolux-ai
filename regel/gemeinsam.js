@@ -198,6 +198,20 @@ function pruefeJahr(j) {
   return n >= 2000 && n <= 2100;
 }
 
+// ZUV-G5 N1: alle Seiten einer Sammlung lesen (statt nur der ersten 300). Mehr als maxSeiten Seiten = Fehler (fail-closed: lieber ablehnen als
+// Sperren übersehen). Ergebnis wie fs.list ({ dokumente, naechste: null }).
+export async function listeAlle(fs, pfad, { seite = 300, maxSeiten = 20 } = {}) {
+  const alle = [];
+  let token = null;
+  for (let i = 0; i < maxSeiten; i += 1) {
+    const r = await fs.list(pfad, token ? { pageSize: seite, pageToken: token } : { pageSize: seite });
+    alle.push(...(Array.isArray(r && r.dokumente) ? r.dokumente : []));
+    token = r && r.naechste ? r.naechste : null;
+    if (!token) return { dokumente: alle, naechste: null };
+  }
+  throw new Error(`Sammlung ${pfad}: mehr als ${maxSeiten} Seiten`);
+}
+
 // Spätester festgeschriebener Tag aus den Dokumenten festschreibung/* (status 'festgeschrieben'), sonst null
 export function festgeschriebenBis(dokumente) {
   let bis = null;
