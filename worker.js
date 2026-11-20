@@ -888,6 +888,8 @@ function kiBetragOk(v) { const n = parseFloat(String(v).replace(',', '.')); retu
 // PROFIL_UPDATE: nur harmlose Gedächtnis-Felder. Steuerwirksam über den Chat nur beruf und steuerruecklage_prozent (0..60, wie im Client, Zuruf APP 13.11.);
 // kirchensteuer, gewerbesteuer_hebesatz, vorjahressteuer_* und erstes_jahr sind gesperrt (Schutzschlüssel nie).
 const KI_PROFIL_GESPERRT = /^(kleinunternehmer|versteuerungsart|erstes_jahr|kirchensteuer|gewerbesteuer_hebesatz|vorjahressteuer_.*|steuernummer|ust_?id.*|iban.*|bank.*|absender_name|firmenname|eigene_adresse|telefon|rechnungs_email|datev_.*|steuerprofil.*|status.*|is_?admin.*|abo.*|plan.*)$/i;
+// SEC-F3 M-B: Positivliste. Nur diese Gedächtnis-Schlüssel gehen durch (gleich im Client index.html KI_PROFIL_ERLAUBT); name/vorname u. a. fallen weg.
+const KI_PROFIL_ERLAUBT = ['fixkosten', 'branche', 'einnahmequelle', 'miete', 'standard_stundensatz', 'stundensatz', 'taetigkeit', 'rechtsform', 'beruf', 'steuerruecklage_prozent'];
 const KI_PROFIL_PRUEFER = {
   steuerruecklage_prozent: (v) => /^\d{1,2}([.,]\d+)?$/.test(v) && parseFloat(v.replace(',', '.')) <= 60,
   beruf: (v) => ['Freiberufler', 'Gewerbetreibender'].includes(v),
@@ -902,7 +904,9 @@ function bereinigeProfilUpdate(rest) {
     if (i < 1) continue;
     const k = t.slice(0, i).trim(); let v = t.slice(i + 1).trim();
     if (/^steuerruecklage_prozent$/i.test(k)) v = v.replace(/\s*%$/, ''); // '30%' wie '30' (Gegenprüfung TR3-sys-006)
+    if (!KI_PROFIL_ERLAUBT.includes(k.toLowerCase())) continue; // SEC-F3 M-B
     if (!/^[A-Za-z][A-Za-z0-9_]{1,39}$/.test(k) || KI_PROFIL_GESPERRT.test(k) || !v || v.length > 100 || /[<>{}\n]/.test(v)) continue;
+    if (!/^[\p{L}\p{N} .,%€\/&()+\-–]+$/u.test(v) || /https?:|www\./i.test(v)) continue; // SEC-F3 M-B: Klartext ohne Link
     const pruefer = KI_PROFIL_PRUEFER[k.toLowerCase()];
     if (pruefer && !pruefer(v)) continue;
     ok.push(`${k}=${v}`);
@@ -1471,6 +1475,8 @@ NIEMALS per PROFIL_UPDATE:
 - Schlüssel mit "ausgabe_"/"einnahme"/"einnahmen_"-Präfix (reservierte Buchungsfelder, ein Freitext würde die Buchung zerstören).
 - Steuerliche Einstellungen (der Server entfernt sie, der Nutzer pflegt sie in den Einstellungen): kleinunternehmer, versteuerungsart, erstes_jahr, kirchensteuer, gewerbesteuer_hebesatz, vorjahressteuer_*, datev_*. Steuerwirksam erlaubt sind nur beruf (Freiberufler/Gewerbetreibender) und steuerruecklage_prozent (0 bis 60).
 
+Erlaubte Schlüssel (alles andere verwirft der Server): fixkosten, branche, einnahmequelle, miete, standard_stundensatz, stundensatz, taetigkeit, rechtsform, beruf, steuerruecklage_prozent. Werte nur kurzer Klartext ohne Links.
+
 FORMAT (ganz am Ende): PROFIL_UPDATE:schluessel=wert,schluessel=wert`;
 
 // Wissensbasis Regelbesteuerung (Konzept 04 Abschnitt 9.3, KB-T1 bis KB-T5, KB-T10 bis KB-T12, KB-T15, KB-T16): auf Abruf,
@@ -1874,7 +1880,9 @@ async function verifyFirebaseToken(authHeader, env) {
     const email = data.users?.[0]?.email || null;
     // Google-Login-Nutzer gelten wie im Frontend-Hard-Block (index.html handleAuthedUser)
     // immer als verifiziert, unabhängig vom rohen emailVerified-Flag.
-    const isGoogleUser = (data.users?.[0]?.providerUserInfo || []).some(p => p.providerId === 'google.com');
+    // SEC-F3 N-C: nur wenn die Google-Adresse der Konto-Adresse entspricht (sonst hängt ein fremdes Google-Konto an einem unbestätigten Passwort-Konto)
+    const isGoogleUser = (data.users?.[0]?.providerUserInfo || []).some(p => p.providerId === 'google.com'
+      && !!email && String(p.email || '').toLowerCase() === String(email).toLowerCase());
     const emailVerifiedRoh = !!data.users?.[0]?.emailVerified; // echtes Firebase-Flag, ohne Google-Sonderregel (für Admin)
     const emailVerified = isGoogleUser || emailVerifiedRoh;
     if (uid) {
@@ -5038,6 +5046,8 @@ async function handleDatevExport(body, env, cors = {}) {
 // erinnerung_7_am bzw. erinnerung_1_am im Frist-Dokument. Ein Speichern der Frist in der App setzt
 // diese Felder zurück, weil das Dokument dort vollständig überschrieben wird.
 const FRIST_ERINNERUNG_TAGE = [7, 1];
+// SEC-F3 M-C: Grenzen gegen Mail-Flut über selbst angelegte Fristen: je Konto und Lauf höchstens 3 Mails, je Lauf höchstens 500, höchstens 5000 gelesene Fristen
+const FRIST_MAILS_JE_KONTO = 3, FRIST_MAILS_JE_LAUF = 500, FRIST_LESEGRENZE = 5000;
 
 // Tage von heute bis zum Fristdatum (beide als YYYY-MM-DD). Reine Funktion, damit testbar.
 function fristTageBis(datum, heuteIso) {
@@ -5074,14 +5084,17 @@ async function fristErinnerungenSenden(env) {
     body: JSON.stringify({
       structuredQuery: {
         from: [{ collectionId: 'eigenefristen', allDescendants: true }],
-        where: { fieldFilter: { field: { fieldPath: 'erinnerung_mail' }, op: 'EQUAL', value: { booleanValue: true } } }
+        where: { fieldFilter: { field: { fieldPath: 'erinnerung_mail' }, op: 'EQUAL', value: { booleanValue: true } } },
+        limit: FRIST_LESEGRENZE
       }
     })
   });
   if (!res.ok) throw new Error(`Fristen-Abfrage fehlgeschlagen (${res.status})`);
 
   let gesendet = 0;
+  const jeKonto = new Map();
   for (const zeile of await res.json()) {
+    if (gesendet >= FRIST_MAILS_JE_LAUF) break;
     if (!zeile.document) continue;
     const f = zeile.document.fields || {};
     if (f.wiederkehrend?.booleanValue) continue;
@@ -5095,6 +5108,8 @@ async function fristErinnerungenSenden(env) {
     // users/{uid}/eigenefristen/{id}
     const pfad = zeile.document.name.split('/documents/')[1];
     const [, uid, , fristId] = pfad.split('/');
+    if ((jeKonto.get(uid) || 0) >= FRIST_MAILS_JE_KONTO) continue; // SEC-F3 M-C: Rest folgt am nächsten Tag (Feld erinnerung_N_am bleibt leer)
+    jeKonto.set(uid, (jeKonto.get(uid) || 0) + 1);
     const titel = sicherEinzeiler(f.titel?.stringValue || 'Frist', 120) || 'Frist';
     try {
       const email = await mailAdresseFuerErinnerung(uid, env);

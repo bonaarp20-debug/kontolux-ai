@@ -91,7 +91,7 @@ test('KI-Befehlsfilter: Prompt-konforme Zeilen bleiben unveraendert (DOKUMENT_SP
 });
 
 test('KI-Befehlsfilter: PROFIL_UPDATE mit Prozentzeichen (Prompt-Beispiel steuerruecklage=30%) bleibt, steuerruecklage_prozent=30% wird still verworfen (nur Hinweis)', () => {
-  assert.equal(pruefeBetragZeile('PROFIL_UPDATE:steuerruecklage=30%'), 'PROFIL_UPDATE:steuerruecklage=30%');
+  assert.equal(pruefeBetragZeile('PROFIL_UPDATE:steuerruecklage=30%'), 'PROFIL_UPDATE:keine'); // SEC-F3 M-B: Schlüssel nicht auf der Positivliste
   const r = pruefeBetragZeile('PROFIL_UPDATE:steuerruecklage_prozent=30%');
   assert.ok(r === 'PROFIL_UPDATE:keine' || r.includes('30'), 'dokumentiert: ' + r);
 });
