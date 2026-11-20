@@ -371,6 +371,37 @@ test('REST-G3: ohne erfasste Rechnungen bleibt es bei RE-2026-001; Nummer aus de
   const a = umgebung();
   assert.equal((await a.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' })).json.nummer, 'RE-2026-001');
   const b = umgebung();
-  b.fs.setze(`users/${UID}/dokumente/v1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2025-120' });
-  assert.equal((await b.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' })).json.nummer, 'RE-2026-121');
+  b.fs.setze(`users/${UID}/dokumente/v1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2025-045' });
+  assert.equal((await b.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' })).json.nummer, 'RE-2026-046');
+});
+
+test('NL-G3: Plausibilitätsgrenze: erfasste Nummer höchstens Stand + 50, sonst nicht übernommen, aber mit Warnung gemeldet (kein Hochspringen bei Datumsformat)', async () => {
+  const a = umgebung();
+  a.fs.setze(`users/${UID}/dokumente/d1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-11001' }); // Jahr+Monat+Zähler
+  a.fs.setze(`users/${UID}/dokumente/d2`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-012' });
+  const r = await a.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' });
+  assert.equal(r.json.nummer, 'RE-2026-013', 'springt nicht auf 11002');
+  assert.equal(r.json.warnung, 'ERFASSTE_NUMMER_UNPLAUSIBEL');
+  assert.equal(r.json.ignoriert, 11001);
+  // genau an der Grenze (Stand 0 + 50) wird noch übernommen
+  const b = umgebung();
+  b.fs.setze(`users/${UID}/dokumente/d1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-050' });
+  const rb = await b.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' });
+  assert.equal(rb.json.nummer, 'RE-2026-051');
+  assert.equal(rb.json.warnung, undefined);
+  // bestehender Stand 60: 110 liegt an der Grenze, 111 nicht
+  const c = umgebung();
+  c.fs.setze(`users/${UID}/zaehler/RE`, { name: 'RE', letzte: 60 });
+  c.fs.setze(`users/${UID}/dokumente/d1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-111' });
+  c.fs.setze(`users/${UID}/dokumente/d2`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-105' });
+  const rc = await c.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' });
+  assert.equal(rc.json.nummer, 'RE-2026-106');
+  assert.equal(rc.json.ignoriert, 111);
+});
+test('NL-G3: Abfrage vergleicht numerisch und liest mehr als 30 (RE-2026-1000 steht im Textbereich hinter 999)', async () => {
+  const a = umgebung();
+  a.fs.setze(`users/${UID}/zaehler/RE`, { name: 'RE', letzte: 990 });
+  for (const n of [995, 1000]) a.fs.setze(`users/${UID}/dokumente/h${n}`, { typ: 'rechnung_ausgehend', rechnungsnr: `RE-2026-${n}` });
+  const r = await a.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' });
+  assert.equal(r.json.nummer, 'RE-2026-1001');
 });

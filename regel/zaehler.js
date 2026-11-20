@@ -67,8 +67,8 @@ const altPfad = (uid, def) => `users/${uid}/${def.altzaehler}`;
 const ganz = (x) => (Number.isSafeInteger(x) && x > 0 ? x : 0);
 const warteStandard = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function ergebnis(d, wiederholt, cors) {
-  return antwort({ ok: true, nummer: d.nummer, laufnummer: Number.isSafeInteger(d.laufnummer) ? d.laufnummer : null, wiederholt, status: d.status }, 200, cors);
+function ergebnis(d, wiederholt, cors, zusatz = null) {
+  return antwort({ ok: true, nummer: d.nummer, laufnummer: Number.isSafeInteger(d.laufnummer) ? d.laufnummer : null, wiederholt, status: d.status, ...(zusatz || {}) }, 200, cors);
 }
 
 // Sucht die Nummer zu einem Idempotenzschlüssel (eine Unteranfrage). null = keine.
@@ -85,7 +85,14 @@ async function nachSchluessel(fs, uid, def, schluessel) {
 // Vor der automatischen Vergabe wird deshalb die höchste Laufnummer unter den eigenen AUSGEHENDEN, nicht gelöschten Rechnungen im Zählerformat
 // (RE-JJJJ-N) gelesen; der Stand ist dann mindestens diese Zahl. Eingehende Rechnungen und fremde Nummernformate zählen nicht mit.
 // Eine Unteranfrage (Textbereich 'RE-' bis 'RE.', absteigend, höchstens 30 Dokumente; Einzelfeld-Index genügt). Bei Fehler: ohne Abgleich weiter.
-export async function hoechsteErfassteNummer(fs, uid, def) {
+// NL-G3 (BH-30): Plausibilitätsgrenze: eine erfasste Nummer wird nur übernommen, wenn sie höchstens ERFASST_SPRUNG_MAX über dem aktuellen Zählerstand liegt.
+// Nummernformate mit Datumsanteil (z. B. RE-2026-11001 = Jahr + Monat + Zähler) ließen den Zähler sonst weit nach oben springen. Eine verworfene Nummer wird
+// NICHT übernommen, aber über meldung.ignoriert an den Aufrufer gemeldet (die Antwort trägt dann warnung ERFASSTE_NUMMER_UNPLAUSIBEL).
+// Gelesen werden bis zu ERFASST_LESEGRENZE Dokumente (Einzelfeld-Index, eine Unteranfrage); verglichen wird NUMERISCH (der Textbereich sortiert 'RE-2026-999'
+// hinter 'RE-2026-1000'), und nur eigene ausgehende Rechnungen zählen.
+export const ERFASST_SPRUNG_MAX = 50;
+export const ERFASST_LESEGRENZE = 300;
+export async function hoechsteErfassteNummer(fs, uid, def, stand = null, meldung = null) {
   try {
     const treffer = await fs.runQuery(`users/${uid}`, {
       from: [{ collectionId: 'dokumente' }],
@@ -94,15 +101,20 @@ export async function hoechsteErfassteNummer(fs, uid, def) {
         { fieldFilter: { field: { fieldPath: 'rechnungsnr' }, op: 'LESS_THAN', value: { stringValue: `${def.praefix}.` } } },
       ] } },
       orderBy: [{ field: { fieldPath: 'rechnungsnr' }, direction: 'DESCENDING' }],
-      limit: 30,
+      limit: ERFASST_LESEGRENZE,
     });
+    const grenze = Number.isSafeInteger(stand) && stand >= 0 ? stand + ERFASST_SPRUNG_MAX : Infinity;
     let hoechste = 0;
+    let ignoriert = 0;
     for (const t of treffer) {
       const d = t.daten || {};
       if (d.typ !== 'rechnung_ausgehend' || d.deleted === true) continue;
       const n = laufnummerAusFormat(def, d.rechnungsnr);
-      if (n && n > hoechste) hoechste = n;
+      if (!n) continue;
+      if (n > grenze) { if (n > ignoriert) ignoriert = n; continue; }
+      if (n > hoechste) hoechste = n;
     }
+    if (ignoriert && meldung && typeof meldung === 'object') meldung.ignoriert = ignoriert;
     return hoechste;
   } catch (e) {
     console.warn('regel_zaehler_abgleich_fehlt ' + String(e && e.message).slice(0, 80));
@@ -134,6 +146,7 @@ async function reservieren(body, cors, deps) {
     const ap = altPfad(uid, def);
     let mindest = 0;
     let erfasst = null;
+    const abgleich = {}; // NL-G3: verworfene (unplausible) erfasste Nummer
     for (let versuch = 0; versuch < ZAEHLER_VERSUCHE; versuch++) {
       // V-F (N-1, G-VE): erst lesen (Zähler mit updateTime), DANN nach dem Schlüssel suchen, dann mit der Vorbedingung schreiben. Hat ein
       // paralleler Lauf mit demselben Schlüssel vor der Suche geschrieben, findet ihn die Suche; schreibt er danach, hat er den Zähler nach
@@ -181,7 +194,7 @@ async function reservieren(body, cors, deps) {
       // FIX-RB Z1: belegt ist eine Nummer auch, wenn es ihr Dokument schon gibt (Altbestand vor dem Fix). Scheitert das create-only Anlegen
       // (ALREADY_EXISTS), springt der nächste Versuch über diese Laufnummer, statt sie zehnmal zu wiederholen. Ohne Zusatzanfrage: kam der
       // Fehler in Wahrheit vom gleichzeitigen Anlegen des Zählers, steht der Zähler beim nächsten Lesen ohnehin mindestens dort.
-      if (erfasst === null) erfasst = await hoechsteErfassteNummer(fs, uid, def); // REST-G3: einmal je Aufruf, nur bei automatischer Vergabe
+      if (erfasst === null) erfasst = await hoechsteErfassteNummer(fs, uid, def, stand, abgleich); // REST-G3, NL-G3: einmal je Aufruf, nur bei automatischer Vergabe
       const laufnummer = Math.max(stand, erfasst, mindest - 1) + 1;
       const jahr = jahrAus(deps);
       const nummer = nummerFormat(def.praefix, jahr, laufnummer, def.stellen);
@@ -192,7 +205,7 @@ async function reservieren(body, cors, deps) {
           schreibe.aendern(ap, { count: laufnummer }, ['count'], vorbedingungAus(alt)),
           schreibe.anlegen(nummerPfad(uid, def, nummer), d),
         ]);
-        return ergebnis(d, false, cors);
+        return ergebnis(d, false, cors, abgleich.ignoriert ? { warnung: 'ERFASSTE_NUMMER_UNPLAUSIBEL', ignoriert: abgleich.ignoriert } : null);
       } catch (e) {
         if (!(e instanceof FirestoreFehler && e.art === 'konflikt')) throw e;
         if (e.klasse === 'ALREADY_EXISTS') mindest = Math.max(mindest, laufnummer + 1);
