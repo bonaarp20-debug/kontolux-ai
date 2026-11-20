@@ -31,7 +31,7 @@ export const KLEINBETRAG_GRENZE_CENT = GRENZEN.KLEINBETRAG.wert_cent; // § 33 U
 export const BELEG_BETRAG_MAX_CENT = 1000000000; // 10 Mio EUR je Beleg (Konzept E1); die Firestore-Regeln lassen das Doppelte zu (Gegenprüfung M3, M6)
 
 // Kategorien, bei denen ein Altbeleg mit mwst_satz 'keine' im Regelstatus eindeutig ohne Vorsteuer ist (3.8.2).
-const KATEGORIEN_OHNE_VORSTEUER = Object.freeze(['Bankgebühren', 'Versicherungen', 'Versicherung', 'Reisekosten', 'Verpflegungsmehraufwand', 'Fahrtkosten (Kilometerpauschale)']);
+const KATEGORIEN_OHNE_VORSTEUER = Object.freeze(['Bankgebühren', 'Versicherungen', 'Versicherung', 'Kfz-Steuern/Versicherung', 'Reisekosten', 'Verpflegungsmehraufwand', 'Fahrtkosten (Kilometerpauschale)']);
 const PLATTFORM_QUELLEN = ['webhook', 'stripe', 'copecart', 'digistore', 'shopify', 'paypal', 'plattform'];
 
 // ---------------------------------------------------------------------------------------------

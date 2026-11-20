@@ -521,7 +521,9 @@ function anlagegutHinweis(s) {
 // W_ANLAGEGUT_WAHL_FEHLT); die Voranmeldung rechnet trotzdem. Hinweis zu § 15a UStG nur als Text (HN_15A_NUTZUNGSAENDERUNG).
 // Grundlage der Abschreibung/des Sammelpostens: Anschaffungskosten = Netto plus nicht abziehbare Vorsteuer (§ 9b Abs. 1 EStG).
 // ---------------------------------------------------------------------------------------------
-function anlagegutKandidat(s, p) {
+// NL-KERN-1: erklaert = false schaltet den 250-bis-800-Weg über anlagegut: true ab (ohne Kern-Option anlagegut_vorsteuer_sofort darf nur die Kategorie GWG bis 800€
+// gelten, sonst wird ein Beleg ohne Option auf einmal Anlagegut: Rückfall -18). Standard true für Aufrufer innerhalb des Options-Wegs.
+function anlagegutKandidat(s, p, erklaert = true) {
   if (!istObjekt(p) || !istCent(p.netto_cent) || !istCent(p.ust_cent)) return false;
   const k = p.kategorie || s.kategorie || null;
   if (k === 'Abschreibung (AfA)' || k === 'GWG bis 800€') return true;
@@ -530,19 +532,19 @@ function anlagegutKandidat(s, p) {
   // KERN-20 (M1 Zweitprüfung G4): Erklärt der Nutzer ausdrücklich ein Anlagegut (anlagegut: true), gilt das auch zwischen 250 und 800 EUR
   // netto außerhalb der Kategorie "GWG bis 800€": Wahl Sammelposten (Kz 137, ein Fünftel je Jahr) bzw. Wahl GWG (Kz 132 im Anschaffungsjahr)
   // statt Betriebsausgabe bei Zahlung (§ 6 Abs. 2, 2a EStG). Bis 250 EUR ist ohnehin Sofortabzug. Nur mit Kern-Option anlagegut_vorsteuer_sofort.
-  return kosten > GRENZEN.SAMMELPOSTEN_SOFORT.wert_cent && anlagegutErklaert(s);
+  return erklaert && kosten > GRENZEN.SAMMELPOSTEN_SOFORT.wert_cent && anlagegutErklaert(s);
 }
 function anlagegutErklaert(s) {
   const kz = Array.isArray(s.kennzeichen) ? s.kennzeichen : [];
   return s.anlagegut === true || kz.includes('anlagegut');
 }
-export function anlagegutPlan(s, profil) {
+export function anlagegutPlan(s, profil, erklaert = true) {
   if (!istObjekt(s) || s.richtung !== 'eingang' || KORREKTUR_ARTEN.includes(s.beleg_art) || !Array.isArray(s.positionen)) return null;
   const bis = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null;
   const jahr = bis ? jahrVon(bis) : null;
   const wahl = jahr === null ? null : gwgWahlFuer(profil, jahr);
   const pos = s.positionen.map((p, i) => {
-    if (!anlagegutKandidat(s, p)) return { i, art: 'normal' };
+    if (!anlagegutKandidat(s, p, erklaert)) return { i, art: 'normal' };
     const k = p.kategorie || s.kategorie || null;
     const kosten = gwgKosten(p);
     const abz = s.steuerfall === 'E_INLAND_VORSTEUER' && !(s.ausschluss && s.ausschluss.vorsteuer === 'nein') ? (istCent(p.vorsteuer_abziehbar_cent) ? p.vorsteuer_abziehbar_cent : p.ust_cent) : 0;
@@ -603,15 +605,15 @@ function anlagegutWeg(s, opt, profil) {
 // Skonto-Plan, § 255 Abs. 1 S. 3 HGB, B; sonst EÜR-Zwischenwert, C). Die Voranmeldung ist in beiden Wegen die des normalen Wegs.
 function gwgJahrWeg(s) {
   if (!istObjekt(s) || s.richtung !== 'eingang' || KORREKTUR_ARTEN.includes(s.beleg_art) || !Array.isArray(s.positionen)) return null;
-  const plan0 = anlagegutPlan(s, null);
+  const plan0 = anlagegutPlan(s, null, false); // NL-KERN-1: ohne Option nie der 250-800-Weg über anlagegut: true
   if (!plan0 || plan0.jahr === null) return null;
   const anl = plan0.positionen.filter((x) => x.art !== 'normal');
   // Kosten bis 250 EUR plant anlagegutArt in jeder Wahl als 'sofort'; nur die Kategorie GWG (AfA-Kategorie schließt F8 ohne Option aus)
   if (!anl.length || !anl.every((x) => x.kategorie === 'GWG bis 800€' && (x.art === 'sofort_bisher' || x.art === 'sofort'))) return null;
   if (aktiveZahlungen(s).every((z) => jahrVon(z.datum) === plan0.jahr)) return null;
   // Plan wie mit Wahl gwg (alle Positionen 'sofort'): die Art hängt dann nicht von einer Skonto-Minderung an der 250-EUR-Grenze ab (Skonto-Plan)
-  const plan = anlagegutPlan(s, { gwg_wahl: { [String(plan0.jahr)]: 'gwg' } });
-  const grund = anlagegutSperre(s);
+  const plan = anlagegutPlan(s, { gwg_wahl: { [String(plan0.jahr)]: 'gwg' } }, false);
+  const grund = anlagegutSperre(s, false);
   if (!grund) return { art: 'plan', plan };
   return { art: 'nur_ust', grund, plan: grund === 'anlagegut_skonto' ? anlagegutSkontoPlan(s, plan) : null };
 }
@@ -716,10 +718,10 @@ function rcAnlagegut(s) {
   return false;
 }
 // Grund, warum der Anlagegut-Weg diesen Beleg nicht trägt (dann Ausschluss wie bisher), sonst null.
-function anlagegutSperre(s) {
+function anlagegutSperre(s, erklaert = true) {
   if (s.steuerfall !== 'E_INLAND_VORSTEUER' && s.steuerfall !== 'E_INLAND_OHNE_VORSTEUER') return 'anlagegut_steuerfall';
   if (!istObjekt(s.leistung) || !istDatum(s.leistung.bis)) return 'anlagegut_datum';
-  if (!s.positionen.every((p) => anlagegutKandidat(s, p))) return 'anlagegut_gemischt';
+  if (!s.positionen.every((p) => anlagegutKandidat(s, p, erklaert))) return 'anlagegut_gemischt';
   if (istTeilleistung(s)) return 'anlagegut_teilleistung';
   if (s.kleinbetrag === true || istObjekt(s.geschenk) || (Array.isArray(s.kennzeichen) && s.kennzeichen.includes('bewirtung'))) return 'anlagegut_sonderfall';
   if (aktiveZahlungen(s).some((z) => istCent(z.skonto_cent) && z.skonto_cent > 0)) return 'anlagegut_skonto';
@@ -1517,12 +1519,29 @@ function zehnTageFenster(zahlung, kategorie, l) {
 // '1-prozent' (die Methode gibt der Nutzer selbst an) oder 'ja' (privat genutzt, Methode offen: der Hinweis bleibt, weil Kontolux den Anteil nicht rechnet).
 // Jeder andere nicht leere Text (frühere Werte wie 'ein_prozent', 'keine') schaltet den Hinweis wie bisher ab; ohne Eintrag unverändert.
 export const KFZ_KATEGORIEN_KERN = Object.freeze(['Kfz-Kosten', 'Kfz-Leasing', 'Kfz-Steuern/Versicherung']);
-function kfzOhnePrivatanteil(s, profil) {
-  if (istObjekt(profil) && typeof profil.kfz_privatnutzung === 'string' && profil.kfz_privatnutzung.length > 0 && profil.kfz_privatnutzung !== 'ja') return false;
-  return Array.isArray(s.positionen) && s.positionen.some((p) => istObjekt(p) && KFZ_KATEGORIEN_KERN.includes(p.kategorie || s.kategorie || null));
+// NL-KERN-3: Auswahl 'nein' (und 'keine') blendet den Hinweis aus; 'fahrtenbuch' und '1-prozent' (auch 'ein_prozent') lassen einen kurzen Resthinweis stehen (der Privatanteil
+// bleibt Sache des Nutzers: Umsatzsteuer Kz 81, EÜR Kz 106); 'ja' und kein Eintrag: voller Hinweis; jeder andere nicht leere Text blendet aus wie bisher.
+function kfzHinweisArt(s, profil) {
+  if (!Array.isArray(s.positionen) || !s.positionen.some((p) => istObjekt(p) && KFZ_KATEGORIEN_KERN.includes(p.kategorie || s.kategorie || null))) return null;
+  const w = istObjekt(profil) && typeof profil.kfz_privatnutzung === 'string' ? profil.kfz_privatnutzung : '';
+  if (w === '' || w === 'ja') return 'HN_KFZ_PRIVATANTEIL';
+  if (w === 'fahrtenbuch' || w === '1-prozent' || w === 'ein_prozent') return 'HN_KFZ_PRIVATANTEIL_KURZ';
+  return null;
 }
+// NL-KERN-2 (Konfidenz B): Versicherungsbeiträge sind umsatzsteuerfrei (§ 4 Nr. 10 UStG, es fällt Versicherungsteuer an), daraus gibt es keine Vorsteuer.
+// Steht auf einem Beleg der Kategorie Versicherungen ein Umsatzsteuerbetrag (19 %), rechnet der Kern ihn nicht (Zwischenwert mit
+// HN_VERSICHERUNG_VORSTEUER), statt eine nicht abziehbare Vorsteuer in Kz 66 zu buchen. Rückfall: Bestandsbelege dieser Kategorien mit Steuerbetrag waren bis -22
+// mit Vorsteuer gerechnet und werden jetzt ausgeschlossen (bewusst, weil die Vorsteuer sonst zu hoch stünde).
+export const VERSICHERUNG_KATEGORIEN_KERN = Object.freeze(['Versicherungen', 'Versicherung']);
+function mitSteuerInKategorie(s, liste) {
+  return Array.isArray(s.positionen) && s.positionen.some((p) => istObjekt(p) && istCent(p.ust_cent) && p.ust_cent > 0 && liste.includes(p.kategorie || s.kategorie || null));
+}
+const versicherungMitSteuer = (s) => mitSteuerInKategorie(s, VERSICHERUNG_KATEGORIEN_KERN);
+// Kfz-Steuern/Versicherung umfasst auch Maut (mit Umsatzsteuer): dort nur die Warnung, kein Ausschluss.
+const kfzSteuerVersMitSteuer = (s) => mitSteuerInKategorie(s, ['Kfz-Steuern/Versicherung']);
 function eingangWirkungen(s, profil, ctx, out, opt) {
-  if (!KORREKTUR_ARTEN.includes(s.beleg_art) && kfzOhnePrivatanteil(s, profil) && !ctx.hinweise.includes('HN_KFZ_PRIVATANTEIL')) ctx.hinweise.push('HN_KFZ_PRIVATANTEIL');
+  const kfzHin = KORREKTUR_ARTEN.includes(s.beleg_art) ? null : kfzHinweisArt(s, profil); // NL-KERN-3
+  if (kfzHin && !ctx.hinweise.includes(kfzHin)) ctx.hinweise.push(kfzHin);
   const l = s.leistung;
   const teil = istTeilleistung(s);
   const gruppen = gruppiere(s, teil);
@@ -1543,6 +1562,11 @@ function eingangWirkungen(s, profil, ctx, out, opt) {
   // ist in den Quellen (UStAE 15.1 Abs. 5 S. 6, Abs. 6) nicht belegt: ausschließen statt in einen Zeitraum ohne Voranmeldung buchen.
   if (mitVorsteuer && erhalt > l.bis && statusAm(profil, erhalt).status === 'ku') {
     schliesseAus(s, profil, ctx, out, 'rechnung_nach_rueckwechsel', ['W_WECHSEL_DIALOG']);
+    return;
+  }
+  if (mitVorsteuer && !KORREKTUR_ARTEN.includes(s.beleg_art) && kfzSteuerVersMitSteuer(s) && !ctx.hinweise.includes('W_KFZ_STEUER_VERSICHERUNG_UST')) ctx.hinweise.push('W_KFZ_STEUER_VERSICHERUNG_UST'); // NL-KERN-2: nur Warnung (Maut hat Umsatzsteuer)
+  if (mitVorsteuer && !KORREKTUR_ARTEN.includes(s.beleg_art) && versicherungMitSteuer(s)) { // NL-KERN-2
+    schliesseAus(s, profil, ctx, out, 'versicherung_mit_umsatzsteuer', ['HN_VERSICHERUNG_VORSTEUER']);
     return;
   }
   if (mitVorsteuer && teilzahlungMischsatz(gruppen, zahlungen, stichBis, false)) ctx.hinweise.push('HN_TEILZAHLUNG_MISCHSATZ');
