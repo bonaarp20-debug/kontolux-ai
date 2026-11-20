@@ -2382,15 +2382,17 @@ async function handleSendEmailChangeVerification(currentEmail, body, env, cors =
 const MODEL_PRICING_PER_MTOK = {
   // Haiku 5.5 (Stand 2026-11-20, docs/reports/eu-ki-wechsel-mistral.md): 0,10 / 0,50 / Cache-Lesen 0,01; Cache-Schreiben 1h = 2x Eingabe (Annahme).
   haiku: { input: 0.10, output: 0.50, cacheWrite: 0.20, cacheRead: 0.01 },
+  // NL-G6: Haiku 5.5 über 100.000 Prompt-Token (Eingabe + Cache-Schreiben + Cache-Lesen): fünffacher Tarif (0,50 / 2,50 / Cache-Lesen 0,05; Cache-Schreiben 1h = 2x Eingabe), ganze Anfrage
+  haikuLang: { input: 0.50, output: 2.50, cacheWrite: 1.00, cacheRead: 0.05 },
   sonnet: { input: 3.00, output: 15.00, cacheWrite: 6.00, cacheRead: 0.30 },
   opus: { input: 5.00, output: 25.00, cacheWrite: 10.00, cacheRead: 0.50 }
 };
 export function estimateCostCents(model, usage) {
   const key = /haiku/i.test(model) ? 'haiku' : /sonnet/i.test(model) ? 'sonnet' : /opus/i.test(model) ? 'opus' : 'haiku';
-  const p = MODEL_PRICING_PER_MTOK[key];
   const input = usage.input_tokens || 0;
   const cacheWrite = usage.cache_creation_input_tokens || 0;
   const cacheRead = usage.cache_read_input_tokens || 0;
+  const p = key === 'haiku' && input + cacheWrite + cacheRead > 100000 ? MODEL_PRICING_PER_MTOK.haikuLang : MODEL_PRICING_PER_MTOK[key];
   const output = usage.output_tokens || 0;
   const dollars = (input * p.input + cacheWrite * p.cacheWrite + cacheRead * p.cacheRead + output * p.output) / 1_000_000;
   return (dollars * 100).toFixed(3);
