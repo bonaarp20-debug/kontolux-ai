@@ -2,6 +2,7 @@
 // Rücknahme nur mit Grund und Audit, Abbruch, Konsistenzwächter, Übernahme der Alt-Monatsabschlüsse, Zeiträume nach Voranmeldungszeitraum.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { festPruefungMarkieren } from '../regel/schreibweg-v2.js';
 import { regelFestschreibung } from '../regel/festschreibung.js';
 import { snapshotFuer } from '../regel/festschreibung-kern.js';
 import { kettepruefen } from '../regel/audit.js';
@@ -207,8 +208,30 @@ test('Konsistenzwächter pruefen: unverändert; neuer Beleg im gesperrten Zeitra
   assert.equal(r.json.unveraendert, false);
   assert.equal(r.json.neue_belege, 1);
   assert.ok(r.json.abweichungen.some((x) => x.kz === '83'));
-  assert.deepEqual(fs.lies(F('ust-2026-Q3')).pruefung, { am: '2026-11-14T10:00:00.000Z', unveraendert: false, neue_belege: 1, abweichungen: r.json.abweichungen.length });
+  assert.deepEqual(fs.lies(F('ust-2026-Q3')).pruefung, { am: '2026-11-14T10:00:00.000Z', unveraendert: false, belege_geaendert: true, kern_gewechselt: false, neue_belege: 1, abweichungen: r.json.abweichungen.length });
   assert.equal((await rufe({ aktion: 'pruefen', periode_id: 'ust-2026-Q2' })).json.fehler[0].code, 'NICHT_FESTGESCHRIEBEN');
+});
+
+test('ABSCHLUSS-FIX M2: Regeländerung (Kern-Version und Zahlen anders, Belege gleich) ist keine Belegänderung', async () => {
+  const { fs, rufe, snapClient } = umgebung();
+  await rufe({ aktion: 'festschreiben', periode_id: 'ust-2026-Q3', snapshot: snapClient('ust-2026-Q3') });
+  const d = fs.lies(F('ust-2026-Q3'));
+  const geaendert = d.snapshot_ust.map((z, i) => {
+    if (i !== 0) return z;
+    const k = Object.keys(z).find((x) => x.endsWith('_cent'));
+    return { ...z, [k]: z[k] + 100 };
+  });
+  fs.setze(F('ust-2026-Q3'), { ...d, kern_version: '1999.01.01-1', snapshot_ust: geaendert });
+  const r = await rufe({ aktion: 'pruefen', periode_id: 'ust-2026-Q3' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.unveraendert, false, 'die Zahlen weichen ab');
+  assert.equal(r.json.kern_gewechselt, true);
+  assert.equal(r.json.neue_belege, 0);
+  assert.equal(r.json.belege_hash_gleich, true);
+  const p = fs.lies(F('ust-2026-Q3')).pruefung;
+  assert.equal(p.belege_geaendert, false);
+  assert.equal(p.kern_gewechselt, true);
+  assert.equal(p.unveraendert, false);
 });
 
 test('Übernahme der Alt-Monatsabschlüsse: quelle legacy_snapshot, idempotent, Sperre nur nach Bestätigung, Abgleich beim Entsperren im Altsystem', async () => {
@@ -291,4 +314,51 @@ test('abgegeben (Zuruf BP-10): nur bei festgeschriebenem Zeitraum, Datum nicht i
   assert.equal(fs.lies(F('ust-2026-Q3')).abgegeben.kz10_berichtigt, true, 'erneute Abgabe nach Rücknahme = berichtigte Anmeldung');
   assert.ok(audit().some((a) => a.aktion === 'festschreibung_abgegeben'));
   assert.equal((await kettepruefen(audit())).ok, true);
+});
+
+test('ABSCHLUSS-FIX M2: Abweichung ohne Kernwechsel ohne Hash-/Beleganzahl-Änderung (ältere v1-Festschreibung) gilt als Belegänderung', async () => {
+  const { fs, rufe, snapClient } = umgebung();
+  await rufe({ aktion: 'festschreiben', periode_id: 'ust-2026-Q3', snapshot: snapClient('ust-2026-Q3') });
+  const d = fs.lies(F('ust-2026-Q3'));
+  const geaendert = d.snapshot_ust.map((z, i) => {
+    if (i !== 0) return z;
+    const k = Object.keys(z).find((x) => x.endsWith('_cent'));
+    return { ...z, [k]: z[k] + 100 };
+  });
+  fs.setze(F('ust-2026-Q3'), { ...d, snapshot_ust: geaendert });
+  const r = await rufe({ aktion: 'pruefen', periode_id: 'ust-2026-Q3' });
+  assert.equal(r.json.unveraendert, false);
+  assert.equal(r.json.kern_gewechselt, false);
+  assert.equal(r.json.belege_hash_gleich, true);
+  assert.equal(fs.lies(F('ust-2026-Q3')).pruefung.belege_geaendert, true);
+});
+
+test('ABSCHLUSS-FIX N: sperre_nachholen übernimmt keine alte pruefung', async () => {
+  const { fs, rufe } = umgebung();
+  fs.setze(`users/${UID}/monatsabschluesse/August-2026`, { monat: 'August', jahr: 2026, einnahmen_gesamt: 119, ausgaben_gesamt: 0, gewinn: 119, einnahmen_positionen: [{ bezeichnung: 'R1', betrag: 119 }], ausgaben_positionen: [], festgeschrieben: true, festgeschrieben_am: '2026-09-02T08:00:00.000Z' });
+  await rufe({ aktion: 'legacy_uebernehmen' });
+  fs.setze(F('euer-2026-08'), { ...fs.lies(F('euer-2026-08')), pruefung: { am: '2026-11-01T00:00:00.000Z', unveraendert: false, belege_geaendert: true } });
+  const r = await rufe({ aktion: 'sperre_nachholen', periode_id: 'euer-2026-08', bestaetigt: true });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(fs.lies(F('euer-2026-08')).pruefung, undefined);
+});
+
+test('ABSCHLUSS-FIX M2: festPruefungMarkieren vermerkt belege_geaendert nur an festgeschriebenen Zeiträumen (dauerhaft am Dokument, nie werfend)', async () => {
+  const { fs, rufe, snapClient } = umgebung();
+  await rufe({ aktion: 'festschreiben', periode_id: 'ust-2026-Q3', snapshot: snapClient('ust-2026-Q3') });
+  await rufe({ aktion: 'pruefen', periode_id: 'ust-2026-Q3' });
+  assert.equal(fs.lies(F('ust-2026-Q3')).pruefung.belege_geaendert, false);
+  const zeit = '2026-11-20T09:00:00.000Z';
+  const g = await festPruefungMarkieren({ uid: UID, token: 't', fetchFn: fs.fetchFn, perioden: ['ust-2026-Q3', 'ust-2026-Q2', '<x>'], zeit });
+  assert.deepEqual(g, ['ust-2026-Q3']);
+  const p = fs.lies(F('ust-2026-Q3')).pruefung;
+  assert.equal(p.belege_geaendert, true);
+  assert.equal(p.unveraendert, false);
+  assert.equal(p.am, zeit);
+  assert.equal(fs.lies(F('ust-2026-Q2')), null);
+  assert.deepEqual(await festPruefungMarkieren({ uid: UID, token: 't', fetchFn: async () => { throw new Error('netz'); }, perioden: ['ust-2026-Q3'], zeit }), []);
+  assert.deepEqual(await festPruefungMarkieren({ uid: UID, token: null, fetchFn: fs.fetchFn, perioden: ['ust-2026-Q3'], zeit }), []);
+  // Verdrahtung im Worker: beide Beleg-Wege und der Webhook-Weg markieren nach dem Speichern
+  const w = (await import('node:fs')).readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
+  assert.equal((w.match(/await nachFestschreibungMarkieren\(env, userId, v2/g) || []).length, 3);
 });

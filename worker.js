@@ -21,7 +21,7 @@ import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // 
 import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4)
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
-import { v2Vorbereiten, clientSteuerVorbereiten, v2RestFelder } from './regel/schreibweg-v2.js';
+import { v2Vorbereiten, clientSteuerVorbereiten, v2RestFelder, nachFestschreibungAntwort, festPruefungMarkieren } from './regel/schreibweg-v2.js';
 // BP-21a-W (Phase 3): Steuerdaten je Plattformbeleg, OSS-Datenbasis, hinter Feature 'plattform'
 import { agbZustimmungAb, AGB_FASSUNG_RELEASE_B } from './regel/gemeinsam.js'; // KX-EB A6
 import { plattformAuswerten, plattformFeatureAn, plattformEingabe, plattformSteuerKennzeichnen, plattformDatenFeld, originalZurErstattung, stripeChargeLaden, paypalOrderLaden, refBereinigen, waehrungCode, hinweisAusland, HINWEIS_LAND_FEHLT } from './regel/plattform.js';
@@ -908,7 +908,67 @@ function bereinigeProfilUpdate(rest) {
   return ok.length ? ok.join(',') : 'keine';
 }
 
+// ABSCHLUSS-FIX C3-M1/H1/N1: Rechnungs-, Mahnungs- und Angebotsnummer aus dem KI-Befehl nur in einem festen Muster (Buchstaben inkl. Umlaute,
+// Ziffern, . _ / - – # und Leerzeichen, 1 bis 40 Zeichen). "auto"/leer bleibt erlaubt (die App vergibt dann selbst eine Nummer).
+// Der Wert wird wie im Handler mit den Schlüsseln des JEWEILIGEN Befehls gelesen (wie parseCommandParams). Ein unbekannter Folgeschlüssel
+// nach der Nummer (", xyz=...") wird verworfen statt als Teil der Nummer gelesen.
+const KI_NUMMER_MUSTER = /^[\p{L}\p{N}._\/\-–# ]{1,40}$/u;
+const KI_NUMMER_SCHLUESSEL = {
+  RECHNUNG_ERSTELLEN: ['absender_name', 'empfaenger_name', 'empfaenger_anrede', 'empfaenger_adresse', 'leistung', 'leistungsdatum', 'zahlungsziel', 'betrag_netto', 'rechnungsnummer', 'steuernummer', 'eigene_adresse', 'bankverbindung', 'verwendungszweck', 'format', 'mwst_satz', 'empfaenger_ust_id'],
+  MAHNUNG_ERSTELLEN: ['absender_name', 'empfaenger_name', 'empfaenger_anrede', 'empfaenger_adresse', 'rechnungsnummer', 'rechnungsdatum', 'betrag', 'mahnstufe', 'neue_frist', 'eigene_adresse', 'bankverbindung', 'verwendungszweck'],
+  ANGEBOT_ERSTELLEN: ['angebotsnummer', 'kunde', 'kundenadresse', 'positionen', 'gueltig_bis', 'mwst_satz'],
+  ANGEBOT_KONVERTIEREN: ['angebots_id', 'rechnungsnummer', 'format'],
+  ZEIT_ABRECHNEN: ['kunde', 'zeiteintraege_ids', 'rechnungsnummer', 'mwst_satz', 'format'],
+  REISE_ABRECHNEN: ['kunde', 'reise_ids', 'rechnungsnummer', 'mwst_satz', 'format'],
+  RECHNUNG_STORNIEREN: ['rechnungsnummer', 'grund']
+};
+const KI_NUMMER_BEFEHLE = Object.keys(KI_NUMMER_SCHLUESSEL);
+const KI_NUMMER_MIT_AUTO = ['RECHNUNG_ERSTELLEN', 'ANGEBOT_ERSTELLEN', 'ANGEBOT_KONVERTIEREN', 'ZEIT_ABRECHNEN', 'REISE_ABRECHNEN']; // hier vergibt Kontolux bei "auto" selbst eine Nummer
+export function kiNummerGueltig(wert) {
+  const w = String(wert == null ? '' : wert).trim();
+  return w === '' || w.toLowerCase() === 'auto' || KI_NUMMER_MUSTER.test(w);
+}
+// Prüft und bereinigt (gleiche Logik wie im Client, index.html) alle Befehle mit Nummer in text. Ergebnis: { text, ungueltig: [Befehlsname, ...] }
+export function kiNummernPruefen(text) {
+  const ungueltig = [];
+  let s = String(text || '');
+  for (const name of KI_NUMMER_BEFEHLE) {
+    const keys = KI_NUMMER_SCHLUESSEL[name].map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    s = s.replace(new RegExp('(' + name + ':)([^\\n\\r]*)', 'gi'), (ganz, kopf, zeile) => {
+      const re = new RegExp('(?:^|,)\\s*(' + keys + ')=', 'g');
+      const treffer = [];
+      let m;
+      while ((m = re.exec(zeile)) !== null) treffer.push({ key: m[1], start: m.index, wert: m.index + m[0].length });
+      let neu = zeile;
+      for (let i = treffer.length - 1; i >= 0; i--) {
+        const t = treffer[i];
+        if (t.key !== 'rechnungsnummer' && t.key !== 'angebotsnummer') continue;
+        const ende = i + 1 < treffer.length ? treffer[i + 1].start : zeile.length;
+        const roh = zeile.substring(t.wert, ende);
+        const komma = roh.indexOf(',');
+        const wert = (komma >= 0 ? roh.slice(0, komma) : roh).trim();
+        if (!kiNummerGueltig(wert)) { ungueltig.push(name); break; }
+        if (komma >= 0) neu = neu.slice(0, t.wert + komma) + neu.slice(ende);
+      }
+      return kopf + neu;
+    });
+  }
+  return { text: s, ungueltig };
+}
+const KI_NUMMER_FEHLER = 'Die Nummer enthält ungültige Zeichen.';
+export function kiNummerFehlerText(ungueltig) {
+  return ungueltig.length && ungueltig.every((n) => KI_NUMMER_MIT_AUTO.includes(n)) ? KI_NUMMER_FEHLER + ' Du kannst „auto“ angeben, dann vergibt Kontolux sie.' : KI_NUMMER_FEHLER;
+}
+
 export function pruefeBetragZeile(line) {
+  {
+    const np = kiNummernPruefen(line);
+    if (np.ungueltig.length) {
+      const bm = String(line).match(new RegExp('(' + KI_NUMMER_BEFEHLE.join('|') + '):', 'i'));
+      return line.slice(0, bm ? bm.index : 0) + kiNummerFehlerText(np.ungueltig);
+    }
+    line = np.text;
+  }
   // Diagnose-Logging: läuft für jede Zeile jeder Chat-Antwort, loggt aber nur bei einem Treffer —
   // sichtbar per `wrangler tail`. KUNDE_SPEICHERN bewusst NICHT mehr enthalten (2026-09-09):
   // Kunden-Anlegen ist inzwischen reine, deterministische Frontend-Logik (siehe
@@ -3124,6 +3184,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
         }
       }
 
+      await nachFestschreibungMarkieren(env, userId, v2); // ABSCHLUSS-FIX M2
       return new Response(JSON.stringify({
         success: true,
         docId: docId,
@@ -3131,6 +3192,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
         typ: typ || 'rechnung_eingehend',
         message: 'Beleg erfolgreich gespeichert',
         ...(steuerGespeichert ? { steuer_gespeichert: true } : {}),
+        ...nachFestschreibungAntwort(v2), // ABSCHLUSS-FIX C1-01
         ...(tagesbewegungWarnung ? { warning: tagesbewegungWarnung } : {})
       }), {
         status: 200,
@@ -3327,6 +3389,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
         }
       }
 
+      await nachFestschreibungMarkieren(env, userId, v2); // ABSCHLUSS-FIX M2
       return new Response(JSON.stringify({
         success: true,
         docId: docId,
@@ -3338,6 +3401,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
         // Nur wenn der Browser steuer mitgeschickt hat (Beleg-Formular v2); ohne steuer im Body bleibt die Antwort wie bisher
         ...(steuerGespeichert ? { steuer_gespeichert: true } : {}),
         ...(clientSteuerCodes ? { steuer_gespeichert: false, steuer_codes: clientSteuerCodes } : {}),
+        ...nachFestschreibungAntwort(v2), // ABSCHLUSS-FIX C1-01
         ...(tagesbewegungWarnung ? { warning: tagesbewegungWarnung } : {})
       }), {
         status: 200,
@@ -6354,6 +6418,15 @@ async function handleFestschreiben(pfad, body, env, cors) {
 // null (Beleg wie heute, die Migration erfasst ihn später). Geloggt werden nur Weg, Kern-Version und Codes.
 // Fahrplan: aus -> warnung (1 bis 2 Wochen, Zähler steuerkernZaehler/Log steuerkern_warnung) -> an (config kern_max 'an' zuerst für alle aus,
 // dann env 'an'; Notaus in Sekunden: config kern_max 'aus' oder env zurück); siehe docs/regelbesteuerung/15-phase2/bp13-bericht.md.
+// ABSCHLUSS-FIX (M2): nach dem Speichern eines Belegs in einem festgeschriebenen Zeitraum die Prüfung am Festschreibungsdokument markieren (wirft nie)
+async function nachFestschreibungMarkieren(env, userId, v2, adminToken = null) {
+  try {
+    if (!v2 || !Array.isArray(v2.nach_festschreibung) || !v2.nach_festschreibung.length) return;
+    const token = adminToken || await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    await festPruefungMarkieren({ uid: userId, token, fetchFn: (...a) => fetch(...a), perioden: v2.nach_festschreibung, zeit: new Date().toISOString() });
+  } catch { /* nie werfen */ }
+}
+
 async function schreibwegV2(env, weg, userId, token, belegRoh, felder, { nieAblehnen = false, plattformDaten = null } = {}) {
   const wegKennung = String(weg || 'unbekannt').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 40) || 'unbekannt';
   try {
@@ -6493,6 +6566,7 @@ export async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
     }
   }
 
+  await nachFestschreibungMarkieren(env, userId, v2, adminToken); // ABSCHLUSS-FIX M2
   return { success: true, docId, ...(tagesbewegungWarnung ? { tagesbewegungWarnung } : {}) };
 }
 
