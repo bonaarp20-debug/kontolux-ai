@@ -207,8 +207,30 @@ test('Konsistenzwächter pruefen: unverändert; neuer Beleg im gesperrten Zeitra
   assert.equal(r.json.unveraendert, false);
   assert.equal(r.json.neue_belege, 1);
   assert.ok(r.json.abweichungen.some((x) => x.kz === '83'));
-  assert.deepEqual(fs.lies(F('ust-2026-Q3')).pruefung, { am: '2026-11-14T10:00:00.000Z', unveraendert: false, neue_belege: 1, abweichungen: r.json.abweichungen.length });
+  assert.deepEqual(fs.lies(F('ust-2026-Q3')).pruefung, { am: '2026-11-14T10:00:00.000Z', unveraendert: false, belege_geaendert: true, kern_gewechselt: false, neue_belege: 1, abweichungen: r.json.abweichungen.length });
   assert.equal((await rufe({ aktion: 'pruefen', periode_id: 'ust-2026-Q2' })).json.fehler[0].code, 'NICHT_FESTGESCHRIEBEN');
+});
+
+test('ABSCHLUSS-FIX M2: Regeländerung (Kern-Version und Zahlen anders, Belege gleich) ist keine Belegänderung', async () => {
+  const { fs, rufe, snapClient } = umgebung();
+  await rufe({ aktion: 'festschreiben', periode_id: 'ust-2026-Q3', snapshot: snapClient('ust-2026-Q3') });
+  const d = fs.lies(F('ust-2026-Q3'));
+  const geaendert = d.snapshot_ust.map((z, i) => {
+    if (i !== 0) return z;
+    const k = Object.keys(z).find((x) => x.endsWith('_cent'));
+    return { ...z, [k]: z[k] + 100 };
+  });
+  fs.setze(F('ust-2026-Q3'), { ...d, kern_version: '1999.01.01-1', snapshot_ust: geaendert });
+  const r = await rufe({ aktion: 'pruefen', periode_id: 'ust-2026-Q3' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.unveraendert, false, 'die Zahlen weichen ab');
+  assert.equal(r.json.kern_gewechselt, true);
+  assert.equal(r.json.neue_belege, 0);
+  assert.equal(r.json.belege_hash_gleich, true);
+  const p = fs.lies(F('ust-2026-Q3')).pruefung;
+  assert.equal(p.belege_geaendert, false);
+  assert.equal(p.kern_gewechselt, true);
+  assert.equal(p.unveraendert, false);
 });
 
 test('Übernahme der Alt-Monatsabschlüsse: quelle legacy_snapshot, idempotent, Sperre nur nach Bestätigung, Abgleich beim Entsperren im Altsystem', async () => {

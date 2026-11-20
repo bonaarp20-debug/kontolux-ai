@@ -484,7 +484,10 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
       }
       // Zusammenfassung am Dokument (keine Beträge), damit die Ansicht 'nach der Festschreibung geändert' zeigen kann (kein Audit: abgeleitet)
       if (fs.rest >= 1) {
-        const pruefung = { am: zeit, unveraendert: !!ergebnis.unveraendert, neue_belege: ergebnis.neue_belege ?? null, abweichungen: Array.isArray(ergebnis.abweichungen) ? ergebnis.abweichungen.length : null };
+        // ABSCHLUSS-FIX M2: belege_geaendert = echte Belegänderung (neue Belege, Beleg-Fingerabdruck anders, bei Legacy die Quelle); kern_gewechselt = Kern-Version oder
+        // Kern-Optionen haben gewechselt (Regeländerung, keine Belegänderung). Die App zeigt "nach der Festschreibung geändert" nur bei belege_geaendert.
+        const belegeGeaendert = alt.quelle === 'legacy_snapshot' ? !ergebnis.unveraendert : (ergebnis.belege_hash_gleich === false || (ergebnis.neue_belege || 0) > 0);
+        const pruefung = { am: zeit, unveraendert: !!ergebnis.unveraendert, belege_geaendert: !!belegeGeaendert, kern_gewechselt: !!(ergebnis.kern_gewechselt || ergebnis.kern_optionen_gewechselt), neue_belege: ergebnis.neue_belege ?? null, abweichungen: Array.isArray(ergebnis.abweichungen) ? ergebnis.abweichungen.length : null };
         try { await fs.commit([schreibe.aendern(pfad, { pruefung }, ['pruefung'], { updateTime: festDok.updateTime }), ...lesestandLoeschen(uid, periodeId, body.aktion, gelesen)]); } catch (e) { if (!(e instanceof FirestoreFehler)) throw e; }
       }
       return antwort(ergebnis, 200, cors);

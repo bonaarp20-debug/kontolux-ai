@@ -908,28 +908,66 @@ function bereinigeProfilUpdate(rest) {
   return ok.length ? ok.join(',') : 'keine';
 }
 
-// ABSCHLUSS-FIX C3-M1: Rechnungs-, Mahnungs- und Angebotsnummer aus dem Befehl nur im festen Muster (wie im Client). "auto"/leer bleibt erlaubt.
-const KI_NUMMER_MUSTER = /^[A-Za-z0-9._/\- ]{1,40}$/;
-const KI_NUMMER_BEFEHLE_RE = /(RECHNUNG_ERSTELLEN|MAHNUNG_ERSTELLEN|ANGEBOT_ERSTELLEN|ANGEBOT_KONVERTIEREN|ZEIT_ABRECHNEN|REISE_ABRECHNEN|RECHNUNG_STORNIEREN):(.*)$/i;
-const KI_BEFEHLS_SCHLUESSEL = ['absender_name', 'empfaenger_name', 'empfaenger_anrede', 'empfaenger_adresse', 'leistung', 'leistungsdatum', 'zahlungsziel', 'betrag_netto', 'rechnungsnummer', 'angebotsnummer',
-  'steuernummer', 'eigene_adresse', 'bankverbindung', 'verwendungszweck', 'format', 'mwst_satz', 'empfaenger_ust_id', 'rechnungsdatum', 'betrag', 'mahnstufe', 'neue_frist', 'kunde', 'kundenadresse',
-  'positionen', 'gueltig_bis', 'angebots_id', 'zeiteintraege_ids', 'reise_ids', 'grund'];
-export function kiNummerUngueltig(line) {
-  const m = String(line || '').match(KI_NUMMER_BEFEHLE_RE);
-  if (!m) return false;
-  const re = new RegExp('(?:^|,)\\s*(?:rechnungsnummer|angebotsnummer)=([\\s\\S]*?)(?=,\\s*(?:' + KI_BEFEHLS_SCHLUESSEL.join('|') + ')=|$)', 'gi');
-  let n;
-  while ((n = re.exec(m[2]))) {
-    const w = n[1].trim();
-    if (w !== '' && w.toLowerCase() !== 'auto' && !KI_NUMMER_MUSTER.test(w)) return true;
+// ABSCHLUSS-FIX C3-M1/H1/N1: Rechnungs-, Mahnungs- und Angebotsnummer aus dem KI-Befehl nur in einem festen Muster (Buchstaben inkl. Umlaute,
+// Ziffern, . _ / - – # und Leerzeichen, 1 bis 40 Zeichen). "auto"/leer bleibt erlaubt (die App vergibt dann selbst eine Nummer).
+// Der Wert wird wie im Handler mit den Schlüsseln des JEWEILIGEN Befehls gelesen (wie parseCommandParams). Ein unbekannter Folgeschlüssel
+// nach der Nummer (", xyz=...") wird verworfen statt als Teil der Nummer gelesen.
+const KI_NUMMER_MUSTER = /^[\p{L}\p{N}._\/\-–# ]{1,40}$/u;
+const KI_NUMMER_SCHLUESSEL = {
+  RECHNUNG_ERSTELLEN: ['absender_name', 'empfaenger_name', 'empfaenger_anrede', 'empfaenger_adresse', 'leistung', 'leistungsdatum', 'zahlungsziel', 'betrag_netto', 'rechnungsnummer', 'steuernummer', 'eigene_adresse', 'bankverbindung', 'verwendungszweck', 'format', 'mwst_satz', 'empfaenger_ust_id'],
+  MAHNUNG_ERSTELLEN: ['absender_name', 'empfaenger_name', 'empfaenger_anrede', 'empfaenger_adresse', 'rechnungsnummer', 'rechnungsdatum', 'betrag', 'mahnstufe', 'neue_frist', 'eigene_adresse', 'bankverbindung', 'verwendungszweck'],
+  ANGEBOT_ERSTELLEN: ['angebotsnummer', 'kunde', 'kundenadresse', 'positionen', 'gueltig_bis', 'mwst_satz'],
+  ANGEBOT_KONVERTIEREN: ['angebots_id', 'rechnungsnummer', 'format'],
+  ZEIT_ABRECHNEN: ['kunde', 'zeiteintraege_ids', 'rechnungsnummer', 'mwst_satz', 'format'],
+  REISE_ABRECHNEN: ['kunde', 'reise_ids', 'rechnungsnummer', 'mwst_satz', 'format'],
+  RECHNUNG_STORNIEREN: ['rechnungsnummer', 'grund']
+};
+const KI_NUMMER_BEFEHLE = Object.keys(KI_NUMMER_SCHLUESSEL);
+const KI_NUMMER_MIT_AUTO = ['RECHNUNG_ERSTELLEN', 'ANGEBOT_ERSTELLEN', 'ANGEBOT_KONVERTIEREN', 'ZEIT_ABRECHNEN', 'REISE_ABRECHNEN']; // hier vergibt Kontolux bei "auto" selbst eine Nummer
+export function kiNummerGueltig(wert) {
+  const w = String(wert == null ? '' : wert).trim();
+  return w === '' || w.toLowerCase() === 'auto' || KI_NUMMER_MUSTER.test(w);
+}
+// Prüft und bereinigt (gleiche Logik wie im Client, index.html) alle Befehle mit Nummer in text. Ergebnis: { text, ungueltig: [Befehlsname, ...] }
+export function kiNummernPruefen(text) {
+  const ungueltig = [];
+  let s = String(text || '');
+  for (const name of KI_NUMMER_BEFEHLE) {
+    const keys = KI_NUMMER_SCHLUESSEL[name].map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    s = s.replace(new RegExp('(' + name + ':)([^\\n\\r]*)', 'gi'), (ganz, kopf, zeile) => {
+      const re = new RegExp('(?:^|,)\\s*(' + keys + ')=', 'g');
+      const treffer = [];
+      let m;
+      while ((m = re.exec(zeile)) !== null) treffer.push({ key: m[1], start: m.index, wert: m.index + m[0].length });
+      let neu = zeile;
+      for (let i = treffer.length - 1; i >= 0; i--) {
+        const t = treffer[i];
+        if (t.key !== 'rechnungsnummer' && t.key !== 'angebotsnummer') continue;
+        const ende = i + 1 < treffer.length ? treffer[i + 1].start : zeile.length;
+        const roh = zeile.substring(t.wert, ende);
+        const komma = roh.indexOf(',');
+        const wert = (komma >= 0 ? roh.slice(0, komma) : roh).trim();
+        if (!kiNummerGueltig(wert)) { ungueltig.push(name); break; }
+        if (komma >= 0) neu = neu.slice(0, t.wert + komma) + neu.slice(ende);
+      }
+      return kopf + neu;
+    });
   }
-  return false;
+  return { text: s, ungueltig };
+}
+const KI_NUMMER_FEHLER = 'Die Nummer enthält ungültige Zeichen.';
+export function kiNummerFehlerText(ungueltig) {
+  return ungueltig.length && ungueltig.every((n) => KI_NUMMER_MIT_AUTO.includes(n)) ? KI_NUMMER_FEHLER + ' Du kannst „auto“ angeben, dann vergibt Kontolux sie.' : KI_NUMMER_FEHLER;
 }
 
 export function pruefeBetragZeile(line) {
-  if (kiNummerUngueltig(line)) {
-    const bm = String(line).match(KI_NUMMER_BEFEHLE_RE);
-    return line.slice(0, bm.index) + 'Die Nummer enthält ungültige Zeichen.';
+  {
+    const np = kiNummernPruefen(line);
+    if (np.ungueltig.length) {
+      const bm = String(line).match(new RegExp('(' + KI_NUMMER_BEFEHLE.join('|') + '):', 'i'));
+      return line.slice(0, bm ? bm.index : 0) + kiNummerFehlerText(np.ungueltig);
+    }
+    line = np.text;
   }
   // Diagnose-Logging: läuft für jede Zeile jeder Chat-Antwort, loggt aber nur bei einem Treffer —
   // sichtbar per `wrangler tail`. KUNDE_SPEICHERN bewusst NICHT mehr enthalten (2026-09-09):
