@@ -5239,57 +5239,81 @@ async function mailAdresseFuerErinnerung(uid, env) {
   return user.email;
 }
 
-async function fristErinnerungenSenden(env) {
+// NL-G1: Zeitfenster statt genauem Tag. Eine Frist, deren Mail wegen der Grenzen (je Konto, je Lauf) oder eines Fehlers ausfiel, wird am nächsten Tag nachgeholt:
+//   erinnerung_7: 1 < Tage <= 7 und erinnerung_7_am fehlt;  erinnerung_1: 0 <= Tage <= 1 und erinnerung_1_am fehlt.
+// Reine Funktion (testbar): welches Feld ist für diesen Abstand zu senden? null = nichts.
+export function fristErinnerungFeld(tage, feldWerte = {}) {
+  if (!Number.isInteger(tage)) return null;
+  if (tage >= 0 && tage <= 1) return feldWerte.erinnerung_1_am ? null : 'erinnerung_1_am';
+  if (tage > 1 && tage <= 7) return feldWerte.erinnerung_7_am ? null : 'erinnerung_7_am';
+  return null;
+}
+function fristAbfrage(heute, mitDatum) {
+  const bis = new Date(Date.UTC(...heute.split('-').map((x, i) => (i === 1 ? Number(x) - 1 : Number(x))))); bis.setUTCDate(bis.getUTCDate() + 8);
+  const bisIso = bis.toISOString().slice(0, 10);
+  const mailFilter = { fieldFilter: { field: { fieldPath: 'erinnerung_mail' }, op: 'EQUAL', value: { booleanValue: true } } };
+  return {
+    structuredQuery: {
+      from: [{ collectionId: 'eigenefristen', allDescendants: true }],
+      where: mitDatum ? { compositeFilter: { op: 'AND', filters: [mailFilter,
+        { fieldFilter: { field: { fieldPath: 'datum' }, op: 'GREATER_THAN_OR_EQUAL', value: { stringValue: heute } } },
+        { fieldFilter: { field: { fieldPath: 'datum' }, op: 'LESS_THAN_OR_EQUAL', value: { stringValue: bisIso } } }] } } : mailFilter,
+      limit: FRIST_LESEGRENZE
+    }
+  };
+}
+export async function fristErinnerungenSenden(env, optionen = {}) {
   const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
-  const heute = heuteBerlinIso();
-  const res = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      structuredQuery: {
-        from: [{ collectionId: 'eigenefristen', allDescendants: true }],
-        where: { fieldFilter: { field: { fieldPath: 'erinnerung_mail' }, op: 'EQUAL', value: { booleanValue: true } } },
-        limit: FRIST_LESEGRENZE
-      }
-    })
-  });
+  const heute = optionen.heute || heuteBerlinIso();
+  const url = 'https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery';
+  const abfragen = async (mitDatum) => fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(fristAbfrage(heute, mitDatum)) });
+  // Datum in der Abfrage eingrenzen (nur Fristen der nächsten 8 Tage). Braucht den zusammengesetzten Index (firestore.indexes.json, erinnerung_mail + datum, Sammlungsgruppe);
+  // ist er noch nicht angelegt, antwortet Firestore mit FAILED_PRECONDITION und der Lauf liest wie bisher alle Fristen mit eingeschalteter Erinnerung.
+  let res = await abfragen(true);
+  if (!res.ok) res = await abfragen(false);
   if (!res.ok) throw new Error(`Fristen-Abfrage fehlgeschlagen (${res.status})`);
 
   let gesendet = 0;
   const jeKonto = new Map();
-  for (const zeile of await res.json()) {
+  const fehlerJeKonto = new Map();
+  const mailCache = new Map();
+  const zeilen = ((await res.json()) || []).filter((z) => z && z.document);
+  zeilen.sort((a, b) => String(a.document.fields?.datum?.stringValue || '').localeCompare(String(b.document.fields?.datum?.stringValue || ''))); // früheste Frist zuerst
+  for (const zeile of zeilen) {
     if (gesendet >= FRIST_MAILS_JE_LAUF) break;
-    if (!zeile.document) continue;
     const f = zeile.document.fields || {};
     if (f.wiederkehrend?.booleanValue) continue;
     const datum = f.datum?.stringValue;
     if (!datum || !/^\d{4}-\d{2}-\d{2}$/.test(datum)) continue;
     const tage = fristTageBis(datum, heute);
-    if (!FRIST_ERINNERUNG_TAGE.includes(tage)) continue;
-    const feldName = `erinnerung_${tage}_am`;
-    if (f[feldName]?.stringValue) continue;
+    const feldName = fristErinnerungFeld(tage, { erinnerung_7_am: f.erinnerung_7_am?.stringValue, erinnerung_1_am: f.erinnerung_1_am?.stringValue });
+    if (!feldName) continue;
 
     // users/{uid}/eigenefristen/{id}
     const pfad = zeile.document.name.split('/documents/')[1];
     const [, uid, , fristId] = pfad.split('/');
-    if ((jeKonto.get(uid) || 0) >= FRIST_MAILS_JE_KONTO) continue; // SEC-F3 M-C: Rest folgt am nächsten Tag (Feld erinnerung_N_am bleibt leer)
-    jeKonto.set(uid, (jeKonto.get(uid) || 0) + 1);
+    if ((jeKonto.get(uid) || 0) >= FRIST_MAILS_JE_KONTO) continue; // SEC-F3 M-C: Rest folgt am nächsten Lauf (das Feld bleibt leer, das Zeitfenster hält die Frist offen)
+    if ((fehlerJeKonto.get(uid) || 0) >= FRIST_MAILS_JE_KONTO) continue; // viele Fehlversuche: den Rest dieses Kontos auf morgen verschieben
     const titel = sicherEinzeiler(f.titel?.stringValue || 'Frist', 120) || 'Frist';
     try {
-      const email = await mailAdresseFuerErinnerung(uid, env);
+      if (!mailCache.has(uid)) mailCache.set(uid, await mailAdresseFuerErinnerung(uid, env));
+      const email = mailCache.get(uid);
       if (!email) continue;
       const datumDe = datum.split('-').reverse().join('.');
-      const wann = tage === 1 ? 'morgen' : 'in 7 Tagen';
+      const wann = tage === 0 ? 'heute' : tage === 1 ? 'morgen' : tage === 7 ? 'in 7 Tagen' : `in ${tage} Tagen`;
       const html = emailShell(`${escapeHtml(titel)} ist ${wann} fällig`, `
         <h1 style="font-size:19px;color:#0f1f2e;margin:0 0 16px">Erinnerung an deine Frist</h1>
         <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 16px"><strong>${escapeHtml(titel)}</strong> ist ${wann} fällig, am ${datumDe}.</p>
         <p style="font-size:14px;color:#0f1f2e;line-height:1.6;margin:0 0 24px">Du erhältst diese Mail, weil du bei dieser Frist die E-Mail-Erinnerung eingeschaltet hast. Zum Abbestellen in Kontolux AI den Haken bei der Frist entfernen und speichern.</p>
         <a href="https://app.kontolux-ai.de" style="display:inline-block;background:#1d5d96;color:#ffffff;padding:13px 28px;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px">Kontolux AI öffnen</a>
       `);
-      await sendEmail(email, `Erinnerung: ${titel} ist ${wann} fällig`, html, env, 'Kontolux AI <jona@kontolux-ai.de>');
+      const ok = await sendEmail(email, `Erinnerung: ${titel} ist ${wann} fällig`, html, env, 'Kontolux AI <jona@kontolux-ai.de>');
+      if (ok === false) { fehlerJeKonto.set(uid, (fehlerJeKonto.get(uid) || 0) + 1); continue; } // Fehlschlag verbraucht kein Kontingent
       await firestorePatchFields(`users/${uid}/eigenefristen/${fristId}`, { [feldName]: { stringValue: new Date().toISOString() } }, adminToken);
+      jeKonto.set(uid, (jeKonto.get(uid) || 0) + 1); // NL-G1: Zähler erst NACH erfolgreichem Versand
       gesendet++;
     } catch(e) {
+      fehlerJeKonto.set(uid, (fehlerJeKonto.get(uid) || 0) + 1);
       console.error('Fristen-Erinnerung fehlgeschlagen:', e.message);
     }
   }
