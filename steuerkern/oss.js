@@ -260,6 +260,8 @@ function rechneSchwelle(belege, profil) {
     if (ueberschreitet) d.schwellenbeleg = { beleg_id: e.id, datum: e.tag, betrag_cent: e.min, summe_cent: d.min };
     // OSS-KERN-16 (Gegenlesung 3): dieser Beleg ist nur wegen der Annahme Registrierung = Verzicht beim Kundenland
     if (regVerzicht && !explVerzicht && !(d.vjUeber || d.min > GRENZE || d.schwellenbeleg)) d.annahme_reg = true;
+    // OSS-KERN-16 (zweite Gegenlesung 5): dieser Beleg ist nur wegen der Wirkung ab 01.01. beim Kundenland (vor dem eingetragenen Verzichtstag)
+    if (explVerzicht && !regVerzicht && e.tag < verzichtAb && !(d.vjUeber || d.min > GRENZE || d.schwellenbeleg)) d.jahresbeginn = true;
     let stufe;
     if (d.vjUeber || d.min > GRENZE || d.schwellenbeleg || verzicht) stufe = 'ueber';
     else if (d.vjUnter && d.max <= GRENZE) stufe = 'unter';
@@ -332,8 +334,19 @@ export function ossVerzichtImJahr(profil, jahr) {
     if (von < nach) teile.push({ art, von, nach });
   }
   if (!teile.length) return null;
-  const nach = teile.map((t) => t.nach).sort().pop();
-  return { ab: teile.map((t) => t.von).sort()[0], nicht_mehr_ab: nach < folge ? nach : null, verzicht: teile.some((t) => t.art === 'verzicht'), registrierung: teile.some((t) => t.art === 'registrierung') };
+  // zweite Gegenlesung 2: Abschnitte zusammenfassen, Lücken bleiben getrennt
+  const abschnitte = [];
+  for (const t of teile.slice().sort((x, y) => (x.von < y.von ? -1 : 1))) {
+    const l = abschnitte[abschnitte.length - 1];
+    if (l && t.von <= l.nach) { if (t.nach > l.nach) l.nach = t.nach; } else abschnitte.push({ von: t.von, nach: t.nach });
+  }
+  const nach = abschnitte[abschnitte.length - 1].nach;
+  return { ab: abschnitte[0].von, nicht_mehr_ab: nach < folge ? nach : null, verzicht: teile.some((t) => t.art === 'verzicht'), registrierung: teile.some((t) => t.art === 'registrierung'), abschnitte };
+}
+// Karte (zweite Gegenlesung 4): beendet der eingetragene Widerruf überhaupt einen Verzicht bzw. eine Teilnahme?
+export function ossWiderrufWirkt(profil) {
+  const vz = verzichtDaten(profil);
+  return !!(vz.explEnde || vz.regEnde);
 }
 
 // Letzter Tag, bis zu dem eine Korrektur dem Fall ihres Originals folgt: 31.12. des vierten Jahres nach dem Leistungstag des Originals. Deckt die
@@ -497,7 +510,10 @@ function verzichtHinweise(vz, J, d) {
   const { verzichtAb, registriertAb, verzichtStart, widerrufAb } = vz;
   // Verzicht mitten im Jahr: wirkt ab 01.01. dieses Jahres (UStAE 3a.9a Abs. 1 S. 1 Nr. 1 S. 4, B)
   // (Gegenlesung 8: ein Widerruf wirkt nur nach dem Beginn 01.01., also nie am 01.01. des Verzichtsjahres; keine weitere Bedingung nötig)
-  if (verzichtAb && verzichtAb.slice(0, 4) === anfang.slice(0, 4) && verzichtAb !== anfang) out.push('HN_OSS_VERZICHT_JAHRESBEGINN');
+  // zweite Gegenlesung 5: nur, wenn ein Verkauf erst durch den Jahresbeginn beim Kundenland liegt
+  if (d && d.jahresbeginn) out.push('HN_OSS_VERZICHT_JAHRESBEGINN');
+  // zweite Gegenlesung 6: Widerruf nach dem 01.01., aber vor dem eingetragenen Verzichtstag (unplausibel, Zahlen folgen der Angabe)
+  if (verzichtAb && widerrufAb && vz.explEnde && widerrufAb < verzichtAb && verzichtAb.slice(0, 4) === anfang.slice(0, 4)) out.push('HN_OSS_WIDERRUF_VOR_VERZICHTSTAG');
   // Ein Beleg des Jahres liegt nur wegen der Registrierung beim Kundenland: Kontolux nimmt einen Verzicht an (BZSt; BMF-Auskunft laut DIHK 2021 anders, C)
   if (d && d.annahme_reg) out.push('HN_OSS_REGISTRIERUNG_ALS_VERZICHT');
   // Widerruf ohne früher begonnenen Verzicht: wirkt nicht (Gegenlesung 2)
@@ -509,6 +525,8 @@ function verzichtHinweise(vz, J, d) {
     const bindungEnde = `${String(Number(beginn.slice(0, 4)) + 2).padStart(4, '0')}-01-01`;
     if (widerrufAb < bindungEnde && widerrufAb <= ende && anfang < bindungEnde) { out.push('HN_OSS_VERZICHT_BINDUNG'); break; }
   }
+  // zweite Gegenlesung 7: Widerruf mitten im Jahr (nicht zum 01.01.) ohne Bindungshinweis; ob das Finanzamt das zulässt, ist offen (C, Recherche Frage 6)
+  if (widerrufAb && (vz.explEnde || vz.regEnde) && widerrufAb.slice(0, 4) === anfang.slice(0, 4) && widerrufAb !== anfang && !out.includes('HN_OSS_VERZICHT_BINDUNG')) out.push('HN_OSS_WIDERRUF_UNTERJAEHRIG');
   return out;
 }
 
