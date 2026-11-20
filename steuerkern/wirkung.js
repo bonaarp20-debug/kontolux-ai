@@ -206,7 +206,7 @@ function weitereWirkTage(s, profil) {
   // (Grund laufend_ueber_100k/gruendung_ueber_25k): jedes Entgelt ab dem Überschreiten ist im Zeitraum der Vereinnahmung regelbesteuert, auch bei Soll
   // (gerechnet: statusFuerAusgangsumsatz, ausgangWirkungen). Darum ist auch der Zahlungstag ein weiterer Wirktag.
   const verlauf = s.richtung === 'ausgang' && istObjekt(profil) && Array.isArray(profil.status_verlauf) && statusAm(profil, bis).status === 'ku' ? profil.status_verlauf : [];
-  const nachWechsel = (d) => verlauf.some((e) => istObjekt(e) && e.status === 'regel' && (e.grund === 'laufend_ueber_100k' || e.grund === 'gruendung_ueber_25k') && istDatum(e.gueltig_ab) && e.gueltig_ab > bis && e.gueltig_ab <= d) && statusAm(profil, d).status === 'regel';
+  const nachWechsel = (d) => verlauf.some((e) => istObjekt(e) && e.status === 'regel' && (e.grund === 'laufend_ueber_100k' || e.grund === 'gruendung_ueber_25k') && istDatum(e.gueltig_ab) && e.gueltig_ab > bis && e.gueltig_ab <= d && jahrVon(e.gueltig_ab) === jahrVon(bis)) && statusAm(profil, d).status === 'regel';
   for (const z of aktiveZahlungen(s)) {
     if (istCent(z.skonto_cent) && z.skonto_cent > 0) tage.push(z.datum);
     if (!(ist || z.datum < bis)) { if (verlauf.length && nachWechsel(z.datum)) tage.push(z.datum); continue; }
@@ -260,12 +260,15 @@ function weitereHinweisWirkungen(s, profil, ctx, out, hauptPeriode, f) {
 // ---------------------------------------------------------------------------------------------
 // KERN-17 (M-2, R-ZP-06, R-ZP-24, K18, Konfidenz C): Rechnung mit mehreren Steuersätzen, mindestens eine Zahlung lässt einen Rest offen (Teilzahlung,
 // Anzahlung). Die Verteilung nach Bruttoanteilen ist eine Annahme; der Hinweis HN_TEILZAHLUNG_MISCHSATZ macht sie sichtbar. Die Zahlen ändern sich nicht.
-function teilzahlungMischsatz(gruppen, zahlungen) {
+// KERN-18: nur, wenn sich die Steuer durch die Verteilung zwischen Zeiträumen verschieben kann: Zahlungszeitraum (Ist, Wechsel der Grenze), eine
+// Zahlung vor stichBis (Anzahlung) oder Zahlungen in verschiedenen Jahren (EÜR, Zufluss). Sonst liegt die ganze Steuer im Leistungszeitraum.
+function teilzahlungMischsatz(gruppen, zahlungen, stichBis, zahlungszeitraum) {
   if (!zahlungen.length || new Set(gruppen.map((g) => g.satz_bp)).size < 2) return false;
   let brutto = 0;
   for (const g of gruppen) brutto += g.netto_cent + g.ust_cent;
   let kum = 0;
-  return zahlungen.some((z) => (kum += z.betrag_cent + (istCent(z.skonto_cent) ? z.skonto_cent : 0)) < brutto);
+  if (!zahlungen.some((z) => (kum += z.betrag_cent + (istCent(z.skonto_cent) ? z.skonto_cent : 0)) < brutto)) return false;
+  return zahlungszeitraum === true || zahlungen.some((z) => z.datum < stichBis) || new Set(zahlungen.map((z) => jahrVon(z.datum))).size > 1;
 }
 
 export function zahlungsAnteile(gruppen, zahlungen) {
@@ -1201,7 +1204,7 @@ function ausgangWirkungen(s, profil, ctx, out, opt) {
     if (zahlungen.some((z) => z.datum < wechselAb)) { ctx.hinweise.push('W_WECHSEL_ANZAHLUNG_KZ65'); ctx.hinweise.push('HN_WECHSEL_ANZAHLUNG_VOLL_IN_KZ81'); }
   }
   for (const h of ver.hinweise || []) if (typeof h === 'string' && h.startsWith('W_') && !ctx.hinweise.includes(h)) ctx.hinweise.push(h);
-  if (teilzahlungMischsatz(gruppen, zahlungen)) ctx.hinweise.push('HN_TEILZAHLUNG_MISCHSATZ');
+  if (teilzahlungMischsatz(gruppen, zahlungen, stichBis, ist)) ctx.hinweise.push('HN_TEILZAHLUNG_MISCHSATZ');
   if (!ist && zahlungen.some((z) => jahrVon(z.datum) > jahrVon(l.bis))) ctx.hinweise.push('W_LIQUIDITAET_DEZEMBER');
   const anteile = teil ? anteilErg.anteile : zahlungsAnteile(skonto.eff, zahlungen);
   // TR-orakel-002: Bei voller Rückgängigmachung vor der Leistung (opt.vorLeistungAbzug) ist jede Zahlung Entgelt für eine nicht ausgeführte Leistung
@@ -1499,7 +1502,7 @@ function eingangWirkungen(s, profil, ctx, out, opt) {
     schliesseAus(s, profil, ctx, out, 'rechnung_nach_rueckwechsel', ['W_WECHSEL_DIALOG']);
     return;
   }
-  if (mitVorsteuer && teilzahlungMischsatz(gruppen, zahlungen)) ctx.hinweise.push('HN_TEILZAHLUNG_MISCHSATZ');
+  if (mitVorsteuer && teilzahlungMischsatz(gruppen, zahlungen, stichBis, false)) ctx.hinweise.push('HN_TEILZAHLUNG_MISCHSATZ');
   const hinw = [];
   const kb = s.kleinbetrag === true;
   const anteile = teil ? anteilErg.anteile : zahlungsAnteile(skonto.eff, zahlungen);
