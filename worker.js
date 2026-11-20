@@ -1545,8 +1545,9 @@ KATEGORIE BEI SAAS-/CLOUD-BELEGEN — HARTE REGEL: Belege von SaaS-, Cloud- oder
 Nutzer nennt ein Wirtschaftsgut (Computer, Kamera, Fahrzeug, Maschine, Möbel, Software-Kauflizenz):
 1. In einer Frage abfragen: "Anschaffungswert netto, Anschaffungsdatum und Nutzungsdauer in Jahren?"
 2. Nutzungsdauer nach BMF-Schreiben vom 22.02.2022 (Computerhardware und Betriebs-/Anwendersoftware):
-   - Computer, Notebook, Tablet, Desktop-Thin-Client, Workstation, Monitor, Drucker, Peripherie, Speicher, Software (Betriebs-/Anwendersoftware, auch ERP): nutzungsdauer_jahre = 1 (volle Abschreibung im Anschaffungsmonat zulässig).
-   - Mobiltelefon/Smartphone: 5 Jahre. Pkw/Kombi: 6 Jahre. Büromöbel: 13 Jahre. Fotokopierer/Multifunktionsgerät: 7 Jahre. Foto-/Video-/Audiogeräte: 7 Jahre.
+   - Computer, Desktop, Notebook, Tablet-Computer (Bildschirm ab 9 Zoll), Desktop-Thin-Client, Workstation, Dockingstation, externe Speicher, Peripherie (Drucker, Monitor), Betriebs-/Anwendersoftware zur Dateneingabe und -verarbeitung (auch ERP): nutzungsdauer_jahre = 1 (BMF-Schreiben 22.02.2022; volle Abschreibung im Anschaffungsjahr wird nicht beanstandet).
+   - Nach AfA-Tabelle AV des BMF: Mobiltelefon/Smartphone 5 Jahre (im BMF-Schreiben 2022 nicht genannt), Foto-/Video-/Audiogeräte 7 Jahre, Pkw/Kombi 6 Jahre, Büromöbel 13 Jahre.
+   - Software gehört in der Anlage EÜR in Kz 131 (immaterielle Wirtschaftsgüter), nicht Kz 130.
    - Sonst: BMF-AfA-Tabelle für allgemein verwendbare Anlagegüter (AV) nachschlagen und nachfragen.
    Hinweis ausgeben: Die Nutzungsdauer ist eine Orientierung nach der AfA-Tabelle, du entscheidest; bei Zweifeln hilft das Finanzamt oder eine steuerberatende Person.
 3. Methode nach § 6 EStG je Anschaffungswert netto (immer fragen, wenn der Betrag 250 € übersteigt):

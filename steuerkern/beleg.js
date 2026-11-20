@@ -133,7 +133,7 @@ function verteileUst(positionen, richtung, abweichung) {
       }
       return;
     }
-    const k = `${p.steuerfall || ''}|${p.satz_bp}`;
+    const k = `${p.steuerfall || ''}|${p.satz_bp}|${p.brutto_basis === true ? 'b' : 'n'}`; // KERN-19 (F2-M2): Brutto- und Netto-Positionen im selben Satz getrennt (sonst NaN)
     if (!gruppen.has(k)) gruppen.set(k, []);
     gruppen.get(k).push(i);
   });

@@ -492,6 +492,11 @@ export function eRechnungPflicht(profil, stichtag, ctx) {
   if (st.status === 'unbekannt') hinweise.push('PROFIL_STATUS_FEHLT');
   if (stichtag < nr1.gueltig_von) return { ...basis, pflicht: 'nein', empfang, nr: null, grund: 'vor_2025', text: 'Für Umsätze vor dem 01.01.2025 gibt es keine Pflicht zur E-Rechnung.', hinweise };
   if (stichtag <= nr1.gueltig_bis) {
+    // KERN-19 (M1 Zweitprüfung F1): Nr. 1 erlaubt Papier/PDF nur für Rechnungen, die bis 31.12.2026 übermittelt werden (§ 27 Abs. 38 Nr. 1 UStG).
+    // Nr. 2 gilt erst für Umsätze ab 2027. Ein Umsatz 2026 mit Rechnung ab 2027 braucht daher die E-Rechnung. Ohne ctx.rechnungsdatum wie bisher.
+    if (istObjekt(ctx) && istDatum(ctx.rechnungsdatum) && ctx.rechnungsdatum > nr1.gueltig_bis) {
+      return { ...basis, pflicht: 'ja', empfang, nr: null, grund: 'rechnung_nach_2026', text: 'Die Leistung wurde bis 31.12.2026 ausgeführt, die Rechnung ist aber erst ab 01.01.2027 datiert. Die Erleichterung für Papier und PDF gilt nur für Rechnungen, die bis 31.12.2026 übermittelt werden (§ 27 Abs. 38 Nr. 1 UStG); die Übergangsregel für 2027 betrifft nur Umsätze ab 2027 (Nr. 2). Eine Rechnung an ein Unternehmen im Inland muss daher als E-Rechnung ausgestellt werden (§ 14 Abs. 2 S. 2 Nr. 1 UStG).', hinweise };
+    }
     return { ...basis, pflicht: 'nein', empfang, nr: nr1.nr, grund: 'uebergang_nr1', text: 'Für Umsätze bis 31.12.2026 können Rechnungen bis zum 31.12.2026 noch auf Papier oder, mit Zustimmung des Empfängers, in einem anderen elektronischen Format übermittelt werden (§ 27 Abs. 38 Nr. 1 UStG). Empfangen können musst du E-Rechnungen seit dem 01.01.2025.', hinweise };
   }
   if (stichtag <= nr2.gueltig_bis) {
