@@ -10,14 +10,14 @@
 //   aktion 'eintrag'               { bereich: 'status'|'versteuerung'|'voranmeldung', eintrag: {...}, entsperr_grund? }   append-only (E6)
 //   aktion 'ist_jahr_bestaetigen'  { jahr }   Kalenderjahr in bestaetigte_jahre des Ist-Eintrags (R-PR-04, K2 Jahreswechsel)
 //   aktion 'bestaetigen'           {}        Nutzer bestätigt das Profil (Bereitschaft des Kontos, scope NP-02)
-//   aktion 'stammdaten'            { stammdaten: { beruf_art?, gruendung?, vorjahr?, limit_bestaetigungen?, eu_b2c_grenze?, oss?, gwg_wahl? } } (oss nur mit
+//   aktion 'stammdaten'            { stammdaten: { beruf_art?, gruendung?, vorjahr?, limit_bestaetigungen?, eu_b2c_grenze?, oss?, gwg_wahl?, kfz_privatnutzung? } } (kfz_privatnutzung 'nein'|'ja'|'fahrtenbuch'|'1-prozent'; oss nur mit
 //                                    Feature oss; gwg_wahl { 'JJJJ': 'gwg'|'sammelposten'|'afa'|null } nur mit Feature anlagegut, FIX-G)
 // Ist-Versteuerung nur mit Grundlage Nr. 1 oder Nr. 3, Genehmigungsdatum, Nachweis (Aktenzeichen oder eigenes Schreiben im Speicher)
 // und bestätigtem Kalenderjahr; Felder nach K2: genehmigung.art (ausdruecklich/konkludent/weiss_nicht), bei Nr. 3 fuehrt_buecher_freiberuf
 // und gewerbliche_umsaetze (nur Warnlogik). Kontolux prüft die Genehmigung nicht, es speichert die Angabe (Wortwahl W4).
 import * as Steuerkern from '../steuerkern/index.js';
 import {
-  antwort, fehlerAntwort, grundpruefung, istObjekt, istText, istDatum, nurSchluessel, CONFIG_PFAD, configBereinigen, featureAktiv,
+  antwort, fehlerAntwort, grundpruefung, istObjekt, istText, istDatum, nurSchluessel, CONFIG_PFAD, configBereinigen, featureAktiv, kernOptionenFuer,
   festgeschriebenBis, jetztIso, codesBereinigen, schichtFuer, regelFehler, periodeAusId, listeAlle
 } from './gemeinsam.js';
 import { schreibe, vorbedingungAus } from './firestore.js';
@@ -25,6 +25,7 @@ import { auditSchreibvorgaenge, kopfPfad, hashVon } from './audit.js';
 
 export const PROFIL_KERN_FELDER = ['version', 'gewinnermittlung', 'beruf_art', 'gruendung', 'status_verlauf', 'option_19_3', 'versteuerung_verlauf',
   'voranmeldung_verlauf', 'vorjahr', 'limit_bestaetigungen', 'eu_b2c_grenze',
+  'kfz_privatnutzung', // KERN-22 (N1): 'nein' | 'ja' | 'fahrtenbuch' | '1-prozent', steuert den Kern-Hinweis HN_KFZ_PRIVATANTEIL (Auswahl in den Einstellungen)
   'gwg_wahl', // E-B: GWG-/Sammelposten-/AfA-Wahl je Jahr (BP-04b, Kern profilPruefen GWG_WAHL_UNGUELTIG); ohne Eintrag ginge sie bei jeder Profiländerung verloren
   'oss']; // APP-C (BP-28): OSS-Angaben des Nutzers { jahre_cent, verzicht_ab, registriert_ab, verzicht_widerruf_ab } (steuerkern/oss.js), nur über aktion 'stammdaten' mit Feature oss
 const VERLAUF_MAX = 50;
@@ -266,8 +267,9 @@ export function ossAenderungFestgeschrieben(neuSd, altKern, festDokumente) {
   return null;
 }
 
+export const KFZ_PRIVATNUTZUNG_WERTE = ['nein', 'ja', 'fahrtenbuch', '1-prozent'];
 export function stammdatenBereinigen(s, heute) {
-  if (!istObjekt(s) || !nurSchluessel(s, ['beruf_art', 'gruendung', 'vorjahr', 'limit_bestaetigungen', 'eu_b2c_grenze', 'oss', 'gwg_wahl'])) return { fehler: [F('FELD_NICHT_ERLAUBT')] };
+  if (!istObjekt(s) || !nurSchluessel(s, ['beruf_art', 'gruendung', 'vorjahr', 'limit_bestaetigungen', 'eu_b2c_grenze', 'oss', 'gwg_wahl', 'kfz_privatnutzung'])) return { fehler: [F('FELD_NICHT_ERLAUBT')] };
   const x = {};
   const fehler = [];
   if (s.beruf_art !== undefined) { if (Steuerkern.BERUF_ARTEN.includes(s.beruf_art)) x.beruf_art = s.beruf_art; else fehler.push(F('BERUF_ART_UNGUELTIG')); }
@@ -295,6 +297,9 @@ export function stammdatenBereinigen(s, heute) {
   if (s.oss !== undefined) {
     const o = ossBereinigen(s.oss, heute);
     if (o) x.oss = o; else fehler.push(F('OSS_UNGUELTIG'));
+  }
+  if (s.kfz_privatnutzung !== undefined) {
+    if (KFZ_PRIVATNUTZUNG_WERTE.includes(s.kfz_privatnutzung)) x.kfz_privatnutzung = s.kfz_privatnutzung; else fehler.push(F('KFZ_PRIVATNUTZUNG_UNGUELTIG'));
   }
   if (s.gwg_wahl !== undefined) {
     const g = gwgWahlBereinigen(s.gwg_wahl, heute);
@@ -488,7 +493,7 @@ export async function regelSteuerprofil(body, env, cors = {}, deps = {}) {
     const r = neuesProfil(body.aktion, body, alt, kontext);
     if (r.fehler) return antwort({ ok: false, fehler: r.fehler }, r.status || 400, cors);
 
-    const pruef = Steuerkern.profilPruefen(r.profil);
+    const pruef = Steuerkern.profilPruefen(r.profil, kernOptionenFuer(config)); // KERN-22 (N2): Option kz39_verzicht berücksichtigen
     if (pruef.fehler.length) return antwort({ ok: false, fehler: pruef.fehler.map((x) => F(x.code)) }, 400, cors);
 
     const bestaetigtAm = r.bestaetigen ? zeit : (alt && alt.bestaetigt_am) || null;

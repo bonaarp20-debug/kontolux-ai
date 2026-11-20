@@ -525,7 +525,9 @@ export function grenzpruefung(profil, werte, stichtag) {
 // ---------------------------------------------------------------------------------------------
 // Profil prüfen, Wechsel prüfen, Eintrag hinzufügen
 // ---------------------------------------------------------------------------------------------
-export function profilPruefen(profil) {
+// KERN-22 (N2 Gegenlesung): optionen { regeln: { kz39_verzicht } } wie bei der Voranmeldung; mit kz39_verzicht ist die Sondervorauszahlung nicht "offen"
+// (kz39Monat findet den letzten Monat mit Dauerfrist). Ohne optionen unverändert. Die Warnung steht höchstens einmal (nicht je Jahr).
+export function profilPruefen(profil, optionen) {
   const f = [];
   const w = [];
   if (!istObjekt(profil)) return { fehler: [fehler('PROFIL_FEHLT', 'Das Steuerprofil fehlt oder ist kein Objekt.')], warnungen: [] };
@@ -578,7 +580,8 @@ export function profilPruefen(profil) {
   // KERN-20 (M2): Sondervorauszahlung, die in keinem Zeitraum eines Jahres angerechnet wird (Wechsel mitten im Jahr)
   if (Array.isArray(profil.voranmeldung_verlauf) && profil.voranmeldung_verlauf.every((e) => istObjekt(e) && istDatum(e.gueltig_ab))) {
     const jahre = profil.voranmeldung_verlauf.map((e) => Number(e.gueltig_ab.slice(0, 4)));
-    for (let J = Math.min(...jahre); J <= Math.max(...jahre); J++) if (kz39Offen(profil, J, undefined)) w.push('W_KZ39_NICHT_ANGERECHNET');
+    const kzOpt = { verzicht: istObjekt(optionen) && istObjekt(optionen.regeln) && optionen.regeln.kz39_verzicht === true };
+    for (let J = Math.min(...jahre); J <= Math.max(...jahre); J++) if (kz39Offen(profil, J, kzOpt)) { w.push('W_KZ39_NICHT_ANGERECHNET'); break; }
   }
   return { fehler: f, warnungen: [...new Set(w)] };
 }

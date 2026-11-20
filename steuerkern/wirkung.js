@@ -1513,10 +1513,12 @@ function zehnTageFenster(zahlung, kategorie, l) {
 
 // KERN-20 (M4 Zweitprüfung G4, Konfidenz C): Kfz-Kategorien, deren private Nutzung Kontolux nicht rechnet (Hinweis HN_KFZ_PRIVATANTEIL, einmal je
 // Zeitraum und Jahr, weil der Hinweiscode in den Listen der Voranmeldung und der EÜR nur einmal steht). Entfällt, wenn im Steuerprofil
-// kfz_privatnutzung (Text, zum Beispiel 'fahrtenbuch', 'ein_prozent', 'keine') eingetragen ist.
+// kfz_privatnutzung (Text) eingetragen ist. KERN-22 (N1 Gegenlesung): Auswahl im Steuerprofil 'nein' (keine private Nutzung), 'fahrtenbuch',
+// '1-prozent' (die Methode gibt der Nutzer selbst an) oder 'ja' (privat genutzt, Methode offen: der Hinweis bleibt, weil Kontolux den Anteil nicht rechnet).
+// Jeder andere nicht leere Text (frühere Werte wie 'ein_prozent', 'keine') schaltet den Hinweis wie bisher ab; ohne Eintrag unverändert.
 export const KFZ_KATEGORIEN_KERN = Object.freeze(['Kfz-Kosten', 'Kfz-Leasing', 'Kfz-Steuern/Versicherung']);
 function kfzOhnePrivatanteil(s, profil) {
-  if (istObjekt(profil) && typeof profil.kfz_privatnutzung === 'string' && profil.kfz_privatnutzung.length > 0) return false;
+  if (istObjekt(profil) && typeof profil.kfz_privatnutzung === 'string' && profil.kfz_privatnutzung.length > 0 && profil.kfz_privatnutzung !== 'ja') return false;
   return Array.isArray(s.positionen) && s.positionen.some((p) => istObjekt(p) && KFZ_KATEGORIEN_KERN.includes(p.kategorie || s.kategorie || null));
 }
 function eingangWirkungen(s, profil, ctx, out, opt) {
