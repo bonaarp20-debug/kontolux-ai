@@ -36,7 +36,7 @@ export const ZAEHLER = Object.freeze({
 export const ZWECKE = Object.freeze(['rechnung', 'anzahlung', 'schlussrechnung', 'storno', 'berichtigung', 'gutschrift']);
 export const STATUS = Object.freeze(['reserviert', 'verwendet', 'nicht_verwendet']);
 export const NICHT_VERWENDET_GRUENDE = Object.freeze(['abgebrochen', 'pdf_fehler', 'doppelt_angelegt', 'sonstiges']);
-export const ZAEHLER_VERSUCHE = 10; // je Versuch höchstens 3 Unteranfragen (batchGet, Abfrage, commit): 30 von 35
+export const ZAEHLER_VERSUCHE = 9; // je Versuch höchstens 3 Unteranfragen (batchGet, Abfrage, commit) plus 1 Abgleich (BH-30) je Aufruf: höchstens 28, Grenze 30 von 35 (vorher 10 Versuche = 31)
 const BELEG_ID_MUSTER = /^[A-Za-z0-9_.-]{1,200}$/;
 const SCHLUESSEL_RESERVIEREN = ['userId', 'token', 'anfrage_id', 'zaehler', 'zweck', 'manuell'];
 const SCHLUESSEL_VERWENDEN = ['userId', 'token', 'anfrage_id', 'zaehler', 'nummer', 'aktion', 'beleg_id', 'grund'];
