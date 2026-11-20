@@ -99,8 +99,8 @@ export function fakeFirestore() {
         const basis = eltern ? eltern + '/' : '';
         treffer = [...docs.keys()].filter((p) => { if (!p.startsWith(basis)) return false; const seg = p.slice(basis.length).split('/'); return seg.length >= 2 && seg.length % 2 === 0 && seg[seg.length - 2] === coll; }).sort();
       } else treffer = [...docs.keys()].filter((p) => p.startsWith(praefix) && !p.slice(praefix.length).includes('/')).sort();
-      const ff = sq.where && sq.where.fieldFilter;
-      if (ff) {
+      const filter = !sq.where ? [] : sq.where.fieldFilter ? [sq.where.fieldFilter] : ((sq.where.compositeFilter && sq.where.compositeFilter.filters) || []).map((x) => x.fieldFilter).filter(Boolean); // REST-G3: UND-Filter
+      for (const ff of filter) {
         treffer = treffer.filter((p) => {
           // KERN-C3: verschachtelte Feldpfade (a.b.c) über mapValue, wie Firestore; ein flacher Schlüssel gleichen Namens hat Vorrang (ältere Tests)
           const felder = docs.get(p).fields;
@@ -108,8 +108,16 @@ export function fakeFirestore() {
           if (ff.op === 'ARRAY_CONTAINS') return (f?.arrayValue?.values || []).some((x) => JSON.stringify(x) === JSON.stringify(ff.value));
           if (ff.op === 'EQUAL') return JSON.stringify(f) === JSON.stringify(ff.value);
           if (ff.op === 'IN') return f !== undefined && (ff.value?.arrayValue?.values || []).some((x) => JSON.stringify(x) === JSON.stringify(f)); // G1
+          if (ff.op === 'GREATER_THAN_OR_EQUAL') return typeof f?.stringValue === 'string' && f.stringValue >= ff.value.stringValue; // REST-G3
+          if (ff.op === 'LESS_THAN') return typeof f?.stringValue === 'string' && f.stringValue < ff.value.stringValue;
           return false;
         });
+      }
+      if (Array.isArray(sq.orderBy) && sq.orderBy[0] && sq.orderBy[0].field && sq.orderBy[0].field.fieldPath !== '__name__') { // REST-G3: Sortierung nach einem Textfeld
+        const fp = sq.orderBy[0].field.fieldPath;
+        const richtung = sq.orderBy[0].direction === 'DESCENDING' ? -1 : 1;
+        const wert = (p) => docs.get(p).fields[fp]?.stringValue ?? '';
+        treffer = [...treffer].sort((a, b) => (wert(a) < wert(b) ? -richtung : wert(a) > wert(b) ? richtung : 0));
       }
       if (sq.startAt) {
         const ab = pfadVon(sq.startAt.values[0].referenceValue);

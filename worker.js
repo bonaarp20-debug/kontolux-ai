@@ -382,6 +382,8 @@ const GLOBALE_LIMITS = {
   // Mail-Bombing übernehmen das Limit pro Adresse und pro IP.
   '/send-password-reset': { limit: 300, windowSec: 600 },
   '/feedback':            { limit: 100, windowSec: 600 },
+  // Zweitprüfung F3 / C3-N2: öffentlicher Endpunkt, schreibt nach Firestore und mailt dem Betreiber
+  '/anfrage':             { limit: 60,  windowSec: 3600 },
   '/auszug-rueckmeldung': { limit: 100, windowSec: 600 },
 };
 async function globalesLimit(env, schluessel, limit, windowSec) {
@@ -984,6 +986,13 @@ export function pruefeBetragZeile(line) {
     if (!Number.isFinite(betrag) || betrag <= 0 || betrag > 10000000) {
       return line.slice(0, rechnungMatch.index) + 'Ich kann diese Rechnung nicht erstellen — der Betrag muss größer als 0 sein. Bitte nenne mir einen gültigen Betrag.';
     }
+    // REST-G3 (Chat-Rechnung ohne Leistungsdatum): Das Leistungsdatum oder der Leistungszeitraum ist Pflichtangabe (§ 14 Abs. 4 Nr. 6 UStG) und
+    // wird laut Prompt immer erfragt. Fehlt es trotzdem im Befehl, erstellt Kontolux keine Rechnung ohne die Angabe, sondern fragt nach.
+    const ld = rechnungMatch[1].match(/(?:^|,)\s*leistungsdatum\s*=\s*([^,]*)/i);
+    const ldWert = ld ? ld[1].trim() : '';
+    if (!ldWert || /^(auto|-|—|n\/?a|keins?|unbekannt)$/i.test(ldWert)) {
+      return line.slice(0, rechnungMatch.index) + 'Mir fehlt noch das Leistungsdatum oder der Leistungszeitraum für diese Rechnung. Nenne es mir bitte, dann erstelle ich sie.';
+    }
   }
   const mahnungMatch = line.match(/MAHNUNG_ERSTELLEN:(.*)$/i);
   if (mahnungMatch) {
@@ -1290,6 +1299,7 @@ const SACHKONTO_MAPPING = {
   'Gezahlte Umsatzsteuer':      { SKR03: '1780', SKR04: '3820', euer_zeile: 'Z.59' },
   'Einnahmen 19%':              { SKR03: '8400', SKR04: '4400', euer_zeile: 'Z.15' },
   'Einnahmen 7%':               { SKR03: '8300', SKR04: '4300', euer_zeile: 'Z.15' },
+  // F1-N2: allgemeines Erlöskonto; eigene Konten für steuerfreie Umsätze nicht ohne amtlichen DATEV-Kontenrahmen ändern (Hinweis in der App-UI).
   'Einnahmen steuerfrei':       { SKR03: '8200', SKR04: '4200', euer_zeile: 'Z.12' },
   // OSS-FORM 3: Verkauf an Privatkunden in anderen EU-Ländern (Satz des Kundenlands), gleich wie index.html; der DATEV-Export mit Feature oss nimmt das
   // Konto aus dem Steuerteil (regel/datev-oss.js), dies ist nur der Altpfad
@@ -2256,11 +2266,12 @@ async function handleSendEmailChangeVerification(currentEmail, body, env, cors =
 // den 5-Minuten-Satz (1.25x) — dadurch wurden alle costCents-Werte in diesem Log bisher zu
 // niedrig berechnet (der reale Cache-Write kostet 2x, nicht 1.25x, des Input-Preises).
 const MODEL_PRICING_PER_MTOK = {
-  haiku: { input: 1.00, output: 5.00, cacheWrite: 2.00, cacheRead: 0.10 },
+  // Haiku 5.5 (Stand 2026-11-20, docs/reports/eu-ki-wechsel-mistral.md): 0,10 / 0,50 / Cache-Lesen 0,01; Cache-Schreiben 1h = 2x Eingabe (Annahme).
+  haiku: { input: 0.10, output: 0.50, cacheWrite: 0.20, cacheRead: 0.01 },
   sonnet: { input: 3.00, output: 15.00, cacheWrite: 6.00, cacheRead: 0.30 },
   opus: { input: 5.00, output: 25.00, cacheWrite: 10.00, cacheRead: 0.50 }
 };
-function estimateCostCents(model, usage) {
+export function estimateCostCents(model, usage) {
   const key = /haiku/i.test(model) ? 'haiku' : /sonnet/i.test(model) ? 'sonnet' : /opus/i.test(model) ? 'opus' : 'haiku';
   const p = MODEL_PRICING_PER_MTOK[key];
   const input = usage.input_tokens || 0;
@@ -2447,7 +2458,7 @@ async function handleChat(body, env, cors = {}, ctx) {
   // ✅ Fehlerbehandlung: Claude API muss ok sein!
   if (!claudeRes.ok) {
     const errText = await claudeRes.text();
-    console.error('Claude API Error:', claudeRes.status, errText.substring(0, 200));
+    console.error('Claude API Error:', claudeRes.status, apiFehlerKlasse(errText));
     return new Response(
       JSON.stringify({ error: `Claude API Error: ${claudeRes.status}` }),
       { status: claudeRes.status, headers: { ...cors, 'Content-Type': 'application/json' } }
@@ -2551,7 +2562,7 @@ async function streamTextResponse(claudeRes, userId, env, cors, model = 'claude-
   // bekäme der Nutzer eine leere Antwort ohne Hinweis.
   if (!claudeRes.ok) {
     const errText = await claudeRes.text().catch(() => '');
-    console.error(`Claude API Error (${label}):`, claudeRes.status, errText.substring(0, 200));
+    console.error(`Claude API Error (${label}):`, claudeRes.status, apiFehlerKlasse(errText));
     return new Response('Kontolux ist gerade nicht erreichbar. Bitte versuche es in ein paar Minuten noch einmal.', {
       status: 502, headers: { ...cors, 'Content-Type': 'text/plain; charset=utf-8' }
     });
@@ -2882,11 +2893,41 @@ async function parseXRechnungXml(text, sellerNameHint) {
   };
 }
 
+// C3-N1: Entpack-Bombe. Flate-Streams werden mit Ausgabegrenze entpackt (echte Rechnungs-XML hat wenige KB). Andere Filter
+// nur bei kleiner Eingabe, ohne Filter unverändert. Rückgabe null = übergehen.
+export const ENTPACKEN_MAX_BYTES = 5 * 1024 * 1024;
+export async function eingebettetEntpacken(stream, maxBytes = ENTPACKEN_MAX_BYTES) {
+  const filter = stream.dict.lookup(PDFName.of('Filter'));
+  const filterText = filter ? String(filter.toString ? filter.toString() : filter) : '';
+  const roh = stream.getContents();
+  if (!filterText) return roh.length <= maxBytes ? roh : null;
+  if (/^\/FlateDecode$|^\[\s*\/FlateDecode\s*\]$/.test(filterText.trim())) {
+    try {
+      const leser = new Blob([roh]).stream().pipeThrough(new DecompressionStream('deflate')).getReader();
+      const teile = [];
+      let summe = 0;
+      for (;;) {
+        const { done, value } = await leser.read();
+        if (done) break;
+        summe += value.length;
+        if (summe > maxBytes) { try { await leser.cancel(); } catch (_) { /* egal */ } return null; }
+        teile.push(value);
+      }
+      const aus = new Uint8Array(summe);
+      let pos = 0;
+      for (const t of teile) { aus.set(t, pos); pos += t.length; }
+      return aus;
+    } catch (_) { return null; }
+  }
+  if (roh.length > 1024 * 1024) return null;
+  try { return decodePDFRawStream(stream).decode(); } catch (_) { return null; }
+}
+
 // Sucht im /Names /EmbeddedFiles-Baum eines PDFs nach einer eingebetteten XML-Datei.
 // ZUGFeRD/Factur-X-Konvention nennt sie meist factur-x.xml/zugferd-invoice.xml/xrechnung.xml,
 // der Name variiert aber je nach Rechnungsprogramm — deshalb wird jede eingebettete Datei
 // genommen, deren Name auf .xml endet, statt nur exakte Namensmatches zuzulassen.
-function findEmbeddedXml(pdfDoc) {
+export async function findEmbeddedXml(pdfDoc) {
   const catalog = pdfDoc.catalog;
   const namesDict = catalog.lookup(PDFName.of('Names'), PDFDict);
   const embeddedFiles = namesDict.lookup(PDFName.of('EmbeddedFiles'), PDFDict);
@@ -2901,7 +2942,8 @@ function findEmbeddedXml(pdfDoc) {
     const fRef = ef?.get(PDFName.of('F')) || ef?.get(PDFName.of('UF'));
     if (!fRef) continue;
     const stream = pdfDoc.context.lookup(fRef, PDFStream);
-    const bytes = stream instanceof PDFRawStream ? decodePDFRawStream(stream).decode() : stream.getContents();
+    const bytes = stream instanceof PDFRawStream ? await eingebettetEntpacken(stream) : stream.getContents();
+    if (!bytes) continue;
     return { name, bytes };
   }
   return null;
@@ -2920,7 +2962,7 @@ export async function detectAndParseERechnung(bytes, filename, mimeType, sellerN
     const isPdf = /\.pdf$/i.test(filename || '') || /pdf/i.test(mimeType || '');
     if (isPdf) {
       const pdfDoc = await PDFDocument.load(bytes, { ignoreEncryption: true, throwOnInvalidObject: false });
-      const embedded = findEmbeddedXml(pdfDoc);
+      const embedded = await findEmbeddedXml(pdfDoc);
       if (!embedded) return { format: null };
       const text = new TextDecoder('utf-8').decode(embedded.bytes);
       const result = await parseXRechnungXml(text, sellerNameHint);
@@ -2983,6 +3025,15 @@ function belegEingabeFehler({ typ, mwst_satz, datum, bezahlt, bezahlt_am, betrag
 }
 
 // Fehlerklasse (z. B. INVALID_ARGUMENT) aus einer Firestore-Fehlerantwort, ohne Pfade und Feldinhalte.
+// C3-N12: Fehlertexte von Fremd-APIs können Inhalte enthalten; ins Log kommt nur die Fehlerklasse (error.type / error.status / name).
+export function apiFehlerKlasse(errText) {
+  try {
+    const j = JSON.parse(errText);
+    const k = j?.error?.type || j?.error?.status || j?.name || j?.type;
+    if (typeof k === 'string' && /^[A-Za-z_]{3,40}$/.test(k)) return k;
+  } catch { /* kein JSON */ }
+  return 'FEHLER';
+}
 function firestoreFehlerKlasse(errText) {
   try { const st = JSON.parse(errText)?.error?.status; if (typeof st === 'string' && /^[A-Z_]{3,40}$/.test(st)) return st; } catch { /* kein JSON */ }
   return 'FEHLER';
@@ -3609,7 +3660,7 @@ async function sendEmail(to, subject, html, env, from = 'Kontolux AI <jona@konto
     const errText = await res.text();
     // Empfängeradresse nicht ins Log: nur der Anfang und die Domain
     const zielMaske = String(to ?? '').replace(/^(.{1,2}).*(@.*)$/, '$1…$2');
-    console.error('sendEmail Resend Error:', res.status, errText, 'to=', zielMaske);
+    console.error('sendEmail Resend Error:', res.status, apiFehlerKlasse(errText), 'to=', zielMaske);
   }
   return res.ok;
 }
@@ -4132,7 +4183,7 @@ async function prueferZugangSuchen(adminToken, feld, wert) {
   });
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
-    throw new Error(`Query fehlgeschlagen: ${res.status} ${errText.slice(0, 300)}`);
+    throw new Error(`Query fehlgeschlagen: ${res.status} ${apiFehlerKlasse(errText)}`);
   }
   const rows = await res.json();
   return Array.isArray(rows) ? rows.find(r => r.document?.name) || null : null;
@@ -9289,6 +9340,23 @@ function shopifyEventToBeleg(topic, payload) {
   return null;
 }
 
+/**
+ * Replay-Schutz Zeitstempel (Zweitprüfung F3). Shopify sendet `X-Shopify-Triggered-At` (ISO-8601, Auslösezeit des
+ * Ereignisses, bleibt bei Wiederholungen gleich); Shopify wiederholt Zustellungen höchstens 48 Stunden lang. Ein
+ * signierter Aufruf, dessen Auslösezeit älter als 72 Stunden ist (oder in der Zukunft über 10 Minuten liegt), ist
+ * kein legitimer Aufruf mehr und wird abgelehnt. Fehlt der Header oder ist er unlesbar, gilt das Ereignis weiter
+ * (Idempotenz über Webhook-ID und Bestell-/Erstattungs-ID bleibt die eigentliche Sperre; die Marker werden nie
+ * automatisch gelöscht). CopeCart und Digistore24 liefern keinen verlässlich dokumentierten Zeitstempel im
+ * signierten Teil: dort schützt allein die Idempotenz über transaction_id (+ Ereignisart).
+ */
+export const WEBHOOK_MAX_ALTER_MS = 72 * 3600 * 1000;
+export function webhookZeitstempelAbgelaufen(headerWert, jetztMs = Date.now(), maxAlterMs = WEBHOOK_MAX_ALTER_MS) {
+  if (!headerWert) return false;
+  const t = Date.parse(String(headerWert));
+  if (!Number.isFinite(t)) return false;
+  return jetztMs - t > maxAlterMs || t - jetztMs > 10 * 60 * 1000;
+}
+
 /** Fachlicher Idempotenz-Schlüssel (eine Bestellung wird nur einmal bezahlt, eine Erstattung nur einmal gebucht). */
 function shopifyFachSchluessel(topic, payload) {
   if (topic === 'orders/paid' && payload.id) return `shopify_order_paid_${payload.id}`;
@@ -9323,6 +9391,11 @@ async function handleShopifyWebhook(request, url, env, cors) {
     if (!sigCheck.valid) {
       console.warn('Shopify-Webhook Signaturprüfung fehlgeschlagen:', sigCheck.reason, 'userId=', kurz(userId));
       return json({ error: 'Invalid signature' }, 401);
+    }
+
+    if (webhookZeitstempelAbgelaufen(request.headers.get('X-Shopify-Triggered-At'))) {
+      console.warn('Shopify-Webhook verworfen: Zeitstempel außerhalb des Fensters, userId=', kurz(userId));
+      return json({ error: 'Stale webhook' }, 400);
     }
 
     let payload;
