@@ -638,6 +638,10 @@ export const KATEGORIEN = frieren([
   kat('Einnahmen 19%', 'einnahme', 112),
   kat('Einnahmen 7%', 'einnahme', 112),
   kat('Einnahmen steuerfrei', 'einnahme', 103, { euer_kz_kleinunternehmer: 111 }),
+  // OSS-FORM 3 (Kern 2026.11.16-11): Verkauf an Privatkunden in anderen EU-Ländern mit dem Satz des Kundenlands (steuer.oss, A_OSS_EU_B2C). Die Zahlen
+  // kommen aus dem Steuerfall (wirkung.js ossWirkungen: Kz 45, EÜR netto Kz 112, Steuer Kz 140, Konfidenz C); die Kategorie ordnet nur und trägt dieselbe
+  // EÜR-Kennzahl wie der Steuerfall. DATEV-Konto 8320/4320 bzw. 8331/4331 nach Leistungsart (KontoluxWorker/regel/datev-oss.js), nicht aus der Kategorie.
+  kat('Einnahmen EU-Privatkunden (OSS)', 'einnahme', 112, { euer_kz_kleinunternehmer: 111, hinweis: 'Satz des Kundenlands (OSS); EÜR wie A_OSS_EU_B2C' }),
   kat('Vereinnahmte Umsatzsteuer', 'einnahme', 140),
   kat('Umsatzsteuer-Erstattung', 'einnahme', 141),
   kat('Vorsteuer', 'ausgabe', 185),
@@ -1442,7 +1446,7 @@ export const REGEL_UMSETZUNG = Object.freeze({
   'R-EUER-09': U('teilweise', 'Der Kern bucht keine Abschreibung. Ohne Kern-Option anlagegut_vorsteuer_sofort wird der ganze Beleg ausgeschlossen; mit Option rechnet die Voranmeldung, die EÜR-Wirkung der Anschaffungskosten ist ausgeschlossen (W_ANLAGEGUT_AFA_NICHT_BERECHNET). KERN-D: mit Wahl und Skonto/gemischten Positionen/Sonderfall rechnet die Voranmeldung wie ohne Wahl; nicht sauber rechenbarer EÜR-Teil als Zwischenwert (W_ANLAGEGUT_EUER_ZWISCHENWERT, Kleinunternehmer _KU). KERN-E: wie ohne Wahl nur bei voller Zahlung im Anschaffungsjahr (G-KD-1); § 13b-Anlagegut mit rc_eingang EÜR-Zwischenwert (G-KD-2); Korrektur auf ein Anlagegut macht die EÜR ab dem Korrekturjahr zum Zwischenwert (W_ANLAGEGUT_KORREKTUR, G-KD-6).', 'wirkung.js:function anlagegutEuer'), 'R-EUER-11': U('umgesetzt', 'Sammelposten (ein Fünftel je Jahr, Kz 137) nach gwg_wahl, hinter der Kern-Option anlagegut_vorsteuer_sofort (Feature anlagegut).', 'wirkung.js:function anlagegutEuer'),
   'R-EUER-12': U('noch_nicht', 'Restbuchwerte nicht im Kern.'), 'R-EUER-20': U('noch_nicht', 'Keine Kategorie, Kz 162/168/172/163 nicht erreichbar.'),
   'R-EUER-21': U('teilweise', 'nur Kategorie Kfz-Kosten auf Kz 146; Kz 144/145 nicht erreichbar.'),
-  'R-EUER-10': U('umgesetzt', 'GWG bis 800 EUR netto', 'wirkung.js:gwg_ueber_800'), 'R-EUER-13': U('umgesetzt', 'Kategorie Telefon/Internet auf Kz 280', 'wirkung.js:ausgabeKz'),
+  'R-EUER-10': U('umgesetzt', 'GWG bis 800 EUR netto; GWG-FIX (Kern -14): auch ohne Kern-Option im Wirtschaftsjahr der Anschaffung, wenn eine Zahlung in einem anderen Jahr liegt (wie mit Wahl gwg)', 'wirkung.js:function gwgJahrWeg'), 'R-EUER-13': U('umgesetzt', 'Kategorie Telefon/Internet auf Kz 280', 'wirkung.js:ausgabeKz'),
   'R-EUER-22': U('umgesetzt', 'Summe der Ausgabenzeilen', 'euer.js:gewinn_cent'), 'R-EUER-32': U('umgesetzt', 'Gewinn Kleinunternehmer', 'euer.js:gewinn_cent'),
   'R-EUER-33': U('teilweise', 'KATEGORIEN mit EÜR-Kz im Kern, SKR-Konten nur als Lücke U.'),
   'R-KOR-02': U('teilweise', 'Skonto in der Zahlung (skonto_cent) wird gerechnet: Minderung im Zahlungszeitraum (Soll, Eingang) bzw. Zahlbetrag als Entgelt (Ist); Rabatt in der Zahlung (rabatt_cent) und der Korrekturgrund skonto werden ausgeschlossen.', 'wirkung.js:skontoAufteilung'), 'R-KOR-03': U('nur_doku', 'Pflichtangabe auf der Rechnung, keine Kern-Logik.'), 'R-KOR-14': U('nur_doku', 'Hinweisregel (UStAE 1.3 Abs. 16d): keine Kern-Logik, die Zahlung wird als Rechnung erfasst.'),

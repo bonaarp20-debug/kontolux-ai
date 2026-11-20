@@ -44,7 +44,9 @@ const DATEV_2026 = {
   'Verpflegungsmehraufwand': [['4674', 'Reisekosten Unternehmer Verpflegungsmehraufwand'], ['6674', 'Reisekosten Unternehmer Verpflegungsmehraufwand']],
   'Einnahmen 19%': [['8400', 'Erlöse 19 % USt (Automatik)'], ['4400', 'Erlöse 19 % USt (Automatik)']],
   'Einnahmen 7%': [['8300', 'Erlöse 7 % USt (Automatik)'], ['4300', 'Erlöse 7 % USt (Automatik)']],
-  'Einnahmen steuerfrei': [['8200', 'Erlöse'], ['4200', 'Erlöse']]
+  'Einnahmen steuerfrei': [['8200', 'Erlöse'], ['4200', 'Erlöse']],
+  // OSS-FORM 3: Kontenrahmen 2026 (regel/datev-oss.js, Fußnote 3: BU-Schlüssel 10, EU-Land und Satz über das EU-Fenster)
+  'Einnahmen EU-Privatkunden (OSS)': [['8320', 'Erlöse aus im anderen EU-Land steuerpflichtigen Lieferungen, im Inland nicht steuerbar'], ['4320', 'Erlöse aus im anderen EU-Land steuerpflichtigen Lieferungen, im Inland nicht steuerbar']]
 };
 // Weitere im Worker/Export verwendete Konten (nicht im Mapping): KU-Erlöse 8192/4184 (AM, "Steuerfreie Erlöse Kleinunternehmer nach
 // § 19 Abs. 1 UStG"), § 13b-Erlöse 8337/4337, USt § 13b 19 % 1787/3837, Vorsteuer § 13b 19 % 1577/1407 — 8195/4185 sind reserviert.

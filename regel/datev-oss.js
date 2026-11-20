@@ -27,8 +27,8 @@ import { istObjekt, CONFIG_PFAD, configBereinigen, kernOptionenFuer, kernOptione
 import { dekodiereFelder } from './firestore.js';
 
 export const DATEV_OSS_KONTEN = Object.freeze({
-  SKR03: Object.freeze({ ware: '8320', ware_korrektur: '8727', tbe: '8331', drittland: '8338', inland: Object.freeze({ 1900: '8400', 700: '8300' }) }),
-  SKR04: Object.freeze({ ware: '4320', ware_korrektur: '4727', tbe: '4331', drittland: '4338', inland: Object.freeze({ 1900: '4400', 700: '4300' }) }),
+  SKR03: Object.freeze({ ware: '8320', ware_korrektur: '8727', tbe: '8331', drittland: '8338', inland: Object.freeze({ 1900: '8400', 700: '8300' }), kleinunternehmer: '8192' }),
+  SKR04: Object.freeze({ ware: '4320', ware_korrektur: '4727', tbe: '4331', drittland: '4338', inland: Object.freeze({ 1900: '4400', 700: '4300' }), kleinunternehmer: '4184' }),
 });
 export const DATEV_OSS_BU = Object.freeze({ ware: '10', tbe: '44' });
 const LAND_DATEV = Object.freeze({ GR: 'EL' });
@@ -71,7 +71,7 @@ export function datevOssPlan(zeilen, profil) {
     if (!b || !istObjekt(b.steuer) || !istObjekt(b.steuer.oss)) continue;
     const f = faelle.get(b.id);
     plan.set(b.id, f
-      ? { fall: f.fall, korrektur: f.korrektur === true, grund: f.grund || null, oss: b.steuer.oss }
+      ? { fall: f.fall, korrektur: f.korrektur === true, grund: f.grund || null, status: f.status || null, oss: b.steuer.oss } // OSS-FORM 4 (F3): Status am Leistungstag
       : { fall: 'UNBEKANNT', korrektur: false, grund: 'oss_ohne_zuordnung', oss: b.steuer.oss });
   }
   return plan;
@@ -99,9 +99,11 @@ export function datevOssBuchungen(eintrag, ctx) {
   const basis = { sollHaben, konto: ctx.bankkonto, belegDatum: ctx.belegDatum, belegfeld1: ctx.belegfeld1, belegfeld2: '', buchungstext: text, diverseAdressnummer: ctx.diverseAdressnummer || '' };
   const out = [];
   if (fall === 'A_EU_B2C_UNTER_SCHWELLE') {
-    if (korr) return offen('korrektur_unter_schwelle');
+    // OSS-FORM 4 (F3): unter der Grenze wie der Inlandspfad: deutscher Satz -> 8400/8300 (Automatik), Kleinunternehmer ohne Steuer -> KU-Konto
+    // 8192/4184 (AM, ohne Schlüssel); Storno/Korrektur als Rückbuchung (Haben, Textmarke) auf dasselbe Konto. Vorher still offen.
     for (const [i, z] of zeilen.entries()) {
-      const konto = k.inland[z.satz_bp];
+      const ku = eintrag.status === 'ku' && z.ust_cent === 0;
+      const konto = ku ? k.kleinunternehmer : k.inland[z.satz_bp];
       if (!konto) return offen('satz_nicht_deutsch');
       out.push({ ...basis, betrag: brutto[i] / 100, gegenkonto: konto, bu: '' });
     }

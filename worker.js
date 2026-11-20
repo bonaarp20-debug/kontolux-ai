@@ -233,6 +233,7 @@ async function gesperrteKontenLoeschen(env) {
   if (!env.PROFIL_KV) return 0;
   const grenze = Date.now() - SPERRFRIST_TAGE * 24 * 60 * 60 * 1000;
   let geloescht = 0;
+  let uebersprungen = 0;
   let cursor;
   do {
     const liste = await env.PROFIL_KV.list({ prefix: 'gesperrt:', cursor });
@@ -243,6 +244,15 @@ async function gesperrteKontenLoeschen(env) {
       // Erst die Daten, dann das Login, zuletzt die Markierung: scheitert ein Schritt, bleibt die Markierung und der nächste Tageslauf versucht es erneut
       try {
         const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+        // LOESCHWEG-SCHUTZ (B1): wie der neue Weg (regel/loeschlaeufe-konto.js vorbedingung, P5) kein automatisches Löschen eines Kontos mit
+        // Belegen, Festschreibung oder Monatsabschlüssen: überspringen, zählen, loggen; die Markierung bleibt (Prüfung von Hand, Phase 'pruefen').
+        // Im Zweifel (Abfrage scheitert) nicht löschen.
+        const grund = await aufbewahrungsdatenVorhanden(uid, adminToken);
+        if (grund) {
+          uebersprungen++;
+          console.log('wegwerf_altweg_pruefen ' + JSON.stringify({ uid: kurz(uid), grund }));
+          continue;
+        }
         await archivDatenLoeschen(uid, env, adminToken);
       } catch (e) {
         console.error('Datenlöschung gesperrtes Konto fehlgeschlagen, uid=', kurz(uid), String(e.message).slice(0, 120));
@@ -266,7 +276,22 @@ async function gesperrteKontenLoeschen(env) {
     }
     cursor = liste.list_complete ? undefined : liste.cursor;
   } while (cursor);
+  if (uebersprungen) console.log('wegwerf_altweg ' + JSON.stringify({ geloescht, pruefen: uebersprungen }));
   return geloescht;
+}
+// LOESCHWEG-SCHUTZ (B1): Hat das Konto Aufbewahrungsdaten (dokumente, festschreibung, monatsabschluesse)? Liefert den Sammlungsnamen oder null.
+// Abfrage scheitert: 'abfrage_fehlgeschlagen' (sichere Richtung: nicht löschen).
+async function aufbewahrungsdatenVorhanden(uid, adminToken) {
+  for (const s of ['dokumente', 'festschreibung', 'monatsabschluesse']) {
+    try {
+      const res = await fetch(`${NACHRICHT_FS}/users/${encodeURIComponent(uid)}/${s}?pageSize=1&mask.fieldPaths=__name__`, { headers: { Authorization: `Bearer ${adminToken}` } });
+      if (!res.ok) return 'abfrage_fehlgeschlagen';
+      const j = await res.json().catch(() => null);
+      if (!j) return 'abfrage_fehlgeschlagen';
+      if (Array.isArray(j.documents) && j.documents.length) return s;
+    } catch (e) { return 'abfrage_fehlgeschlagen'; }
+  }
+  return null;
 }
 
 function getCORS(origin) {
@@ -1200,7 +1225,10 @@ const SACHKONTO_MAPPING = {
   'Gezahlte Umsatzsteuer':      { SKR03: '1780', SKR04: '3820', euer_zeile: 'Z.59' },
   'Einnahmen 19%':              { SKR03: '8400', SKR04: '4400', euer_zeile: 'Z.15' },
   'Einnahmen 7%':               { SKR03: '8300', SKR04: '4300', euer_zeile: 'Z.15' },
-  'Einnahmen steuerfrei':       { SKR03: '8200', SKR04: '4200', euer_zeile: 'Z.12' }
+  'Einnahmen steuerfrei':       { SKR03: '8200', SKR04: '4200', euer_zeile: 'Z.12' },
+  // OSS-FORM 3: Verkauf an Privatkunden in anderen EU-Ländern (Satz des Kundenlands), gleich wie index.html; der DATEV-Export mit Feature oss nimmt das
+  // Konto aus dem Steuerteil (regel/datev-oss.js), dies ist nur der Altpfad
+  'Einnahmen EU-Privatkunden (OSS)': { SKR03: '8320', SKR04: '4320', euer_zeile: 'Z.15' }
 };
 
 function resolveSachkonto(kategorie, skr) {
@@ -3733,7 +3761,8 @@ async function loescheUnterCollectionAlsAdmin(userId, collectionId, env) {
 async function loescheKvSpuren(uid, env, { archivMarkerAuch = false } = {}) {
   if (!env.PROFIL_KV) return;
   // gesperrt:{uid} bleibt bewusst stehen: der Löschlauf entfernt es erst, wenn alles andere gelungen ist (sonst wäre ein Neuversuch unmöglich)
-  const feste = [`gezaehlt:${uid}`, `status:${uid}`, `freigabe-grund:${uid}`];
+  // LOESCHWEG-SCHUTZ (B1 c): auch der Fortschritt des neuen Wegs (loeschstand:{uid}) wird geräumt, sonst bleibt er verwaist
+  const feste = [`gezaehlt:${uid}`, `status:${uid}`, `freigabe-grund:${uid}`, `loeschstand:${uid}`];
   if (archivMarkerAuch) feste.push(`archiv:${uid}`, `archivlauf:${uid}`);
   for (const k of feste) { try { await env.PROFIL_KV.delete(k); } catch (e) { /* best effort */ } }
   try {
@@ -4552,6 +4581,9 @@ async function handleDatevExport(body, env, cors = {}) {
     // Einnahmen ohne Kategorie: Erlöskonto nach mwst_satz (erloeskontoExport) — vorher immer
     // 8400/4400, ein Automatikkonto, auf dem DATEV auch steuerfreien/7-%-Einnahmen 19 % USt anrechnet.
     const alleErloeskonten = new Set(Object.values(DATEV_ERLOESKONTEN[skr] || DATEV_ERLOESKONTEN.SKR03));
+    // OSS-FORM 4 (F5): Altpfad (Feature oss aus) mit Kategorie „Einnahmen EU-Privatkunden (OSS)“ (8320/4320): auch ein Erlöskonto, damit Kleinunternehmer
+    // auf das KU-Konto umgelenkt werden und kein Steuerschlüssel daran hängt
+    alleErloeskonten.add(skr === 'SKR04' ? '4320' : '8320');
 
     // Steuersatz je Integration aus deren Einnahmen (zuletzt verwendeter Satz, wie
     // berechneUstSchaetzwert in index.html) — für Erstattungen, die ohne Satz gespeichert werden.

@@ -29,7 +29,7 @@
 //   'b2c_ausland'). Profil: profil.oss = { jahre_cent: { 'JJJJ': Cent (Nutzerwert, Summe des Jahres) }, verzicht_ab, registriert_ab } und die
 //   Sammelbestätigung profil.eu_b2c_grenze = { 'JJJJ': { unter_grenze: true|false } } (APP-B2).
 
-import { istCent, ustAusNetto } from './geld.js';
+import { istCent, ustAusNetto, ustAusBrutto } from './geld.js';
 import { istDatum, jahrVon, quartalVon, periodenEnde, periodenStart, letzterTagFolgemonat, wochentagKurz, addiereMonate, tageSeitEpoche, periodeVerschieben } from './daten.js';
 import { statusAm, versteuerungAm } from './steuerprofil.js';
 import { EU_SAETZE, EU_LAENDER, GRENZEN, OSS_FRISTEN, SATZ_REGEL_BP, SATZ_ERMAESSIGT_BP, istEuLand } from './tabellen.js';
@@ -136,8 +136,33 @@ function plattformOffen(b) {
 // ---------------------------------------------------------------------------------------------
 // BP-27: Schwelle und Zuordnung (eine Rechnung für beide)
 // ---------------------------------------------------------------------------------------------
+// OSS-FORM 4 (Kern 2026.11.16-12, Gegenprüfung F1, Konfidenz C, Jona/Anwalt klären): Ob ein Verkauf die Grenze überschreitet, rechnet der Kern mit dem
+// Netto bei deutscher Besteuerung (deutscher Satz der Zeile; Satz des Kundenlands: Regelsatz des Landes -> 19 %, sonst 7 %; ohne Satz das Netto;
+// Kleinunternehmer: Brutto, § 19 UStG). Sonst wäre die Grenze ein Zirkel: mit deutschem Satz über der Grenze, mit dem (höheren) Satz des Kundenlands
+// darunter. Überschreitet dieser Wert die Grenze, ist der Verkauf der Schwellenbeleg (Satz des Kundenlands); die laufende Summe bleibt das Netto der
+// gespeicherten Belege. Ohne Kundenlandsatz (deutscher Satz, kein Satz) ist der Wert gleich dem Netto, also wie bisher. null = nicht bestimmbar.
+function nettoDeutsch(oss, tag, profil) {
+  const ze = zeilenEuro(oss);
+  if (!ze) return null;
+  let st = null;
+  try { st = statusAm(profil, tag).status; } catch (_) { st = null; }
+  let t;
+  let summe = 0;
+  for (const z of ze) {
+    if (!istCent(z.netto_cent) || !istCent(z.ust_cent)) return null;
+    const brutto = z.netto_cent + z.ust_cent;
+    if (st === 'ku') { summe += brutto; continue; }
+    if (z.satz_bp === null || z.satz_bp === undefined || DEUTSCHE_SAETZE.includes(z.satz_bp) || !satzOk(z.satz_bp)) { summe += z.netto_cent; continue; }
+    if (t === undefined) t = euSaetzeAm(oss.land, tag);
+    // OSS-FORM 5: ohne Satzliste (Tag vor deren Beginn) wie ein Regelsatz 19 % (gleich dem Formular)
+    const de = !t || t.normal_bp.includes(z.satz_bp) ? SATZ_REGEL_BP : SATZ_ERMAESSIGT_BP;
+    summe += brutto - (brutto < 0 ? -ustAusBrutto(-brutto, de) : ustAusBrutto(brutto, de));
+  }
+  return summe;
+}
+
 // Je Beleg ein Eintrag für die Schwelle: min/max Beitrag (Cent; max Infinity = Betrag unbekannt) und ob er selbst zugeordnet werden kann.
-function schwellenEintraege(belege) {
+function schwellenEintraege(belege, profil) {
   const eintraege = [];
   const korrekturen = [];
   for (const b of Array.isArray(belege) ? belege : []) {
@@ -152,7 +177,9 @@ function schwellenEintraege(belege) {
       const euro = nettoEuro(o);
       if (o.lage === 'ungeklaert') { eintraege.push({ id: b.id, tag, art: 'unsicher', grund: 'oss_land_ungeklaert', hinweis: 'W_OSS_LAND_UNGEKLAERT', min: 0, max: euro === null ? Infinity : Math.max(0, euro), b }); continue; }
       if (o.leistungsart !== 'ware' && o.leistungsart !== 'tbe') { eintraege.push({ id: b.id, tag, art: 'unsicher', grund: 'oss_leistungsart_fehlt', hinweis: 'W_OSS_LEISTUNGSART_FEHLT', min: 0, max: euro === null ? Infinity : Math.max(0, euro), b }); continue; }
-      eintraege.push({ id: b.id, tag, art: 'eu', min: euro === null ? 0 : euro, max: euro === null ? Infinity : euro, kurs_fehlt: euro === null, b });
+      // OSS-FORM 5: eine Messgröße für Grenze und laufende Summe: das Netto bei deutscher Besteuerung (nettoDeutsch); ohne Kurs unbekannt
+      const de = euro === null ? null : nettoDeutsch(o, tag, profil);
+      eintraege.push({ id: b.id, tag, art: 'eu', min: de === null ? 0 : de, max: de === null ? Infinity : de, kurs_fehlt: de === null, b });
     } else if (bestaetigtUnter(s)) {
       const netto = Array.isArray(s.positionen) ? s.positionen.reduce((a, p) => a + (istCent(p.netto_cent) ? p.netto_cent : 0), 0) : 0;
       eintraege.push({ id: b.id, tag, art: 'bestaetigt', min: Math.max(0, netto), max: Math.max(0, netto), b });
@@ -177,12 +204,14 @@ function vorjahrGrenzen(profil, jahr, summen) {
   if (istCent(jw) && jw >= 0) { min = Math.max(min, jw); max = Math.max(jw, b.max); quelle = 'nutzer_betrag'; }
   else if (best && best.unter_grenze === true) { max = b.max > GRENZE ? b.max : GRENZE; quelle = 'nutzer_bestaetigung'; }
   else if (best && best.unter_grenze === false) { min = Math.max(min, GRENZE + 1); quelle = 'nutzer_bestaetigung'; }
-  return { min, max, quelle };
+  // OSS-FORM 5: die erfassten Belege des Vorjahres überschreiten die Grenze, die Angabe sagt „darunter“: es gelten die Belege, Widerspruch wird gemeldet
+  const widerspruch = b.min > GRENZE && ((istCent(jw) && jw <= GRENZE) || (!(istCent(jw) && jw >= 0) && best && best.unter_grenze === true));
+  return { min, max, quelle, widerspruch };
 }
 
 // Kern der Zuordnung: liefert je Jahr die Schwellenrechnung und je Beleg den Fall.
 function rechneSchwelle(belege, profil) {
-  const { eintraege, korrekturen } = schwellenEintraege(belege);
+  const { eintraege, korrekturen } = schwellenEintraege(belege, profil);
   const oss = istObjekt(profil) && istObjekt(profil.oss) ? profil.oss : {};
   const verzichtAb = datumAb(oss.verzicht_ab);
   const registriertAb = datumAb(oss.registriert_ab);
@@ -218,17 +247,19 @@ function rechneSchwelle(belege, profil) {
     d.letzter = e.tag;
     if (e.art === 'bestaetigt') {
       if (!d.vjUeber && !d.schwellenbeleg && minVor <= GRENZE && d.min > GRENZE) d.schwellenbeleg = { beleg_id: e.id, datum: e.tag, betrag_cent: e.min, summe_cent: d.min };
-      if (d.vjUeber || d.min > GRENZE) faelle.set(e.id, { fall: 'UNBEKANNT', grund: 'oss_bestaetigung_widerspruch', hinweise: ['W_OSS_SCHWELLE_UEBERSCHRITTEN'], datum: e.tag, bestaetigt: true });
+      if (d.vjUeber || d.min > GRENZE || d.schwellenbeleg) faelle.set(e.id, { fall: 'UNBEKANNT', grund: 'oss_bestaetigung_widerspruch', hinweise: ['W_OSS_SCHWELLE_UEBERSCHRITTEN'], datum: e.tag, bestaetigt: true });
       continue;
     }
     if (e.art !== 'eu') { d.unsicher.push(e.id); if (e.art === 'unsicher') faelle.set(e.id, { fall: 'UNBEKANNT', grund: e.grund, hinweise: [e.hinweis], datum: e.tag }); continue; }
     if (e.kurs_fehlt) d.unsicher.push(e.id);
     const verzicht = (verzichtAb && e.tag >= verzichtAb) || (registriertAb && e.tag >= registriertAb);
+    // OSS-FORM 4: Überschreiten mit dem Netto bei deutscher Besteuerung (nettoDeutsch, oben); ab dem Schwellenbeleg gilt das Kundenland
+    const ueberschreitet = !d.vjUeber && !d.schwellenbeleg && minVor <= GRENZE && d.min > GRENZE;
+    if (ueberschreitet) d.schwellenbeleg = { beleg_id: e.id, datum: e.tag, betrag_cent: e.min, summe_cent: d.min };
     let stufe;
-    if (d.vjUeber || d.min > GRENZE || verzicht) stufe = 'ueber';
+    if (d.vjUeber || d.min > GRENZE || d.schwellenbeleg || verzicht) stufe = 'ueber';
     else if (d.vjUnter && d.max <= GRENZE) stufe = 'unter';
     else stufe = 'unklar';
-    if (!d.vjUeber && !d.schwellenbeleg && minVor <= GRENZE && d.min > GRENZE) d.schwellenbeleg = { beleg_id: e.id, datum: e.tag, betrag_cent: e.min, summe_cent: d.min };
     const st = statusAm(profil, e.tag).status;
     const hin = [];
     let fall;
@@ -299,7 +330,39 @@ function rueckgewaehr(b, orig, alleKorrekturen) {
 }
 
 export function ossZuordnung(belege, profil, optionen) {
-  return rechneSchwelle(belege, profil).faelle;
+  return rechneMitPaaren(belege, profil).faelle;
+}
+
+// OSS-FORM 5 (dritte Gegenprüfung): Ein Original, das der Kern mit seinem Satz nicht rechnen kann (A_OSS_EU_B2C mit deutschem oder fremdem Satz,
+// unter der Grenze mit Kundenlandsatz bzw. Kleinunternehmer mit Steuer), ohne Zahlungen und durch einen Storno in voller Höhe aufgehoben (Weg
+// „Stornieren und neu erfassen“), ist eine Fehlerfassung: Original und Storno sind neutral (nicht offen, nicht in der Grenze, ohne Wirkung). Rückgabe Set der IDs.
+function neutralePaare(belege, faelle) {
+  const ids = new Map();
+  for (const b of belege) if (istObjekt(b) && typeof b.id === 'string') ids.set(b.id, b);
+  const aus = new Set();
+  for (const k of belege) {
+    if (!istObjekt(k) || !istObjekt(k.steuer) || k.steuer.beleg_art !== 'storno' || !istObjekt(k.steuer.oss) || !istObjekt(k.steuer.bezug)) continue;
+    const o = ids.get(k.steuer.bezug.storniert_beleg_id);
+    if (!o || !istObjekt(o.steuer) || !istObjekt(o.steuer.oss) || !Array.isArray(o.steuer.oss.zeilen) || !Array.isArray(k.steuer.oss.zeilen)) continue;
+    if ((Array.isArray(o.steuer.zahlungen) ? o.steuer.zahlungen : []).some((z) => istObjekt(z) && z.status !== 'rueckgaengig')) continue;
+    if (bruttoZeilen(o.steuer.oss) !== bruttoZeilen(k.steuer.oss)) continue;
+    const z = faelle.get(o.id);
+    if (!z || !istDatum(z.datum)) continue;
+    const zl = o.steuer.oss.zeilen;
+    let nichtGerechnet = false;
+    if (z.fall === 'A_OSS_EU_B2C') nichtGerechnet = o.steuer.oss.satz_bestaetigt !== true && zl.some((x) => !ossSatzPruefung(o.steuer.oss.land, x.satz_bp, z.datum).ok);
+    else if (z.fall === 'A_EU_B2C_UNTER_SCHWELLE') nichtGerechnet = z.status === 'ku' ? zl.some((x) => x.ust_cent !== 0) : zl.some((x) => !DEUTSCHE_SAETZE.includes(x.satz_bp));
+    if (nichtGerechnet) { aus.add(o.id); aus.add(k.id); }
+  }
+  return aus;
+}
+function rechneMitPaaren(belege, profil) {
+  const liste = Array.isArray(belege) ? belege : [];
+  const r1 = rechneSchwelle(liste, profil);
+  const aus = neutralePaare(liste, r1.faelle);
+  if (!aus.size) return { ...r1, neutral: aus };
+  const r2 = rechneSchwelle(liste.filter((b) => !(istObjekt(b) && aus.has(b.id))), profil);
+  return { ...r2, neutral: aus };
 }
 
 // KERN-C3 (G-OSS F1): bestätigte Belege ("unter der Grenze", APP-B2), die ab dem Überschreiten liegen (der Schwellenbeleg selbst eingeschlossen: ab dem
@@ -310,7 +373,7 @@ export function ossZuordnung(belege, profil, optionen) {
 // Rückgabe [{ beleg_id, datum, jahr, grund, schwellenbeleg }] nach Datum und ID sortiert.
 export function ossUmstellbareBelege(belege, profil) {
   if (!Array.isArray(belege)) return [];
-  const r = rechneSchwelle(belege, profil);
+  const r = rechneMitPaaren(belege, profil);
   const aus = [];
   for (const [id, z] of r.faelle) {
     if (!z.bestaetigt) continue;
@@ -321,7 +384,7 @@ export function ossUmstellbareBelege(belege, profil) {
 }
 
 export function ossSchwelle(belege, profil, jahr, optionen) {
-  const r = rechneSchwelle(belege, profil);
+  const r = rechneMitPaaren(belege, profil);
   const J = Number(jahr);
   let d = r.proJahr.get(J);
   if (!d) {
@@ -339,11 +402,12 @@ export function ossSchwelle(belege, profil, jahr, optionen) {
   }
   const stufeVj = d.vjUeber ? 'ueberschritten' : (d.vjUnter ? 'ok' : 'unbekannt');
   let stufe;
-  if (d.vjUeber || d.min > GRENZE) stufe = 'ueberschritten';
+  if (d.vjUeber || d.min > GRENZE || d.schwellenbeleg) stufe = 'ueberschritten'; // OSS-FORM 4: Schwellenbeleg nach nettoDeutsch
   else if (d.vjUnter && d.max <= GRENZE) stufe = d.max >= WARN ? 'warnung' : 'ok';
   else stufe = 'unbekannt';
   const hinweise = [];
   if (!(d.vj.max < Infinity) && !d.vjUeber) hinweise.push('W_OSS_WERT_FEHLT');
+  if (d.vj.widerspruch) hinweise.push('W_OSS_VORJAHR_WIDERSPRUCH');
   if (stufe === 'unbekannt') hinweise.push('W_OSS_SCHWELLE_UNKLAR');
   if (stufe === 'warnung') hinweise.push('W_OSS_SCHWELLE_80');
   if (stufe === 'ueberschritten') hinweise.push('W_OSS_SCHWELLE_UEBERSCHRITTEN');
@@ -401,8 +465,11 @@ function summeAus(pos) {
 export function ossBelegeVorbereiten(belege, profil, optionen) {
   if (!regelOss(optionen) || !Array.isArray(belege)) return belege;
   if (!belege.some((b) => istObjekt(b) && istObjekt(b.steuer) && (istObjekt(b.steuer.oss) || bestaetigtUnter(b.steuer)))) return belege;
-  const faelle = ossZuordnung(belege, profil, optionen);
+  const rp = rechneMitPaaren(belege, profil);
+  const faelle = rp.faelle;
   return belege.map((b) => {
+    // OSS-FORM 5: Fehlerfassung mit Storno in voller Höhe (neutralePaare): ohne Wirkung, nicht offen
+    if (istObjekt(b) && istObjekt(b.steuer) && typeof b.id === 'string' && rp.neutral.has(b.id)) return { ...b, steuer: { ...b.steuer, wirkungslos: true } };
     if (istObjekt(b) && istObjekt(b.steuer) && !istObjekt(b.steuer.oss) && typeof b.id === 'string') {
       const zb = faelle.get(b.id);
       if (!zb || !zb.bestaetigt) return b;
@@ -605,6 +672,9 @@ export function ossQuartal(belege, profil, jahr, quartal, optionen) {
     if (!istObjekt(b) || typeof b.id !== 'string' || !istObjekt(b.steuer) || !istObjekt(b.steuer.oss)) continue;
     const z = faelle.get(b.id);
     if (!z || z.fall !== 'A_OSS_EU_B2C' || !z.korrektur || !istDatum(z.datum) || quartalVon(z.datum) !== periode || quartalVon(z.datum_original) === periode) continue;
+    // OSS-FORM 5: dieselbe Satzprüfung wie die Voranmeldung (wirkung.js ossWirkungen): eine Korrektur mit unpassendem Satz zählt nicht in Kz 45
+    const ko = b.steuer.oss;
+    if (ko.satz_bestaetigt !== true && ko.zeilen.some((x) => !ossSatzPruefung(ko.land, x.satz_bp, z.datum_original).ok)) continue;
     const ne = nettoEuro(b.steuer.oss);
     kz45 = ne === null ? null : kz45 + ne;
   }
