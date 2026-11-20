@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import * as K from '../steuerkern/index.js';
 import { regelKlaerungBeleg, KLAERUNG_BELEG_AKTION, GRUNDLAGE_EU_B2C, GRUNDLAGE_OSS, ossPruefung } from '../regel/klaerung-beleg.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
+import { TEST_ENV, signiert } from './plattform-signatur-hilfe.mjs'; // POLITUR-B: Plattformbelege wie vom Worker signiert
 
 const UID = 'nutzerWC00000000000000003';
 const REGEL = {
@@ -55,11 +56,11 @@ function umgebung(belege, { profil = UEBER, config = OSS_AN, fest = [] } = {}) {
   const fs = fakeFirestore();
   if (config) fs.setze('config/features', config);
   if (profil) fs.setze(`users/${UID}/steuerprofil/aktuell`, profil);
-  for (const [id, d] of Object.entries(belege)) fs.setze(pfad(id), d);
+  for (const [id, d] of Object.entries(belege)) fs.setze(pfad(id), signiert(UID, id, d));
   for (const f of fest) fs.setze(`users/${UID}/festschreibung/${f}`, { status: 'festgeschrieben' });
   const deps = { fetchFn: fs.fetchFn, adminToken: async () => 't', jetzt: () => '2026-11-15T10:00:00.000Z', heute: () => '2026-11-15' };
   const rufe = async (antwort, ids, anfrage_id = aid()) => {
-    const r = await regelKlaerungBeleg({ userId: UID, aktion: KLAERUNG_BELEG_AKTION, anfrage_id, beleg_ids: ids, antwort }, {}, {}, deps);
+    const r = await regelKlaerungBeleg({ userId: UID, aktion: KLAERUNG_BELEG_AKTION, anfrage_id, beleg_ids: ids, antwort }, TEST_ENV, {}, deps);
     return { status: r.status, json: await r.json() };
   };
   return { fs, rufe };

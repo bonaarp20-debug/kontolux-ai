@@ -18,6 +18,8 @@ import {
   PLATTFORM_DATEN_SCHLUESSEL, GEGENPARTEI_SCHLUESSEL, PLATTFORM_STEUER_SCHLUESSEL, ZEILE_SCHLUESSEL, POSITION_SCHLUESSEL, LEISTUNG_SCHLUESSEL,
   BEZUG_SCHLUESSEL, HINWEIS_CODES, HINWEIS_LAND_FEHLT, hinweisAusland,
 } from '../regel/plattform.js';
+import { plattformDatenPruefen, SIG_FELD, GRUENDE } from '../regel/plattform-signatur.js';
+import { TEST_SCHLUESSEL } from './plattform-signatur-hilfe.mjs';
 
 const HIER = dirname(fileURLToPath(import.meta.url));
 const FX = (name) => JSON.parse(readFileSync(resolve(HIER, 'plattform-fixtures', `${name}.json`), 'utf8'));
@@ -98,6 +100,7 @@ const BASIS_ENV = {
   FIREBASE_ADMIN_CLIENT_EMAIL: 'test@example.iam.gserviceaccount.com',
   TOKEN_ENCRYPTION_KEY: TOKEN_KEY,
   WEBHOOK_TESTMODUS: '0',
+  PLATTFORM_DATEN_HMAC_KEY: TEST_SCHLUESSEL, // POLITUR-B: Secret wie in Produktion gesetzt
   FIREBASE_ADMIN_PRIVATE_KEY: crypto.generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }),
   PROFIL_KV: { get: async (k) => kv.get(k) ?? null, put: async (k, v) => { kv.set(k, v); }, delete: async (k) => { kv.delete(k); }, list: async () => ({ keys: [], list_complete: true }) },
   ABO_KV: { get: async () => null, put: async () => {} },
@@ -600,4 +603,59 @@ test('Wortregeln (W3/K1 5.5, Abschrift aus Kontolux/scripts/test-steuerkern-hinw
     for (const re of VERBOTEN) assert.ok(!re.test(t), `${re} in ${t}`);
     if (/übermittel/i.test(t)) assert.match(t, /nicht übermittel/i);
   }
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// POLITUR-B: HMAC-Kennzeichen für plattform_daten (regel/plattform-signatur.js)
+// ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+test('POLITUR-B: jeder Beleg mit plattform_daten trägt ein gültiges Kennzeichen über uid und Beleg-ID; Land geändert -> ungültig', async () => {
+  env = { ...BASIS_ENV };
+  setzeFeatures({ kern_max: 'aus', features: { plattform: 'an' } });
+  const uid = uidNeu('sig');
+  einrichten(uid);
+  await alleSenden(uid);
+  const mit = belege(uid).filter(({ d }) => d.plattform_daten);
+  assert.ok(mit.length >= 8, 'Plattformbelege vorhanden');
+  for (const { id, d } of mit) {
+    assert.deepEqual(await plattformDatenPruefen(env, uid, id, d.plattform_daten, d[SIG_FELD]), { ok: true, v: 1 }, id);
+    const falsch = { ...d.plattform_daten, gegenpartei: { ...(d.plattform_daten.gegenpartei || {}), land: 'AT' } };
+    assert.deepEqual(await plattformDatenPruefen(env, uid, id, falsch, d[SIG_FELD]), { ok: false, grund: GRUENDE.UNGUELTIG }, id + ' manipuliert');
+  }
+  for (const { d } of belege(uid)) if (!d.plattform_daten) assert.equal(d[SIG_FELD], undefined, 'ohne plattform_daten kein Kennzeichen');
+});
+
+test('POLITUR-B: Secret fehlt -> Webhook trotzdem 200, plattform_daten ohne Kennzeichen, Erstattung erbt das Land nicht (original_ungeprueft)', async () => {
+  const { PLATTFORM_DATEN_HMAC_KEY: _k, ...ohne } = BASIS_ENV;
+  env = ohne;
+  setzeFeatures({ kern_max: 'aus', features: { plattform: 'an' } });
+  const uid = uidNeu('ohnesig');
+  einrichten(uid);
+  assert.equal((await shopify(uid, 'orders/paid', FX('shopify-fr'))).status, 200);
+  assert.equal((await shopify(uid, 'refunds/create', FX('shopify-erstattung'))).status, 200);
+  const B = belege(uid);
+  const fr = B.find(({ d }) => d.rechnungsnr === '#1001');
+  assert.equal(fr.d.plattform_daten.gegenpartei.land, 'FR');
+  assert.equal(fr.d[SIG_FELD], undefined);
+  const erst = B.find(({ d }) => d.typ === 'rechnung_eingehend');
+  assert.deepEqual(erst.d.plattform_daten.bezug, { ref: 'shopify:5900000000000' }, 'kein Bezug auf eine ungeprüfte Beleg-ID');
+  assert.equal(erst.d.plattform_daten.gegenpartei?.land_quelle === 'original', false, 'Land nicht vom Original geerbt');
+  assert.ok(erst.d.plattform_daten.hinweise.includes('original_ungeprueft'));
+  assert.ok(!erst.d.plattform_daten.hinweise.includes('original_nicht_gefunden'));
+  env = { ...BASIS_ENV };
+});
+
+test('POLITUR-B: gefälschtes Original (Client schreibt plattform_daten mit passender ref, ohne Kennzeichen) -> Erstattung erbt nichts', async () => {
+  env = { ...BASIS_ENV };
+  setzeFeatures({ kern_max: 'aus', features: { plattform: 'an' } });
+  const uid = uidNeu('faelsch');
+  einrichten(uid);
+  docs.set(`users/${uid}/dokumente/vom_client`, kodiereFelder({ name: 'Bestellung', typ: 'rechnung_ausgehend', betrag: 100,
+    plattform_daten: { version: 1, plattform: 'shopify', ref: 'shopify:5900000000000', fall: 'auslandskunde', gegenpartei: { land: 'IT', unternehmer: 'nein' } } }));
+  assert.equal((await shopify(uid, 'refunds/create', FX('shopify-erstattung'))).status, 200);
+  const erst = belege(uid).find(({ d }) => d.typ === 'rechnung_eingehend');
+  assert.ok(erst, 'Erstattung gespeichert');
+  assert.notEqual(erst.d.plattform_daten.gegenpartei?.land, 'IT');
+  assert.equal(erst.d.plattform_daten.bezug.beleg_id, undefined);
+  assert.ok(erst.d.plattform_daten.hinweise.includes('original_ungeprueft'));
+  assert.deepEqual(await plattformDatenPruefen(env, uid, erst.id, erst.d.plattform_daten, erst.d[SIG_FELD]), { ok: true, v: 1 }, 'Erstattung selbst signiert');
 });
