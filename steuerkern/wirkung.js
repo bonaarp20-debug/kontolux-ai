@@ -202,9 +202,14 @@ function weitereWirkTage(s, profil) {
   }
   const ver = s.versteuerung_beleg === 'soll' || s.versteuerung_beleg === 'ist' ? s.versteuerung_beleg : versteuerungAm(profil, bis).art;
   const ist = s.richtung === 'ausgang' && ver === 'ist';
+  // KERN-17 (M-1, R-PR-09, UStAE 19.7 Abs. 1 S. 2, 3 mit Beispiel, A): Ausgang aus der Kleinunternehmerzeit, Grenze danach unterjährig überschritten
+  // (Grund laufend_ueber_100k/gruendung_ueber_25k): jedes Entgelt ab dem Überschreiten ist im Zeitraum der Vereinnahmung regelbesteuert, auch bei Soll
+  // (gerechnet: statusFuerAusgangsumsatz, ausgangWirkungen). Darum ist auch der Zahlungstag ein weiterer Wirktag.
+  const verlauf = s.richtung === 'ausgang' && istObjekt(profil) && Array.isArray(profil.status_verlauf) && statusAm(profil, bis).status === 'ku' ? profil.status_verlauf : [];
+  const nachWechsel = (d) => verlauf.some((e) => istObjekt(e) && e.status === 'regel' && (e.grund === 'laufend_ueber_100k' || e.grund === 'gruendung_ueber_25k') && istDatum(e.gueltig_ab) && e.gueltig_ab > bis && e.gueltig_ab <= d) && statusAm(profil, d).status === 'regel';
   for (const z of aktiveZahlungen(s)) {
     if (istCent(z.skonto_cent) && z.skonto_cent > 0) tage.push(z.datum);
-    if (!(ist || z.datum < bis)) continue;
+    if (!(ist || z.datum < bis)) { if (verlauf.length && nachWechsel(z.datum)) tage.push(z.datum); continue; }
     if (b13) tage.push(z.datum);
     // Eingang: Vorsteuer aus der Anzahlung erst, wenn auch die Rechnung vorliegt (§ 15 Abs. 1 S. 1 Nr. 1 S. 3 UStG): der spätere der beiden Tage
     tage.push(eingang && erhalt && erhalt > z.datum ? erhalt : z.datum);
@@ -253,6 +258,16 @@ function weitereHinweisWirkungen(s, profil, ctx, out, hauptPeriode, f) {
 // gruppen: [{ satz_bp, netto_cent, ust_cent }]; zahlungen: [{ betrag_cent }] in Reihenfolge.
 // Rückgabe je Zahlung: Liste von { netto_cent, ust_cent } je Gruppe (Reihenfolge wie gruppen).
 // ---------------------------------------------------------------------------------------------
+// KERN-17 (M-2, R-ZP-06, R-ZP-24, K18, Konfidenz C): Rechnung mit mehreren Steuersätzen, mindestens eine Zahlung lässt einen Rest offen (Teilzahlung,
+// Anzahlung). Die Verteilung nach Bruttoanteilen ist eine Annahme; der Hinweis HN_TEILZAHLUNG_MISCHSATZ macht sie sichtbar. Die Zahlen ändern sich nicht.
+function teilzahlungMischsatz(gruppen, zahlungen) {
+  if (!zahlungen.length || new Set(gruppen.map((g) => g.satz_bp)).size < 2) return false;
+  let brutto = 0;
+  for (const g of gruppen) brutto += g.netto_cent + g.ust_cent;
+  let kum = 0;
+  return zahlungen.some((z) => (kum += z.betrag_cent + (istCent(z.skonto_cent) ? z.skonto_cent : 0)) < brutto);
+}
+
 export function zahlungsAnteile(gruppen, zahlungen) {
   const n = gruppen.length;
   const offen = gruppen.map((g) => g.netto_cent + g.ust_cent);
@@ -1186,6 +1201,7 @@ function ausgangWirkungen(s, profil, ctx, out, opt) {
     if (zahlungen.some((z) => z.datum < wechselAb)) { ctx.hinweise.push('W_WECHSEL_ANZAHLUNG_KZ65'); ctx.hinweise.push('HN_WECHSEL_ANZAHLUNG_VOLL_IN_KZ81'); }
   }
   for (const h of ver.hinweise || []) if (typeof h === 'string' && h.startsWith('W_') && !ctx.hinweise.includes(h)) ctx.hinweise.push(h);
+  if (teilzahlungMischsatz(gruppen, zahlungen)) ctx.hinweise.push('HN_TEILZAHLUNG_MISCHSATZ');
   if (!ist && zahlungen.some((z) => jahrVon(z.datum) > jahrVon(l.bis))) ctx.hinweise.push('W_LIQUIDITAET_DEZEMBER');
   const anteile = teil ? anteilErg.anteile : zahlungsAnteile(skonto.eff, zahlungen);
   // TR-orakel-002: Bei voller Rückgängigmachung vor der Leistung (opt.vorLeistungAbzug) ist jede Zahlung Entgelt für eine nicht ausgeführte Leistung
@@ -1483,6 +1499,7 @@ function eingangWirkungen(s, profil, ctx, out, opt) {
     schliesseAus(s, profil, ctx, out, 'rechnung_nach_rueckwechsel', ['W_WECHSEL_DIALOG']);
     return;
   }
+  if (mitVorsteuer && teilzahlungMischsatz(gruppen, zahlungen)) ctx.hinweise.push('HN_TEILZAHLUNG_MISCHSATZ');
   const hinw = [];
   const kb = s.kleinbetrag === true;
   const anteile = teil ? anteilErg.anteile : zahlungsAnteile(skonto.eff, zahlungen);
