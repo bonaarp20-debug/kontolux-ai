@@ -54,6 +54,8 @@ function konto(g, kv, uid, { belege = 5, chats = 2, dateien = 3, uploads = 2, ar
   for (let i = 0; i < uploads; i++) g.datei(B, `users/${uid}/uploads/170000000000${i}_auszug${i}.pdf`);
   if (uploads) g.setze(`${u}/dokumente/dUpload`, { typ: 'rechnung_eingehend', storage_url: `https://firebasestorage.googleapis.com/v0/b/${B}/o/${encodeURIComponent(`users/${uid}/uploads/1700000000000_auszug0.pdf`)}?alt=media` });
   g.setze(`nachrichtenlimit/${uid}`, { anzahl: 3, datum: '2026-11-15' });
+  g.setze(`uploadlimit/${uid}_2037-01`, { anzahl: 2 }); // NL-F: Upload-Reservierung des laufenden Monats
+  g.setze(`uploadlimit/${uid}_2036-12`, { anzahl: 9 });
   g.setze(`feedback/${uid}_1`, { userId: uid, gut: 'x', datum: '2036-06-01T00:00:00.000Z' });
   g.nutzerAnlegen({ localId: uid, email: `${uid.toLowerCase()}@test.invalid`, emailVerified: true, disabled: !!archiviert, createdAt: String(Date.parse('2026-01-01')) });
   if (archiviert) {
@@ -196,6 +198,8 @@ test('Archiv-Ende an: wiederaufnehmbar unter Budget, vollständig, idempotent; l
   assert.deepEqual(g.pfade('users/archivA0000000001/'), []);
   assert.deepEqual(g.dateienMit(B, 'users/archivA0000000001/'), []);
   assert.equal(g.lies('nachrichtenlimit/archivA0000000001'), null);
+  assert.equal(g.lies('uploadlimit/archivA0000000001_2037-01'), null, 'NL-F: uploadlimit mit gelöscht');
+  assert.equal(g.lies('uploadlimit/archivA0000000001_2036-12'), null);
   assert.equal(g.lies('feedback/archivA0000000001_1'), null);
   assert.equal(g.konten.has('archivA0000000001'), false, 'Login gelöscht');
   assert.equal(kvAbo._m.size, 0, 'Erinnerungs-Verteiler ausgetragen');
@@ -312,6 +316,7 @@ test('Nachlauf Kontolöschung an (A5, B2, B5, B8): nur Zähler, Feedback, Kalend
   const settings = JSON.stringify(g.docs.get('users/archivA0000000001/profil/settings'));
   await laufBisFertig(g, env({ LOESCHLAUF_KONTOLOESCHUNG: 'an' }), kv, STUNDE(10));
   assert.equal(g.lies('nachrichtenlimit/archivA0000000001'), null);
+  assert.equal(g.lies('uploadlimit/archivA0000000001_2037-01'), null, 'NL-F: Nachlauf löscht auch uploadlimit');
   assert.equal(g.lies('feedback/archivA0000000001_1'), null);
   assert.ok(g.lies('feedback/fremd_1'));
   assert.equal(g.lies('users/archivA0000000001/profil/kalender'), null);

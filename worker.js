@@ -856,7 +856,7 @@ export function uploadReservierungsKey(userId, jetzt = new Date()) {
 }
 export async function reserviereUpload(userId, env, optionen = {}) {
   const limit = Number.isInteger(optionen.limit) ? optionen.limit : UPLOAD_LIMIT;
-  const key = uploadReservierungsKey(userId);
+  const key = uploadReservierungsKey(userId, optionen.jetzt instanceof Date ? optionen.jetzt : new Date()); // NL-F: Zeitpunkt der Reservierung (für die Freigabe am Monatswechsel)
   const maxVersuche = 6;
   if (!userId) return { erlaubt: false, grund: 'infra' };
   let token;
@@ -887,10 +887,12 @@ export async function reserviereUpload(userId, env, optionen = {}) {
   }
   return { erlaubt: false, grund: 'ausgelastet' }; // N3: alle Versuche an parallelen Aufrufen gescheitert (Wettlauf), kein Infrastrukturfehler
 }
-export async function gibUploadZurueck(userId, env) {
+// NL-F: reserviertAm = Zeitpunkt der Reservierung. Die Freigabe zählt im Monat der Reservierung zurück, nicht im (inzwischen neuen) Monat.
+export async function gibUploadZurueck(userId, env, reserviertAm = null) {
   if (!userId) return;
+  const bezug = reserviertAm instanceof Date ? reserviertAm : new Date();
   try {
-    const key = uploadReservierungsKey(userId);
+    const key = uploadReservierungsKey(userId, bezug);
     const token = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
     for (let versuch = 0; versuch < 4; versuch++) {
       const doc = await nachrichtenDocLesenIn(UPLOAD_FS_COLLECTION, key, token);
@@ -905,7 +907,7 @@ export async function gibUploadZurueck(userId, env) {
     }
   } catch (e) { console.warn('gibUploadZurueck (Firestore):', e.message); }
   try { // KV-Zähler: der Aufrufer hat ihn vorab hochgezählt, ein gescheiterter Aufruf zählt nicht
-    const kvKey = uploadLimitKey(userId, new Date());
+    const kvKey = uploadLimitKey(userId, bezug);
     const val = await env.PROFIL_KV.get(kvKey);
     const n = val ? parseInt(val) : 0;
     if (n > 0) await env.PROFIL_KV.put(kvKey, String(n - 1), { expirationTtl: 35 * 86400 });
@@ -916,7 +918,8 @@ export async function gibUploadZurueck(userId, env) {
 export async function anthropicFetchMitKontingent(kontoUid, env, url, init, optionen = {}) {
   const fetchFn = optionen.fetchFn || fetch;
   if (!kontoUid) return fetchFn(url, init);
-  const r = await reserviereUpload(kontoUid, env, optionen);
+  const reserviertAm = new Date(); // NL-F: Monat der Reservierung merken
+  const r = await reserviereUpload(kontoUid, env, { ...optionen, jetzt: reserviertAm });
   if (!r.erlaubt) {
     await gibKvZaehlerZurueck(kontoUid, env);
     const text = r.grund === 'limit'
@@ -928,8 +931,8 @@ export async function anthropicFetchMitKontingent(kontoUid, env, url, init, opti
     return new Response(text, { status: r.grund === 'limit' || r.grund === 'ausgelastet' ? 429 : 503, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'X-Kx-Sperre': r.grund } });
   }
   let res;
-  try { res = await fetchFn(url, init); } catch (e) { await gibUploadZurueck(kontoUid, env); throw e; }
-  if (!res.ok) await gibUploadZurueck(kontoUid, env);
+  try { res = await fetchFn(url, init); } catch (e) { await gibUploadZurueck(kontoUid, env, reserviertAm); throw e; }
+  if (!res.ok) await gibUploadZurueck(kontoUid, env, reserviertAm);
   return res;
 }
 async function gibKvZaehlerZurueck(userId, env) {

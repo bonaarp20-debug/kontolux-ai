@@ -116,3 +116,20 @@ test('N2: Beispieljahr im Monatsabschluss-Prompt ist nicht fest 2026', () => {
   assert.ok(!QUELLE.includes('"jahr": 2026, "einnahmen_gesamt"'));
   assert.ok(QUELLE.includes('"jahr": ${berlinDatumAlsString().slice(0, 4)}, "einnahmen_gesamt"'));
 });
+
+test('NL-F: Freigabe am Monatswechsel gibt die Reservierung im ALTEN Monat zurück, das neue Monatsdokument bleibt unberührt', async () => {
+  const env = await erzeugeTestEnv(); const fs = firestoreAttrappe();
+  try {
+    const alt = new Date(Date.UTC(2026, 9, 31, 12, 0, 0)); // Oktober
+    const neu = new Date(Date.UTC(2026, 10, 2, 12, 0, 0)); // November
+    const r = await reserviereUpload('uid-mw', env, { limit: 50, jetzt: alt });
+    assert.equal(r.erlaubt, true);
+    const rNeu = await reserviereUpload('uid-mw', env, { limit: 50, jetzt: neu });
+    assert.equal(rNeu.erlaubt, true);
+    assert.equal(fs.docs.get(uploadReservierungsKey('uid-mw', alt)).anzahl, 1);
+    assert.equal(fs.docs.get(uploadReservierungsKey('uid-mw', neu)).anzahl, 1);
+    await gibUploadZurueck('uid-mw', env, alt);
+    assert.equal(fs.docs.get(uploadReservierungsKey('uid-mw', alt)).anzahl, 0, 'alter Monat freigegeben');
+    assert.equal(fs.docs.get(uploadReservierungsKey('uid-mw', neu)).anzahl, 1, 'neuer Monat unberührt');
+  } finally { fs.restore(); }
+});
