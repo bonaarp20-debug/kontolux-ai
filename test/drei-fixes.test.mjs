@@ -26,7 +26,8 @@ test('/chat: Anhang zählt gegen das Upload-Limit', async () => {
   const dienste = mockExterneDienste({ users });
   try {
     await anfrage(env, { path: '/chat', body: pdfChat, headers: { Authorization: 'Bearer tok-a' }, ip: '203.0.113.51' });
-    assert.equal(env.PROFIL_KV._m.get(uploadKey('uid-a')), '1');
+    // G6-M5: der Mock-Anthropic antwortet mit 500, der gescheiterte Aufruf gibt die Reservierung zurück (Zähler zählt nur gelungene Uploads)
+    assert.equal(env.PROFIL_KV._m.get(uploadKey('uid-a')), '0');
     assert.equal(dienste.log.anthropic, 1);
   } finally { dienste.restore(); }
 });
