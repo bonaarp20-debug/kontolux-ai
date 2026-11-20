@@ -21,7 +21,7 @@ import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // 
 import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4)
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
-import { v2Vorbereiten, clientSteuerVorbereiten, v2RestFelder, nachFestschreibungAntwort } from './regel/schreibweg-v2.js';
+import { v2Vorbereiten, clientSteuerVorbereiten, v2RestFelder, nachFestschreibungAntwort, festPruefungMarkieren } from './regel/schreibweg-v2.js';
 // BP-21a-W (Phase 3): Steuerdaten je Plattformbeleg, OSS-Datenbasis, hinter Feature 'plattform'
 import { agbZustimmungAb, AGB_FASSUNG_RELEASE_B } from './regel/gemeinsam.js'; // KX-EB A6
 import { plattformAuswerten, plattformFeatureAn, plattformEingabe, plattformSteuerKennzeichnen, plattformDatenFeld, originalZurErstattung, stripeChargeLaden, paypalOrderLaden, refBereinigen, waehrungCode, hinweisAusland, HINWEIS_LAND_FEHLT } from './regel/plattform.js';
@@ -3184,6 +3184,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
         }
       }
 
+      await nachFestschreibungMarkieren(env, userId, v2); // ABSCHLUSS-FIX M2
       return new Response(JSON.stringify({
         success: true,
         docId: docId,
@@ -3388,6 +3389,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
         }
       }
 
+      await nachFestschreibungMarkieren(env, userId, v2); // ABSCHLUSS-FIX M2
       return new Response(JSON.stringify({
         success: true,
         docId: docId,
@@ -6416,6 +6418,15 @@ async function handleFestschreiben(pfad, body, env, cors) {
 // null (Beleg wie heute, die Migration erfasst ihn später). Geloggt werden nur Weg, Kern-Version und Codes.
 // Fahrplan: aus -> warnung (1 bis 2 Wochen, Zähler steuerkernZaehler/Log steuerkern_warnung) -> an (config kern_max 'an' zuerst für alle aus,
 // dann env 'an'; Notaus in Sekunden: config kern_max 'aus' oder env zurück); siehe docs/regelbesteuerung/15-phase2/bp13-bericht.md.
+// ABSCHLUSS-FIX (M2): nach dem Speichern eines Belegs in einem festgeschriebenen Zeitraum die Prüfung am Festschreibungsdokument markieren (wirft nie)
+async function nachFestschreibungMarkieren(env, userId, v2, adminToken = null) {
+  try {
+    if (!v2 || !Array.isArray(v2.nach_festschreibung) || !v2.nach_festschreibung.length) return;
+    const token = adminToken || await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    await festPruefungMarkieren({ uid: userId, token, fetchFn: (...a) => fetch(...a), perioden: v2.nach_festschreibung, zeit: new Date().toISOString() });
+  } catch { /* nie werfen */ }
+}
+
 async function schreibwegV2(env, weg, userId, token, belegRoh, felder, { nieAblehnen = false, plattformDaten = null } = {}) {
   const wegKennung = String(weg || 'unbekannt').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 40) || 'unbekannt';
   try {
@@ -6555,6 +6566,7 @@ export async function writeBelegAsAdmin(userId, belegData, env, adminToken) {
     }
   }
 
+  await nachFestschreibungMarkieren(env, userId, v2, adminToken); // ABSCHLUSS-FIX M2
   return { success: true, docId, ...(tagesbewegungWarnung ? { tagesbewegungWarnung } : {}) };
 }
 

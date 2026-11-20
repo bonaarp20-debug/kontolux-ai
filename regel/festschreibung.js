@@ -486,8 +486,10 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
       if (fs.rest >= 1) {
         // ABSCHLUSS-FIX M2: belege_geaendert = echte Belegänderung (neue Belege, Beleg-Fingerabdruck anders, bei Legacy die Quelle); kern_gewechselt = Kern-Version oder
         // Kern-Optionen haben gewechselt (Regeländerung, keine Belegänderung). Die App zeigt "nach der Festschreibung geändert" nur bei belege_geaendert.
-        const belegeGeaendert = alt.quelle === 'legacy_snapshot' ? !ergebnis.unveraendert : (ergebnis.belege_hash_gleich === false || (ergebnis.neue_belege || 0) > 0);
-        const pruefung = { am: zeit, unveraendert: !!ergebnis.unveraendert, belege_geaendert: !!belegeGeaendert, kern_gewechselt: !!(ergebnis.kern_gewechselt || ergebnis.kern_optionen_gewechselt), neue_belege: ergebnis.neue_belege ?? null, abweichungen: Array.isArray(ergebnis.abweichungen) ? ergebnis.abweichungen.length : null };
+        const kernWechsel = !!(ergebnis.kern_gewechselt || ergebnis.kern_optionen_gewechselt);
+        // Abweichung ohne Kern- oder Optionswechsel kann nur von den Belegen kommen (auch bei älterer Festschreibung mit v1-Hash, dort bleibt der Hash-Vergleich gleich)
+        const belegeGeaendert = alt.quelle === 'legacy_snapshot' ? !ergebnis.unveraendert : (ergebnis.belege_hash_gleich === false || (ergebnis.neue_belege || 0) > 0 || (!ergebnis.unveraendert && !kernWechsel));
+        const pruefung = { am: zeit, unveraendert: !!ergebnis.unveraendert, belege_geaendert: !!belegeGeaendert, kern_gewechselt: kernWechsel, neue_belege: ergebnis.neue_belege ?? null, abweichungen: Array.isArray(ergebnis.abweichungen) ? ergebnis.abweichungen.length : null };
         try { await fs.commit([schreibe.aendern(pfad, { pruefung }, ['pruefung'], { updateTime: festDok.updateTime }), ...lesestandLoeschen(uid, periodeId, body.aktion, gelesen)]); } catch (e) { if (!(e instanceof FirestoreFehler)) throw e; }
       }
       return antwort(ergebnis, 200, cors);
@@ -522,7 +524,8 @@ export async function regelFestschreibung(body, env, cors = {}, deps = {}) {
       }
       const nachId = new Map(zeilen.map((z) => [z.id, z]));
       const offen = ids.filter((id) => !sperrtSchon(nachId.get(id)?.daten, periodeId)).map((id) => offenEintrag(id, nachId.get(id)?.updateTime));
-      const neu = { ...alt, status: 'sperre_laeuft', belege_hash: await belegeHash(zeilen, ids), belege_anzahl: ids.length, sperre: { offen, gesamt: ids.length, erledigt: ids.length - offen.length }, letzte_anfrage_id: body.anfrage_id };
+      const { pruefung: _altePruefung, ...altOhnePruefung } = alt; // ABSCHLUSS-FIX: die alte Prüfung gilt für den vorigen Belegstand nicht mehr
+      const neu = { ...altOhnePruefung, status: 'sperre_laeuft', belege_hash: await belegeHash(zeilen, ids), belege_anzahl: ids.length, sperre: { offen, gesamt: ids.length, erledigt: ids.length - offen.length }, letzte_anfrage_id: body.anfrage_id };
       neu.audit_seq = naechsteSeq(kopfDok);
       const audit = await auditSchreibvorgaenge(uid, kopfDok, { aktion: 'festschreibung_start', ziel: periodeId, vorher: alt, nachher: neu, zeit, details: { status: 'sperre_laeuft', belege: ids.length, nachgeholt: true } });
       const r = await fs.commit([schreibe.setzen(pfad, neu, { updateTime: festDok.updateTime }), ...audit.writes, ...lesestandLoeschen(uid, periodeId, body.aktion, gelesen)]);

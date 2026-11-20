@@ -16,7 +16,7 @@
 // Kern-Ausnahme: kein v2, der Beleg wird wie heute geschrieben (später Migration), nie 5xx.
 import * as Steuerkern from '../steuerkern/index.js';
 import { envModus, effektiverKernModus, ablehnungErlaubt, NIE_ABLEHNEN_WEGE } from './kern-modus.js';
-import { erzeugeSchicht, kodiereWert, dekodiereFelder } from './firestore.js';
+import { erzeugeSchicht, kodiereWert, dekodiereFelder, schreibe } from './firestore.js';
 import { legacyHash } from './drift.js';
 import { istObjekt, codesBereinigen, CONFIG_PFAD, configBereinigen, featureAktiv, kernOptionenFuerKontoLaden } from './gemeinsam.js';
 
@@ -84,6 +84,30 @@ export function v2Entscheiden({ weg, eingabe, profil, legacy, stichtag, festPeri
 export function nachFestschreibungAntwort(v2) {
   const l = v2 && Array.isArray(v2.nach_festschreibung) ? v2.nach_festschreibung.filter((p) => typeof p === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(p)).slice(0, 12) : [];
   return l.length ? { nach_festschreibung: true, nach_festschreibung_perioden: l } : {};
+}
+
+// ABSCHLUSS-FIX (M2): Wurde ein Beleg in einen festgeschriebenen Zeitraum geschrieben, vermerkt der Worker das am Festschreibungsdokument
+// (pruefung.belege_geaendert = true, pruefung.am = jetzt), damit jede nächste Anzeige warnt, auch nach Neuladen oder auf einem anderen Gerät.
+// token: Dienstkonto (die Regeln sperren Schreiben an festschreibung für Clients). Wirft nie; nur Zeiträume mit Status 'festgeschrieben'.
+export async function festPruefungMarkieren({ uid, token, fetchFn, perioden, zeit }) {
+  const geschrieben = [];
+  try {
+    const liste = (Array.isArray(perioden) ? perioden : []).filter((p) => typeof p === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(p)).slice(0, 4);
+    if (!liste.length || !uid || !token) return geschrieben;
+    const schicht = erzeugeSchicht({ token, fetchFn, budget: 12 });
+    for (const p of liste) {
+      try {
+        const pfad = `users/${uid}/festschreibung/${p}`;
+        const d = await schicht.get(pfad);
+        if (!d || !istObjekt(d.daten) || d.daten.status !== 'festgeschrieben') continue;
+        const alt = istObjekt(d.daten.pruefung) ? d.daten.pruefung : {};
+        const pruefung = { ...alt, am: zeit, unveraendert: false, belege_geaendert: true, neue_belege: null };
+        await schicht.commit([schreibe.aendern(pfad, { pruefung }, ['pruefung'], { updateTime: d.updateTime })]);
+        geschrieben.push(p);
+      } catch { /* nächster Zeitraum; die 24-Stunden-Prüfung der App fängt es spätestens dann ab */ }
+    }
+  } catch { /* nie werfen: der Beleg ist gespeichert */ }
+  return geschrieben;
 }
 
 // REST-Felder, die der Aufrufer in sein metadata.fields übernimmt (gleicher PATCH)
