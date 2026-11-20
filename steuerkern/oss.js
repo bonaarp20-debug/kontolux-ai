@@ -179,7 +179,7 @@ function schwellenEintraege(belege, profil) {
       if (o.leistungsart !== 'ware' && o.leistungsart !== 'tbe') { eintraege.push({ id: b.id, tag, art: 'unsicher', grund: 'oss_leistungsart_fehlt', hinweis: 'W_OSS_LEISTUNGSART_FEHLT', min: 0, max: euro === null ? Infinity : Math.max(0, euro), b }); continue; }
       // OSS-FORM 5: eine Messgröße für Grenze und laufende Summe: das Netto bei deutscher Besteuerung (nettoDeutsch); ohne Kurs unbekannt
       const de = euro === null ? null : nettoDeutsch(o, tag, profil);
-      eintraege.push({ id: b.id, tag, art: 'eu', min: de === null ? 0 : de, max: de === null ? Infinity : de, kurs_fehlt: de === null, b });
+      eintraege.push({ id: b.id, tag, art: 'eu', min: de === null ? 0 : de, max: de === null ? Infinity : de, kurs_fehlt: de === null, kl: euro, b });
     } else if (bestaetigtUnter(s)) {
       const netto = Array.isArray(s.positionen) ? s.positionen.reduce((a, p) => a + (istCent(p.netto_cent) ? p.netto_cent : 0), 0) : 0;
       eintraege.push({ id: b.id, tag, art: 'bestaetigt', min: Math.max(0, netto), max: Math.max(0, netto), b });
@@ -270,6 +270,9 @@ function rechneSchwelle(belege, profil) {
     const hin = [];
     let fall;
     let grund = null;
+    // KERN-20 (Anwaltsfragen Frage 1, Konfidenz C): Am Schwellenbeleg zählt Kontolux das Netto bei deutscher Steuer (nettoDeutsch). Läge die Summe mit dem
+    // gespeicherten Netto (Steuer des Kundenlands) noch auf oder unter der Grenze, steht das offen im Hinweis; eine amtliche Rechenvorschrift gibt es nicht.
+    if (ueberschreitet && istCent(e.kl) && minVor + e.kl <= GRENZE) { hin.push('HN_OSS_GRENZUMSATZ_MESSUNG'); d.messung = true; }
     if (stufe === 'unklar') { fall = 'UNBEKANNT'; grund = 'oss_schwelle_unklar'; hin.push('W_OSS_SCHWELLE_UNKLAR'); if (!(d.vj.max < Infinity) && !d.vjUeber) hin.push('W_OSS_WERT_FEHLT'); if (e.kurs_fehlt) hin.push('W_OSS_KURS_FEHLT'); }
     else if (st === 'unbekannt') { fall = 'UNBEKANNT'; grund = 'oss_status_unbekannt'; }
     else if (stufe === 'unter') { fall = 'A_EU_B2C_UNTER_SCHWELLE'; hin.push('HN_OSS_UNTER_SCHWELLE'); }
@@ -464,6 +467,7 @@ export function ossSchwelle(belege, profil, jahr, optionen) {
   if (stufe === 'unbekannt') hinweise.push('W_OSS_SCHWELLE_UNKLAR');
   if (stufe === 'warnung') hinweise.push('W_OSS_SCHWELLE_80');
   if (stufe === 'ueberschritten') hinweise.push('W_OSS_SCHWELLE_UEBERSCHRITTEN');
+  if (d.messung && stufe === 'ueberschritten') hinweise.push('HN_OSS_GRENZUMSATZ_MESSUNG');
   if (d.ku_weiche) hinweise.push('W_OSS_KU_WEICHE');
   if (d.mit_korrektur) hinweise.push('HN_OSS_SCHWELLE_OHNE_MINDERUNG');
   hinweise.push(...verzichtHinweise(r.vz, J, d));

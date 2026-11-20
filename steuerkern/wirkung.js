@@ -21,7 +21,7 @@
 import { istCent, ustAusBrutto, ustAusNetto, teile, mulDivRund } from './geld.js';
 import { istDatum, jahrVon, addiereMonate, monatsende, periodenEnde, periodenArt, quartalVon, frist10Tag, zehnTageRegelVorjahr, ustPeriodeFuer } from './daten.js';
 import { voranmeldungsperiodeFuer, voranmeldungAm, versteuerungAm, statusAm, statusFuerAusgangsumsatz, gwgWahlFuer } from './steuerprofil.js';
-import { regelNachId, KATEGORIEN, GRENZEN, USTVA_ZEILEN, EUER_ZEILEN, STEUERSAETZE, BELEG_ARTEN, KORREKTUR_GRUENDE, basisKzFuerSatz, anbieterLage, SATZ_REGEL_BP, SATZ_ERMAESSIGT_BP } from './tabellen.js';
+import { regelNachId, afaKennzahl, KATEGORIEN, GRENZEN, USTVA_ZEILEN, EUER_ZEILEN, STEUERSAETZE, BELEG_ARTEN, KORREKTUR_GRUENDE, basisKzFuerSatz, anbieterLage, SATZ_REGEL_BP, SATZ_ERMAESSIGT_BP } from './tabellen.js';
 import { KORREKTUR_ARTEN, tagVonZeit, normalisiereAlt } from './beleg.js';
 import { ossBelegeVorbereiten, ossSatzPruefung, ossNettoEuro, ossSchwellenSpanne, OSS_FAELLE } from './oss.js';
 
@@ -111,6 +111,10 @@ function euerZeileFuer(kz, jahr) {
   const z = t.zeilen.find((r) => r.kz === kz);
   return z ? z.zeile : null;
 }
+
+// KERN-20 (N4 Zweitprüfung F1): Zeile der Anlage EÜR für einen Abschreibungseintrag nach seiner Art (tabellen.js afaKennzahl): 'software' Kz 131 (2026 Zeile 33),
+// sonst Kz 130 (2026 Zeile 34). Für die Liste der Abschreibungen in der App; der Kern selbst bucht keine laufende AfA.
+export function afaEuerZeile(art, jahr) { return euerZeileFuer(afaKennzahl(art), jahr); }
 
 function ustPeriode(profil, datum, hinweise) {
   const p = voranmeldungsperiodeFuer(profil, datum);
@@ -476,6 +480,20 @@ function gwgKosten(p) {
   const e = istCent(p.ust_enthalten_cent) && p.ust_enthalten_cent >= 0 && p.ust_enthalten_cent <= p.netto_cent ? p.ust_enthalten_cent : 0;
   return p.netto_cent - e;
 }
+// KERN-20 (Anwaltsfragen Frage 3, Konfidenz B): Grenzfall GWG: Rechnungsnetto über 800 EUR, nach dem im Anschaffungsjahr tatsächlich gezogenen
+// Skonto (netto, anteilig auf die Position) höchstens 800 EUR (§ 255 Abs. 1 S. 3 HGB; H 6.2 EStH). Kontolux rechnet dort nichts (gwg_ueber_800), nennt den Fall.
+function gwgNachSkontoUnterGrenze(s, p) {
+  const bis = istObjekt(s.leistung) && istDatum(s.leistung.bis) ? s.leistung.bis : null;
+  if (!bis || !Array.isArray(s.positionen)) return false;
+  const sk = aktiveZahlungen(s).reduce((t, z) => t + (z && istCent(z.skonto_cent) && z.skonto_cent > 0 && istDatum(z.datum) && jahrVon(z.datum) <= jahrVon(bis) ? z.skonto_cent : 0), 0);
+  if (sk <= 0) return false;
+  let netto = 0;
+  let brutto = 0;
+  for (const q of s.positionen) if (istObjekt(q) && istCent(q.netto_cent) && istCent(q.ust_cent)) { netto += q.netto_cent; brutto += q.netto_cent + q.ust_cent; }
+  if (netto <= 0 || brutto <= 0) return false;
+  const anteil = mulDivRund(mulDivRund(sk, netto, brutto), p.netto_cent, netto);
+  return gwgKosten(p) - anteil <= GRENZEN.GWG_NETTO.wert_cent;
+}
 function anlagegutHinweis(s) {
   if (s.richtung !== 'eingang' || KORREKTUR_ARTEN.includes(s.beleg_art) || !Array.isArray(s.positionen)) return false;
   for (const p of s.positionen) {
@@ -507,7 +525,16 @@ function anlagegutKandidat(s, p) {
   if (!istObjekt(p) || !istCent(p.netto_cent) || !istCent(p.ust_cent)) return false;
   const k = p.kategorie || s.kategorie || null;
   if (k === 'Abschreibung (AfA)' || k === 'GWG bis 800€') return true;
-  return gwgKosten(p) > GRENZEN.GWG_NETTO.wert_cent && anlagegutLage(s, k) === 'ausschluss';
+  const kosten = gwgKosten(p);
+  if (kosten > GRENZEN.GWG_NETTO.wert_cent) return anlagegutLage(s, k) === 'ausschluss';
+  // KERN-20 (M1 Zweitprüfung G4): Erklärt der Nutzer ausdrücklich ein Anlagegut (anlagegut: true), gilt das auch zwischen 250 und 800 EUR
+  // netto außerhalb der Kategorie "GWG bis 800€": Wahl Sammelposten (Kz 137, ein Fünftel je Jahr) bzw. Wahl GWG (Kz 132 im Anschaffungsjahr)
+  // statt Betriebsausgabe bei Zahlung (§ 6 Abs. 2, 2a EStG). Bis 250 EUR ist ohnehin Sofortabzug. Nur mit Kern-Option anlagegut_vorsteuer_sofort.
+  return kosten > GRENZEN.SAMMELPOSTEN_SOFORT.wert_cent && anlagegutErklaert(s);
+}
+function anlagegutErklaert(s) {
+  const kz = Array.isArray(s.kennzeichen) ? s.kennzeichen : [];
+  return s.anlagegut === true || kz.includes('anlagegut');
 }
 export function anlagegutPlan(s, profil) {
   if (!istObjekt(s) || s.richtung !== 'eingang' || KORREKTUR_ARTEN.includes(s.beleg_art) || !Array.isArray(s.positionen)) return null;
@@ -937,7 +964,7 @@ function nichtUnterstuetzt(s, opt, profil) {
       // TR4-kern-006 (§ 6 Abs. 2 S. 1, § 9b Abs. 1 EStG, EStR R 9b Abs. 2): Grenze netto, auch wenn die Vorsteuer nicht abziehbar ist (gwgKosten)
       const kosten = gwgKosten(p);
       if (k === 'GWG bis 800€') {
-        if (kosten > GRENZEN.GWG_NETTO.wert_cent) return { grund: 'gwg_ueber_800', hinweise: [] };
+        if (kosten > GRENZEN.GWG_NETTO.wert_cent) return { grund: 'gwg_ueber_800', hinweise: gwgNachSkontoUnterGrenze(s, p) ? ['HN_GWG_SKONTO_GRENZE'] : [] };
       } else if (kosten > GRENZEN.GWG_NETTO.wert_cent && anlagegutLage(s, k) === 'ausschluss') {
         // TR-euer-001 (Standard 06 Entscheidung 8): Der Kern bucht keine Anlagegüter über 800 EUR (kein AfA-Pfad, Sammelposten nur mit Wahl):
         // statt stiller Sofortausgabe wird der Beleg ausgeschlossen, mit Warnung W_ANLAGEGUT_PRUEFEN.
@@ -1202,6 +1229,11 @@ function ausgangWirkungen(s, profil, ctx, out, opt) {
   if (wechselAb !== null) {
     ctx.hinweise.push('HN_UMSATZ_ZAHLUNGSZEITRAUM_NACH_UEBERSCHREITEN');
     if (zahlungen.some((z) => z.datum < wechselAb)) { ctx.hinweise.push('W_WECHSEL_ANZAHLUNG_KZ65'); ctx.hinweise.push('HN_WECHSEL_ANZAHLUNG_VOLL_IN_KZ81'); }
+    // KERN-20 (N4 Zweitprüfung G4, § 13 Abs. 1 Nr. 4 UStG i. V. m. § 14c Abs. 2 UStG, Konfidenz C): Eine in der Kleinunternehmerzeit ausgestellte
+    // Rechnung mit ausgewiesener Steuer kann die Steuer nach § 14c Abs. 2 schon mit der Ausgabe der Rechnung (Rechnungsmonat) auslösen, nicht erst mit
+    // der Zahlung. Ob das neben der Besteuerung bei Vereinnahmung (UStAE 19.7) gilt, ist nicht geklärt: Kontolux bleibt beim Zahlungsmonat, nennt den
+    // Fall (nur Warnung, keine Zahl und kein Zwischenwert: ob die Rechnung Steuer auswies, steht im Beleg nicht fest).
+    if (istDatum(s.rechnungsdatum) && s.rechnungsdatum < wechselAb && statusAm(profil, s.rechnungsdatum).status === 'ku' && gruppen.some((g) => g.ust_cent > 0)) ctx.hinweise.push('W_14C_KU_RECHNUNG_ZEITPUNKT');
   }
   for (const h of ver.hinweise || []) if (typeof h === 'string' && h.startsWith('W_') && !ctx.hinweise.includes(h)) ctx.hinweise.push(h);
   if (teilzahlungMischsatz(gruppen, zahlungen, stichBis, ist)) ctx.hinweise.push('HN_TEILZAHLUNG_MISCHSATZ');
@@ -1479,7 +1511,16 @@ function zehnTageFenster(zahlung, kategorie, l) {
   return (dez(zahlung) && lj === zj + 1 && jan(l.bis)) || (jan(zahlung) && lj === zj - 1 && dez(l.bis));
 }
 
+// KERN-20 (M4 Zweitprüfung G4, Konfidenz C): Kfz-Kategorien, deren private Nutzung Kontolux nicht rechnet (Hinweis HN_KFZ_PRIVATANTEIL, einmal je
+// Zeitraum und Jahr, weil der Hinweiscode in den Listen der Voranmeldung und der EÜR nur einmal steht). Entfällt, wenn im Steuerprofil
+// kfz_privatnutzung (Text, zum Beispiel 'fahrtenbuch', 'ein_prozent', 'keine') eingetragen ist.
+export const KFZ_KATEGORIEN_KERN = Object.freeze(['Kfz-Kosten', 'Kfz-Leasing', 'Kfz-Steuern/Versicherung']);
+function kfzOhnePrivatanteil(s, profil) {
+  if (istObjekt(profil) && typeof profil.kfz_privatnutzung === 'string' && profil.kfz_privatnutzung.length > 0) return false;
+  return Array.isArray(s.positionen) && s.positionen.some((p) => istObjekt(p) && KFZ_KATEGORIEN_KERN.includes(p.kategorie || s.kategorie || null));
+}
 function eingangWirkungen(s, profil, ctx, out, opt) {
+  if (!KORREKTUR_ARTEN.includes(s.beleg_art) && kfzOhnePrivatanteil(s, profil) && !ctx.hinweise.includes('HN_KFZ_PRIVATANTEIL')) ctx.hinweise.push('HN_KFZ_PRIVATANTEIL');
   const l = s.leistung;
   const teil = istTeilleistung(s);
   const gruppen = gruppiere(s, teil);

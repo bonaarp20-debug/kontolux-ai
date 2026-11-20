@@ -600,6 +600,12 @@ export const FA_KATEGORIE_ZU_ART = Object.freeze({
 });
 
 // Gründe für einen Statuswechsel im Zeitstrahl (Konzept 3.4).
+// KERN-20 (N4 Zweitprüfung F1): Art eines Abschreibungseintrags. 'software' (Betriebs- und Anwendersoftware, immaterielles Wirtschaftsgut) steht in der
+// Anlage EÜR in Zeile 33 (2026) bzw. 32 (2025), Kz 131; alles andere (auch Computer-Hardware, ein bewegliches Wirtschaftsgut) in Zeile 34 bzw. 33, Kz 130
+// (Vordruck und Anleitung laut BMF 29.08.2025 und 01.09.2026). Ohne Angabe (art fehlt oder unbekannt) Kz 130 wie bisher.
+export const AFA_ARTEN = Object.freeze(['beweglich', 'software']);
+export function afaKennzahl(art) { return art === 'software' ? 131 : 130; }
+
 export const STATUS_GRUENDE = Object.freeze(['beginn', 'vorjahr_ueber_25k', 'laufend_ueber_100k', 'gruendung_ueber_25k', 'option_19_3', 'widerruf_option', 'freiwillig_wechsel', 'rueckwechsel_unter_grenze']);
 
 // ---------------------------------------------------------------------------------------------
@@ -621,6 +627,9 @@ export const KATEGORIEN = frieren([
   kat('Reisekosten', 'ausgabe', 221, { hinweis: 'nur Übernachtungs- und Reisenebenkosten' }),
   kat('Fortbildung', 'ausgabe', 281),
   kat('Kfz-Kosten', 'ausgabe', 146, { hinweis: 'sonstige tatsächliche Fahrtkosten ohne AfA und Zinsen' }),
+  // KERN-20 (N3 Zweitprüfung F1): Kz 144 und 145 sind jetzt über eigene Kategorien erreichbar. Bestehende Belege der Kategorie 'Kfz-Kosten' bleiben auf Kz 146.
+  kat('Kfz-Leasing', 'ausgabe', 144, { hinweis: 'Kfz: Leasingkosten (Anlage EÜR 2026 Zeile 69, 2025 Zeile 68)' }),
+  kat('Kfz-Steuern/Versicherung', 'ausgabe', 145, { hinweis: 'Kfz: Steuern, Versicherungen und Maut (Anlage EÜR 2026 Zeile 70, 2025 Zeile 69)' }),
   kat('Miete/Raumkosten', 'ausgabe', 150),
   kat('Wareneinkauf 19%', 'ausgabe', 100),
   kat('Wareneinkauf 7%', 'ausgabe', 100),
@@ -1239,7 +1248,7 @@ export const REGELN_KORREKTUREN = frieren([
   {
     regel_id: 'R-EUER-21',
     felder: {
-      regel: 'Kfz (Leasing, Steuern/Versicherung, sonstige) (Kz 144, 145, 146): Kategorie-Netto. Im Kern gibt es nur die Kategorie Kfz-Kosten auf Kz 146; Kz 144 und 145 sind nicht erreichbar (teilweise).',
+      regel: 'Kfz (Leasing, Steuern/Versicherung, sonstige) (Kz 144, 145, 146): Kategorie-Netto. Seit Kern 2026.11.16-20 gibt es die Kategorien Kfz-Leasing (Kz 144), Kfz-Steuern/Versicherung (Kz 145) und Kfz-Kosten (Kz 146); bestehende Kfz-Kosten bleiben auf Kz 146.',
     },
     begruendung: 'Gesamtprüfung 10 (Regeln-1, niedrig): Kz 144/145 haben keine Kategorie.',
   },
@@ -1445,7 +1454,7 @@ export const REGEL_UMSETZUNG = Object.freeze({
   'R-EUER-06': U('noch_nicht', 'Nutzereingabe, nicht im Kern.'), 'R-EUER-07': U('noch_nicht', 'Nutzereingabe, nicht im Kern.'), 'R-EUER-08': U('noch_nicht', 'Nutzereingabe, nicht im Kern.'),
   'R-EUER-09': U('teilweise', 'Der Kern bucht keine Abschreibung. Ohne Kern-Option anlagegut_vorsteuer_sofort wird der ganze Beleg ausgeschlossen; mit Option rechnet die Voranmeldung, die EÜR-Wirkung der Anschaffungskosten ist ausgeschlossen (W_ANLAGEGUT_AFA_NICHT_BERECHNET). KERN-D: mit Wahl und Skonto/gemischten Positionen/Sonderfall rechnet die Voranmeldung wie ohne Wahl; nicht sauber rechenbarer EÜR-Teil als Zwischenwert (W_ANLAGEGUT_EUER_ZWISCHENWERT, Kleinunternehmer _KU). KERN-E: wie ohne Wahl nur bei voller Zahlung im Anschaffungsjahr (G-KD-1); § 13b-Anlagegut mit rc_eingang EÜR-Zwischenwert (G-KD-2); Korrektur auf ein Anlagegut macht die EÜR ab dem Korrekturjahr zum Zwischenwert (W_ANLAGEGUT_KORREKTUR, G-KD-6).', 'wirkung.js:function anlagegutEuer'), 'R-EUER-11': U('umgesetzt', 'Sammelposten (ein Fünftel je Jahr, Kz 137) nach gwg_wahl, hinter der Kern-Option anlagegut_vorsteuer_sofort (Feature anlagegut).', 'wirkung.js:function anlagegutEuer'),
   'R-EUER-12': U('noch_nicht', 'Restbuchwerte nicht im Kern.'), 'R-EUER-20': U('noch_nicht', 'Keine Kategorie, Kz 162/168/172/163 nicht erreichbar.'),
-  'R-EUER-21': U('teilweise', 'nur Kategorie Kfz-Kosten auf Kz 146; Kz 144/145 nicht erreichbar.'),
+  'R-EUER-21': U('umgesetzt', 'Kategorien Kfz-Leasing (Kz 144), Kfz-Steuern/Versicherung (Kz 145), Kfz-Kosten (Kz 146); die private Nutzung rechnet der Kern nicht (HN_KFZ_PRIVATANTEIL).', 'wirkung.js:KFZ_KATEGORIEN_KERN'),
   'R-EUER-10': U('umgesetzt', 'GWG bis 800 EUR netto; GWG-FIX (Kern -14): auch ohne Kern-Option im Wirtschaftsjahr der Anschaffung, wenn eine Zahlung in einem anderen Jahr liegt (wie mit Wahl gwg)', 'wirkung.js:function gwgJahrWeg'), 'R-EUER-13': U('umgesetzt', 'Kategorie Telefon/Internet auf Kz 280', 'wirkung.js:ausgabeKz'),
   'R-EUER-22': U('umgesetzt', 'Summe der Ausgabenzeilen', 'euer.js:gewinn_cent'), 'R-EUER-32': U('umgesetzt', 'Gewinn Kleinunternehmer', 'euer.js:gewinn_cent'),
   'R-EUER-33': U('teilweise', 'KATEGORIEN mit EÜR-Kz im Kern, SKR-Konten nur als Lücke U.'),
