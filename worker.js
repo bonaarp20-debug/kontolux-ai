@@ -3047,9 +3047,25 @@ function firestoreFehlerKlasse(errText) {
   return 'FEHLER';
 }
 
+// ZUV-G5 M3: Beleg anlegen idempotent. Der Client schickt eine anfrage_id; sie wird zur Dokument-ID (beleg_manual_<id> / beleg_<id>) und das Anlegen
+// geschieht nur mit Vorbedingung exists=false. Eine Wiederholung (Netzabbruch nach Erfolg, Doppelklick) bestätigt den vorhandenen Beleg mit 200
+// statt 409 und schreibt nichts ein zweites Mal (kein zweiter Zähler, keine zweite Tagesbuchung). Ohne anfrage_id gilt das bisherige Verhalten.
+function belegAnfrageIdAus(body) {
+  const a = body && body.anfrage_id;
+  return typeof a === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(a) ? a : null;
+}
+async function belegSchonDa(userId, token, docId) {
+  try { return !!(await firestoreGetDoc(`users/${userId}/dokumente/${docId}`, token)); } catch { return false; }
+}
+function belegVorbedingungVerletzt(status, errText) {
+  const k = firestoreFehlerKlasse(errText);
+  return k === 'ALREADY_EXISTS' || k === 'FAILED_PRECONDITION' || status === 409;
+}
+
 async function handleDocument(body, env, cors = {}, ctx) {
   if (textEingabenUngueltig(body)) return ungueltigeEingabeAntwort(cors);
   let { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz, datum, content, sellerNameHint, e_rechnung_format, duplikatBestaetigt, kategorie, sachkonto, buchungstext, betrag_netto, bezahlt_am: bezahlt_am_client } = body;
+  const belegAnfrageId = belegAnfrageIdAus(body); // ZUV-G5 M3
   // Grenzen gegen überlange Eingaben und unrealistische Beträge (Security-Audit 2026-10-16).
   const MAX_BETRAG = 10000000;
   if (betrag !== undefined && betrag !== null && betrag !== '' && Math.abs(parseFloat(betrag)) > MAX_BETRAG) {
@@ -3128,6 +3144,12 @@ async function handleDocument(body, env, cors = {}, ctx) {
       // findeBelegDuplikat in index.html). Hat der Nutzer dort bereits bestätigt
       // (duplikatBestaetigt), wird dieser Backstop übersprungen — sonst gäbe es keine
       // Möglichkeit, eine bewusst bestätigte Dopplung tatsächlich zu speichern.
+      // ZUV-G5 M3: Wiederholung derselben anfrage_id nach Erfolg bestätigt den vorhandenen Beleg (vor dem Duplikat-Check)
+      const docIdManuell = belegAnfrageId ? `beleg_manual_${belegAnfrageId}` : null;
+      if (docIdManuell && await belegSchonDa(userId, token, docIdManuell)) {
+        return new Response(JSON.stringify({ success: true, docId: docIdManuell, name: `Beleg von ${absender}`, typ: typ || 'rechnung_eingehend', message: 'Beleg erfolgreich gespeichert', idempotent: true }), { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
+      }
+
       if (!duplikatBestaetigt) try {
         const existingDocs = await belegeSeit(userId, token, Date.now() - 10 * 60 * 1000);
         const windowStart = Date.now() - 10 * 60 * 1000;
@@ -3147,8 +3169,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
       } catch(e) { console.warn('Duplikat-Check (BELEG_MANUELL):', e.message); }
 
       // Speichere DIREKT in Firestore (nur Metadaten, keine Datei)
-      const docId = `beleg_manual_${Date.now()}_${crypto.randomUUID().slice(0, 6)}`;
-      const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}`;
+      const docId = docIdManuell || `beleg_manual_${Date.now()}_${crypto.randomUUID().slice(0, 6)}`;
+      const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}${belegAnfrageId ? '?currentDocument.exists=false' : ''}`;
 
       const metadata = {
         fields: {
@@ -3213,6 +3235,10 @@ async function handleDocument(body, env, cors = {}, ctx) {
 
       if (!firestoreRes.ok) {
         const errText = await firestoreRes.text();
+        // ZUV-G5 M3: gleichzeitige Wiederholung: der Beleg wurde zwischen Prüfung und Schreiben von der ersten Anfrage angelegt
+        if (belegAnfrageId && belegVorbedingungVerletzt(firestoreRes.status, errText)) {
+          return new Response(JSON.stringify({ success: true, docId, name: `Beleg von ${absender}`, typ: typ || 'rechnung_eingehend', message: 'Beleg erfolgreich gespeichert', idempotent: true }), { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
+        }
         // Nur Statuscode und Fehlerklasse loggen: der Fehlertext enthält Dokumentpfad (UID) und Feldinhalte (TR-integration-007)
         console.error('Firestore Error:', firestoreRes.status, firestoreFehlerKlasse(errText));
         return new Response(JSON.stringify({ error: 'Speichern fehlgeschlagen' }), {
@@ -3311,6 +3337,12 @@ async function handleDocument(body, env, cors = {}, ctx) {
       // das gesamte Belegarchiv, der Nutzer entscheidet dort per Modal. duplikatBestaetigt
       // überspringt diesen Backstop, sonst könnte eine bewusst bestätigte Dopplung nie
       // tatsächlich gespeichert werden.
+      // ZUV-G5 M3: Wiederholung derselben anfrage_id nach Erfolg bestätigt den vorhandenen Beleg (vor dem Duplikat-Check)
+      const docIdDatei = belegAnfrageId ? `beleg_${belegAnfrageId}` : null;
+      if (docIdDatei && await belegSchonDa(userId, token, docIdDatei)) {
+        return new Response(JSON.stringify({ success: true, docId: docIdDatei, name: name || 'Beleg', storage_url: storageUrl, typ: typ || 'rechnung_eingehend', message: 'Beleg erfolgreich gespeichert', idempotent: true }), { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
+      }
+
       if (!duplikatBestaetigt) try {
         const existingDocs = await belegeSeit(userId, token, Date.now() - 10 * 60 * 1000);
         const windowStart = Date.now() - 10 * 60 * 1000;
@@ -3337,8 +3369,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
         }
       } catch(e) { console.warn('Duplikat-Check (BELEG_SPEICHERN):', e.message); }
 
-      const docId = `beleg_${Date.now()}_${crypto.randomUUID().slice(0, 6)}`;
-      const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}`;
+      const docId = docIdDatei || `beleg_${Date.now()}_${crypto.randomUUID().slice(0, 6)}`;
+      const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}${belegAnfrageId ? '?currentDocument.exists=false' : ''}`;
 
       const sizeBytes = size || 0;
       const sizeFormatted = sizeBytes > 1024 * 1024
@@ -3415,6 +3447,9 @@ async function handleDocument(body, env, cors = {}, ctx) {
 
       if (!firestoreRes.ok) {
         const errText = await firestoreRes.text();
+        if (belegAnfrageId && belegVorbedingungVerletzt(firestoreRes.status, errText)) { // ZUV-G5 M3
+          return new Response(JSON.stringify({ success: true, docId, name: name || 'Beleg', storage_url: storageUrl, typ: typ || 'rechnung_eingehend', message: 'Beleg erfolgreich gespeichert', idempotent: true }), { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
+        }
         console.error('Firestore Error:', firestoreRes.status, firestoreFehlerKlasse(errText));
         return new Response(JSON.stringify({
           error: `Firestore Error ${firestoreRes.status}`

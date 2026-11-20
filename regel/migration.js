@@ -44,7 +44,7 @@ import * as Steuerkern from '../steuerkern/index.js';
 import MANIFEST from '../steuerkern/MANIFEST.json' with { type: 'json' };
 import {
   antwort, fehlerAntwort, grundpruefung, istObjekt, CONFIG_PFAD, configBereinigen, featureAktiv, periodeAusId, jetztIso, schichtFuer, regelFehler,
-  ANFRAGE_ID_MUSTER, kanonisch, sha256Hex, kernOptionenFuerKontoLaden,
+  ANFRAGE_ID_MUSTER, kanonisch, sha256Hex, kernOptionenFuerKontoLaden, listeAlle
 } from './gemeinsam.js';
 import { schreibe, vorbedingungAus, vollerName, FirestoreFehler, BudgetFehler } from './firestore.js';
 import { auditSchreibvorgaenge, kopfPfad } from './audit.js';
@@ -498,7 +498,7 @@ async function laufStarten(fs, uid, body, sicherung, zeit, cors, altbestandGrenz
   if (art === 'migration' && !profilBereit(profil)) return fehlerAntwort(409, 'PROFIL_NICHT_BESTAETIGT', cors);
   const [abschluesse, fest, plattformen] = await Promise.all([
     art === 'migration' ? fs.list(`users/${uid}/monatsabschluesse`, { pageSize: 300 }) : Promise.resolve({ dokumente: [] }),
-    fs.list(`users/${uid}/festschreibung`, { pageSize: 300 }),
+    listeAlle(fs, `users/${uid}/festschreibung`),
     art === 'migration' ? fs.list(`users/${uid}/webhook_secrets`, { pageSize: 30 }) : Promise.resolve({ dokumente: [] }),
   ]);
   // Rücknahme ist nach einer Festschreibung nicht ohne Entsperren möglich (Konzept 3.8.5 Schritt 6)
@@ -697,7 +697,7 @@ async function klaerungAusfuehren(fs, uid, body, zeit, cors) {
   let einheiten = ids.map((id) => klaerungEinheit(uid, id, docs.get(dokPfad(uid, id)), kontext));
   // Festgeschriebene und gerade gesperrte Zeiträume nur lesen, wenn überhaupt etwas geschrieben würde (eine Unteranfrage)
   if (einheiten.some((e) => e.write)) {
-    const liste = await fs.list(`users/${uid}/festschreibung`, { pageSize: 300 });
+    const liste = await listeAlle(fs, `users/${uid}/festschreibung`);
     kontext.festPerioden = liste.dokumente.filter((d) => ['festgeschrieben', 'sperre_laeuft'].includes(d.daten && d.daten.status)).map((d) => String(d.pfad).split('/').pop());
     if (kontext.festPerioden.length) einheiten = ids.map((id) => klaerungEinheit(uid, id, docs.get(dokPfad(uid, id)), kontext));
   }

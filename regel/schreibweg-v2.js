@@ -18,7 +18,7 @@ import * as Steuerkern from '../steuerkern/index.js';
 import { envModus, effektiverKernModus, ablehnungErlaubt, NIE_ABLEHNEN_WEGE } from './kern-modus.js';
 import { erzeugeSchicht, kodiereWert, dekodiereFelder, schreibe } from './firestore.js';
 import { legacyHash } from './drift.js';
-import { istObjekt, codesBereinigen, CONFIG_PFAD, configBereinigen, featureAktiv, kernOptionenFuerKontoLaden } from './gemeinsam.js';
+import { istObjekt, codesBereinigen, CONFIG_PFAD, configBereinigen, featureAktiv, kernOptionenFuerKontoLaden, listeAlle } from './gemeinsam.js';
 
 const FORMAL = /^PF_(SCHEMA|STEUER|CENT|SUMME|BETRAG_ZU_GROSS|DATUM_FORMAT|SATZ|POSITIONEN|BELEG_ART|RICHTUNG|STEUERFALL)/;
 const ZAHLUNG = /^PF_ZAHLUNG_/;
@@ -136,7 +136,7 @@ export async function v2Vorbereiten(deps) {
   const profil = istObjekt(roh) && Array.isArray(roh.status_verlauf) ? roh : null;
   if (effektiverKernModus(deps.env, docs.get(CONFIG_PFAD) ? docs.get(CONFIG_PFAD).daten : null) !== 'an') return { aus: true, ablehnen: false, codes: [], steuer: null, profil, felder: {} };
   if (!profilBereit(profil)) return { ablehnen: false, codes: ['V2_PROFIL_NICHT_BESTAETIGT'], steuer: null, profil, felder: {} };
-  const liste = await schicht.list(`users/${uid}/festschreibung`, { pageSize: 300 });
+  const liste = await listeAlle(schicht, `users/${uid}/festschreibung`);
   const festPerioden = liste.dokumente.filter((d) => SPERRENDE.includes(d.daten && d.daten.status)).map((d) => String(d.pfad).split('/').pop());
   const legacy = dekodiereFelder(deps.felder || {});
   const eingabe = deps.eingabeFn(deps.weg, deps.belegRoh, deps.stichtag);
@@ -226,7 +226,7 @@ export async function clientSteuerVorbereiten(deps) {
   const profil = istObjekt(roh) && Array.isArray(roh.status_verlauf) ? roh : null;
   const config = configBereinigen(docs.get(CONFIG_PFAD) ? docs.get(CONFIG_PFAD).daten : null);
   if (!config || config.kern_max === 'aus' || !featureAktiv(config, 'beleg_formular') || !profilBereit(profil)) return { ignoriert: true, ablehnen: false, codes: [], steuer: null, profil, felder: {} };
-  const liste = await schicht.list(`users/${deps.uid}/festschreibung`, { pageSize: 300 });
+  const liste = await listeAlle(schicht, `users/${deps.uid}/festschreibung`);
   const festPerioden = liste.dokumente.filter((d) => SPERRENDE.includes(d.daten && d.daten.status)).map((d) => String(d.pfad).split('/').pop());
   const e = clientSteuerPruefen({ steuer: deps.steuer, legacy: dekodiereFelder(deps.felder || {}), stichtag: deps.stichtag, festPerioden, profil, kernOptionen: await kernOptionenFuerKontoLaden(deps.uid, config, { fs: schicht }) }); // E-B (A1); FIX-EB (F4): Zustimmung je Konto
   return { ...e, profil, felder: v2RestFelder(e, deps.zeit || new Date().toISOString()) };

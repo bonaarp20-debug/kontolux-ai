@@ -18,7 +18,7 @@
 import * as Steuerkern from '../steuerkern/index.js';
 import {
   antwort, fehlerAntwort, grundpruefung, istObjekt, istText, istDatum, nurSchluessel, CONFIG_PFAD, configBereinigen, featureAktiv,
-  festgeschriebenBis, jetztIso, codesBereinigen, schichtFuer, regelFehler, periodeAusId,
+  festgeschriebenBis, jetztIso, codesBereinigen, schichtFuer, regelFehler, periodeAusId, listeAlle
 } from './gemeinsam.js';
 import { schreibe, vorbedingungAus } from './firestore.js';
 import { auditSchreibvorgaenge, kopfPfad, hashVon } from './audit.js';
@@ -226,6 +226,46 @@ export function gwgWahlFestgeschrieben(neu, alt, festDokumente) {
   return null;
 }
 
+// ZUV-G5 H2: OSS-Angaben und EU-Privatkunden-Sammelbestätigung wirken rückwirkend auf USt-Zeiträume (OSS-Zuordnung, Schwelle). Ändert sich ein Wert
+// und liegt ein festgeschriebener USt-Zeitraum im betroffenen Bereich, wird abgelehnt (Rückgabe: dessen Id). Gleiche Werte erneut senden ist erlaubt.
+//  eu_b2c_grenze 'JJJJ': betrifft USt-Zeiträume des Jahres JJJJ.
+//  oss.registriert_ab / verzicht_ab / verzicht_widerruf_ab: betrifft alle Zeiträume ab dem früheren von altem und neuem Datum.
+//  oss.jahre_cent 'JJJJ' (Vorjahreswert): betrifft USt-Zeiträume des Folgejahres JJJJ+1.
+export function ossAenderungFestgeschrieben(neuSd, altKern, festDokumente) {
+  const ab = [];   // Mindestdatum je Änderung
+  const jahre = []; // genau diese Jahre
+  const gleich = (a, b) => (a === undefined || a === null ? null : a) === (b === undefined || b === null ? null : b);
+  if (neuSd.eu_b2c_grenze) {
+    const a = istObjekt(altKern.eu_b2c_grenze) ? altKern.eu_b2c_grenze : {};
+    for (const [k, e] of Object.entries(neuSd.eu_b2c_grenze)) {
+      const v = istObjekt(a[k]) ? a[k].unter_grenze : undefined;
+      if (!istObjekt(e) || v !== e.unter_grenze) jahre.push(Number(k));
+    }
+  }
+  if (neuSd.oss) {
+    const a = istObjekt(altKern.oss) ? altKern.oss : {};
+    for (const k of ['verzicht_ab', 'registriert_ab', 'verzicht_widerruf_ab']) {
+      if (neuSd.oss[k] === undefined || gleich(a[k], neuSd.oss[k])) continue;
+      const kand = [a[k], neuSd.oss[k]].filter((x) => typeof x === 'string');
+      ab.push(kand.sort()[0]);
+    }
+    if (neuSd.oss.jahre_cent) {
+      const aj = istObjekt(a.jahre_cent) ? a.jahre_cent : {};
+      for (const [k, c] of Object.entries(neuSd.oss.jahre_cent)) if (!gleich(aj[k], c)) jahre.push(Number(k) + 1);
+    }
+  }
+  if (!ab.length && !jahre.length) return null;
+  for (const d of festDokumente || []) {
+    if (!d || !istObjekt(d.daten) || d.daten.status !== 'festgeschrieben') continue;
+    const id = String(d.pfad || '').split('/').pop();
+    const p = periodeAusId(id);
+    if (!p || p.art !== 'ust') continue;
+    const y = Number(p.periode.slice(0, 4));
+    if (jahre.includes(y) || ab.some((t) => p.ende >= t)) return id;
+  }
+  return null;
+}
+
 export function stammdatenBereinigen(s, heute) {
   if (!istObjekt(s) || !nurSchluessel(s, ['beruf_art', 'gruendung', 'vorjahr', 'limit_bestaetigungen', 'eu_b2c_grenze', 'oss', 'gwg_wahl'])) return { fehler: [F('FELD_NICHT_ERLAUBT')] };
   const x = {};
@@ -304,6 +344,7 @@ export function neuesProfil(aktion, body, alt, kontext) {
       // Zeitstrahl in zeitlicher Reihenfolge aufbauen; jeder Schritt durch die Wechselprüfung des Kerns (E6)
       bereinigt.sort((a, b) => (a.gueltig_ab < b.gueltig_ab ? -1 : a.gueltig_ab > b.gueltig_ab ? 1 : 0));
       for (const e of bereinigt) {
+        if (opt.festgeschriebenBis && e.gueltig_ab <= opt.festgeschriebenBis) { fehler.push({ code: 'IN_FESTGESCHRIEBENEM_ZEITRAUM', bereich, gueltig_ab: e.gueltig_ab }); continue; } // ZUV-G5 H2
         const r = Steuerkern.eintragHinzufuegen(profil, bereich, e, opt);
         if (!r.pruefung.ok) fehler.push(...r.pruefung.fehler.map((x) => ({ code: x.code, bereich, gueltig_ab: e.gueltig_ab })));
         else { profil = r.profil; warnungen.push(...r.pruefung.warnungen); }
@@ -325,6 +366,9 @@ export function neuesProfil(aktion, body, alt, kontext) {
     const r = eintragBereinigen(bereich, body.eintrag, kontext);
     if (r.fehler) return { fehler: r.fehler };
     warnungen.push(...r.warnungen);
+    // ZUV-G5 H2: Jeder Eintrag mit gueltig_ab im festgeschriebenen Zeitraum wird abgelehnt; ein entsperr_grund hebt das NICHT auf (nur die Rücknahme
+    // der Festschreibung öffnet den Zeitraum). Der Kern (entsperrGrund) bleibt für die Rückdatierung vor den letzten Eintrag zuständig.
+    if (opt.festgeschriebenBis && r.eintrag.gueltig_ab <= opt.festgeschriebenBis) return { fehler: [F('IN_FESTGESCHRIEBENEM_ZEITRAUM')], status: 409 };
     const k = Steuerkern.eintragHinzufuegen(altKern, bereich, r.eintrag, opt);
     if (!k.pruefung.ok) return { fehler: k.pruefung.fehler.map((x) => F(x.code)) };
     warnungen.push(...k.pruefung.warnungen);
@@ -341,7 +385,7 @@ export function neuesProfil(aktion, body, alt, kontext) {
     let idx = -1;
     liste.forEach((e, i) => { if (istObjekt(e) && istDatum(e.gueltig_ab) && e.gueltig_ab <= ende && (idx < 0 || e.gueltig_ab >= liste[idx].gueltig_ab)) idx = i; });
     if (idx < 0 || liste[idx].art !== 'ist') return { fehler: [F('KEIN_IST_EINTRAG')], status: 409 };
-    if (opt.festgeschriebenBis && `${jahr}-01-01` <= opt.festgeschriebenBis && !(opt.entsperrGrund && opt.entsperrGrund.trim().length >= 10)) return { fehler: [F('IN_FESTGESCHRIEBENEM_ZEITRAUM')] };
+    if (opt.festgeschriebenBis && `${jahr}-01-01` <= opt.festgeschriebenBis) return { fehler: [F('IN_FESTGESCHRIEBENEM_ZEITRAUM')], status: 409 }; // ZUV-G5 H2: kein Aufheben per Grund
     const e = liste[idx];
     const jahre = Array.isArray(e.bestaetigte_jahre) ? e.bestaetigte_jahre.filter((j) => Number.isSafeInteger(j)) : [];
     if (jahre.includes(jahr)) return { fehler: [F('JAHR_BEREITS_BESTAETIGT')], status: 409 };
@@ -369,6 +413,10 @@ export function neuesProfil(aktion, body, alt, kontext) {
     if (sd.stammdaten.gwg_wahl) {
       const fest = gwgWahlFestgeschrieben(sd.stammdaten.gwg_wahl, altKern.gwg_wahl, kontext.festDokumente);
       if (fest) return { fehler: [F('GWG_WAHL_FESTGESCHRIEBEN', { periode: fest })], status: 409 };
+    }
+    if (sd.stammdaten.oss || sd.stammdaten.eu_b2c_grenze) {
+      const fest = ossAenderungFestgeschrieben(sd.stammdaten, altKern, kontext.festDokumente);
+      if (fest) return { fehler: [F('OSS_ANGABE_FESTGESCHRIEBEN', { periode: fest })], status: 409 };
     }
     const profil = { ...altKern, ...sd.stammdaten, version: altVersion + 1 };
     if (sd.stammdaten.oss) { const o = ossMischen(altKern.oss, sd.stammdaten.oss); if (o) profil.oss = o; else delete profil.oss; }
@@ -433,7 +481,8 @@ export async function regelSteuerprofil(body, env, cors = {}, deps = {}) {
     // Festgeschriebene Zeiträume schützen den Zeitstrahl vor Rückdatierung (pruefeWechsel festgeschriebenBis)
     const brauchtFest = ['anlegen', 'eintrag', 'ist_jahr_bestaetigen'].includes(body.aktion);
     // FIX-G: die GWG-Wahl braucht die Liste ebenfalls (EÜR-Monate des Jahres und der vier Folgejahre, gwgWahlFestgeschrieben)
-    const festDokumente = brauchtFest || mitGwgWahl ? (await fs.list(`users/${uid}/festschreibung`, { pageSize: 300 })).dokumente : null;
+    const mitOssAngabe = body.aktion === 'stammdaten' && istObjekt(body.stammdaten) && (body.stammdaten.oss !== undefined || body.stammdaten.eu_b2c_grenze !== undefined); // ZUV-G5 H2
+    const festDokumente = brauchtFest || mitGwgWahl || mitOssAngabe ? (await listeAlle(fs, `users/${uid}/festschreibung`)).dokumente : null;
     const fest = brauchtFest ? festgeschriebenBis(festDokumente) : null;
     const kontext = { heute, uid, storageUrlOk: deps.storageUrlOk || (() => false), festgeschriebenBis: fest, festDokumente: festDokumente || [] };
     const r = neuesProfil(body.aktion, body, alt, kontext);

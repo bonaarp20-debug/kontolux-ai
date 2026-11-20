@@ -571,6 +571,7 @@ async function legacyUebernehmen(uid, body, cors, deps, zeit) {
     let uebernommen = 0;
     let abgeglichen = 0;
     const offenEntsperren = [];
+    const abgelehnt = []; // ZUV-G5 M5
     for (const a of abschluesse) {
       const legacyId = String(a.pfad).split('/').pop();
       const monat = monatAusAbschlussId(legacyId);
@@ -581,6 +582,10 @@ async function legacyUebernehmen(uid, body, cors, deps, zeit) {
       const istFest = a.daten.festgeschrieben === true;
       if (istFest && (!v || (v.quelle === 'legacy_snapshot' && ['entsperrt', 'abgebrochen'].includes(v.status)))) {
         if (uebernommen >= LEGACY_MAX_JE_AUFRUF) continue;
+        // ZUV-G5 M5: Wieder-Festschreiben mit einem vom Nutzer gelieferten Schnappschuss nach einer Rücknahme zählt gegen dieselbe Grenze wie die
+        // Rücknahme im Worker-Weg (ZU_VIELE_RUECKNAHMEN, 50). Darüber hinaus übernimmt der Worker den neuen Schnappschuss nicht mehr (der Monat bleibt
+        // entsperrt, die Antwort nennt ihn unter abgelehnt); ein Fortgang geht nur über die Festschreibung im Worker-Weg.
+        if (v && Array.isArray(v.entsperrt) && v.entsperrt.length >= ENTSPERRT_MAX) { abgelehnt.push(pid); continue; }
         const ls = await legacySnapshot(a.daten);
         const neu = {
           art: 'euer', periode: monat, status: 'festgeschrieben', quelle: 'legacy_snapshot', von: 'nutzer', legacy_id: legacyId,
@@ -589,7 +594,7 @@ async function legacyUebernehmen(uid, body, cors, deps, zeit) {
           kern_version: Steuerkern.KERN_VERSION, belege_gesperrt: false, entsperrt: Array.isArray(v?.entsperrt) ? v.entsperrt.slice(-ENTSPERRT_MAX) : [],
           letzte_anfrage_id: body.anfrage_id, schema: 2,
         };
-        eintraege.push({ e: { aktion: 'festschreibung_legacy', ziel: pid, vorher: v || undefined, nachher: neu, details: { status: 'festgeschrieben', quelle: 'legacy_snapshot' } }, pfad: festPfad(uid, pid), neu, vor: vorbedingungAus(vorhanden) });
+        eintraege.push({ e: { aktion: 'festschreibung_legacy', ziel: pid, vorher: v || undefined, nachher: neu, details: { status: 'festgeschrieben', quelle: 'legacy_snapshot', ...(v ? { nach_ruecknahme: true, ruecknahmen: Array.isArray(v.entsperrt) ? v.entsperrt.length : 0 } : {}) } }, pfad: festPfad(uid, pid), neu, vor: vorbedingungAus(vorhanden) });
         uebernommen++;
       } else if (!istFest && v && v.quelle === 'legacy_snapshot' && v.status === 'festgeschrieben') {
         // Im Altsystem entsperrt (festgeschrieben false + entsperr_grund): die Übernahme zieht nach, mit dem Grund aus dem Altdokument
@@ -602,7 +607,7 @@ async function legacyUebernehmen(uid, body, cors, deps, zeit) {
         abgeglichen++;
       }
     }
-    if (!eintraege.length) return antwort({ ok: true, uebernommen: 0, abgeglichen: 0, offen_entsperren: [], weiter: false }, 200, cors);
+    if (!eintraege.length) return antwort({ ok: true, uebernommen: 0, abgeglichen: 0, offen_entsperren: [], weiter: false, ...(abgelehnt.length ? { abgelehnt } : {}) }, 200, cors);
     const kopfDok = docs.get(kopfPfad(uid));
     const erste = naechsteSeq(kopfDok);
     eintraege.forEach((x, i) => {
@@ -612,7 +617,7 @@ async function legacyUebernehmen(uid, body, cors, deps, zeit) {
     });
     const kette = await auditKette(uid, kopfDok, eintraege.map((x) => x.e), zeit);
     await fs.commit([...eintraege.map((x) => schreibe.setzen(x.pfad, x.neu, x.vor)), ...kette.writes]);
-    return antwort({ ok: true, uebernommen, abgeglichen, offen_entsperren: offenEntsperren, weiter: uebernommen >= LEGACY_MAX_JE_AUFRUF }, 200, cors);
+    return antwort({ ok: true, uebernommen, abgeglichen, offen_entsperren: offenEntsperren, weiter: uebernommen >= LEGACY_MAX_JE_AUFRUF, ...(abgelehnt.length ? { abgelehnt } : {}) }, 200, cors);
   } catch (e) {
     if (e instanceof BudgetFehler) return fehlerAntwort(503, 'BUDGET_ERSCHOEPFT', cors);
     return regelFehler(e, 'festschreibung', cors);
