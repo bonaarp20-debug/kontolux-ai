@@ -8,10 +8,10 @@
     "drift.js": "14063c9f43ca36148da3ebcf9e33c6ded5fd5f51a7b65cd6abda2b08e4d3c923",
     "euer.js": "d64b935c1a066c4bb7546c2c9e71589b7696a7f4823f6396adecefadf1e0c43b",
     "geld.js": "5088847eac9557f12b327656bf7625c450027045fd057eb9f00f5f95c9970f8c",
-    "hinweise.js": "0fd6e42d4c169ba85e87bcb4c034ebecb07f57c459f6a6e09d003cccba7a120a",
+    "hinweise.js": "d068407ab78a366acee0fa882b8e17d4939924a39fa20a7f8c1243010e36a2ff",
     "index.js": "558883f8ee7f413dd3b1f4b46b61a75636b4b73c1fdedffa9773f33922462677",
     "migration.js": "01b1bab1770f9a4657904d3612a60ac48fd65cf1706d966212f5142383852edf",
-    "oss.js": "26020985eadcf630f0cdbdde2009d05d7ce4477668564f32b34b2409358d561e",
+    "oss.js": "236f39ab3fd9b9d6574e185203e7eb1991170634a2b0f6c9fb9afe649193b06d",
     "regeln-basis.js": "7d00a83387e05624861ec60c6f042fed429156c417bc9784f39dd9eb68f6b832",
     "steuerprofil.js": "6c22f8e86a39c22a97d97621aceee76d186804b7b790727a5dc37d663c8f668b",
     "tabellen.js": "a4ca10f1eb36fd0c014eb4ac35043b981c494d6d4e36b8569ce9a32d445de2f1",
@@ -22,7 +22,7 @@
     "golden/pruefberichte.json": "400df2a102a7668c1539dc54eb36c027ce95f5e69b71103190c10e1d7361b843",
     "golden/referenzfaelle.json": "0cf69711097ca1439605b9fd96d0b7978de1d2b8b32316a71706964bf1067136"
   },
-  "erzeugt": "2026-11-20T13:48:43.857Z",
+  "erzeugt": "2026-11-20T15:00:22.051Z",
   "nur_app": [
     "schatten.js"
   ]

@@ -213,13 +213,8 @@ function vorjahrGrenzen(profil, jahr, summen) {
 function rechneSchwelle(belege, profil) {
   const { eintraege, korrekturen } = schwellenEintraege(belege, profil);
   const oss = istObjekt(profil) && istObjekt(profil.oss) ? profil.oss : {};
-  const verzichtAb = datumAb(oss.verzicht_ab);
-  const registriertAb = datumAb(oss.registriert_ab);
-  // OSS-KERN-16 (ABWEICHUNGEN 5.32): Der ausdrückliche Verzicht gilt ab Beginn des Kalenderjahres, für das er erklärt ist (UStAE 3a.9a Abs. 1 S. 1 Nr. 1
-  // S. 4 über 3c.1 Abs. 1 S. 3, B); die Registrierung zählt als Verzicht ab ihrem Tag (Annahme nach BZSt, C, HN_OSS_REGISTRIERUNG_ALS_VERZICHT). Ein
-  // Widerruf (verzicht_widerruf_ab) beendet beides ab seinem Tag; vor Ablauf der Bindung (§ 3c Abs. 4 S. 3 UStG) nur mit HN_OSS_VERZICHT_BINDUNG.
-  const verzichtStart = verzichtAb ? `${verzichtAb.slice(0, 4)}-01-01` : null;
-  const widerrufAb = datumAb(oss.verzicht_widerruf_ab);
+  const vz = verzichtDaten(profil);
+  const { verzichtAb, registriertAb } = vz;
   // Summen je Jahr (alle zählenden Einträge)
   const summen = new Map();
   for (const e of eintraege) {
@@ -257,10 +252,14 @@ function rechneSchwelle(belege, profil) {
     }
     if (e.art !== 'eu') { d.unsicher.push(e.id); if (e.art === 'unsicher') faelle.set(e.id, { fall: 'UNBEKANNT', grund: e.grund, hinweise: [e.hinweis], datum: e.tag }); continue; }
     if (e.kurs_fehlt) d.unsicher.push(e.id);
-    const verzicht = ((verzichtStart && e.tag >= verzichtStart) || (registriertAb && e.tag >= registriertAb)) && !(widerrufAb && e.tag >= widerrufAb);
+    const explVerzicht = vz.explWirkt(e.tag);
+    const regVerzicht = vz.regWirkt(e.tag);
+    const verzicht = explVerzicht || regVerzicht;
     // OSS-FORM 4: Überschreiten mit dem Netto bei deutscher Besteuerung (nettoDeutsch, oben); ab dem Schwellenbeleg gilt das Kundenland
     const ueberschreitet = !d.vjUeber && !d.schwellenbeleg && minVor <= GRENZE && d.min > GRENZE;
     if (ueberschreitet) d.schwellenbeleg = { beleg_id: e.id, datum: e.tag, betrag_cent: e.min, summe_cent: d.min };
+    // OSS-KERN-16 (Gegenlesung 3): dieser Beleg ist nur wegen der Annahme Registrierung = Verzicht beim Kundenland
+    if (regVerzicht && !explVerzicht && !(d.vjUeber || d.min > GRENZE || d.schwellenbeleg)) d.annahme_reg = true;
     let stufe;
     if (d.vjUeber || d.min > GRENZE || d.schwellenbeleg || verzicht) stufe = 'ueber';
     else if (d.vjUnter && d.max <= GRENZE) stufe = 'unter';
@@ -298,7 +297,43 @@ function rechneSchwelle(belege, profil) {
     if (o.fall !== 'A_DRITTLAND_B2C_TBE' && datum > korrekturGrenze(o.datum)) { offenK('oss_korrektur_spaet', 'W_OSS_KORREKTUR_SPAET', datum); continue; }
     faelle.set(b.id, { ...o, hinweise: o.hinweise.slice(), korrektur: true, original_id: oid, datum_original: o.datum, datum });
   }
-  return { faelle, proJahr, verzichtAb, registriertAb, verzichtStart, widerrufAb };
+  return { faelle, proJahr, verzichtAb, registriertAb, vz };
+}
+
+// OSS-KERN-16 (ABWEICHUNGEN 5.32): Wirkung des Verzichts auf die Grenze aus profil.oss. Der ausdrückliche Verzicht (verzicht_ab) gilt ab Beginn des
+// Kalenderjahres, für das er erklärt ist (UStAE 3a.9a Abs. 1 S. 1 Nr. 1 S. 4 über 3c.1 Abs. 1 S. 3, B); die Registrierung (registriert_ab) zählt als Verzicht
+// ab ihrem Tag (Annahme nach BZSt, C). Der Widerruf (verzicht_widerruf_ab) beendet nur, was VOR ihm begonnen hat (Gegenlesung 2); auf oder vor dem Beginn
+// wirkt er nicht (HN_OSS_WIDERRUF_OHNE_WIRKUNG). Bindung zwei Kalenderjahre (§ 3c Abs. 4 S. 3 UStG) nur als Hinweis (HN_OSS_VERZICHT_BINDUNG).
+function verzichtDaten(profil) {
+  const oss = istObjekt(profil) && istObjekt(profil.oss) ? profil.oss : {};
+  const verzichtAb = datumAb(oss.verzicht_ab);
+  const registriertAb = datumAb(oss.registriert_ab);
+  const verzichtStart = verzichtAb ? `${verzichtAb.slice(0, 4)}-01-01` : null;
+  const widerrufAb = datumAb(oss.verzicht_widerruf_ab);
+  const ende = (start) => (start && widerrufAb && start < widerrufAb ? widerrufAb : null);
+  const explEnde = ende(verzichtStart);
+  const regEnde = ende(registriertAb);
+  const wirkt = (start, bis) => (tag) => !!start && tag >= start && !(bis && tag >= bis);
+  return { verzichtAb, registriertAb, verzichtStart, widerrufAb, explEnde, regEnde, explWirkt: wirkt(verzichtStart, explEnde), regWirkt: wirkt(registriertAb, regEnde) };
+}
+// Karte (Gegenlesung 1, 7): Wirkung des Verzichts im Jahr: { ab, nicht_mehr_ab, verzicht, registrierung } oder null. nicht_mehr_ab = erster Tag ohne
+// Verzicht im Jahr (null, wenn er bis Jahresende wirkt). Nur Profilangaben, keine Belege.
+export function ossVerzichtImJahr(profil, jahr) {
+  const J = Number(jahr);
+  if (!Number.isSafeInteger(J)) return null;
+  const vz = verzichtDaten(profil);
+  const anfang = `${String(J).padStart(4, '0')}-01-01`;
+  const folge = `${String(J + 1).padStart(4, '0')}-01-01`;
+  const teile = [];
+  for (const [art, start, bis] of [['verzicht', vz.verzichtStart, vz.explEnde], ['registrierung', vz.registriertAb, vz.regEnde]]) {
+    if (!start) continue;
+    const von = start > anfang ? start : anfang;
+    const nach = bis && bis < folge ? bis : folge;
+    if (von < nach) teile.push({ art, von, nach });
+  }
+  if (!teile.length) return null;
+  const nach = teile.map((t) => t.nach).sort().pop();
+  return { ab: teile.map((t) => t.von).sort()[0], nicht_mehr_ab: nach < folge ? nach : null, verzicht: teile.some((t) => t.art === 'verzicht'), registrierung: teile.some((t) => t.art === 'registrierung') };
 }
 
 // Letzter Tag, bis zu dem eine Korrektur dem Fall ihres Originals folgt: 31.12. des vierten Jahres nach dem Leistungstag des Originals. Deckt die
@@ -418,7 +453,7 @@ export function ossSchwelle(belege, profil, jahr, optionen) {
   if (stufe === 'ueberschritten') hinweise.push('W_OSS_SCHWELLE_UEBERSCHRITTEN');
   if (d.ku_weiche) hinweise.push('W_OSS_KU_WEICHE');
   if (d.mit_korrektur) hinweise.push('HN_OSS_SCHWELLE_OHNE_MINDERUNG');
-  hinweise.push(...verzichtHinweise(r, J, stufe));
+  hinweise.push(...verzichtHinweise(r.vz, J, d));
   // Lineare Prognose aus der sicheren Summe bis zum letzten Beleg (nur Anzeige)
   let prognose = null;
   if ((stufe === 'ok' || stufe === 'warnung') && d.min > 0 && d.letzter) {
@@ -455,22 +490,24 @@ export function ossSchwelle(belege, profil, jahr, optionen) {
   };
 }
 // OSS-KERN-16 (ABWEICHUNGEN 5.32): Hinweise zum Verzicht im Jahr J (ändern keine Zahl)
-function verzichtHinweise(r, J, stufe) {
+function verzichtHinweise(vz, J, d) {
   const out = [];
   const anfang = `${String(J).padStart(4, '0')}-01-01`;
   const ende = `${String(J).padStart(4, '0')}-12-31`;
-  const { verzichtAb, registriertAb, verzichtStart, widerrufAb } = r;
-  const widerrufBis = (tag) => widerrufAb && widerrufAb <= tag;
+  const { verzichtAb, registriertAb, verzichtStart, widerrufAb } = vz;
   // Verzicht mitten im Jahr: wirkt ab 01.01. dieses Jahres (UStAE 3a.9a Abs. 1 S. 1 Nr. 1 S. 4, B)
-  if (verzichtAb && verzichtAb.slice(0, 4) === anfang.slice(0, 4) && verzichtAb !== anfang && !widerrufBis(anfang)) out.push('HN_OSS_VERZICHT_JAHRESBEGINN');
-  // Registrierung ohne ausdrücklichen Verzicht unter der Grenze: Kontolux nimmt einen Verzicht an (BZSt; BMF-Auskunft laut DIHK 2021 anders, C)
-  const ausdruecklich = verzichtStart && verzichtStart <= ende;
-  if (registriertAb && registriertAb <= ende && !ausdruecklich && stufe !== 'ueberschritten' && !widerrufBis(registriertAb > anfang ? registriertAb : anfang)) out.push('HN_OSS_REGISTRIERUNG_ALS_VERZICHT');
-  // Widerruf vor Ablauf von zwei Kalenderjahren ab dem ersten Verzichtsjahr (§ 3c Abs. 4 S. 3 UStG, A); Hinweis ab dem Jahr des Widerrufs bis zum Ende der Bindung
-  const beginn = [verzichtStart, registriertAb].filter(Boolean).sort()[0] || null;
-  if (widerrufAb && beginn && widerrufAb > beginn) {
+  // (Gegenlesung 8: ein Widerruf wirkt nur nach dem Beginn 01.01., also nie am 01.01. des Verzichtsjahres; keine weitere Bedingung nötig)
+  if (verzichtAb && verzichtAb.slice(0, 4) === anfang.slice(0, 4) && verzichtAb !== anfang) out.push('HN_OSS_VERZICHT_JAHRESBEGINN');
+  // Ein Beleg des Jahres liegt nur wegen der Registrierung beim Kundenland: Kontolux nimmt einen Verzicht an (BZSt; BMF-Auskunft laut DIHK 2021 anders, C)
+  if (d && d.annahme_reg) out.push('HN_OSS_REGISTRIERUNG_ALS_VERZICHT');
+  // Widerruf ohne früher begonnenen Verzicht: wirkt nicht (Gegenlesung 2)
+  const starts = [verzichtStart, registriertAb].filter(Boolean).sort();
+  if (widerrufAb && starts.length && !vz.explEnde && !vz.regEnde && starts[0].slice(0, 4) <= anfang.slice(0, 4)) out.push('HN_OSS_WIDERRUF_OHNE_WIRKUNG');
+  // Widerruf vor Ablauf von zwei Kalenderjahren ab dem ersten Jahr jedes Beginns (§ 3c Abs. 4 S. 3 UStG, A; Gegenlesung 6: je Beginn geprüft)
+  for (const beginn of starts) {
+    if (!(widerrufAb && beginn < widerrufAb)) continue;
     const bindungEnde = `${String(Number(beginn.slice(0, 4)) + 2).padStart(4, '0')}-01-01`;
-    if (widerrufAb < bindungEnde && widerrufAb <= ende && anfang < bindungEnde) out.push('HN_OSS_VERZICHT_BINDUNG');
+    if (widerrufAb < bindungEnde && widerrufAb <= ende && anfang < bindungEnde) { out.push('HN_OSS_VERZICHT_BINDUNG'); break; }
   }
   return out;
 }
