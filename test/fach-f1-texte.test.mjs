@@ -9,6 +9,6 @@ assert.ok(seed.includes('§ 19 Abs. 2 UStG') && !seed.includes('§ 19 Abs. 3 USt
 assert.ok(seed.includes('Summe der Entgelte netto') && seed.includes('selbst Bauleistungen erbringt'));
 assert.ok(seed.includes('der Bruttobetrag ist keine Pflichtangabe'));
 const w = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
-assert.ok(!/Mobiltelefon\/Smartphone: 5 Jahre/.test(w) && !/Tablet, Desktop-Thin-Client/.test(w));
-assert.ok(w.includes('meist 1 bis 5 Jahre, je nach Gerät'));
+assert.ok(w.includes('Tablet-Computer (Bildschirm ab 9 Zoll)') && w.includes('Mobiltelefon/Smartphone 5 Jahre (im BMF-Schreiben 2022 nicht genannt)'));
+assert.ok(!w.includes('meist 1 bis 5 Jahre'));
 console.log('test-fach-f1-texte: ok');
