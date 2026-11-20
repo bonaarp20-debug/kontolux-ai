@@ -77,9 +77,15 @@ test('H2: OSS-Angaben und EU-Grenze rückwirkend in festgeschriebenen Quartalen:
   // Verzicht neu ab Q2 des festgeschriebenen Jahres
   assert.deepEqual(code(stamm({ oss: { verzicht_ab: '2026-04-01' } })), ['OSS_ANGABE_FESTGESCHRIEBEN']);
   // EU-Privatkunden-Grenze: Änderung für 2026 (Q1/Q2 festgeschrieben) abgelehnt, gleiche Antwort erlaubt, anderes Jahr erlaubt
-  assert.deepEqual(code(stamm({ eu_b2c_grenze: { 2026: { unter_grenze: false } } })), ['OSS_ANGABE_FESTGESCHRIEBEN']);
-  assert.equal(stamm({ eu_b2c_grenze: { 2026: { unter_grenze: true } } }).fehler, undefined);
-  assert.equal(stamm({ eu_b2c_grenze: { 2025: { unter_grenze: false } } }).fehler, undefined);
+  // NL-B: der Schlüssel JJJJ ist die Vorjahresfrage und wirkt auf JJJJ+1: Änderung für 2025 wirkt auf 2026 (festgeschrieben) = 409
+  assert.deepEqual(code(stamm({ eu_b2c_grenze: { 2025: { unter_grenze: false } } })), ['OSS_ANGABE_FESTGESCHRIEBEN']);
+  assert.equal(stamm({ eu_b2c_grenze: { 2025: { unter_grenze: false } } }).status, 409);
+  assert.equal(stamm({ eu_b2c_grenze: { 2026: { unter_grenze: true } } }).fehler, undefined, 'gleiche Antwort erlaubt');
+  assert.equal(stamm({ eu_b2c_grenze: { 2026: { unter_grenze: false } } }).fehler, undefined, 'Frage 2026 wirkt erst auf 2027 (offen)');
+  // nur 2025 festgeschrieben: Vorjahresfrage 2025 wirkt auf 2026 (offen) = erlaubt
+  const nur2025 = [{ pfad: `users/${UID}/festschreibung/ust-2025-Q4`, daten: { status: 'festgeschrieben' } }];
+  assert.equal(ossAenderungFestgeschrieben({ eu_b2c_grenze: { 2025: { unter_grenze: false } } }, alt, nur2025), null);
+  assert.ok(ossAenderungFestgeschrieben({ eu_b2c_grenze: { 2024: { unter_grenze: false } } }, alt, nur2025), 'Frage 2024 wirkt auf 2025 (festgeschrieben)');
   // Vorjahreswert 2025 wirkt auf 2026 (festgeschrieben): abgelehnt; Wert für 2024 wirkt auf 2025 (offen): erlaubt
   assert.deepEqual(code(stamm({ oss: { jahre_cent: { 2025: 100000 } } })), ['OSS_ANGABE_FESTGESCHRIEBEN']);
   assert.equal(stamm({ oss: { jahre_cent: { 2024: 100000 } } }).fehler, undefined);
@@ -246,4 +252,32 @@ test('M3: ohne anfrage_id wie bisher (zufällige ID, kein Vorbedingungs-Paramete
     assert.equal(c.status, 200);
     assert.match(c.json.docId, /^beleg_manual_\d+_/);
   } finally { m.restore(); }
+});
+
+test('NL-C: 409 mit ABORTED ist kein „Beleg schon da“: ohne Beleg 503, nie 200 idempotent; mit vorhandenem Beleg weiterhin Bestätigung', async () => {
+  const m = belegMock();
+  const unter = globalThis.fetch;
+  let abbrechen = true;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (abbrechen && init.method === 'PATCH' && /\/dokumente\/beleg_manual_/.test(url) && url.includes('currentDocument.exists=false')) {
+      return new Response(JSON.stringify({ error: { code: 409, status: 'ABORTED', message: 'x' } }), { status: 409 });
+    }
+    return unter(input, init);
+  };
+  try {
+    const env = await erzeugeTestEnv({ STEUERKERN_MODUS: 'aus' });
+    const a = await manuell(env, { anfrage_id: 'kxaborted00001' });
+    assert.equal(a.status, 503, JSON.stringify(a.json));
+    assert.notEqual(a.json.idempotent, true);
+    assert.equal(m.dokumente.size, 0, 'kein Beleg angelegt');
+    // Beleg ist schon da (erste Anfrage kam an), dann antwortet die zweite mit ABORTED: Nachlesen bestätigt
+    abbrechen = false;
+    const b = await manuell(env, { anfrage_id: 'kxaborted00002' });
+    assert.equal(b.status, 200, JSON.stringify(b.json));
+    abbrechen = true;
+    const c = await manuell(env, { anfrage_id: 'kxaborted00002' });
+    assert.equal(c.status, 200, JSON.stringify(c.json));
+    assert.equal(c.json.idempotent, true);
+  } finally { globalThis.fetch = unter; m.restore(); }
 });

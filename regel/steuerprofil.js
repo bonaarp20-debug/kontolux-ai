@@ -229,7 +229,7 @@ export function gwgWahlFestgeschrieben(neu, alt, festDokumente) {
 
 // ZUV-G5 H2: OSS-Angaben und EU-Privatkunden-Sammelbestätigung wirken rückwirkend auf USt-Zeiträume (OSS-Zuordnung, Schwelle). Ändert sich ein Wert
 // und liegt ein festgeschriebener USt-Zeitraum im betroffenen Bereich, wird abgelehnt (Rückgabe: dessen Id). Gleiche Werte erneut senden ist erlaubt.
-//  eu_b2c_grenze 'JJJJ': betrifft USt-Zeiträume des Jahres JJJJ.
+//  eu_b2c_grenze 'JJJJ' (Vorjahresfrage): betrifft USt-Zeiträume des Folgejahres JJJJ+1 (der Kern wertet sie nur als Vorjahresgrenze).
 //  oss.registriert_ab / verzicht_ab / verzicht_widerruf_ab: betrifft alle Zeiträume ab dem früheren von altem und neuem Datum.
 //  oss.jahre_cent 'JJJJ' (Vorjahreswert): betrifft USt-Zeiträume des Folgejahres JJJJ+1.
 export function ossAenderungFestgeschrieben(neuSd, altKern, festDokumente) {
@@ -240,7 +240,7 @@ export function ossAenderungFestgeschrieben(neuSd, altKern, festDokumente) {
     const a = istObjekt(altKern.eu_b2c_grenze) ? altKern.eu_b2c_grenze : {};
     for (const [k, e] of Object.entries(neuSd.eu_b2c_grenze)) {
       const v = istObjekt(a[k]) ? a[k].unter_grenze : undefined;
-      if (!istObjekt(e) || v !== e.unter_grenze) jahre.push(Number(k));
+      if (!istObjekt(e) || v !== e.unter_grenze) jahre.push(Number(k) + 1); // NL-B: der Kern liest eu_b2c_grenze[J] als Vorjahresangabe für J+1 (steuerkern/oss.js vorjahrGrenzen)
     }
   }
   if (neuSd.oss) {

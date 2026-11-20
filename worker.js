@@ -3168,7 +3168,13 @@ async function belegSchonDa(userId, token, docId) {
 }
 function belegVorbedingungVerletzt(status, errText) {
   const k = firestoreFehlerKlasse(errText);
-  return k === 'ALREADY_EXISTS' || k === 'FAILED_PRECONDITION' || status === 409;
+  // NL-C: Nur ALREADY_EXISTS/FAILED_PRECONDITION heißen „Beleg schon da“. Firestore liefert 409 auch bei ABORTED (Transaktionskonflikt): das ist kein Beleg.
+  return k === 'ALREADY_EXISTS' || k === 'FAILED_PRECONDITION';
+}
+// Bei 409 mit anderer Klasse (ABORTED o. ä.): den Beleg nachlesen. Vorhanden = idempotente Bestätigung, sonst Fehler 503 (nie 200 ohne Beleg).
+async function belegNachlesen409(status, userId, token, docId) {
+  if (status !== 409) return null;
+  return (await belegSchonDa(userId, token, docId)) ? 'da' : 'fehlt';
 }
 
 async function handleDocument(body, env, cors = {}, ctx) {
@@ -3347,6 +3353,11 @@ async function handleDocument(body, env, cors = {}, ctx) {
         // ZUV-G5 M3: gleichzeitige Wiederholung: der Beleg wurde zwischen Prüfung und Schreiben von der ersten Anfrage angelegt
         if (belegAnfrageId && belegVorbedingungVerletzt(firestoreRes.status, errText)) {
           return new Response(JSON.stringify({ success: true, docId, name: `Beleg von ${absender}`, typ: typ || 'rechnung_eingehend', message: 'Beleg erfolgreich gespeichert', idempotent: true }), { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
+        }
+        if (belegAnfrageId) {
+          const n409 = await belegNachlesen409(firestoreRes.status, userId, token, docId); // NL-C
+          if (n409 === 'da') return new Response(JSON.stringify({ success: true, docId, name: `Beleg von ${absender}`, typ: typ || 'rechnung_eingehend', message: 'Beleg erfolgreich gespeichert', idempotent: true }), { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
+          if (n409 === 'fehlt') return new Response(JSON.stringify({ error: 'Speichern fehlgeschlagen, bitte noch einmal versuchen' }), { status: 503, headers: { ...cors, 'Content-Type': 'application/json' } });
         }
         // Nur Statuscode und Fehlerklasse loggen: der Fehlertext enthält Dokumentpfad (UID) und Feldinhalte (TR-integration-007)
         console.error('Firestore Error:', firestoreRes.status, firestoreFehlerKlasse(errText));
@@ -3558,6 +3569,11 @@ async function handleDocument(body, env, cors = {}, ctx) {
         const errText = await firestoreRes.text();
         if (belegAnfrageId && belegVorbedingungVerletzt(firestoreRes.status, errText)) { // ZUV-G5 M3
           return new Response(JSON.stringify({ success: true, docId, name: name || 'Beleg', storage_url: storageUrl, typ: typ || 'rechnung_eingehend', message: 'Beleg erfolgreich gespeichert', idempotent: true }), { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
+        }
+        if (belegAnfrageId) {
+          const n409 = await belegNachlesen409(firestoreRes.status, userId, token, docId); // NL-C
+          if (n409 === 'da') return new Response(JSON.stringify({ success: true, docId, name: name || 'Beleg', storage_url: storageUrl, typ: typ || 'rechnung_eingehend', message: 'Beleg erfolgreich gespeichert', idempotent: true }), { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
+          if (n409 === 'fehlt') return new Response(JSON.stringify({ error: 'Speichern fehlgeschlagen, bitte noch einmal versuchen' }), { status: 503, headers: { ...cors, 'Content-Type': 'application/json' } });
         }
         console.error('Firestore Error:', firestoreRes.status, firestoreFehlerKlasse(errText));
         return new Response(JSON.stringify({
