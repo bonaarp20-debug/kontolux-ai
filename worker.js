@@ -21,7 +21,7 @@ import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // 
 import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4)
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
-import { v2Vorbereiten, clientSteuerVorbereiten, v2RestFelder } from './regel/schreibweg-v2.js';
+import { v2Vorbereiten, clientSteuerVorbereiten, v2RestFelder, nachFestschreibungAntwort } from './regel/schreibweg-v2.js';
 // BP-21a-W (Phase 3): Steuerdaten je Plattformbeleg, OSS-Datenbasis, hinter Feature 'plattform'
 import { agbZustimmungAb, AGB_FASSUNG_RELEASE_B } from './regel/gemeinsam.js'; // KX-EB A6
 import { plattformAuswerten, plattformFeatureAn, plattformEingabe, plattformSteuerKennzeichnen, plattformDatenFeld, originalZurErstattung, stripeChargeLaden, paypalOrderLaden, refBereinigen, waehrungCode, hinweisAusland, HINWEIS_LAND_FEHLT } from './regel/plattform.js';
@@ -908,7 +908,29 @@ function bereinigeProfilUpdate(rest) {
   return ok.length ? ok.join(',') : 'keine';
 }
 
+// ABSCHLUSS-FIX C3-M1: Rechnungs-, Mahnungs- und Angebotsnummer aus dem Befehl nur im festen Muster (wie im Client). "auto"/leer bleibt erlaubt.
+const KI_NUMMER_MUSTER = /^[A-Za-z0-9._/\- ]{1,40}$/;
+const KI_NUMMER_BEFEHLE_RE = /(RECHNUNG_ERSTELLEN|MAHNUNG_ERSTELLEN|ANGEBOT_ERSTELLEN|ANGEBOT_KONVERTIEREN|ZEIT_ABRECHNEN|REISE_ABRECHNEN|RECHNUNG_STORNIEREN):(.*)$/i;
+const KI_BEFEHLS_SCHLUESSEL = ['absender_name', 'empfaenger_name', 'empfaenger_anrede', 'empfaenger_adresse', 'leistung', 'leistungsdatum', 'zahlungsziel', 'betrag_netto', 'rechnungsnummer', 'angebotsnummer',
+  'steuernummer', 'eigene_adresse', 'bankverbindung', 'verwendungszweck', 'format', 'mwst_satz', 'empfaenger_ust_id', 'rechnungsdatum', 'betrag', 'mahnstufe', 'neue_frist', 'kunde', 'kundenadresse',
+  'positionen', 'gueltig_bis', 'angebots_id', 'zeiteintraege_ids', 'reise_ids', 'grund'];
+export function kiNummerUngueltig(line) {
+  const m = String(line || '').match(KI_NUMMER_BEFEHLE_RE);
+  if (!m) return false;
+  const re = new RegExp('(?:^|,)\\s*(?:rechnungsnummer|angebotsnummer)=([\\s\\S]*?)(?=,\\s*(?:' + KI_BEFEHLS_SCHLUESSEL.join('|') + ')=|$)', 'gi');
+  let n;
+  while ((n = re.exec(m[2]))) {
+    const w = n[1].trim();
+    if (w !== '' && w.toLowerCase() !== 'auto' && !KI_NUMMER_MUSTER.test(w)) return true;
+  }
+  return false;
+}
+
 export function pruefeBetragZeile(line) {
+  if (kiNummerUngueltig(line)) {
+    const bm = String(line).match(KI_NUMMER_BEFEHLE_RE);
+    return line.slice(0, bm.index) + 'Die Nummer enthält ungültige Zeichen.';
+  }
   // Diagnose-Logging: läuft für jede Zeile jeder Chat-Antwort, loggt aber nur bei einem Treffer —
   // sichtbar per `wrangler tail`. KUNDE_SPEICHERN bewusst NICHT mehr enthalten (2026-09-09):
   // Kunden-Anlegen ist inzwischen reine, deterministische Frontend-Logik (siehe
@@ -3131,6 +3153,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
         typ: typ || 'rechnung_eingehend',
         message: 'Beleg erfolgreich gespeichert',
         ...(steuerGespeichert ? { steuer_gespeichert: true } : {}),
+        ...nachFestschreibungAntwort(v2), // ABSCHLUSS-FIX C1-01
         ...(tagesbewegungWarnung ? { warning: tagesbewegungWarnung } : {})
       }), {
         status: 200,
@@ -3338,6 +3361,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
         // Nur wenn der Browser steuer mitgeschickt hat (Beleg-Formular v2); ohne steuer im Body bleibt die Antwort wie bisher
         ...(steuerGespeichert ? { steuer_gespeichert: true } : {}),
         ...(clientSteuerCodes ? { steuer_gespeichert: false, steuer_codes: clientSteuerCodes } : {}),
+        ...nachFestschreibungAntwort(v2), // ABSCHLUSS-FIX C1-01
         ...(tagesbewegungWarnung ? { warning: tagesbewegungWarnung } : {})
       }), {
         status: 200,

@@ -80,6 +80,12 @@ export function v2Entscheiden({ weg, eingabe, profil, legacy, stichtag, festPeri
   return { ablehnen: false, codes: codesBereinigen(codes), steuer, nach_festschreibung: gesperrt };
 }
 
+// ABSCHLUSS-FIX C1-01: Antwortfelder für die App, wenn ein neuer Beleg in einen schon festgeschriebenen Zeitraum fällt (leer sonst).
+export function nachFestschreibungAntwort(v2) {
+  const l = v2 && Array.isArray(v2.nach_festschreibung) ? v2.nach_festschreibung.filter((p) => typeof p === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(p)).slice(0, 12) : [];
+  return l.length ? { nach_festschreibung: true, nach_festschreibung_perioden: l } : {};
+}
+
 // REST-Felder, die der Aufrufer in sein metadata.fields übernimmt (gleicher PATCH)
 export function v2RestFelder(entscheidung, zeit) {
   if (!entscheidung || !entscheidung.steuer) return {};
