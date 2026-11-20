@@ -26,7 +26,7 @@ import { auditSchreibvorgaenge, kopfPfad, hashVon } from './audit.js';
 export const PROFIL_KERN_FELDER = ['version', 'gewinnermittlung', 'beruf_art', 'gruendung', 'status_verlauf', 'option_19_3', 'versteuerung_verlauf',
   'voranmeldung_verlauf', 'vorjahr', 'limit_bestaetigungen', 'eu_b2c_grenze',
   'gwg_wahl', // E-B: GWG-/Sammelposten-/AfA-Wahl je Jahr (BP-04b, Kern profilPruefen GWG_WAHL_UNGUELTIG); ohne Eintrag ginge sie bei jeder Profiländerung verloren
-  'oss']; // APP-C (BP-28): OSS-Angaben des Nutzers { jahre_cent, verzicht_ab, registriert_ab } (steuerkern/oss.js), nur über aktion 'stammdaten' mit Feature oss
+  'oss']; // APP-C (BP-28): OSS-Angaben des Nutzers { jahre_cent, verzicht_ab, registriert_ab, verzicht_widerruf_ab } (steuerkern/oss.js), nur über aktion 'stammdaten' mit Feature oss
 const VERLAUF_MAX = 50;
 const AKTIONEN = ['anlegen', 'eintrag', 'ist_jahr_bestaetigen', 'bestaetigen', 'stammdaten'];
 const GRUNDLAGEN_EINGABE = ['nr1', 'nr2', 'nr3', 'weiss_nicht']; // K2; Ist nur mit nr1/nr3 (Kern GRUNDLAGEN_IST)
@@ -140,12 +140,14 @@ export function euB2cGrenzeMischen(alt, neu, heute) {
 //                                      § 3a Abs. 5 S. 3 UStG); nur die drei Vorjahre (der Kern braucht das Vorjahr), 0 bis 1 Mrd. EUR
 //   verzicht_ab 'JJJJ-MM-TT'|null      Verzicht auf die Grenze gegenüber dem Finanzamt (§ 3c Abs. 4 S. 2, 3 UStG)
 //   registriert_ab 'JJJJ-MM-TT'|null   Teilnahme am OSS-Verfahren beim BZSt (§ 18j Abs. 1 UStG)
+//   verzicht_widerruf_ab 'JJJJ-MM-TT'|null  OSS-KERN-16: Tag, ab dem der Verzicht laut Nutzer endet (Widerruf; Bindung zwei Kalenderjahre, § 3c Abs. 4 S. 3
+//                                      UStG; vor Ablauf meldet der Kern HN_OSS_VERZICHT_BINDUNG, keine Sperre)
 // Daten frühestens 01.07.2021 (Beginn OSS), spätestens Ende des Folgejahres. Es sind Angaben des Nutzers; Kontolux prüft sie nicht beim BZSt.
 const OSS_START = '2021-07-01';
 const OSS_CENT_MAX = 100000000000; // 1 Mrd. EUR
 export function ossBereinigen(v, heute) {
   const jahrHeute = Number(String(heute || '').slice(0, 4));
-  if (!istObjekt(v) || !Object.keys(v).length || !nurSchluessel(v, ['jahre_cent', 'verzicht_ab', 'registriert_ab']) || !Number.isSafeInteger(jahrHeute)) return null;
+  if (!istObjekt(v) || !Object.keys(v).length || !nurSchluessel(v, ['jahre_cent', 'verzicht_ab', 'registriert_ab', 'verzicht_widerruf_ab']) || !Number.isSafeInteger(jahrHeute)) return null;
   const x = {};
   if (v.jahre_cent !== undefined) {
     const j = v.jahre_cent;
@@ -157,7 +159,7 @@ export function ossBereinigen(v, heute) {
       x.jahre_cent[k] = c;
     }
   }
-  for (const k of ['verzicht_ab', 'registriert_ab']) {
+  for (const k of ['verzicht_ab', 'registriert_ab', 'verzicht_widerruf_ab']) {
     if (v[k] === undefined) continue;
     if (v[k] !== null && !(istDatum(v[k]) && v[k] >= OSS_START && v[k] <= `${jahrHeute + 1}-12-31`)) return null;
     x[k] = v[k];
@@ -172,7 +174,7 @@ export function ossMischen(alt, neu) {
     for (const [k, c] of Object.entries(neu.jahre_cent)) { if (c === null) delete j[k]; else j[k] = c; }
     if (Object.keys(j).length) x.jahre_cent = j; else delete x.jahre_cent;
   }
-  for (const k of ['verzicht_ab', 'registriert_ab']) {
+  for (const k of ['verzicht_ab', 'registriert_ab', 'verzicht_widerruf_ab']) {
     if (neu[k] === undefined) continue;
     if (neu[k] === null) delete x[k]; else x[k] = neu[k];
   }

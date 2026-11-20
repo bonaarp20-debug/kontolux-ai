@@ -57,6 +57,14 @@ test('Mischen: Jahre einzeln, Daten setzen und löschen, leeres Ergebnis entfern
   assert.deepEqual(ossMischen({ registriert_ab: '2026-07-01' }, { registriert_ab: null }), null);
 });
 
+test('OSS-KERN-16: verzicht_widerruf_ab (Ende des Verzichts laut Nutzer) wird wie die anderen Daten bereinigt und gemischt', () => {
+  assert.deepEqual(ossBereinigen({ verzicht_widerruf_ab: '2027-01-01' }, HEUTE), { verzicht_widerruf_ab: '2027-01-01' });
+  assert.deepEqual(ossBereinigen({ verzicht_widerruf_ab: null }, HEUTE), { verzicht_widerruf_ab: null });
+  for (const kaputt of [{ verzicht_widerruf_ab: '2021-06-30' }, { verzicht_widerruf_ab: '2028-01-01' }, { verzicht_widerruf_ab: 'morgen' }]) assert.equal(ossBereinigen(kaputt, HEUTE), null, JSON.stringify(kaputt));
+  assert.deepEqual(ossMischen({ verzicht_ab: '2026-01-01' }, { verzicht_widerruf_ab: '2027-01-01' }), { verzicht_ab: '2026-01-01', verzicht_widerruf_ab: '2027-01-01' });
+  assert.deepEqual(ossMischen({ verzicht_widerruf_ab: '2027-01-01' }, { verzicht_widerruf_ab: null }), null);
+});
+
 test('Feature oss aus (fehlt in config/features): OSS-Angaben werden nicht gespeichert, andere Stammdaten wie bisher', async () => {
   const { rufe, profil } = await umgebung({ config: { kern_max: 'an', features: { steuerprofil: 'an' } } });
   const vorher = profil();
