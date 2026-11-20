@@ -10,7 +10,7 @@
 
 import { ustAusNetto, ustAusBrutto, basisInEuro } from './geld.js';
 import { istDatum, periodenArt, periodenEnde, periodenStart } from './daten.js';
-import { voranmeldungAm, kz70Datum, fristFuerPeriode, kz39Monat } from './steuerprofil.js';
+import { voranmeldungAm, kz70Datum, fristFuerPeriode, kz39Monat, kz39Offen } from './steuerprofil.js';
 import { RUNDUNG_BASIS, USTVA_ZEILEN, SATZ_REGEL_BP, SATZ_ERMAESSIGT_BP, basisKzFuerSatz } from './tabellen.js';
 import { profilHinweise, pruefeWirkungen, regelAn } from './wirkung.js';
 
@@ -39,6 +39,8 @@ export function ustvaPerioden(wirkungen, profil, jahr, optionen) {
     const m39 = kz39Monat(profil, jahr, { verzicht: regelAn(optionen, 'kz39_verzicht') });
     const va = m39 ? voranmeldungAm(profil, periodenEnde(m39)) : null;
     if (va && Number.isSafeInteger(va.sondervorauszahlung_cent)) p.add(m39);
+    const o39 = kz39Offen(profil, jahr, { verzicht: regelAn(optionen, 'kz39_verzicht') }); // KERN-20 (M2): der letzte Zeitraum des Jahres, damit der Hinweis sichtbar ist
+    if (o39) p.add(o39.periode);
   }
   return [...p].sort();
 }
@@ -358,6 +360,10 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
     if (periode.slice(5, 7) !== '12') hinweise.push('HN_KZ39_VERZICHT_DAUERFRIST');
   }
 
+  // KERN-20 (M2): Sondervorauszahlung im Profil, aber in keinem Zeitraum des Jahres angerechnet: Hinweis und Zwischenwert im letzten Zeitraum
+  const o39 = kz39Offen(profil, jahr, { verzicht: regelAn(opt, 'kz39_verzicht') });
+  if (o39 && o39.periode === periode) hinweise.push('W_KZ39_NICHT_ANGERECHNET');
+
   // --- Summen: primär laut RUNDUNG_BASIS.steuer_quelle, die andere Variante daneben (Doppelanzeige) ---
   const sExakt = summen(zeile13.steuer_cent, zeile14.steuer_cent, 0, z38, z41, z44, z46, z47, z49, zRc);
   const sElster = summen(zeile13.steuer_elster_cent, zeile14.steuer_elster_cent, 0, z38, z41, z44, z46, z47, z49, zRc);
@@ -407,6 +413,7 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
   const alle = eindeutig(hinweise);
   const angenommen = alle.includes('W_VORANMELDUNG_ANGENOMMEN');
   // Gegenprüfung M2/M9: Anzahlung vor dem Überschreiten der Grenze (Zeitraum und Kz 65 nicht ausdrücklich in der Quelle) bleibt Zwischenwert
+  const kz39Offen_ = alle.includes('W_KZ39_NICHT_ANGERECHNET');
   const wechselAnzahlung = alle.includes('W_WECHSEL_ANZAHLUNG_KZ65') || alle.includes('W_WECHSEL_VORJAHR_ZAHLUNG');
   const kz65Offen = alle.includes('W_KZ65_VORSCHLAG_OFFEN') || alle.includes('W_KZ65_DOPPELT');
 
@@ -452,9 +459,9 @@ export function ustvaFuer(wirkungen, profil, periode, optionen) {
     summen_alternativ: alternativ,
     kz83: {
       betrag_cent: primaer.z50_cent,
-      status: unvollstaendig || angenommen || wechselAnzahlung || kz65Offen || kernOpt.widerspruch.length ? 'zwischenwert' : 'ergebnis',
+      status: unvollstaendig || angenommen || wechselAnzahlung || kz65Offen || kz39Offen_ || kernOpt.widerspruch.length ? 'zwischenwert' : 'ergebnis',
       regel_id: 'R-KZ-50',
-      text: unvollstaendig ? `Zwischenwert (unvollständig): ${ausg.length} Beleg(e) nicht berücksichtigt` : (angenommen ? 'Zwischenwert: Voranmeldungszeitraum im Profil nicht bestätigt (Quartal angenommen)' : (wechselAnzahlung ? 'Zwischenwert: Anzahlung oder Zahlung über das Überschreiten der Umsatzgrenze, Zeitraum in der Quelle nicht genannt (UStAE 19.7 Abs. 1 S. 4)' : (kz65Offen ? 'Zwischenwert: Anzahlung aus der Kleinunternehmerzeit, Variante für Kz 65 noch nicht bestätigt (K5)' : null))),
+      text: unvollstaendig ? `Zwischenwert (unvollständig): ${ausg.length} Beleg(e) nicht berücksichtigt` : (angenommen ? 'Zwischenwert: Voranmeldungszeitraum im Profil nicht bestätigt (Quartal angenommen)' : (kz39Offen_ ? 'Zwischenwert: Sondervorauszahlung (Kz 39) aus dem Profil in keinem Zeitraum des Jahres angerechnet, Anrechnung bei Wechsel mitten im Jahr nicht geregelt (§ 48 Abs. 4 UStDV)' : (wechselAnzahlung ? 'Zwischenwert: Anzahlung oder Zahlung über das Überschreiten der Umsatzgrenze, Zeitraum in der Quelle nicht genannt (UStAE 19.7 Abs. 1 S. 4)' : (kz65Offen ? 'Zwischenwert: Anzahlung aus der Kleinunternehmerzeit, Variante für Kz 65 noch nicht bestätigt (K5)' : null)))),
     },
     unvollstaendig,
     ausgeschlossene: ausg,

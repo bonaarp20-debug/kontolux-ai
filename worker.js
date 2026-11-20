@@ -1248,6 +1248,11 @@ const SACHKONTO_MAPPING = {
   'Reisekosten':                { SKR03: '4676', SKR04: '6680', euer_zeile: 'Z.45' },
   'Fortbildung':                { SKR03: '4945', SKR04: '6821', euer_zeile: 'Z.46' },
   'Kfz-Kosten':                 { SKR03: '4500', SKR04: '6500', euer_zeile: 'Z.71' },
+  // KERN-20 (N3): Kfz-Leasing (KZ 144, 2026 Z.69, 2025 Z.68) und Kfz-Steuern/Versicherung/Maut (KZ 145, 2026 Z.70, 2025 Z.69). DATEV 2026: 4570/6560 "Mietleasing Kfz",
+  // 4520/6520 "Kfz-Versicherungen" (Kfz-Steuer 4510/7685 und Maut 4560/6580 haben eigene Konten; die Sammelkategorie bucht auf das Versicherungskonto, Konfidenz B,
+  // Quelle: Kontenrahmen-Übersichten SKR03/SKR04, Rechtsstand 30.06.2026). Bestehende Belege der Kategorie 'Kfz-Kosten' bleiben unverändert (KZ 146).
+  'Kfz-Leasing':                { SKR03: '4570', SKR04: '6560', euer_zeile: 'Z.69' },
+  'Kfz-Steuern/Versicherung':   { SKR03: '4520', SKR04: '6520', euer_zeile: 'Z.70' },
   'Miete/Raumkosten':           { SKR03: '4200', SKR04: '6310', euer_zeile: 'Z.40' },
   // SKR04 3400/3300 waren falsch (Audit-Korrektur 2026-09) — Aktiv/Passiv-Verwechslung: das sind
   // real "Verbindlichkeiten..." (Fremdkapitalkonten), da SKR04 dem Abschlussgliederungsprinzip
@@ -1558,7 +1563,7 @@ Nutzer nennt ein Wirtschaftsgut (Computer, Kamera, Fahrzeug, Maschine, Möbel, S
 4. Anschaffungswert > 800€ netto: afa_betrag_jaehrlich = anschaffungswert ÷ nutzungsdauer_jahre (auf Cent runden).
 5. Sachkonto-Vorschlag laut Kategorie-Tabelle (Kategorie 'Abschreibung (AfA)'), EÜR Z.34 (AfA auf bewegliche Wirtschaftsgüter). Buchungstext "AfA [Gerät] [Jahr]".
 6. Erst nach (j/n)-Frage und j buchen. Das Datum ist das ANSCHAFFUNGSDATUM, nicht der 31.12.:
-AUSGABE_UPDATE:datum=[Anschaffungsdatum YYYY-MM-DD],betrag=[afa_betrag_jaehrlich],beschreibung=[Gerätename],kategorie=Abschreibung (AfA),anschaffungswert=[Netto-Anschaffungswert],nutzungsdauer_jahre=[Jahre],methode=[sofort|sammelposten|afa]
+AUSGABE_UPDATE:datum=[Anschaffungsdatum YYYY-MM-DD],betrag=[afa_betrag_jaehrlich],beschreibung=[Gerätename],kategorie=Abschreibung (AfA),anschaffungswert=[Netto-Anschaffungswert],nutzungsdauer_jahre=[Jahre],methode=[sofort|sammelposten|afa],art=[beweglich|software] (software = Betriebs-/Anwendersoftware, Anlage EÜR Kz 131; alles andere beweglich, Kz 130)
 Hinweis: Kontolux verteilt die AfA automatisch monatlich ab dem Anschaffungsmonat (§7 EStG). Ein Jahresbetrag wird nicht als Tagesausgabe gebucht.
 
 ## TAGESEINNAHMEN SPEICHERN
@@ -1578,7 +1583,7 @@ Bei JEDER Buchung (Ausgabe/Einnahme/Rechnung) Kategorie + Sachkonto als Vorschla
 Kategorie-Tabelle (SKR03, SKR04 in Klammern):
 ${buildSachkontoTabelleText()}
 
-Kategorie bestimmen: 1) "Bekannte Absender-Kategorie" im Profil-Kontext für genau diesen Absender → immer verwenden. 2) Sonst nach Absendername einschätzen — SaaS/Cloud-Erkennung IMMER zuerst prüfen (siehe KATEGORIE BEI SAAS-/CLOUD-BELEGEN oben), erst danach die übrigen Regeln: Anthropic/OpenAI/ChatGPT/Cloudflare/GitHub/AWS/Azure/Google Cloud/Microsoft/Adobe/Notion/Figma/Slack/Zoom/Dropbox/Spotify/Netflix/Vercel/Netlify/Heroku/DigitalOcean/GitLab/Sentry/Canva/Mailchimp/Make.com/Zapier/Webflow/DATEV→Software/EDV/SaaS (auch wenn der Name sonst nach Wareneinkauf aussieht, z.B. "Amazon Web Services"), sonst Google*→Werbekosten, Amazon*(ohne AWS)→Wareneinkauf/Bürobedarf, Telekom/Vodafone/O2/1&1→Telefon/Internet, ADAC/Tankstelle→Kfz-Kosten, Hotel/Bahn/Flug→Reisekosten, Subunternehmer/Freelancer/Honorar/Dienstleister→Fremdleistungen. 3) Passt nichts eindeutig → kurz nachfragen, nicht raten.
+Kategorie bestimmen: 1) "Bekannte Absender-Kategorie" im Profil-Kontext für genau diesen Absender → immer verwenden. 2) Sonst nach Absendername einschätzen — SaaS/Cloud-Erkennung IMMER zuerst prüfen (siehe KATEGORIE BEI SAAS-/CLOUD-BELEGEN oben), erst danach die übrigen Regeln: Anthropic/OpenAI/ChatGPT/Cloudflare/GitHub/AWS/Azure/Google Cloud/Microsoft/Adobe/Notion/Figma/Slack/Zoom/Dropbox/Spotify/Netflix/Vercel/Netlify/Heroku/DigitalOcean/GitLab/Sentry/Canva/Mailchimp/Make.com/Zapier/Webflow/DATEV→Software/EDV/SaaS (auch wenn der Name sonst nach Wareneinkauf aussieht, z.B. "Amazon Web Services"), sonst Google*→Werbekosten, Amazon*(ohne AWS)→Wareneinkauf/Bürobedarf, Telekom/Vodafone/O2/1&1→Telefon/Internet, ADAC/Tankstelle→Kfz-Kosten, Kfz-Leasingrate→Kfz-Leasing, Kfz-Versicherung/Kfz-Steuer/Maut→Kfz-Steuern/Versicherung, Hotel/Bahn/Flug→Reisekosten, Subunternehmer/Freelancer/Honorar/Dienstleister→Fremdleistungen. 3) Passt nichts eindeutig → kurz nachfragen, nicht raten.
 
 Buchungstext IMMER automatisch generieren: "[Absender] [Monat] [Jahr]" (z.B. "Google Ads August 2026") — Nutzer liefert nie selbst einen.
 

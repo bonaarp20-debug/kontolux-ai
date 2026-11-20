@@ -29,6 +29,8 @@ const DATEV_2026 = {
   'Reisekosten': [['4676', 'Reisekosten Unternehmer Übernachtungsaufwand und Reisenebenkosten'], ['6680', 'Reisekosten Unternehmer Übernachtungsaufwand und Reisenebenkosten']],
   'Fortbildung': [['4945', 'Fortbildungskosten'], ['6821', 'Fortbildungskosten']],
   'Kfz-Kosten': [['4500', 'Fahrzeugkosten'], ['6500', 'Fahrzeugkosten']],
+  'Kfz-Leasing': [['4570', 'Mietleasing Kfz'], ['6560', 'Mietleasing Kfz']],
+  'Kfz-Steuern/Versicherung': [['4520', 'Kfz-Versicherungen'], ['6520', 'Kfz-Versicherungen']],
   'Miete/Raumkosten': [['4200', 'Raumkosten'], ['6310', 'Miete (unbewegliche Wirtschaftsgüter)']],
   'Wareneinkauf 19%': [['3400', 'Wareneingang 19 % Vorsteuer (Automatik)'], ['5400', 'Wareneingang 19 % Vorsteuer (Automatik)']],
   'Wareneinkauf 7%': [['3300', 'Wareneingang 7 % Vorsteuer (Automatik)'], ['5300', 'Wareneingang 7 % Vorsteuer (Automatik)']],

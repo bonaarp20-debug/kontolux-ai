@@ -273,6 +273,24 @@ export function kz39Monat(profil, jahr, optionen) {
   return null;
 }
 
+// KERN-20 (M2 Zweitprüfung G4, § 48 Abs. 4 UStDV (docs/quellen/ustdv-48.md), Konfidenz C): Steht für das Jahr eine Sondervorauszahlung im Profil (monatliche
+// Abgabe mit Dauerfristverlängerung), aber kz39Monat findet keinen Monat, in dem Kz 39 abgezogen wird (Wechsel mitten im Jahr auf vierteljährliche Abgabe,
+// oder Verzicht auf die Dauerfrist ohne Kern-Option kz39_verzicht), ging die Anrechnung bisher still verloren. Die Norm nennt "den letzten
+// Voranmeldungszeitraum, für den die Fristverlängerung gilt"; wie das bei einem Wechsel mitten im Jahr zu lesen ist, regelt keine Quelle. Kontolux rechnet
+// nichts an, nennt es aber (W_KZ39_NICHT_ANGERECHNET) und kennzeichnet den letzten Zeitraum des Jahres als Zwischenwert.
+// Rückgabe: { svz_cent, periode } (letzter Voranmeldungszeitraum des Jahres) oder null.
+export function kz39Offen(profil, jahr, optionen) {
+  if (!Number.isSafeInteger(jahr) || !istObjekt(profil) || kz39Monat(profil, jahr, optionen)) return null;
+  const J = String(jahr).padStart(4, '0');
+  let svz = null;
+  for (let m = 1; m <= 12; m++) {
+    const va = voranmeldungAm(profil, periodenEnde(`${J}-${String(m).padStart(2, '0')}`));
+    if (va.dauerfrist === true && va.zeitraum === 'monat' && Number.isSafeInteger(va.sondervorauszahlung_cent) && va.sondervorauszahlung_cent > 0) svz = va.sondervorauszahlung_cent;
+  }
+  if (svz === null) return null;
+  return { svz_cent: svz, periode: voranmeldungAm(profil, `${J}-12-31`).zeitraum === 'monat' ? `${J}-12` : `${J}-Q4` };
+}
+
 // KERN-B (BP-04b, PF-044): Wahl für Wirtschaftsgüter je Wirtschaftsjahr (= Kalenderjahr, L1), § 6 Abs. 2, 2a EStG (docs/quellen/estg-6.md
 // Z. 128, 129, Konfidenz A): 'gwg' (Sofortabzug bis 800 EUR netto, darüber Abschreibung), 'sammelposten' (über 250 bis 1.000 EUR netto in den
 // Sammelposten, ein Fünftel je Jahr; einheitlich für alle Wirtschaftsgüter des Jahres, Abs. 2a S. 5; bis 250 EUR sofort, S. 4), 'afa' (keine
@@ -557,6 +575,11 @@ export function profilPruefen(profil) {
   }
   const hatKu = Array.isArray(profil.status_verlauf) && profil.status_verlauf.length > 0;
   if (!hatKu) w.push('PROFIL_STATUS_FEHLT');
+  // KERN-20 (M2): Sondervorauszahlung, die in keinem Zeitraum eines Jahres angerechnet wird (Wechsel mitten im Jahr)
+  if (Array.isArray(profil.voranmeldung_verlauf) && profil.voranmeldung_verlauf.every((e) => istObjekt(e) && istDatum(e.gueltig_ab))) {
+    const jahre = profil.voranmeldung_verlauf.map((e) => Number(e.gueltig_ab.slice(0, 4)));
+    for (let J = Math.min(...jahre); J <= Math.max(...jahre); J++) if (kz39Offen(profil, J, undefined)) w.push('W_KZ39_NICHT_ANGERECHNET');
+  }
   return { fehler: f, warnungen: [...new Set(w)] };
 }
 

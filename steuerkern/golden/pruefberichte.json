@@ -1,7 +1,7 @@
 {
  "format": 1,
  "art": "pruefberichte",
- "kern_version": "2026.11.16-19",
+ "kern_version": "2026.11.16-20",
  "quelle": "docs/regelbesteuerung/07-*.md und 08-gegenpruefung-phase1.md: Schlüsselzahlen von Hand, Rest Kern-Ausgabe",
  "vektoren": [
   {
@@ -138,6 +138,7 @@
         },
         "unvollstaendig": false,
         "warnungen": [
+         "W_14C_KU_RECHNUNG_ZEITPUNKT",
          "W_KU_GRENZE_UEBERSCHRITTEN",
          "W_WECHSEL_ANZAHLUNG_KZ65"
         ],
@@ -145,6 +146,7 @@
          "HN_RD_ELSTER",
          "HN_UMSATZ_ZAHLUNGSZEITRAUM_NACH_UEBERSCHREITEN",
          "HN_WECHSEL_ANZAHLUNG_VOLL_IN_KZ81",
+         "W_14C_KU_RECHNUNG_ZEITPUNKT",
          "W_KU_GRENZE_UEBERSCHRITTEN",
          "W_WECHSEL_ANZAHLUNG_KZ65"
         ],
@@ -161,6 +163,7 @@
        "ausgeschlossene": []
       },
       "warnungen": [
+       "W_14C_KU_RECHNUNG_ZEITPUNKT",
        "W_KU_GRENZE_UEBERSCHRITTEN",
        "W_WECHSEL_ANZAHLUNG_KZ65"
       ],
