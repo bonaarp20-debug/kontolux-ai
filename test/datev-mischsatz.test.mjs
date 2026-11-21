@@ -33,7 +33,7 @@ globalThis.fetch = async (input, init = {}) => {
 const worker = (await import(process.env.DATEV_WORKER || '../worker.js')).default;
 
 let aufrufNr = 0;
-async function exportiere(belege, { skr = 'SKR03', ku = false, profil = REGEL } = {}) {
+async function exportiere(belege, { skr = 'SKR03', ku = false, profil = REGEL, jahr = 2026 } = {}) {
   const f = fakeFirestore();
   aktuellesFs = f;
   if (profil) f.setze(`users/${UID}/steuerprofil/aktuell`, profil);
@@ -41,7 +41,7 @@ async function exportiere(belege, { skr = 'SKR03', ku = false, profil = REGEL } 
   for (const [id, d] of Object.entries(belege)) f.setze(`users/${UID}/dokumente/${id}`, d);
   const r = await worker.fetch(new Request('https://worker.test/datev-export', {
     method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://app.kontolux-ai.de', Authorization: 'Bearer tok', 'CF-Connecting-IP': `198.51.100.${(++aufrufNr % 250) + 1}` },
-    body: JSON.stringify({ userId: UID, jahr: 2026, token: 'tok' }),
+    body: JSON.stringify({ userId: UID, jahr, token: 'tok' }),
   }), env, { waitUntil() {} });
   const text = new TextDecoder('utf-8').decode(new Uint8Array(await r.arrayBuffer()));
   const roh = r.status === 200 ? text.replace(/^﻿/, '').split('\r\n').filter(Boolean) : [];
@@ -340,8 +340,11 @@ test('B-1 Grenzen: ohne Rückzahlung nur Hinweis, Original gelöscht oder unbeza
   assert.equal(zeilenVon(r, 'ST5').length, 0);
   assert.match(r.warnung, /Storno oder eine Gutschrift ohne Rückzahlung: ST5/);
   const mitRz = ohneId(korrekturBeleg('ST6', 'o', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }], { rz: { datum: '2026-06-20', betrag_cent: 11900 } }));
-  r = await exportiere({ o: { ...orig, deleted: true }, s: mitRz });
+  // Original gelöscht OHNE v2-Storno, der darauf zeigt (Altweg ohne Kern): bleibt wie bisher draußen, keine Gegenbuchung ohne Original im Stapel.
+  // (Bis 8ba38e8 galt das auch für gelöschte Originale MIT v2-Storno; das war falsch, siehe die Tests zu A-H1 unten.)
+  r = await exportiere({ o: { ...orig, deleted: true }, s: { ...mitRz, steuer: { ...mitRz.steuer, beleg_art: 'gutschrift_erteilt' } } });
   assert.equal(zeilenVon(r, 'ST6').length, 0);
+  assert.equal(zeilenVon(r, 'R5').length, 0);
   r = await exportiere({ o: { ...orig, bezahlt: false }, s: mitRz, ok: alt('OK', 'rechnung_ausgehend', 119, '19', 'Einnahmen 19%') });
   assert.equal(zeilenVon(r, 'ST6').length, 0);
   const vorjahr = ohneId(korrekturBeleg('ST7', 'o', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }], { rz: { datum: '2025-12-20', betrag_cent: 11900 } }));
@@ -358,4 +361,98 @@ test('B-1 Rückfall: Altbeleg typ storno ohne Steuerteil und unbezahlte Rechnung
   const r = await exportiere({ a: alt('R9', 'rechnung_ausgehend', 119, '19', 'Einnahmen 19%'), s: alt('S9', 'storno', 119, '19', 'Einnahmen 19%', { bezahlt: false }) });
   assert.equal(r.zeilen.length, 1);
   assert.equal(r.warnung, '');
+});
+
+// ── Gegenlesung 2 (A-H1 ... A-N4): echter Datenweg des Korrektur-Dialogs ───────────────────────
+// 'Korrigieren -> Storno': Original weich gelöscht (deleted + storniert), Hash nachgezogen; der v2-Storno-Beleg trägt die Rückzahlung selbst, ist nie bezahlt.
+const loeschen = (b) => { const d = { ...b, deleted: true, storniert: true }; const { schema_version, steuer, ...legacy } = d; d.steuer = { ...steuer, migration: { ...steuer.migration, legacy_hash: K.legacyHash(legacy) } }; return d; };
+const altStorno = (nr) => alt(nr, 'storno', 119, '19', 'Einnahmen 19%', { bezahlt: false, bezahlt_am: null }); // Gegenbeleg des Altwegs (stornoDurchfuehren), ohne Steuerteil
+
+test('A-H1 echter Weg: gelöschtes+storniertes bezahltes Original bleibt im Stapel, Gegenbuchung aus der Rückzahlung, keine Doppelbuchung, Nettosumme 0', async () => {
+  const orig = loeschen(v2('R1', 'ausgang', [P19(10000)], { kat: 'Einnahmen 19%' }));
+  const st = ohneId(korrekturBeleg('ST1', 'o1', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }], { rz: { datum: '2026-06-20', betrag_cent: 11900 } }));
+  const r = await exportiere({ o1: orig, s1: st, a1: altStorno('AS1') });
+  assert.equal(r.zeilen.length, 2);
+  assert.deepEqual(kurz(r, 'R1'), [['119,00', 'S', '1200', '8400', '']]);
+  assert.deepEqual(kurz(r, 'ST1'), [['119,00', 'H', '1200', '8400', '']]);
+  assert.equal(r.warnung, '');
+});
+
+test('A-H1 Jahreswechsel: Original im Zahlungsjahr, Gegenbuchung im Jahr der Rückzahlung; Teilrückzahlung zeigt den Rest', async () => {
+  const orig = loeschen({ ...v2('R2', 'ausgang', [P19(100000)], { kat: 'Einnahmen 19%' }), bezahlt_am: '2026-12-10', datum: '2026-12-10' });
+  const st = ohneId(korrekturBeleg('ST2', 'o2', 'ausgang', [{ brutto_cent: 119000, satz_bp: 1900 }], { rz: { datum: '2027-01-20', betrag_cent: 119000 }, wirkdatum: '2027-01-15' }));
+  const belege = { o2: orig, s2: st };
+  const r26 = await exportiere(belege);
+  assert.deepEqual(kurz(r26, 'R2'), [['1190,00', 'S', '1200', '8400', '']]);
+  assert.equal(zeilenVon(r26, 'ST2').length, 0);
+  const r27 = await exportiere(belege, { jahr: 2027 });
+  assert.equal(r27.status, 200); // nur die Gegenbuchung im Stapel
+  assert.equal(r27.zeilen.length, 1);
+  assert.deepEqual(kurz(r27, 'ST2'), [['1190,00', 'H', '1200', '8400', '']]);
+  // Teilrückzahlung im selben Jahr: Stapel zeigt 119,00 Einnahme und 50,00 Rückzahlung (Rest 69,00), nicht 0
+  const orig2 = loeschen(v2('R3', 'ausgang', [P19(10000)], { kat: 'Einnahmen 19%' }));
+  const teil = ohneId(korrekturBeleg('ST3', 'o3', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }], { rz: { datum: '2026-06-20', betrag_cent: 5000 } }));
+  const rt = await exportiere({ o3: orig2, s3: teil });
+  assert.equal(summeCent(rt, 'R3') - summeCent(rt, 'ST3'), 6900);
+});
+
+test('A-H1 Grenzen: Storno ohne Rückzahlung lässt das Original im Stapel mit Hinweis; Mischsatz-Original wird je Satz zurückgebucht', async () => {
+  const orig = loeschen(v2('R4', 'ausgang', [P19(10000), P7(5000)], { kat: 'Einnahmen 19%', mwst: '19' }));
+  const ohneRz = ohneId(korrekturBeleg('ST4', 'o4', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }, { brutto_cent: 5350, satz_bp: 700 }]));
+  let r = await exportiere({ o4: orig, s4: ohneRz });
+  assert.equal(zeilenVon(r, 'R4').length, 2);
+  assert.match(r.warnung, /ohne Rückzahlung: ST4/);
+  const mitRz = ohneId(korrekturBeleg('ST5', 'o4', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }, { brutto_cent: 5350, satz_bp: 700 }], { rz: { datum: '2026-06-20', betrag_cent: 17250 } }));
+  r = await exportiere({ o4: orig, s5: mitRz });
+  assert.equal(summeCent(r, 'R4'), 17250);
+  assert.equal(summeCent(r, 'ST5'), 17250);
+  assert.equal(zeilenVon(r, 'ST5').length, 2);
+});
+
+test('A-M1 Rückzahlung zu einem OSS-Original: nicht gebucht, Nummer mit Grund oss_korrektur in der Warnung (nur im Jahr der Rückzahlung)', async () => {
+  const oss = { ...alt('OS1', 'rechnung_ausgehend', 120, 'keine'), schema_version: 2, steuer: { steuerfall: 'UNBEKANNT', oss: { leistungsart: 'ware', land: 'FR', zeilen: [] } } };
+  const st = ohneId(korrekturBeleg('OST', 'oo', 'ausgang', [{ brutto_cent: 12000, satz_bp: 2000 }].map((g) => ({ ...g, satz_bp: 1900 })), { rz: { datum: '2026-06-20', betrag_cent: 12000 } }));
+  let r = await exportiere({ oo: oss, s: st });
+  assert.equal(zeilenVon(r, 'OST').length, 0);
+  assert.match(r.warnung, /OST \(oss_korrektur\)/);
+  r = await exportiere({ oo: oss, s: st }, { jahr: 2025 });
+  assert.doesNotMatch(r.warnung, /oss_korrektur/);
+});
+
+test('A-N1 unklarer Mischsatz auf Automatikkonto: Textmarke [Konto/Steuersatz prüfen] und Warnung zum Automatikkonto', async () => {
+  const b = v2('N1', 'eingang', [P19(10000), P7(5000)], { kat: 'Wareneinkauf 19%', mwst: '19' });
+  const r = await exportiere({ n1: { ...b, betrag: 150 } });
+  assert.match(ohne(zeilenVon(r, 'N1')[0][13]), /\[Steuersatz prüfen\] \[Konto\/Steuersatz prüfen\]$/);
+  assert.equal(zeilenVon(r, 'N1')[0][8], '');
+  assert.match(r.warnung, /Automatikkonto/);
+});
+
+test('A-N2 kein Hinweis „ohne Rückzahlung“, wenn eine zweite Korrektur derselben Rechnung die Rückzahlung trägt', async () => {
+  const orig = alt('R6', 'rechnung_ausgehend', 119, '19', 'Einnahmen 19%');
+  const ohneRz = ohneId(korrekturBeleg('ST6', 'o', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }]));
+  const mitRz = ohneId(korrekturBeleg('ST7', 'o', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }], { rz: { datum: '2026-06-20', betrag_cent: 11900 }, art: 'gutschrift_erteilt', extra: { korrektur_grund: 'preisnachlass' } }));
+  const r = await exportiere({ o: orig, s6: ohneRz, s7: mitRz });
+  assert.equal(zeilenVon(r, 'ST7').length, 1);
+  assert.equal(r.warnung, '');
+});
+
+test('A-N3 Gegenbuchungen ohne Belegnummer: Belegfeld 1 eindeutig (Original, TTMM der Rückzahlung, laufender Zusatz bei gleichem Tag), höchstens 36 Zeichen', async () => {
+  const orig = alt('RE-2026-001', 'rechnung_ausgehend', 238, '19', 'Einnahmen 19%');
+  const g = (rz, extra) => { const b = ohneId(korrekturBeleg('X', 'o', 'ausgang', [{ brutto_cent: 5000, satz_bp: 1900 }], { rz, art: 'gutschrift_erteilt', extra: { korrektur_grund: 'preisnachlass' } })); delete b.rechnungsnr; return b; };
+  const r = await exportiere({ o: orig, g1: g({ datum: '2026-06-20', betrag_cent: 5000 }), g2: g({ datum: '2026-06-20', betrag_cent: 5000 }), g3: g({ datum: '2026-07-02', betrag_cent: 5000 }) });
+  const nrn = r.zeilen.map((x) => ohne(x[10])).filter((n) => n.startsWith('S-'));
+  assert.equal(new Set(nrn).size, 3);
+  assert.ok(nrn.every((n) => n.length <= 36));
+  assert.ok(nrn.includes('S-RE-2026-001-2006') && nrn.includes('S-RE-2026-001-2006-2') && nrn.includes('S-RE-2026-001-0207'));
+});
+
+test('A-N4 Import-Konto des Originals gilt für die Gegenbuchung; Profil Kleinunternehmer: eine Zeile auf dem KU-Konto auch bei A_INLAND-Korrektur', async () => {
+  const imp = alt('IM1', 'rechnung_ausgehend', 119, '19', 'Einnahmen 19%', { datev_konto: '8195', datev_skr: 'SKR03', datev_kategorie_import: 'Einnahmen 19%' });
+  const st = ohneId(korrekturBeleg('STI', 'o', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }], { rz: { datum: '2026-06-20', betrag_cent: 11900 } }));
+  let r = await exportiere({ o: imp, s: st });
+  assert.deepEqual(kurz(r, 'STI').map((x) => x[3]), ['8195']);
+  const ko = alt('K1', 'rechnung_ausgehend', 172.5, undefined, 'Einnahmen 19%');
+  const kst = ohneId(korrekturBeleg('STK', 'o', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }, { brutto_cent: 5350, satz_bp: 700 }], { rz: { datum: '2026-07-01', betrag_cent: 17250 } }));
+  r = await exportiere({ o: ko, s: kst }, { ku: true });
+  assert.deepEqual(kurz(r, 'STK'), [['172,50', 'H', '1200', '8192', '']]);
 });

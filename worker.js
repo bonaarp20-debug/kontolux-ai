@@ -4925,20 +4925,40 @@ async function handleDatevExport(body, env, cors = {}) {
     const korrekturOffen = [];
     const korrekturOhneRueckzahlung = [];
     const dokById = new Map(dokDocs.map((d) => [String(d.name || '').split('/').pop(), d]));
+    // Vorlauf über die Korrekturbelege (A-H1, A-N2): stornoWirksam = Originale, auf die ein nicht gelöschter v2-Storno zeigt (der Korrektur-Dialog löscht das
+    // Original weich und markiert es storniert; der Kern lässt es wirksam, bis zurückgezahlt ist, der Export hält es genauso im Stapel).
+    // rzTraeger = Originale, zu denen mindestens ein Korrekturbeleg eine Rückzahlung trägt (dann kein Hinweis „ohne Rückzahlung“ bei einem anderen).
+    const stornoWirksam = new Set();
+    const rzTraeger = new Set();
+    const korrekturSteuer = new Map(); // Dokument-ID -> dekodierter Steuerteil der Korrekturbelege (nicht gelöscht, nie bezahlt)
+    for (const d of dokDocs) {
+      const f = d.fields || {};
+      if (!f.steuer || firestoreValue(f.deleted) === true || firestoreValue(f.bezahlt) === true) continue;
+      const st = datevDekodiereFelder({ steuer: f.steuer }).steuer;
+      if (!st || !KORREKTUR_BELEG_ARTEN.includes(st.beleg_art) || st.wirkungslos === true || !st.bezug) continue;
+      const bz = st.bezug.storniert_beleg_id || st.bezug.korrigiert_beleg_id;
+      if (!bz) continue;
+      korrekturSteuer.set(String(d.name || '').split('/').pop(), st);
+      if (st.beleg_art === 'storno' && st.bezug.storniert_beleg_id) stornoWirksam.add(String(st.bezug.storniert_beleg_id));
+      const kgVor = datevKorrekturGruppen(st);
+      if (kgVor) rzTraeger.add(String(bz));
+    }
+    const nrBelegt = new Map(); // A-N3: Belegfeld 1 der Gegenbuchungen ohne Belegnummer eindeutig machen
+    const ossOriginal = (id, of) => !!(ossPlan && ossPlan.get(String(id))) || !!(of && of.steuer && of.steuer.mapValue && of.steuer.mapValue.fields && of.steuer.mapValue.fields.oss);
 
     // Buchungszeilen je Satz-Gruppe (Mischsatz und Rückzahlung). gruppen: [{ satz: '19'|'7'|'keine', brutto_cent }], korrektur: Gegenbuchung (Richtung umgekehrt,
     // Textmarke [Storno]), ku: Kleinunternehmer (Konto ohne Steuer, kein Schlüssel). Bewirtung (70 %): je Gruppe 70/30 (abziehbar / nicht abziehbar) mit dem Schlüssel
     // des Satzes der Gruppe, Rundung wie im Einzelpfad.
-    const bucheGruppen = ({ gruppen, korrektur, ku, istEinnahme, kategorie, belegDatum, belegfeld1, textBasis, diverseAdressnummer }) => {
+    const bucheGruppen = ({ gruppen, korrektur, ku, istEinnahme, kategorie, importKonto, belegDatum, belegfeld1, textBasis, diverseAdressnummer }) => {
       const skrK = skr === 'SKR04' ? 'SKR04' : 'SKR03';
       const bewirtungKonten = DATEV_BEWIRTUNG_KONTEN[skrK];
       for (const g of gruppen) {
         if (g.brutto_cent <= 0) continue;
-        let konto = (istEinnahmeKategorie(istEinnahme, kategorie) ? resolveSachkonto(kategorie, skr) : null)
+        let konto = importKonto || (istEinnahmeKategorie(istEinnahme, kategorie) ? resolveSachkonto(kategorie, skr) : null)
           || (istEinnahme ? erloeskontoExport(g.satz, ku, skr) : ausgabenGegenkonto);
-        if (ku && istEinnahme && alleErloeskonten.has(String(konto))) konto = erloeskontoExport('keine', true, skr);
+        if (ku && !importKonto && istEinnahme && alleErloeskonten.has(String(konto))) konto = erloeskontoExport('keine', true, skr);
         let hinweis = '';
-        if (!ku && (g.satz === '19' || g.satz === '7')) {
+        if (importKonto) { /* Konto der Quelldatei bleibt, kein Tausch */ } else if (!ku && (g.satz === '19' || g.satz === '7')) {
           const tausch = DATEV_AUTOMATIK_SATZ_TAUSCH[skrK][String(konto)];
           if (tausch && tausch.satz !== g.satz) konto = tausch.partner; // erwarteter Wechsel (Konto der Kategorie hat den anderen Satz), keine Warnung
         } else if (!ku && DATEV_AUTOMATIKKONTEN_EXPORT[skrK].has(String(konto))) {
@@ -4966,46 +4986,71 @@ async function handleDatevExport(body, env, cors = {}) {
       // dürfen nicht mit exportiert werden — sonst bucht der Steuerberater eine stornierte,
       // ursprünglich bezahlte Rechnung weiterhin als normale Einnahme, da der zugehörige
       // Storno-Gegenbeleg bewusst mit bezahlt:false angelegt wird und hier sonst nie greift.
-      if (firestoreValue(fields.deleted) === true) continue;
+      // A-H1: ein weich gelöschtes, bezahltes Original, auf das ein v2-Storno zeigt, bleibt wirksam (Kern: Gegenposten statt Wegfall). OSS-Originale ausgenommen
+      // (der OSS-Plan kennt gelöschte Belege nicht, die Rückzahlung steht dann als oss_korrektur in der Warnung).
+      const docId = String(doc.name || '').split('/').pop();
+      const wirksamGeloescht = firestoreValue(fields.deleted) === true && firestoreValue(fields.bezahlt) === true && stornoWirksam.has(docId) && !ossOriginal(docId, fields);
+      if (firestoreValue(fields.deleted) === true && !wirksamGeloescht) continue;
       // B-1 (Gegenlesung 21.11.): Korrekturbelege (Storno, Gutschrift, Preisnachlass) sind nie bezahlt, die Bank-Bewegung steht in steuer.rueckzahlung.
       // Gegenbuchung zum Original (Konto, Kunde, Text vom Original): Datum der Rückzahlung, Betrag der Rückzahlung, je Satz aufgeteilt, Richtung umgekehrt.
       // Nur wenn das Original im Stapel steht (nicht gelöscht, bezahlt, kein OSS). Alle anderen Belege laufen unverändert weiter.
-      if (fields.steuer && firestoreValue(fields.bezahlt) !== true) {
-        const st = datevDekodiereFelder({ steuer: fields.steuer }).steuer;
+      if (fields.steuer && firestoreValue(fields.bezahlt) !== true && korrekturSteuer.has(docId)) {
+        const st = korrekturSteuer.get(docId);
         const kg = datevKorrekturGruppen(st);
-        const bezug = st && st.bezug && (st.bezug.storniert_beleg_id || st.bezug.korrigiert_beleg_id);
-        const orig = bezug ? dokById.get(String(bezug)) : null;
+        const bezug = String(st.bezug.storniert_beleg_id || st.bezug.korrigiert_beleg_id);
+        const orig = dokById.get(bezug) || null;
         const of = orig ? (orig.fields || {}) : null;
-        const origImStapel = !!of && firestoreValue(of.deleted) !== true && firestoreValue(of.bezahlt) === true && firestoreValue(of.betrag) > 0
-          && ['rechnung_ausgehend', 'rechnung_eingehend'].includes(firestoreValue(of.typ) || 'rechnung_eingehend') && !(ossPlan && ossPlan.get(String(bezug)));
-        if (kg && origImStapel) {
-          const korrNr = firestoreValue(fields.rechnungsnr) || firestoreValue(fields.rechnungsnummer) || (st && st.rechnungsnr) || '';
-          const origNr = firestoreValue(of.rechnungsnr) || firestoreValue(of.rechnungsnummer) || String(bezug);
-          const nr = korrNr || `S-${origNr}`;
+        const origGeloescht = !!of && firestoreValue(of.deleted) === true;
+        const origWirksam = !!of && firestoreValue(of.bezahlt) === true && firestoreValue(of.betrag) > 0
+          && ['rechnung_ausgehend', 'rechnung_eingehend'].includes(firestoreValue(of.typ) || 'rechnung_eingehend')
+          && (!origGeloescht || stornoWirksam.has(bezug));
+        const rzRoh = Array.isArray(st.rueckzahlung) ? st.rueckzahlung[0] : st.rueckzahlung;
+        const rzJahrGleich = String((rzRoh && rzRoh.datum) || '').slice(0, 4) === String(jahr);
+        const korrNr = firestoreValue(fields.rechnungsnr) || firestoreValue(fields.rechnungsnummer) || st.rechnungsnr || '';
+        const origNr = of ? (firestoreValue(of.rechnungsnr) || firestoreValue(of.rechnungsnummer) || bezug) : bezug;
+        // A-M1: Rückzahlung zu einem OSS-Original bucht der Export nicht (OSS bucht unbezahlte Korrekturbelege nie): mit Nummer in die Warnung
+        if (kg && of && origWirksam && ossOriginal(bezug, of)) {
+          if (rzJahrGleich) korrekturOffen.push(`${korrNr || origNr} (oss_korrektur)`);
+          continue;
+        }
+        if (kg && origWirksam && !ossOriginal(bezug, of)) {
           if (kg.offen) {
-            const rzRoh = Array.isArray(st.rueckzahlung) ? st.rueckzahlung[0] : st.rueckzahlung;
-            if (String((rzRoh && rzRoh.datum) || '').slice(0, 4) === String(jahr)) korrekturOffen.push(`${nr} (${kg.grund})`);
+            if (rzJahrGleich) korrekturOffen.push(`${korrNr || origNr} (${kg.grund})`);
             continue;
           }
           const rzDatum = new Date(kg.datum + 'T00:00:00');
           if (String(rzDatum.getFullYear()) !== String(jahr)) continue;
+          // A-N3: ohne eigene Belegnummer S-<Original>-<TTMM der Rückzahlung>, bei gleichem Tag mit laufendem Zusatz (36 Zeichen Belegfeld 1)
+          let nr = korrNr;
+          if (!nr) {
+            const zusatz = `-${datevTTMM(rzDatum)}`;
+            const basis = `S-${origNr}`.slice(0, 36 - zusatz.length - 3) + zusatz;
+            const n = (nrBelegt.get(basis) || 0) + 1;
+            nrBelegt.set(basis, n);
+            nr = n > 1 ? `${basis}-${n}` : basis;
+          }
           const origEinnahme = firestoreValue(of.typ) === 'rechnung_ausgehend';
           const absOrig = firestoreValue(of.absender) || firestoreValue(of.name) || '';
           const freiOrig = firestoreValue(of.buchungstext) || '';
           const basisOrig = origEinnahme ? `Rechnung ${absOrig}`.trim() : `Beleg ${absOrig}`.trim();
+          const katOrig = firestoreValue(of.kategorie) || '';
+          // A-N4: Import-Konto des Originals gilt auch für die Gegenbuchung; Kleinunternehmer nach Profil (wie das Original im selben Stapel) mit einer Zeile ohne Satz
+          const impKonto = firestoreValue(of.datev_konto) || '';
+          const impGilt = impKonto && (firestoreValue(of.datev_skr) || '') === skr && (firestoreValue(of.datev_kategorie_import) || '') === katOrig;
+          const einSatz = kleinunternehmer || kg.ku === true;
           bucheGruppen({
-            gruppen: kg.gruppen, korrektur: true, ku: kleinunternehmer && kg.ku === true, istEinnahme: origEinnahme,
-            kategorie: firestoreValue(of.kategorie) || '', belegDatum: rzDatum, belegfeld1: nr,
+            gruppen: einSatz ? [{ satz: 'keine', brutto_cent: kg.rueckzahlung_cent }] : kg.gruppen, korrektur: true, ku: kleinunternehmer, istEinnahme: origEinnahme,
+            kategorie: katOrig, importKonto: impGilt ? impKonto : '', belegDatum: rzDatum, belegfeld1: nr,
             textBasis: freiOrig ? `${basisOrig} ${freiOrig}`.trim() : basisOrig,
             diverseAdressnummer: origEinnahme ? (kundenNummerById[firestoreValue(of.kunde_id) || ''] || '') : ''
           });
           korrekturGebucht++;
           continue;
         }
-        // Storno/Gutschrift zu einer bezahlten Rechnung, aber ohne Rückzahlung: keine Bankbuchung, Hinweis (nur im Jahr des Wirkdatums)
-        if (!kg && origImStapel && st && KORREKTUR_BELEG_ARTEN.includes(st.beleg_art) && st.wirkungslos !== true
-            && String(st.wirkdatum || '').slice(0, 4) === String(jahr) && st.korrektur_grund !== 'tippfehler_berichtigung') {
-          korrekturOhneRueckzahlung.push(firestoreValue(fields.rechnungsnr) || firestoreValue(fields.rechnungsnummer) || firestoreValue(of.rechnungsnr) || String(bezug));
+        // Storno/Gutschrift zu einer bezahlten Rechnung, aber ohne Rückzahlung: keine Bankbuchung, Hinweis (nur im Jahr des Wirkdatums, und nur wenn kein
+        // anderer Korrekturbeleg zur selben Rechnung die Rückzahlung trägt)
+        if (!kg && origWirksam && !rzTraeger.has(bezug) && String(st.wirkdatum || '').slice(0, 4) === String(jahr) && st.korrektur_grund !== 'tippfehler_berichtigung') {
+          korrekturOhneRueckzahlung.push(korrNr || origNr);
         }
       }
       const bezahlt = firestoreValue(fields.bezahlt) === true;
@@ -5139,6 +5184,8 @@ async function handleDatevExport(body, env, cors = {}) {
       if (satzFehlt && istEinnahme) { if (satzGemischt) gemischtAusgelassen.push(`${rechnungsnr}${mischsatzUnklarGrund ? ` (${mischsatzUnklarGrund})` : ''}`); else ohneSatzAusgelassen++; continue; }
       let satzHinweis = '';
       if (satzFehlt) { if (satzGemischt) gemischtMarkiert.push(`${rechnungsnr}${mischsatzUnklarGrund ? ` (${mischsatzUnklarGrund})` : ''}`); else ohneSatzMarkiert++; satzHinweis = ' [Steuersatz prüfen]'; }
+      // A-N1: unklarer Mischsatz auf einem Automatikkonto (3400/5400 usw.): DATEV rechnet dort trotz fehlendem Schlüssel selbst Vorsteuer, deshalb eigene Marke und Warnung
+      if (satzGemischt && !istEinnahme && DATEV_AUTOMATIKKONTEN_EXPORT[skr === 'SKR04' ? 'SKR04' : 'SKR03'].has(String(gegenkonto))) { automatikOhneSteuer++; satzHinweis += ' [Konto/Steuersatz prüfen]'; }
       // Automatikkonto und Satz des Belegs müssen zusammenpassen (TR-euer-007): DATEV rechnet auf 8400/3400 (SKR04 4400/5400) stets 19 %,
       // auf 8300/3300 (4300/5300) stets 7 %. Passt der Satz des Belegs nicht, wechselt der Export auf das Konto mit passendem Satz.
       if (!importKontoGilt && !kleinunternehmer && (mwstSatz === '19' || mwstSatz === '7')) {
