@@ -25,6 +25,7 @@
 import * as Steuerkern from '../steuerkern/index.js';
 import { istObjekt, CONFIG_PFAD, configBereinigen, kernOptionenFuer, kernOptionenFuerKontoLaden, schichtFuer, UID_MUSTER } from './gemeinsam.js';
 import { dekodiereFelder } from './firestore.js';
+import { datevKuKonto } from './datev-export-regeln.js';
 
 export const DATEV_OSS_KONTEN = Object.freeze({
   SKR03: Object.freeze({ ware: '8320', ware_korrektur: '8727', tbe: '8331', drittland: '8338', inland: Object.freeze({ 1900: '8400', 700: '8300' }), kleinunternehmer: '8192' }),
@@ -103,7 +104,7 @@ export function datevOssBuchungen(eintrag, ctx) {
     // 8192/4184 (AM, ohne Schlüssel); Storno/Korrektur als Rückbuchung (Haben, Textmarke) auf dasselbe Konto. Vorher still offen.
     for (const [i, z] of zeilen.entries()) {
       const ku = eintrag.status === 'ku' && z.ust_cent === 0;
-      const konto = ku ? k.kleinunternehmer : k.inland[z.satz_bp];
+      const konto = ku ? (ctx.jahr ? datevKuKonto(ctx.skr, ctx.jahr) : k.kleinunternehmer) : k.inland[z.satz_bp]; // E-M9: bis Kontenrahmen 2025 8195/4185
       if (!konto) return offen('satz_nicht_deutsch');
       out.push({ ...basis, betrag: brutto[i] / 100, gegenkonto: konto, bu: '' });
     }

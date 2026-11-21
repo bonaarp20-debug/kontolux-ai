@@ -28,9 +28,11 @@ const DATEV_2026 = {
   'Telefon/Internet': [['4920', 'Telefon'], ['6805', 'Telefon']],
   'Reisekosten': [['4676', 'Reisekosten Unternehmer Übernachtungsaufwand und Reisenebenkosten'], ['6680', 'Reisekosten Unternehmer Übernachtungsaufwand und Reisenebenkosten']],
   'Fortbildung': [['4945', 'Fortbildungskosten'], ['6821', 'Fortbildungskosten']],
-  'Kfz-Kosten': [['4500', 'Fahrzeugkosten'], ['6500', 'Fahrzeugkosten']],
+  // E-M2: 4500/6500 "Fahrzeugkosten" ist laut Fußnote 18 für EÜR-Anwender gesperrt, deshalb die Untergruppe 4530/6530
+  'Kfz-Kosten': [['4530', 'Laufende Fahrzeug-Betriebskosten'], ['6530', 'Laufende Fahrzeug-Betriebskosten']],
   'Kfz-Leasing': [['4570', 'Mietleasing Kfz'], ['6560', 'Mietleasing Kfz']],
-  'Kfz-Steuern/Versicherung': [['4520', 'Kfz-Versicherungen'], ['6520', 'Kfz-Versicherungen']],
+  // E-N8: Bezeichnung wörtlich aus dem Kontenrahmen 2026 (nicht "Kfz-Versicherungen")
+  'Kfz-Steuern/Versicherung': [['4520', 'Fahrzeug-Versicherungen'], ['6520', 'Fahrzeug-Versicherungen']],
   'Miete/Raumkosten': [['4200', 'Raumkosten'], ['6310', 'Miete (unbewegliche Wirtschaftsgüter)']],
   'Wareneinkauf 19%': [['3400', 'Wareneingang 19 % Vorsteuer (Automatik)'], ['5400', 'Wareneingang 19 % Vorsteuer (Automatik)']],
   'Wareneinkauf 7%': [['3300', 'Wareneingang 7 % Vorsteuer (Automatik)'], ['5300', 'Wareneingang 7 % Vorsteuer (Automatik)']],
@@ -88,6 +90,51 @@ const SKR04_PDF = {
   'Abschreibung (AfA)': ['6220', 'Abschreibungen auf Sachanlagen (ohne AfA auf Fahrzeuge und Gebäude)'],
 };
 for (const [kat, [konto]] of Object.entries(SKR04_PDF)) pruefe(`${kat}: SKR04 ${konto} laut DATEV-PDF`, app[kat]?.SKR04 === konto, `Mapping hat ${app[kat]?.SKR04}`);
+// ── Konten des Exports außerhalb des Mappings (DATEV-Gesamtcheck 21.11.2026, Teil 3): jede Konstante gegen die Kontenrahmen 2026 (SKR03 Art.-Nr. 11174,
+// SKR04 Art.-Nr. 11175, Stand 01.01.2026, im Wortlaut gelesen). Marke: AV/AM = Automatikkonto Vorsteuer/Umsatzsteuer, U = Umsatzsteuer-Voranmeldung.
+import { RC_EINGANG_KONTEN, RC_AUSGANG_KONTEN, GWG_KONTEN, KU_KONTO } from './regel/datev-export-regeln.js';
+import { DATEV_OSS_KONTEN } from './regel/datev-oss.js';
+const WEITERE = {
+  SKR03: {
+    '3123': 'U AV Sonstige Leistungen eines im anderen EU-Land ansässigen Unternehmers 19 % Vorsteuer und 19 % Umsatzsteuer',
+    '3125': 'U AV Leistungen eines im Ausland ansässigen Unternehmers 19 % Vorsteuer und 19 % Umsatzsteuer',
+    '3143': 'U AV Sonstige Leistungen eines im anderen EU-Land ansässigen Unternehmers ohne Vorsteuer und 19 % Umsatzsteuer',
+    '3145': 'U AV Leistungen eines im Ausland ansässigen Unternehmers ohne Vorsteuer und 19 % Umsatzsteuer',
+    '8336': 'U AM Erlöse aus im anderen EU-Land steuerpflichtigen sonstigen Leistungen, für die der Leistungsempfänger die Umsatzsteuer schuldet',
+    '8337': 'U AM Erlöse aus Leistungen, für die der Leistungsempfänger die Umsatzsteuer nach § 13b UStG schuldet',
+    '8338': 'U AM Erlöse aus im Drittland steuerbaren Leistungen, im Inland nicht steuerbare Umsätze',
+    '8192': 'U AM Steuerfreie Erlöse Kleinunternehmer nach § 19 Abs. 1 UStG',
+    '0480': 'Geringwertige Wirtschaftsgüter', '4855': 'Sofortabschreibung geringwertiger Wirtschaftsgüter',
+    '4654': 'Nicht abzugsfähige Bewirtungskosten', '4650': 'Bewirtungskosten', '4900': 'Sonstige betriebliche Aufwendungen',
+    '1800': 'F Privatentnahmen allgemein', '1890': 'F Privateinlagen', '4530': 'Laufende Fahrzeug-Betriebskosten',
+  },
+  SKR04: {
+    '5923': 'U AV Sonstige Leistungen eines im anderen EU-Land ansässigen Unternehmers 19 % Vorsteuer und 19 % Umsatzsteuer',
+    '5925': 'U AV Leistungen eines im Ausland ansässigen Unternehmers 19 % Vorsteuer und 19 % Umsatzsteuer',
+    '5943': 'U AV Sonstige Leistungen eines im anderen EU-Land ansässigen Unternehmers ohne Vorsteuer und 19 % Umsatzsteuer',
+    '5945': 'U AV Leistungen eines im Ausland ansässigen Unternehmers ohne Vorsteuer und 19 % Umsatzsteuer',
+    '4336': 'U AM Erlöse aus im anderen EU-Land steuerpflichtigen sonstigen Leistungen, für die der Leistungsempfänger die Umsatzsteuer schuldet',
+    '4337': 'U AM Erlöse aus Leistungen, für die der Leistungsempfänger die Umsatzsteuer nach § 13b UStG schuldet',
+    '4338': 'U AM Erlöse aus im Drittland steuerbaren Leistungen, im Inland nicht steuerbare Umsätze',
+    '4184': 'U AM Steuerfreie Erlöse Kleinunternehmer nach § 19 Abs. 1 UStG',
+    '0670': 'Geringwertige Wirtschaftsgüter', '6260': 'Sofortabschreibungen geringwertiger Wirtschaftsgüter',
+    '6644': 'Nicht abzugsfähige Bewirtungskosten', '6640': 'Bewirtungskosten', '6300': 'Sonstige betriebliche Aufwendungen',
+    '2100': 'F Privatentnahmen allgemein', '2180': 'F Privateinlagen', '6530': 'Laufende Fahrzeug-Betriebskosten',
+  },
+};
+for (const skr of ['SKR03', 'SKR04']) {
+  const rc = RC_EINGANG_KONTEN[skr], ra = RC_AUSGANG_KONTEN[skr], g = GWG_KONTEN[skr];
+  const benutzt = [rc.eu.rb, rc.eu.ku, rc.drittland.rb, rc.drittland.ku, ra.eu, ra.drittland, ra.inland, g.anlage, g.sofort, KU_KONTO[skr].ab2026, DATEV_OSS_KONTEN[skr].kleinunternehmer];
+  pruefe(`${skr}: § 13b-, GWG- und Erlöskonten des Exports stehen im Kontenrahmen 2026 (Tabelle WEITERE)`, benutzt.every(k => WEITERE[skr][k]), benutzt.filter(k => !WEITERE[skr][k]).join(', '));
+  pruefe(`${skr}: § 13b-Eingangskonten sind Automatikkonten (AV), Erlöskonten AM`, [rc.eu.rb, rc.eu.ku, rc.drittland.rb, rc.drittland.ku].every(k => /^U AV /.test(WEITERE[skr][k])) && [ra.eu, ra.drittland, ra.inland].every(k => /^U AM /.test(WEITERE[skr][k])));
+  pruefe(`${skr}: Kleinunternehmer-Konto 2026 ist AM, das Vorjahreskonto ${KU_KONTO[skr].bis2025} ist im Kontenrahmen 2026 reserviert (nicht in der Tabelle)`, /^U AM /.test(WEITERE[skr][KU_KONTO[skr].ab2026]) && !WEITERE[skr][KU_KONTO[skr].bis2025]);
+}
+// Der Export darf die Konten nicht von Hand verdrahten: die Konstanten im Worker stehen in der Tabelle (4654/6644, 1800/1890, 2100/2180, 4900/6300)
+const workerQuelle = readFileSync(new URL('./worker.js', import.meta.url), 'utf8');
+for (const [name, erwartet] of [['DATEV_BEWIRTUNG_KONTEN', ["'4650'", "'4654'", "'6640'", "'6644'"]], ['PRIVATKONTEN_EXPORT', ["'1800'", "'1890'", "'2100'", "'2180'"]]]) {
+  const i = workerQuelle.indexOf('const ' + name + ' = {'); const block = workerQuelle.slice(i, workerQuelle.indexOf('};', i));
+  pruefe(`${name} im Worker enthält genau die geprüften Konten`, erwartet.every(k => block.includes(k)) && [...block.matchAll(/'(\d{4})'/g)].every(m => WEITERE.SKR03[m[1]] || WEITERE.SKR04[m[1]]));
+}
 const reserviert = { SKR03: ['1583', '1775', '8195', '8196'], SKR04: ['4185', '4186'] };
 const verwendet = { SKR03: new Set(Object.values(app).map(e => e.SKR03)), SKR04: new Set(Object.values(app).map(e => e.SKR04)) };
 for (const skr of ['SKR03', 'SKR04']) pruefe(`${skr}: kein reserviertes/gelöschtes Konto im Mapping`, reserviert[skr].every(k => !verwendet[skr].has(k)));

@@ -21,6 +21,7 @@ import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // 
 import { rechnungsnrDuplikat, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c)
 import { datevMischsatzGruppen, datevKorrekturGruppen, KORREKTUR_BELEG_ARTEN } from './regel/datev-mischsatz.js'; // Branch datev-mischsatz: Belege mit mehreren Steuersätzen je Satz buchen
 import { dekodiereFelder as datevDekodiereFelder } from './regel/firestore.js';
+import { datevBelegfeldBereinigen, datevFeldGequotet, datevNummerPruefen, datevKontoVierstellig, datevGeldkontoImBereich, datevKuKonto, RC_EINGANG_KONTEN, RC_AUSGANG_KONTEN, datevRcLage, datevUstId, GWG_KONTEN, AFA_KATEGORIE, GWG_KATEGORIE, FA_EST_ART, UST_KATEGORIEN } from './regel/datev-export-regeln.js'; // DATEV-Gesamtcheck 21.11.2026: Belegfeld 1, § 13b, GWG, Konten
 import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen, kiKassenberichtText } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4); Kassen-P0: kiKassenberichtText
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
@@ -1349,7 +1350,7 @@ async function checkNachrichtenLimit(nutzername, env, userId, ctx) {
 // "Bürobedarf" (4980) — beide EÜR-Zeilen wären dadurch nie unterscheidbar gewesen.
 // Konten-Korrektur 2026-09-26 (geprüft gegen den offiziellen SKR03-/SKR04-Kontenplan des
 // Klausurenverbunds der Steuerberaterkammern, Haufe und epago): SKR03 4650 ist Bewirtung (nicht
-// Werbekosten → 4600; ein Konto 4610 gibt es im SKR03 nicht — Prüfung 2026-09-29 gegen den DATEV-Kontenrahmen 2026), 4930 ist Bürobedarf (nicht Kfz → Fahrzeugkosten 4500/6500), 4830 sind
+// Werbekosten → 4600; ein Konto 4610 gibt es im SKR03 nicht — Prüfung 2026-09-29 gegen den DATEV-Kontenrahmen 2026), 4930 ist Bürobedarf (nicht Kfz → Laufende Fahrzeug-Betriebskosten 4530/6530, E-M2), 4830 sind
 // Abschreibungen (Fortbildung → 4945/6821), 4240 ist Gas/Strom/Wasser (Steuerberater → 4950),
 // Wareneingang liegt auf den Automatikkonten 3400/3300 bzw. 5400/5300, sonstige betriebliche
 // Aufwendungen auf 4900/6300. Betrifft DATEV-Export und DATEV-Import gleichermaßen.
@@ -1366,7 +1367,9 @@ const SACHKONTO_MAPPING = {
   // 'Fahrtkosten (Kilometerpauschale)'/'Verpflegungsmehraufwand' unten.
   'Reisekosten':                { SKR03: '4676', SKR04: '6680', euer_zeile: 'Z.45' },
   'Fortbildung':                { SKR03: '4945', SKR04: '6821', euer_zeile: 'Z.46' },
-  'Kfz-Kosten':                 { SKR03: '4500', SKR04: '6500', euer_zeile: 'Z.71' },
+  // E-M2 (DATEV-Gesamtcheck): 4500/6500 "Fahrzeugkosten" darf laut Fußnote 18 des Kontenrahmens 2026 von EÜR-Anwendern nicht genutzt werden (differenzierter Ausweis
+  // verlangt). Untergruppe 4530/6530 "Laufende Fahrzeug-Betriebskosten" (SKR03 und SKR04 2026 im Wortlaut gelesen).
+  'Kfz-Kosten':                 { SKR03: '4530', SKR04: '6530', euer_zeile: 'Z.71' },
   // KERN-20 (N3): Kfz-Leasing (KZ 144, 2026 Z.69, 2025 Z.68) und Kfz-Steuern/Versicherung/Maut (KZ 145, 2026 Z.70, 2025 Z.69). DATEV 2026: 4570/6560 "Mietleasing Kfz",
   // 4520/6520 "Kfz-Versicherungen" (Kfz-Steuer 4510/7685 und Maut 4560/6580 haben eigene Konten; die Sammelkategorie bucht auf das Versicherungskonto, Konfidenz B,
   // Quelle: Kontenrahmen-Übersichten SKR03/SKR04, Rechtsstand 30.06.2026). Bestehende Belege der Kategorie 'Kfz-Kosten' bleiben unverändert (KZ 146).
@@ -1376,7 +1379,7 @@ const SACHKONTO_MAPPING = {
   // SKR04 3400/3300 waren falsch (Audit-Korrektur 2026-09) — Aktiv/Passiv-Verwechslung: das sind
   // real "Verbindlichkeiten..." (Fremdkapitalkonten), da SKR04 dem Abschlussgliederungsprinzip
   // folgt (Klasse 3 = kurzfristiges Fremdkapital), anders als SKR03 (Klasse 3 = Wareneingang).
-  // Korrekt: 5130/5110 "Einkauf Roh-, Hilfs- und Betriebsstoffe 19%/7% Vorsteuer".
+  // Korrekt ist das Wareneingangs-Automatikkonto 5400/5300 "Wareneingang 19 % / 7 % Vorsteuer (Automatik)" (SKR04 2026, geprüft in test-sachkonten-sync.mjs, E-N7: der frühere Hinweis 5130/5110 war überholt).
   'Wareneinkauf 19%':           { SKR03: '3400', SKR04: '5400', euer_zeile: 'Z.29' },
   'Wareneinkauf 7%':            { SKR03: '3300', SKR04: '5300', euer_zeile: 'Z.29' },
   'GWG bis 800€':               { SKR03: '0480', SKR04: '0670', euer_zeile: 'Z.37' },
@@ -4696,9 +4699,9 @@ const DATEV_ERLOESKONTEN = {
   SKR03: { '19': '8400', '7': '8300', keine: '8200', reverse_charge: '8337', kleinunternehmer: '8192' },
   SKR04: { '19': '4400', '7': '4300', keine: '4200', reverse_charge: '4337', kleinunternehmer: '4184' }
 };
-function erloeskontoExport(mwstSatz, kleinunternehmer, skr) {
+function erloeskontoExport(mwstSatz, kleinunternehmer, skr, jahr) {
   const k = DATEV_ERLOESKONTEN[skr] || DATEV_ERLOESKONTEN.SKR03;
-  if (kleinunternehmer) return k.kleinunternehmer;
+  if (kleinunternehmer) return jahr ? datevKuKonto(skr, jahr) : k.kleinunternehmer; // E-M9: bis Kontenrahmen 2025 8195/4185
   const satz = String(mwstSatz ?? '');
   if (satz === '19' || satz === '7' || satz === 'reverse_charge') return k[satz];
   if (satz === 'keine' || satz === '0') return k.keine;
@@ -4738,7 +4741,9 @@ function buchungstextBasisKurz(text, marke) {
 // Gegenkonto aus der Kategorie nur dann übernehmen, wenn sie zur Buchungsrichtung passt.
 function istEinnahmeKategorie(istEinnahme, kategorie) {
   if (!istEinnahme) return true;
-  return /^Einnahmen/.test(String(kategorie || ''));
+  // E-H2: die USt-Erstattung des Finanzamts (typ rechnung_ausgehend, Kategorie 'Umsatzsteuer-Erstattung', 1780/3820) ist kein Erlös und kein Umsatz
+  // (nicht 8200, bei Kleinunternehmern nicht 8192: sie zählte sonst zur Umsatzgrenze des § 19 UStG). Gleiches für 'Vereinnahmte Umsatzsteuer' (1776/3806).
+  return /^Einnahmen/.test(String(kategorie || '')) || kategorie === 'Umsatzsteuer-Erstattung' || kategorie === 'Vereinnahmte Umsatzsteuer';
 }
 function buSchluesselExport(mwstSatz, kleinunternehmer, istEinnahme, gegenkonto, skr) {
   // Kleinunternehmer (§ 19 UStG): weder USt-Ausweis noch Vorsteuerabzug. Der mwst_satz eines Belegs
@@ -4890,10 +4895,13 @@ async function handleDatevExport(body, env, cors = {}) {
 
     const skr = (firestoreValue(profilFields.datev_skr) || 'SKR03').toString().trim();
     const bankkonto = extractKontoNummer(firestoreValue(profilFields.datev_bankkonto));
-    const ausgabenGegenkonto = extractKontoNummer(firestoreValue(profilFields.datev_ausgaben_gegenkonto))
-      || (skr === 'SKR04' ? '6300' : '4900');
+    const ausgabenGegenkontoRoh = extractKontoNummer(firestoreValue(profilFields.datev_ausgaben_gegenkonto));
+    const ausgabenGegenkontoStandard = skr === 'SKR04' ? '6300' : '4900';
+    const ausgabenGegenkontoUngueltig = !!ausgabenGegenkontoRoh && !datevKontoVierstellig(ausgabenGegenkontoRoh);
+    const ausgabenGegenkonto = (ausgabenGegenkontoRoh && !ausgabenGegenkontoUngueltig) ? ausgabenGegenkontoRoh : ausgabenGegenkontoStandard;
     let wjBeginn = (firestoreValue(profilFields.datev_wj_beginn) || '0101').toString().trim();
     if (!/^\d{4}$/.test(wjBeginn)) wjBeginn = '0101';
+    const skrK0 = skr === 'SKR04' ? 'SKR04' : 'SKR03';
 
     // Buchungskonto ist Pflicht — steht in JEDER Buchungszeile, ein Platzhalter dort würde die
     // komplette Datei unbrauchbar machen (welches Konto wurde tatsächlich bewegt?). Berater-/
@@ -4912,17 +4920,40 @@ async function handleDatevExport(body, env, cors = {}) {
         headers: { ...cors, 'Content-Type': 'application/json' }
       });
     }
-    const beraterNrRaw = (firestoreValue(profilFields.datev_berater_nr) || '').toString().trim();
-    const mandantenNrRaw = (firestoreValue(profilFields.datev_mandanten_nr) || '').toString().trim();
-    const beraterNr = beraterNrRaw || '0';
-    const mandantenNr = mandantenNrRaw || '0';
+    // E-M6: das Buchungskonto muss vierstellig sein (Sachkontenlänge 4 im Kopf). Eine IBAN oder ein Name im Feld ergäbe sonst Konto "89" oder "1" in jeder Zeile.
+    const bankkontoRoh = String(firestoreValue(profilFields.datev_bankkonto) ?? '').trim();
+    if (!datevKontoVierstellig(bankkonto)) {
+      return new Response(JSON.stringify({
+        error: 'DATEV-Einstellungen ungültig',
+        details: `Das Buchungskonto „${bankkontoRoh.slice(0, 40)}“ ist keine vierstellige Kontonummer (z. B. 1200 bei SKR03 oder 1800 bei SKR04). Bitte in den Einstellungen korrigieren und erneut exportieren.`
+      }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+    }
+    // E-M5: Berater- und Mandantennummer stehen ungequotet im Kopf. Eingaben mit Leerzeichen, Punkt oder Semikolon würden die Felder verschieben oder die Datei
+    // ablehnen lassen. Gültig: Berater 1001 bis 9999999, Mandant 1 bis 99999 (sonst Platzhalter 0 mit Warnung).
+    const beraterP = datevNummerPruefen(firestoreValue(profilFields.datev_berater_nr), 'berater');
+    const mandantP = datevNummerPruefen(firestoreValue(profilFields.datev_mandanten_nr), 'mandant');
+    const beraterNr = beraterP.wert;
+    const mandantenNr = mandantP.wert;
     let datevWarning = '';
-    if (!beraterNrRaw && !mandantenNrRaw) {
-      datevWarning = 'Berater-Nr. und Mandanten-Nr. fehlen — Platzhalter (0) wurde verwendet. Dein Steuerberater kann die Datei so nicht zuordnen, bitte in den Einstellungen ergänzen.';
-    } else if (!beraterNrRaw) {
-      datevWarning = 'Berater-Nr. fehlt — Platzhalter (0) wurde verwendet. Bitte in den Einstellungen ergänzen.';
-    } else if (!mandantenNrRaw) {
-      datevWarning = 'Mandanten-Nr. fehlt — Platzhalter (0) wurde verwendet. Bitte in den Einstellungen ergänzen.';
+    const warnen = (t) => { datevWarning = (datevWarning ? datevWarning + ' ' : '') + t; };
+    if (beraterP.fehlt && mandantP.fehlt) {
+      warnen('Berater-Nr. und Mandanten-Nr. fehlen — Platzhalter (0) wurde verwendet. Dein Steuerberater kann die Datei so nicht zuordnen, bitte in den Einstellungen ergänzen.');
+    } else if (beraterP.fehlt) {
+      warnen('Berater-Nr. fehlt — Platzhalter (0) wurde verwendet. Bitte in den Einstellungen ergänzen.');
+    } else if (mandantP.fehlt) {
+      warnen('Mandanten-Nr. fehlt — Platzhalter (0) wurde verwendet. Bitte in den Einstellungen ergänzen.');
+    }
+    if (beraterP.ungueltig) warnen('Die Berater-Nr. in den Einstellungen ist ungültig (erlaubt: Zahl von 1001 bis 9999999) — Platzhalter (0) wurde verwendet. Bitte korrigieren.');
+    if (mandantP.ungueltig) warnen('Die Mandanten-Nr. in den Einstellungen ist ungültig (erlaubt: Zahl von 1 bis 99999) — Platzhalter (0) wurde verwendet. Bitte korrigieren.');
+    if (!datevGeldkontoImBereich(bankkonto, skrK0)) {
+      warnen(`Das Buchungskonto ${bankkonto} liegt nicht im üblichen Bereich für Bank oder Kasse im ${skr === 'SKR04' ? 'SKR04 (1600–1899)' : 'SKR03 (1000–1099, 1200–1299)'}. Bitte prüfen, ob es das richtige Konto ist.`);
+    }
+    // Das Wirtschaftsjahr ist für Kontolux-Nutzer (Einnahmenüberschussrechnung) das Kalenderjahr (§ 4a Abs. 1 Nr. 3 EStG); der Stapel läuft immer 01.01. bis 31.12.
+    // Ein abweichender WJ-Beginn im Kopf würde einen Stapel über zwei Wirtschaftsjahre ergeben (E-M4).
+    if (ausgabenGegenkontoUngueltig) warnen(`Das Gegenkonto für Ausgaben „${ausgabenGegenkontoRoh}“ ist nicht vierstellig. Es wurde das Standardkonto ${ausgabenGegenkontoStandard} verwendet. Bitte in den Einstellungen korrigieren.`);
+    if (wjBeginn !== '0101') warnen(`Der Wirtschaftsjahres-Beginn ${wjBeginn.slice(0, 2)}.${wjBeginn.slice(2)}. aus den Einstellungen wurde nicht verwendet: Der Export gilt immer für das Kalenderjahr (Beginn 01.01.).`);
+    if (istSollversteuerung) {
+      warnen('Du versteuerst nach vereinbarten Entgelten (Soll). Der Stapel enthält nur bezahlte Belege am Zahlungsdatum. Die Umsatzsteuer entsteht bei Soll aber schon mit der Leistung: Voranmeldungsmonate und offene Rechnungen am Jahresende stimmen in DATEV deshalb nicht mit Kontolux überein. Bitte mit dem Steuerberater klären.');
     }
 
     // Einnahmen ohne Kategorie: Erlöskonto nach mwst_satz (erloeskontoExport) — vorher immer
@@ -4931,6 +4962,10 @@ async function handleDatevExport(body, env, cors = {}) {
     // OSS-FORM 4 (F5): Altpfad (Feature oss aus) mit Kategorie „Einnahmen EU-Privatkunden (OSS)“ (8320/4320): auch ein Erlöskonto, damit Kleinunternehmer
     // auf das KU-Konto umgelenkt werden und kein Steuerschlüssel daran hängt
     alleErloeskonten.add(skr === 'SKR04' ? '4320' : '8320');
+    // E-M9/E-M1: Kleinunternehmer-Konto des Vorjahres-Kontenrahmens (8195/4185) und die Reverse-Charge-Erlöse nach Land (8336/8338, 4336/4338) sind auch Erlöskonten
+    alleErloeskonten.add(datevKuKonto(skr, 2025));
+    alleErloeskonten.add(RC_AUSGANG_KONTEN[skr === 'SKR04' ? 'SKR04' : 'SKR03'].eu);
+    alleErloeskonten.add(RC_AUSGANG_KONTEN[skr === 'SKR04' ? 'SKR04' : 'SKR03'].drittland);
 
     // Steuersatz je Integration aus deren Einnahmen (zuletzt verwendeter Satz, wie
     // berechneUstSchaetzwert in index.html) — für Erstattungen, die ohne Satz gespeichert werden.
@@ -4957,6 +4992,9 @@ async function handleDatevExport(body, env, cors = {}) {
     const ohneRechnungsnr = [];
     let plattformOhneNr = 0;
     let skippedUnpaid = 0;
+    // DATEV-Gesamtcheck: Zähler und Listen der Hinweise
+    const rcGebucht = []; const rcOffen = []; const rcAusgangOffen = []; const rcOhneUstId = [];
+    const afaBelege = []; let gwgGebucht = 0; let faOhneNr = 0; const faEstPrivat = []; const faOffen = []; let pauschalenPrivat = 0;
     let ohneSatzAusgelassen = 0;
     let ohneSatzMarkiert = 0;
     let kontoGewechselt = 0;
@@ -5021,8 +5059,8 @@ async function handleDatevExport(body, env, cors = {}) {
       for (const g of gruppen) {
         if (g.brutto_cent <= 0) continue;
         let konto = importKonto || (istEinnahmeKategorie(istEinnahme, kategorie) ? resolveSachkonto(kategorie, skr) : null)
-          || (istEinnahme ? erloeskontoExport(g.satz, ku, skr) : ausgabenGegenkonto);
-        if (ku && !importKonto && istEinnahme && alleErloeskonten.has(String(konto))) konto = erloeskontoExport('keine', true, skr);
+          || (istEinnahme ? erloeskontoExport(g.satz, ku, skr, jahr) : ausgabenGegenkonto);
+        if (ku && !importKonto && istEinnahme && alleErloeskonten.has(String(konto))) konto = erloeskontoExport('keine', true, skr, jahr);
         let hinweis = '';
         if (importKonto) { /* Konto der Quelldatei bleibt, kein Tausch */ } else if (!ku && (g.satz === '19' || g.satz === '7')) {
           const tausch = DATEV_AUTOMATIK_SATZ_TAUSCH[skrK][String(konto)];
@@ -5156,6 +5194,22 @@ async function handleDatevExport(body, env, cors = {}) {
 
       if (!bezahlt) { skippedUnpaid++; continue; }
 
+      // Kategorie und Importkonto früh (AfA-Belege brauchen keine Rechnungsnummer, Finanzamt-Belege dürfen keine haben).
+      const kategorie = firestoreValue(fields.kategorie) || '';
+      // DATEV-Importe: das Original-Konto der Quelldatei behalten, solange der Nutzer die Kategorie
+      // nicht geändert hat und der Kontenrahmen gleich ist — sonst ginge z.B. ein spezielles
+      // Aufwandskonto beim Rück-Export in "Sonstiges" auf.
+      const datevKontoImport = firestoreValue(fields.datev_konto) || '';
+      const importKontoGilt = datevKontoImport
+        && (firestoreValue(fields.datev_skr) || '') === skr
+        && (firestoreValue(fields.datev_kategorie_import) || '') === kategorie;
+      // E-H3: ein Beleg der Kategorie "Abschreibung (AfA)" ist kein Geldabfluss auf 4830 (die AfA ist ein Zeitanteil der Anschaffung, § 7 EStG), die Anschaffung
+      // gehört auf ein Anlagekonto und die Jahres-AfA gegen dieses Konto. Das ist ohne Anlagenverzeichnis nicht sicher buchbar: nicht im Stapel, Nummer in der Warnung.
+      if (kategorie === AFA_KATEGORIE && !importKontoGilt) {
+        afaBelege.push(`${firestoreValue(fields.rechnungsnr) || firestoreValue(fields.absender) || firestoreValue(fields.name) || docId} (${datevTTMMJJ(belegDatum)}, ${betrag.toFixed(2).replace('.', ',')} €)`);
+        continue;
+      }
+
       // Rechnungsnummer: bevorzugt das explizite Feld, sonst Best-Effort-Extraktion aus
       // der Dokument-ID (ältere, vor diesem Fix erstellte Rechnungen/Mahnungen tragen die
       // Nummer nur dort).
@@ -5173,6 +5227,8 @@ async function handleDatevExport(body, env, cors = {}) {
       if (!rechnungsnr) {
         if (DATEV_WEBHOOK_QUELLEN.includes(firestoreValue(fields.quelle))) {
           plattformOhneNr++;
+        } else if (UST_KATEGORIEN.includes(kategorie) || firestoreValue(fields.fa_art)) {
+          faOhneNr++; // Finanzamt-Buchung (aus dem Kontoauszug): hat keine Rechnungsnummer, kein Abbruch
         } else {
           ohneRechnungsnr.push(`${firestoreValue(fields.absender) || firestoreValue(fields.name) || 'ohne Absender'} (${datevTTMMJJ(belegDatum)})`);
         }
@@ -5181,13 +5237,15 @@ async function handleDatevExport(body, env, cors = {}) {
 
       const absender = firestoreValue(fields.absender) || firestoreValue(fields.name) || '';
       let mwstSatz = firestoreValue(fields.mwst_satz);
+      // USt-Durchlaufposten (Finanzamt) tragen keinen Steuersatz: nicht als "Satz fehlt" werten
+      if (UST_KATEGORIEN.includes(kategorie) && !mwstSatz) mwstSatz = 'keine';
 
       // KX-WC2 (BP-30): Beleg mit steuer.oss bei Kern-Option oss: Konto, Schlüssel, Bestimmungsland und Satz aus dem Fall des Kerns; offener Fall = nicht exportiert.
       const ossEintrag = ossPlan ? ossPlan.get(doc.name?.split('/').pop() || '') : null;
       if (ossEintrag) {
         const ossText = firestoreValue(fields.buchungstext) || '';
         const r = datevOssBuchungen(ossEintrag, {
-          skr, bankkonto, belegDatum, belegfeld1: rechnungsnr, betragCent: Math.round(betrag * 100),
+          skr, bankkonto, belegDatum, belegfeld1: rechnungsnr, betragCent: Math.round(betrag * 100), jahr,
           buchungstext: (ossText ? `Rechnung ${absender} ${ossText}` : `Rechnung ${absender}`).trim(),
           diverseAdressnummer: kundenNummerById[firestoreValue(fields.kunde_id) || ''] || ''
         });
@@ -5201,14 +5259,6 @@ async function handleDatevExport(body, env, cors = {}) {
       // sonst würde ein späterer SKR-Wechsel alte Belege mit dem falschen Kontenrahmen
       // exportieren. Nur Belege ohne Kategorie (vor diesem Feature gespeichert) fallen auf das
       // generische Gegenkonto zurück.
-      const kategorie = firestoreValue(fields.kategorie) || '';
-      // DATEV-Importe: das Original-Konto der Quelldatei behalten, solange der Nutzer die Kategorie
-      // nicht geändert hat und der Kontenrahmen gleich ist — sonst ginge z.B. ein spezielles
-      // Aufwandskonto beim Rück-Export in "Sonstiges" auf.
-      const datevKontoImport = firestoreValue(fields.datev_konto) || '';
-      const importKontoGilt = datevKontoImport
-        && (firestoreValue(fields.datev_skr) || '') === skr
-        && (firestoreValue(fields.datev_kategorie_import) || '') === kategorie;
       // Mischsatz (Branch datev-mischsatz): Beleg v2 mit mehreren Steuersätzen (steuer.positionen) ergibt eine Buchungszeile je Satz-Gruppe
       // (Konto und BU-Schlüssel nach Satz, Summe = Belegbrutto), auch Bewirtung (je Satz 70/30). Ein Satz, Kleinunternehmer, Reverse Charge, OSS und
       // Altbelege bleiben auf dem Pfad darunter (byte-gleich). Satz nicht zulässig oder Summe weicht ab: wie 'gemischt' ohne Aufteilung behandelt
@@ -5232,10 +5282,10 @@ async function handleDatevExport(body, env, cors = {}) {
       // den Erlös auf ein Aufwandskonto buchen.
       let gegenkonto = (importKontoGilt ? datevKontoImport : '')
         || (istEinnahmeKategorie(istEinnahme, kategorie) ? resolveSachkonto(kategorie, skr) : null)
-        || (istEinnahme ? erloeskontoExport(mwstSatz, kleinunternehmer, skr) : ausgabenGegenkonto);
+        || (istEinnahme ? erloeskontoExport(mwstSatz, kleinunternehmer, skr, jahr) : ausgabenGegenkonto);
       // Kleinunternehmer: Einnahmen nie auf ein Regelsteuer-Erlöskonto (8400 würde in DATEV 19 % USt erzeugen).
       if (istEinnahme && kleinunternehmer && !importKontoGilt && alleErloeskonten.has(String(gegenkonto))) {
-        gegenkonto = erloeskontoExport(mwstSatz, true, skr);
+        gegenkonto = erloeskontoExport(mwstSatz, true, skr, jahr);
       }
       // Plattform-Erstattung (ohne Kategorie/Satz gespeichert): als Erlösschmälerung auf das Erlöskonto
       // der ursprünglichen Einnahmen statt als "Sonstige Aufwendungen" — sonst fehlt dem Steuerberater
@@ -5244,7 +5294,7 @@ async function handleDatevExport(body, env, cors = {}) {
       const satzErstattung = satzJeQuelle[quelle];
       if (!istEinnahme && !kategorie && !importKontoGilt && DATEV_WEBHOOK_QUELLEN.includes(quelle)
           && (!mwstSatz || mwstSatz === 'keine') && satzErstattung) {
-        gegenkonto = erloeskontoExport(satzErstattung, kleinunternehmer, skr);
+        gegenkonto = erloeskontoExport(satzErstattung, kleinunternehmer, skr, jahr);
       }
       // Erlöskonto ohne Umsatzsteuer (KU, steuerfrei, § 13b) bzw. Erstattung darauf: kein Steuerschlüssel.
       const erstattungsKonto = !istEinnahme && !kategorie && !importKontoGilt && DATEV_WEBHOOK_QUELLEN.includes(quelle)
@@ -5274,14 +5324,47 @@ async function handleDatevExport(body, env, cors = {}) {
         if (istEinnahme) { gegenkonto = erloeskontoExport(mwstSatz, false, skr === 'SKR04' ? 'SKR04' : 'SKR03'); kontoGewechselt++; }
         else { automatikOhneSteuer++; satzHinweis += ' [Konto/Steuersatz prüfen]'; }
       }
+      // DATEV-Gesamtcheck: Finanzamt (E-N11), Pauschalen (E-N5), Reverse Charge Eingang (E-H1) und Ausgang (E-M1). Nie raten: ohne sichere Angabe bleibt der Beleg
+      // wie bisher im Stapel, trägt eine Textmarke und steht mit Nummer in der Warnung.
+      const skrK = skr === 'SKR04' ? 'SKR04' : 'SKR03';
+      let ohneBuErzwingen = false;
+      let konto1 = bankkonto; // Buchungskonto der Zeile: Bank, bei Pauschalen die Privateinlage
+      let rcMarke = '';
+      let ustIdSpalte = '';
+      if (!importKontoGilt) {
+        const stDec = (mwstSatz === 'reverse_charge' && fields.steuer) ? datevDekodiereFelder({ steuer: fields.steuer }).steuer : null;
+        if (!istEinnahme && firestoreValue(fields.fa_art) === FA_EST_ART) {
+          // Einkommensteuer ans Finanzamt ist keine Betriebsausgabe (§ 12 Nr. 3 EStG): Privatentnahme
+          gegenkonto = PRIVATKONTEN_EXPORT.entnahme[skrK]; ohneBuErzwingen = true; faEstPrivat.push(rechnungsnr);
+        } else if (!istEinnahme && !firestoreValue(fields.fa_art) && kategorie === 'Finanzamt') {
+          faOffen.push(rechnungsnr); satzHinweis += ' [Finanzamt prüfen]';
+        } else if (!istEinnahme && (kategorie === 'Fahrtkosten (Kilometerpauschale)' || kategorie === 'Verpflegungsmehraufwand')) {
+          // Pauschalen sind kein Geldabfluss: Betriebsausgabe gegen Privateinlage
+          konto1 = PRIVATKONTEN_EXPORT.einlage[skrK]; ohneBuErzwingen = true; pauschalenPrivat++;
+        } else if (!istEinnahme && mwstSatz === 'reverse_charge') {
+          const lage = datevRcLage(stDec);
+          if (lage === 'eu' || lage === 'drittland') {
+            gegenkonto = RC_EINGANG_KONTEN[skrK][lage][kleinunternehmer ? 'ku' : 'rb'];
+            ohneBuErzwingen = true; // Automatikkonten (AV): Vorsteuer und Umsatzsteuer bucht das Konto selbst
+            rcMarke = ` [§ 13b ${lage === 'eu' ? 'EU' : 'Drittland'}${kategorie ? ', ' + kategorie : ''}]`;
+            rcGebucht.push(rechnungsnr);
+          } else { rcOffen.push(rechnungsnr); satzHinweis += ' [§ 13b prüfen]'; }
+        } else if (istEinnahme && !kleinunternehmer && mwstSatz === 'reverse_charge') {
+          const lage = datevRcLage(stDec);
+          if (lage) {
+            gegenkonto = RC_AUSGANG_KONTEN[skrK][lage];
+            if (lage === 'eu') { ustIdSpalte = datevUstId(stDec); if (!ustIdSpalte) rcOhneUstId.push(rechnungsnr); }
+          } else { rcAusgangOffen.push(rechnungsnr); satzHinweis += ' [Land prüfen]'; }
+        }
+      }
       const ohneSchluessel = alleErloeskonten.has(String(gegenkonto)) && (!istEinnahme || kleinunternehmer);
-      const bu = satzFehlt ? '' : buSchluesselExport(ohneSchluessel ? 'keine' : mwstSatz, kleinunternehmer, istEinnahme, gegenkonto, skr);
+      const bu = (satzFehlt || ohneBuErzwingen) ? '' : buSchluesselExport(ohneSchluessel ? 'keine' : mwstSatz, kleinunternehmer, istEinnahme, gegenkonto, skr);
       const freitext = firestoreValue(fields.buchungstext) || '';
       const buchungstextBasis = istEinnahme
         ? `Rechnung ${absender}`.trim()
         : `Beleg ${absender}`.trim();
       const buchungstextOhneHinweis = freitext ? `${buchungstextBasis} ${freitext}`.trim() : buchungstextBasis;
-      const buchungstext = buchungstextOhneHinweis + satzHinweis;
+      const buchungstext = (satzHinweis || rcMarke) ? buchungstextBasisKurz(buchungstextOhneHinweis, satzHinweis + rcMarke) : buchungstextOhneHinweis; // die Marke wird nie abgeschnitten
       // Belegfeld 2 ist eine Belegnummer (max. 12 Stellen laut DATEV). Der freie Buchungstext gehört in den Buchungstext (max. 60).
       const belegfeld2 = '';
       // Debitorennummer nur bei Einnahmen (Rechnung an Kunde = Debitor) relevant — bei Ausgaben
@@ -5309,15 +5392,25 @@ async function handleDatevExport(body, env, cors = {}) {
       buchungen.push({
         betrag,
         sollHaben: istEinnahme ? 'S' : 'H',
-        konto: bankkonto,
+        konto: konto1,
         gegenkonto,
         bu,
         belegDatum,
         belegfeld1: rechnungsnr,
         belegfeld2,
         buchungstext,
-        diverseAdressnummer
+        diverseAdressnummer,
+        ...(ustIdSpalte ? { euLand: ustIdSpalte, euSatz: '' } : {})
       });
+      // E-H3: GWG (bis 800 € netto) wird sofort abgeschrieben: Zugang auf das GWG-Konto (0480/0670) und Sofortabschreibung (4855/6260) am selben Tag, sonst
+      // erscheint der Aufwand in der DATEV-EÜR erst nach einer Umbuchung des Beraters. Betrag der Abschreibung = Nettobetrag (die Vorsteuer bucht der BU-Schlüssel).
+      if (!istEinnahme && !importKontoGilt && kategorie === GWG_KATEGORIE && String(gegenkonto) === GWG_KONTEN[skrK].anlage) {
+        const cent = Math.round(betrag * 100);
+        const satzZahl = (!kleinunternehmer && !satzFehlt && (mwstSatz === '19' || mwstSatz === '7')) ? Number(mwstSatz) : 0;
+        const vst = satzZahl ? Math.round(cent * satzZahl / (100 + satzZahl)) : 0;
+        buchungen.push({ betrag: (cent - vst) / 100, sollHaben: 'S', konto: GWG_KONTEN[skrK].sofort, gegenkonto: GWG_KONTEN[skrK].anlage, bu: '', belegDatum, belegfeld1: rechnungsnr, belegfeld2: '', buchungstext: buchungstextBasisKurz(buchungstextOhneHinweis, ' Sofortabschreibung GWG'), diverseAdressnummer: '' });
+        gwgGebucht++;
+      }
     }
 
     if (ohneRechnungsnr.length) {
@@ -5392,16 +5485,17 @@ async function handleDatevExport(body, env, cors = {}) {
     }
 
     const jahrNum = parseInt(jahr, 10);
-    const wjBeginnDate = `${jahrNum}${wjBeginn}`; // yyyyMMdd
+    const wjBeginnDate = `${jahrNum}0101`; // yyyyMMdd; E-M4: immer Kalenderjahr, siehe Warnung oben
     const vonDatum = `${jahrNum}0101`;
     const bisDatum = `${jahrNum}1231`;
-    const now = new Date();
-    const erzeugtAm = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}000`;
+    // E-N9: Zeitstempel in deutscher Zeit (der Worker läuft in UTC)
+    const nowTeile = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Berlin', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(new Date()).map(t => [t.type, t.value]));
+    const erzeugtAm = `${nowTeile.year}${nowTeile.month}${nowTeile.day}${nowTeile.hour}${nowTeile.minute}${nowTeile.second}000`;
 
     // Header-Zeile (EXTF-Kennsatz für Buchungsstapel, Formatversion 700/Kategorie 21)
     // Kopfzeile: 31 Felder wie in der Spezifikation. Feld 27 = Kontenrahmen (03 = SKR03, 04 = SKR04).
     const headerRow = [
-      '"EXTF"', '700', '21', '"Buchungsstapel"', '7',
+      '"EXTF"', '700', '21', '"Buchungsstapel"', '13', // E-B1: Formatversion 13 (developer.datev.de Header: Buchungsstapel = 13, Schnittstellenvorgaben: Mindestversion 12), passt zu den 125 Spalten unten
       erzeugtAm, '', '"RE"', '"Kontolux AI"', '',
       beraterNr, mandantenNr, wjBeginnDate, '4',
       vonDatum, bisDatum, `"Kontolux Export ${jahr}"`, '""',
@@ -5411,7 +5505,15 @@ async function handleDatevExport(body, env, cors = {}) {
 
     const columnRow = DATEV_SPALTEN_125.map(h => datevText(h)).join(';');
 
+    // E-H4: Belegfeld 1 auf die von DATEV zulässigen Zeichen bringen (36 Zeichen). Die Originalnummer steht dann in Beleginfo 1.
+    const belegfeldWerte = new Map(); // bereinigter Wert -> Menge der Originale
+    let belegfeldGeaendert = 0;
+    let belegfeldBeispiel = '';
     const rows = buchungen.map(b => {
+      const bf = datevBelegfeldBereinigen(b.belegfeld1);
+      if (!belegfeldWerte.has(bf.wert)) belegfeldWerte.set(bf.wert, new Set());
+      belegfeldWerte.get(bf.wert).add(String(b.belegfeld1 ?? ''));
+      if (bf.geaendert) { belegfeldGeaendert++; if (!belegfeldBeispiel) belegfeldBeispiel = `„${String(b.belegfeld1 ?? '').slice(0, 40)}“ wurde zu „${bf.wert}“`; }
       const zeile = [
       b.betrag.toFixed(2).replace('.', ','),
       b.sollHaben,
@@ -5421,7 +5523,7 @@ async function handleDatevExport(body, env, cors = {}) {
       b.bu,
       datevTTMM(b.belegDatum),
       // Belegfeld 1: Format-Version 700 erlaubt 36 Zeichen (DATEV ASCII-Beschreibung). Vorher auf 12 gekürzt.
-      datevText(b.belegfeld1, 36),
+      datevFeldGequotet(bf.wert),
       datevText(b.belegfeld2, 12),
       '',
       datevText(b.buchungstext, 60),
@@ -5430,9 +5532,30 @@ async function handleDatevExport(body, env, cors = {}) {
       // Auf 125 Spalten auffüllen (Spezifikation). Nicht belegte Felder bleiben leer.
       while (zeile.length < DATEV_SPALTEN_125.length) zeile.push('');
       // KX-WC2 (BP-30): EU-Fenster nur bei OSS-Zeilen, Spalte 40 "EU-Land u. UStID (Bestimmung)" und 41 "EU-Steuersatz (Bestimmung)"
-      if (b.euLand) { zeile[39] = datevText(b.euLand, 15); zeile[40] = b.euSatz; }
+      if (b.euLand) { zeile[39] = datevText(b.euLand, 15); zeile[40] = b.euSatz ?? ''; }
+      // Beleginfo 1 (Spalten 21/22): Originalnummer, wenn Belegfeld 1 bereinigt wurde
+      if (bf.geaendert) { zeile[20] = datevText('Rechnungsnummer', 20); zeile[21] = datevText(String(b.belegfeld1 ?? ''), 210); }
       return zeile.join(';');
     });
+
+    // Hinweise zu den DATEV-Gesamtcheck-Fixes (nach dem Aufbau der Zeilen, vor der Antwort)
+    {
+      const nr = (l) => `${l.slice(0, 10).join(', ')}${l.length > 10 ? ', …' : ''}`;
+      if (afaBelege.length) warnen(`${afaBelege.length} Beleg(e) der Kategorie „Abschreibung (AfA)“ stehen NICHT im Stapel (${nr(afaBelege)}): Die Abschreibung ist kein Geldabfluss, die Anschaffung gehört auf ein Anlagekonto. Bitte nenne die Anlagegüter und die Jahres-Abschreibung deinem Steuerberater, er bucht sie von Hand.`);
+      if (gwgGebucht) warnen(`${gwgGebucht} Beleg(e) „GWG bis 800€“: Zugang auf ${GWG_KONTEN[skrK0].anlage} und Sofortabschreibung auf ${GWG_KONTEN[skrK0].sofort} (Nettobetrag) am selben Tag gebucht.`);
+      const rc = RC_EINGANG_KONTEN[skrK0];
+      if (rcGebucht.length) warnen(`${rcGebucht.length} Eingangsrechnung(en) mit Reverse Charge (§ 13b UStG) stehen auf ${rc.eu.rb}/${rc.drittland.rb} (EU/Drittland, 19 %) bzw. bei Kleinunternehmern auf ${rc.eu.ku}/${rc.drittland.ku}: Das Konto bucht Umsatzsteuer und Vorsteuer selbst, die Kategorie steht im Buchungstext. Bitte beim Steuerberater prüfen, besonders wenn der Steuersatz nicht 19 % ist.`);
+      if (rcOffen.length) warnen(`${rcOffen.length} Eingangsrechnung(en) mit Reverse Charge (§ 13b UStG) stehen OHNE § 13b-Steuer im Stapel, weil das Land des Anbieters fehlt oder unklar ist (EU oder Drittland, Buchungstext mit [§ 13b prüfen]): ${nr(rcOffen)}. Bitte Land in der App klären oder dem Steuerberater nennen, die Umsatzsteuer nach § 13b muss dort noch erfasst werden.`);
+      if (rcAusgangOffen.length) warnen(`${rcAusgangOffen.length} Rechnung(en) mit Reverse Charge an Kunden stehen ohne Länderzuordnung auf ${RC_AUSGANG_KONTEN[skrK0].inland} (Buchungstext mit [Land prüfen]): ${nr(rcAusgangOffen)}. Ist der Kunde im EU-Ausland oder im Drittland, gehört der Umsatz auf ${RC_AUSGANG_KONTEN[skrK0].eu} bzw. ${RC_AUSGANG_KONTEN[skrK0].drittland}.`);
+      if (rcOhneUstId.length) warnen(`${rcOhneUstId.length} Rechnung(en) an Kunden in der EU ohne gültige USt-IdNr. im Beleg (Spalte „EU-Land u. UStID“ bleibt leer): ${nr(rcOhneUstId)}. Für die Zusammenfassende Meldung braucht der Steuerberater die Nummer.`);
+      if (faOhneNr) warnen(`${faOhneNr} Finanzamt-Buchung(en) ohne Nummer: Belegfeld 1 enthält dort das Belegdatum.`);
+      if (faEstPrivat.length) warnen(`${faEstPrivat.length} Zahlung(en) ans Finanzamt (Einkommensteuer) sind als Privatentnahme gebucht, nicht als Betriebsausgabe: ${nr(faEstPrivat)}.`);
+      if (faOffen.length) warnen(`${faOffen.length} Zahlung(en) der Kategorie „Finanzamt“ ohne Art stehen auf ${ausgabenGegenkonto} (Buchungstext mit [Finanzamt prüfen]): ${nr(faOffen)}. Einkommensteuer ist keine Betriebsausgabe; bitte Art in der App wählen oder beim Steuerberater prüfen.`);
+      if (pauschalenPrivat) warnen(`${pauschalenPrivat} Pauschale(n) (Kilometer, Verpflegung) sind als Betriebsausgabe gegen Privateinlage gebucht (kein Geldabfluss).`);
+      if (belegfeldGeaendert) warnen(`${belegfeldGeaendert} Belegnummer(n) enthielten für DATEV unzulässige Zeichen (zum Beispiel Leerzeichen, Punkt, Umlaute) und wurden angepasst, etwa ${belegfeldBeispiel}. Die Originalnummer steht in Beleginfo 1 (Art „Rechnungsnummer“).`);
+      const kollisionen = [...belegfeldWerte.entries()].filter(([, o]) => o.size > 1);
+      if (kollisionen.length) warnen(`${kollisionen.length} Belegnummer(n) sind nach der Bereinigung für DATEV nicht mehr eindeutig (verschiedene Originalnummern ergeben dieselbe Nummer, etwa „${kollisionen[0][0]}“). Bitte beim Steuerberater auf doppelte Belegnummern achten.`);
+    }
 
     const csvContent = [headerRow, columnRow, ...rows].join('\r\n') + '\r\n';
 

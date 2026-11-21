@@ -56,14 +56,28 @@ const res = await worker.fetch(new Request('https://worker.test/datev-export', {
   method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://app.kontolux-ai.de', Authorization: 'Bearer tok' },
   body: JSON.stringify({ userId: USER, jahr: 2026, token: 'tok' })
 }), env, { waitUntil() {} });
-const csv = new TextDecoder('utf-8').decode(new Uint8Array(await res.arrayBuffer()));
+const csvBytes = new Uint8Array(await res.arrayBuffer());
+// Fixture für test-datev-format.mjs aus der ECHTEN Ausgabe erzeugen (E-N6): DATEV_FIXTURE_SCHREIBEN=1 node test-datev-rundreise-lokal.mjs
+if (process.env.DATEV_FIXTURE_SCHREIBEN === '1') {
+  const { writeFileSync } = await import('node:fs');
+  const roh = new TextDecoder('utf-8').decode(csvBytes).split('\r\n');
+  roh[0] = roh[0].split(';').map((x, i) => (i === 5 ? '20260101000000000' : x)).join(';'); // Erzeugt-am fest, damit die Datei stabil bleibt
+  writeFileSync(new URL('./test-fixtures/datev-probe-export.csv', import.meta.url), new Uint8Array([0xEF, 0xBB, 0xBF, ...new TextEncoder().encode(roh.join('\r\n'))]));
+}
+const csv = new TextDecoder('utf-8').decode(csvBytes);
+{ // E-B1/E-N6: Kopf der ECHTEN Ausgabe (nicht einer Fixture): Formatversion 13, 31 Felder, 125 Spalten
+  const kz = csv.replace(/^﻿/, '').split('\r\n');
+  const kopf = kz[0].split(';');
+  pruefe('Kopf: EXTF;700;21;"Buchungsstapel";13 (Formatversion 13)', kopf[0] === '"EXTF"' && kopf[1] === '700' && kopf[2] === '21' && kopf[3] === '"Buchungsstapel"' && kopf[4] === '13', kz[0]);
+  pruefe('Kopf: 31 Felder, Spaltenkopf 125 Spalten (Format 13)', kopf.length === 31 && kz[1].split(';').length === 125, `${kopf.length}/${kz[1].split(';').length}`);
+}
 pruefe('Export liefert 200 und 7 bezahlte Buchungen', res.status === 200 && res.headers.get('X-Datev-Exported-Count') === '7', `${res.status} ${csv.slice(0, 200)}`);
 const zeilen = csv.replace(/^﻿/, '').split('\r\n').filter(Boolean).slice(2).map(z => z.split(';'));
 const zeileMit = (betrag) => zeilen.find(z => z[0] === betrag);
 pruefe('Einnahme 19 % auf Automatikkonto 8400 ohne Steuerschlüssel (vorher 9 = Vorsteuer)', zeileMit('1190,00')?.[7] === '8400' && zeileMit('1190,00')?.[8] === '', zeileMit('1190,00')?.join(';'));
 pruefe('Einnahme 7 % auf Automatikkonto 8300 ohne Steuerschlüssel', zeileMit('107,00')?.[7] === '8300' && zeileMit('107,00')?.[8] === '');
 pruefe('Werbekosten auf 4600 (DATEV-SKR03 2026; vorher 4650 = Bewirtung, 4610 existiert nicht), Vorsteuer 9', zeileMit('238,00')?.[7] === '4600' && zeileMit('238,00')?.[8] === '9', zeileMit('238,00')?.join(';'));
-pruefe('Kfz-Kosten jetzt auf 4500 (vorher 4930 = Bürobedarf)', zeileMit('59,50')?.[7] === '4500');
+pruefe('Kfz-Kosten auf 4530 Laufende Fahrzeug-Betriebskosten (4500 ist für EÜR-Anwender gesperrt, E-M2)', zeileMit('59,50')?.[7] === '4530');
 pruefe('Wareneinkauf auf Automatikkonto 3400, ohne Steuerschlüssel', zeileMit('119,00')?.[7] === '3400' && zeileMit('119,00')?.[8] === '');
 pruefe('Bürobedarf jetzt auf 4930', zeileMit('35,70')?.[7] === '4930');
 pruefe('Importierter Beleg behält sein Original-Konto 4964', zeileMit('80,00')?.[7] === '4964', zeileMit('80,00')?.join(';'));

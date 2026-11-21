@@ -20,7 +20,10 @@ const felder = (z) => { const out = []; let cur = '', q = false; for (let i = 0;
 // Kopfzeile
 const kopf = felder(zeilen[0]);
 pruefe('Kopfzeile beginnt mit EXTF;700;21', kopf[0] === 'EXTF' && kopf[1] === '700' && kopf[2] === '21', kopf.slice(0, 3).join('|'));
+pruefe('Formatversion (Kopf-Feld 5) = 13 für den Buchungsstapel mit 125 Spalten', kopf[4] === '13', kopf[4]);
 pruefe('Kopfzeile hat 31 Felder', kopf.length === 31, `Felder: ${kopf.length}`);
+pruefe('Beraternummer 1001–9999999 und Mandantennummer 1–99999 (oder Platzhalter 0), nur Ziffern', (kopf[10] === '0' || (/^\d{1,7}$/.test(kopf[10]) && +kopf[10] >= 1001)) && (kopf[11] === '0' || (/^\d{1,5}$/.test(kopf[11]) && +kopf[11] >= 1)), `${kopf[10]}/${kopf[11]}`);
+pruefe('Datum von/bis liegen im Wirtschaftsjahr (WJ-Beginn = Datum von, ein Kalenderjahr)', kopf[12] === kopf[14] && kopf[14].endsWith('0101') && kopf[15] === kopf[14].slice(0, 4) + '1231', `${kopf[12]} ${kopf[14]} ${kopf[15]}`);
 pruefe('Feld 27 = Kontenrahmen 03 oder 04', kopf[26] === '03' || kopf[26] === '04', kopf[26]);
 
 // Spaltenkopf und Zeilen
@@ -43,6 +46,7 @@ for (const [i, d] of daten.entries()) {
   if (d[10].length > 36) fehlerZeilen.push(`Zeile ${zeile}: Belegfeld 1 länger als 36`);
   if (d[11].length > 12) fehlerZeilen.push(`Zeile ${zeile}: Belegfeld 2 länger als 12`);
   if (d[13].length > 60) fehlerZeilen.push(`Zeile ${zeile}: Buchungstext länger als 60`);
+  if (!/^[A-Za-z0-9$&%*+\-/]{1,36}$/.test(d[10])) fehlerZeilen.push(`Zeile ${zeile}: Belegfeld 1 "${d[10]}" enthält unzulässige Zeichen (erlaubt: A-Z a-z 0-9 $ & % * + - /, höchstens 36)`);
   if (d[19] !== '') fehlerZeilen.push(`Zeile ${zeile}: Beleglink nicht leer (absichtlich leer)`);
 }
 pruefe('Alle Buchungszeilen erfüllen die Feldregeln', fehlerZeilen.length === 0, fehlerZeilen.slice(0, 5).join(' | '));
