@@ -261,6 +261,7 @@ const KATALOG = {
   HN_IST_KORREKTUR_OHNE_RUECKZAHLUNG: H('hinweis', 'Bei Istversteuerung wirkt die Korrektur einer bezahlten Rechnung erst mit der Rückzahlung (§ 17 Abs. 1, 2 UStG). Bitte erfasse die Rückzahlung.', 'R-KOR-05', '§ 17 Abs. 1, 2 Nr. 3 UStG; § 13 Abs. 1 Nr. 1 Buchst. b UStG', 'B'),
   HN_KERN_FEHLER: H('hinweis', 'Die Angaben dieses Belegs sind nicht lesbar oder unvollständig (zum Beispiel ein Betrag, der keine ganze Cent-Zahl ist). Kontolux rechnet ihn nicht; die übrigen Belege sind davon nicht betroffen.', 'R-HN-02', TECHNIK, 'T'),
   HN_KORREKTUR_TEILRUECKZAHLUNG: H('hinweis', 'Für die stornierte Rechnung ist erst ein Teil zurückgezahlt. Die Minderung wirkt anteilig im Zeitraum der jeweiligen Rückzahlung (UStAE 17.1 Abs. 2 S. 3).', 'R-KOR-13', 'UStAE 17.1 Abs. 2 S. 3, Abs. 8 S. 5', 'B'),
+  W_KASSE_KU_NACH_WECHSEL: H('warnung', 'Dieser Tagesabschluss ist als Kleinunternehmer erfasst, der Geschäftstag liegt aber ab dem Wechsel zur Regelbesteuerung. Der ganze Tag ist regelbesteuert. Storniere den Tagesabschluss und erfasse ihn mit Steuersätzen neu.', 'R-EUER-03', '§ 19 Abs. 1 UStG; Anleitung Anlage EÜR 2026 Zeile 12', 'B'),
   HN_KU_UMSATZ_NACH_WECHSEL: H('hinweis', 'Zahlung für einen Kleinunternehmer-Umsatz nach dem Wechsel zur Regelbesteuerung: In der Anlage EÜR steht sie in Zeile 16 (Kz 103), nicht in Zeile 12.', 'R-EUER-03', 'Anlage EÜR 2026 Zeilen 12, 16; UStAE 19.7 Abs. 1 S. 1', 'B'),
   HN_KZ64_EINGABE: H('hinweis', 'Kz 64 (Berichtigung des Vorsteuerabzugs nach § 15a UStG) ist deine Eingabe. In der Voranmeldung gehört die Berichtigung nur, wenn der Betrag je Wirtschaftsgut und Jahr 6.000 EUR übersteigt oder das Wirtschaftsgut veräußert wird; sonst erst in die Jahreserklärung (§ 44 Abs. 3 UStDV). Zurückzuzahlende Vorsteuer mit Minuszeichen.', 'R-KZ-44', '§ 15a UStG; § 44 Abs. 3 UStDV; Anleitung USt 1 E Zeile 44', 'A'),
   HN_KZ70_ABWEICHEND: H('hinweis', 'Das eingetragene Datum für Zeile 12 (Kz 70) weicht vom Datum im Steuerprofil ab. Einzutragen ist das Datum des Umsatzes, mit dem die Grenze überschritten wurde (Anleitung USt 1 E Zeile 12).', 'R-KZ-12', 'Anleitung USt 1 E Zeile 12', 'A'),
@@ -308,6 +309,7 @@ const KATALOG = {
 
   // --- Hinweise aus der Belegaufnahme (beleg.js, Altdaten) ---------------------------------------------------
   BELEG_ART_UNGUELTIG: H('hinweis', 'Die Belegart ist unbekannt; der Beleg wird als offener Steuerfall geführt.', 'R-HN-03', PFLICHT, 'T'),
+  KANAL_UNBEKANNT: H('hinweis', 'Der Zahlungskanal ist unbekannt und wird als manuelle Zahlung geführt. Auf die Steuerzahlen hat das keine Wirkung.', 'R-HN-03', PFLICHT, 'T'),
   BELEG_UNGUELTIG: H('technik', 'Der Datensatz ist kein lesbarer Beleg.', 'R-HN-02', TECHNIK, 'T'),
   BETRAG_ART_FEHLT: H('hinweis', 'Bitte wähle ausdrücklich, ob der Betrag netto oder brutto ist.', 'R-HN-03', 'Konzept 5.2', 'T'),
   BETRAG_FEHLT: H('hinweis', 'Der Betrag fehlt; der Beleg wird nicht berechnet.', 'R-HN-03', PFLICHT, 'T'),
