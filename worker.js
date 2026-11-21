@@ -18,7 +18,7 @@ import { regelAdminFeatures } from './regel/admin-features.js';
 import { regelOssMeldung } from './regel/oss-meldung.js'; // WORKER-C (Release C, BP-29)
 import { regelEzbKurs } from './regel/ezb-kurs.js'; // WORKER-C (Release C, BP-29)
 import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // KX-WC2 (Release C, BP-30 DATEV-Teil)
-import { datevMischsatzGruppen } from './regel/datev-mischsatz.js'; // Branch datev-mischsatz: Belege mit mehreren Steuersätzen je Satz buchen
+import { datevMischsatzGruppen, datevKorrekturGruppen, KORREKTUR_BELEG_ARTEN } from './regel/datev-mischsatz.js'; // Branch datev-mischsatz: Belege mit mehreren Steuersätzen je Satz buchen
 import { dekodiereFelder as datevDekodiereFelder } from './regel/firestore.js';
 import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4)
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
@@ -4916,10 +4916,49 @@ async function handleDatevExport(body, env, cors = {}) {
     let ohneSatzMarkiert = 0;
     let kontoGewechselt = 0;
     let automatikOhneSteuer = 0;
-    const mischsatzOffen = [];
     let mischsatzGebucht = 0;
-    let gemischtAusgelassen = 0;
-    let gemischtMarkiert = 0;
+    // Mischsatz ohne sichere Aufteilung (Grund steht je Beleg dabei): Einnahmen bleiben draußen, Ausgaben gehen ohne Schlüssel mit Textmarke in den Stapel.
+    const gemischtAusgelassen = [];
+    const gemischtMarkiert = [];
+    // B-1: Korrekturbelege (Storno, Gutschrift) mit Rückzahlung als Gegenbuchung; nicht buchbare Fälle stehen mit Nummer in der Warnung.
+    let korrekturGebucht = 0;
+    const korrekturOffen = [];
+    const korrekturOhneRueckzahlung = [];
+    const dokById = new Map(dokDocs.map((d) => [String(d.name || '').split('/').pop(), d]));
+
+    // Buchungszeilen je Satz-Gruppe (Mischsatz und Rückzahlung). gruppen: [{ satz: '19'|'7'|'keine', brutto_cent }], korrektur: Gegenbuchung (Richtung umgekehrt,
+    // Textmarke [Storno]), ku: Kleinunternehmer (Konto ohne Steuer, kein Schlüssel). Bewirtung (70 %): je Gruppe 70/30 (abziehbar / nicht abziehbar) mit dem Schlüssel
+    // des Satzes der Gruppe, Rundung wie im Einzelpfad.
+    const bucheGruppen = ({ gruppen, korrektur, ku, istEinnahme, kategorie, belegDatum, belegfeld1, textBasis, diverseAdressnummer }) => {
+      const skrK = skr === 'SKR04' ? 'SKR04' : 'SKR03';
+      const bewirtungKonten = DATEV_BEWIRTUNG_KONTEN[skrK];
+      for (const g of gruppen) {
+        if (g.brutto_cent <= 0) continue;
+        let konto = (istEinnahmeKategorie(istEinnahme, kategorie) ? resolveSachkonto(kategorie, skr) : null)
+          || (istEinnahme ? erloeskontoExport(g.satz, ku, skr) : ausgabenGegenkonto);
+        if (ku && istEinnahme && alleErloeskonten.has(String(konto))) konto = erloeskontoExport('keine', true, skr);
+        let hinweis = '';
+        if (!ku && (g.satz === '19' || g.satz === '7')) {
+          const tausch = DATEV_AUTOMATIK_SATZ_TAUSCH[skrK][String(konto)];
+          if (tausch && tausch.satz !== g.satz) konto = tausch.partner; // erwarteter Wechsel (Konto der Kategorie hat den anderen Satz), keine Warnung
+        } else if (!ku && DATEV_AUTOMATIKKONTEN_EXPORT[skrK].has(String(konto))) {
+          if (istEinnahme) konto = erloeskontoExport('keine', false, skrK);
+          else { automatikOhneSteuer++; hinweis = ' [Konto/Steuersatz prüfen]'; }
+        }
+        const ohneSchl = ku || (alleErloeskonten.has(String(konto)) && !istEinnahme);
+        const satzBu = ku ? '' : buSchluesselExport(ohneSchl ? 'keine' : g.satz, false, istEinnahme, konto, skr);
+        const marke = ` ${g.satz === 'keine' ? '0' : g.satz} %${korrektur ? ' [Storno]' : ''}${hinweis}`;
+        const sh = istEinnahme === !korrektur ? 'S' : 'H';
+        const zeile = (betragCent, kontoZeile, zusatz) => buchungen.push({ betrag: betragCent / 100, sollHaben: sh, konto: bankkonto, gegenkonto: kontoZeile, bu: satzBu, belegDatum, belegfeld1, belegfeld2: '', buchungstext: buchungstextBasisKurz(textBasis, marke + zusatz), diverseAdressnummer });
+        if (!istEinnahme && !ku && kategorie === 'Bewirtung (70%)' && String(konto) === bewirtungKonten.abziehbar) {
+          const abz = Math.floor((2 * g.brutto_cent * 70 + 100) / 200);
+          if (abz > 0) zeile(abz, bewirtungKonten.abziehbar, '');
+          if (g.brutto_cent - abz > 0) zeile(g.brutto_cent - abz, bewirtungKonten.nichtAbziehbar, ' davon nicht abziehbar 30 %');
+        } else {
+          zeile(g.brutto_cent, konto, '');
+        }
+      }
+    };
 
     for (const doc of dokDocs) {
       const fields = doc.fields || {};
@@ -4928,6 +4967,47 @@ async function handleDatevExport(body, env, cors = {}) {
       // ursprünglich bezahlte Rechnung weiterhin als normale Einnahme, da der zugehörige
       // Storno-Gegenbeleg bewusst mit bezahlt:false angelegt wird und hier sonst nie greift.
       if (firestoreValue(fields.deleted) === true) continue;
+      // B-1 (Gegenlesung 21.11.): Korrekturbelege (Storno, Gutschrift, Preisnachlass) sind nie bezahlt, die Bank-Bewegung steht in steuer.rueckzahlung.
+      // Gegenbuchung zum Original (Konto, Kunde, Text vom Original): Datum der Rückzahlung, Betrag der Rückzahlung, je Satz aufgeteilt, Richtung umgekehrt.
+      // Nur wenn das Original im Stapel steht (nicht gelöscht, bezahlt, kein OSS). Alle anderen Belege laufen unverändert weiter.
+      if (fields.steuer && firestoreValue(fields.bezahlt) !== true) {
+        const st = datevDekodiereFelder({ steuer: fields.steuer }).steuer;
+        const kg = datevKorrekturGruppen(st);
+        const bezug = st && st.bezug && (st.bezug.storniert_beleg_id || st.bezug.korrigiert_beleg_id);
+        const orig = bezug ? dokById.get(String(bezug)) : null;
+        const of = orig ? (orig.fields || {}) : null;
+        const origImStapel = !!of && firestoreValue(of.deleted) !== true && firestoreValue(of.bezahlt) === true && firestoreValue(of.betrag) > 0
+          && ['rechnung_ausgehend', 'rechnung_eingehend'].includes(firestoreValue(of.typ) || 'rechnung_eingehend') && !(ossPlan && ossPlan.get(String(bezug)));
+        if (kg && origImStapel) {
+          const korrNr = firestoreValue(fields.rechnungsnr) || firestoreValue(fields.rechnungsnummer) || (st && st.rechnungsnr) || '';
+          const origNr = firestoreValue(of.rechnungsnr) || firestoreValue(of.rechnungsnummer) || String(bezug);
+          const nr = korrNr || `S-${origNr}`;
+          if (kg.offen) {
+            const rzRoh = Array.isArray(st.rueckzahlung) ? st.rueckzahlung[0] : st.rueckzahlung;
+            if (String((rzRoh && rzRoh.datum) || '').slice(0, 4) === String(jahr)) korrekturOffen.push(`${nr} (${kg.grund})`);
+            continue;
+          }
+          const rzDatum = new Date(kg.datum + 'T00:00:00');
+          if (String(rzDatum.getFullYear()) !== String(jahr)) continue;
+          const origEinnahme = firestoreValue(of.typ) === 'rechnung_ausgehend';
+          const absOrig = firestoreValue(of.absender) || firestoreValue(of.name) || '';
+          const freiOrig = firestoreValue(of.buchungstext) || '';
+          const basisOrig = origEinnahme ? `Rechnung ${absOrig}`.trim() : `Beleg ${absOrig}`.trim();
+          bucheGruppen({
+            gruppen: kg.gruppen, korrektur: true, ku: kleinunternehmer && kg.ku === true, istEinnahme: origEinnahme,
+            kategorie: firestoreValue(of.kategorie) || '', belegDatum: rzDatum, belegfeld1: nr,
+            textBasis: freiOrig ? `${basisOrig} ${freiOrig}`.trim() : basisOrig,
+            diverseAdressnummer: origEinnahme ? (kundenNummerById[firestoreValue(of.kunde_id) || ''] || '') : ''
+          });
+          korrekturGebucht++;
+          continue;
+        }
+        // Storno/Gutschrift zu einer bezahlten Rechnung, aber ohne Rückzahlung: keine Bankbuchung, Hinweis (nur im Jahr des Wirkdatums)
+        if (!kg && origImStapel && st && KORREKTUR_BELEG_ARTEN.includes(st.beleg_art) && st.wirkungslos !== true
+            && String(st.wirkdatum || '').slice(0, 4) === String(jahr) && st.korrektur_grund !== 'tippfehler_berichtigung') {
+          korrekturOhneRueckzahlung.push(firestoreValue(fields.rechnungsnr) || firestoreValue(fields.rechnungsnummer) || firestoreValue(of.rechnungsnr) || String(bezug));
+        }
+      }
       const bezahlt = firestoreValue(fields.bezahlt) === true;
       const betrag = parseFloat(firestoreValue(fields.betrag)) || 0;
       if (betrag <= 0) continue;
@@ -4981,7 +5061,7 @@ async function handleDatevExport(body, env, cors = {}) {
       }
 
       const absender = firestoreValue(fields.absender) || firestoreValue(fields.name) || '';
-      const mwstSatz = firestoreValue(fields.mwst_satz);
+      let mwstSatz = firestoreValue(fields.mwst_satz);
 
       // KX-WC2 (BP-30): Beleg mit steuer.oss bei Kern-Option oss: Konto, Schlüssel, Bestimmungsland und Satz aus dem Fall des Kerns; offener Fall = nicht exportiert.
       const ossEintrag = ossPlan ? ossPlan.get(doc.name?.split('/').pop() || '') : null;
@@ -5011,36 +5091,19 @@ async function handleDatevExport(body, env, cors = {}) {
         && (firestoreValue(fields.datev_skr) || '') === skr
         && (firestoreValue(fields.datev_kategorie_import) || '') === kategorie;
       // Mischsatz (Branch datev-mischsatz): Beleg v2 mit mehreren Steuersätzen (steuer.positionen) ergibt eine Buchungszeile je Satz-Gruppe
-      // (Konto und BU-Schlüssel nach Satz, Summe = Belegbrutto). Ein Satz, Kleinunternehmer, Reverse Charge, OSS und Altbelege bleiben auf dem
-      // Pfad darunter (byte-gleich). Satz nicht zulässig oder Summe weicht ab: nicht exportiert, mit Grund in der Warnung (nie raten).
-      if (!kleinunternehmer && !importKontoGilt && kategorie !== 'Bewirtung (70%)' && fields.steuer) {
+      // (Konto und BU-Schlüssel nach Satz, Summe = Belegbrutto), auch Bewirtung (je Satz 70/30). Ein Satz, Kleinunternehmer, Reverse Charge, OSS und
+      // Altbelege bleiben auf dem Pfad darunter (byte-gleich). Satz nicht zulässig oder Summe weicht ab: wie 'gemischt' ohne Aufteilung behandelt
+      // (Einnahme nicht exportiert, Ausgabe ohne Schlüssel mit Textmarke, beides mit Beleg und Grund in der Warnung), nie raten.
+      let mischsatzUnklarGrund = '';
+      if (!kleinunternehmer && !importKontoGilt && fields.steuer) {
         const ms = datevMischsatzGruppen(datevDekodiereFelder({ steuer: fields.steuer }).steuer, Math.round(betrag * 100));
-        if (ms && ms.offen) { mischsatzOffen.push(`${rechnungsnr} (${ms.grund})`); continue; }
-        if (ms) {
-          const freitextMs = firestoreValue(fields.buchungstext) || '';
-          const basisMs = istEinnahme ? `Rechnung ${absender}`.trim() : `Beleg ${absender}`.trim();
-          const buchungstextOhneHinweis = freitextMs ? `${basisMs} ${freitextMs}`.trim() : basisMs;
-          const diverseAdressnummer = istEinnahme ? (kundenNummerById[firestoreValue(fields.kunde_id) || ''] || '') : '';
-          const belegfeld2 = '';
-          const skrK = skr === 'SKR04' ? 'SKR04' : 'SKR03';
-          for (const g of ms.gruppen) {
-            if (g.brutto_cent <= 0) continue;
-            let konto = (istEinnahmeKategorie(istEinnahme, kategorie) ? resolveSachkonto(kategorie, skr) : null)
-              || (istEinnahme ? erloeskontoExport(g.satz, false, skr) : ausgabenGegenkonto);
-            let hinweis = '';
-            if (g.satz === '19' || g.satz === '7') {
-              const tausch = DATEV_AUTOMATIK_SATZ_TAUSCH[skrK][String(konto)];
-              if (tausch && tausch.satz !== g.satz) { konto = tausch.partner; kontoGewechselt++; }
-            } else if (DATEV_AUTOMATIKKONTEN_EXPORT[skrK].has(String(konto))) {
-              if (istEinnahme) { konto = erloeskontoExport('keine', false, skrK); kontoGewechselt++; }
-              else { automatikOhneSteuer++; hinweis = ' [Konto/Steuersatz prüfen]'; }
-            }
-            const ohneSchl = alleErloeskonten.has(String(konto)) && !istEinnahme;
-            const satzBu = buSchluesselExport(ohneSchl ? 'keine' : g.satz, false, istEinnahme, konto, skr);
-            const marke = ` ${g.satz === 'keine' ? '0' : g.satz} %${ms.korrektur ? ' [Storno]' : ''}${hinweis}`;
-            const sh = istEinnahme === !ms.korrektur ? 'S' : 'H';
-            buchungen.push({ betrag: g.brutto_cent / 100, sollHaben: sh, konto: bankkonto, gegenkonto: konto, bu: satzBu, belegDatum, belegfeld1: rechnungsnr, belegfeld2, buchungstext: buchungstextBasisKurz(buchungstextOhneHinweis, marke), diverseAdressnummer });
-          }
+        if (ms && ms.offen) { mischsatzUnklarGrund = ms.grund; mwstSatz = 'gemischt'; }
+        if (ms && !ms.offen) {
+          bucheGruppen({
+            gruppen: ms.gruppen, korrektur: ms.korrektur, ku: false, istEinnahme, kategorie, belegDatum, belegfeld1: rechnungsnr,
+            textBasis: (() => { const f = firestoreValue(fields.buchungstext) || ''; const b = istEinnahme ? `Rechnung ${absender}`.trim() : `Beleg ${absender}`.trim(); return f ? `${b} ${f}`.trim() : b; })(),
+            diverseAdressnummer: istEinnahme ? (kundenNummerById[firestoreValue(fields.kunde_id) || ''] || '') : ''
+          });
           mischsatzGebucht++;
           continue;
         }
@@ -5073,9 +5136,9 @@ async function handleDatevExport(body, env, cors = {}) {
       // 'gemischt' (Rechnung v2 mit mehreren Sätzen) ohne verwertbare Aufteilung im Steuerteil: der eine Satz des Altfelds fehlt, nicht als 19 % raten.
       const satzGemischt = !kleinunternehmer && mwstSatz === 'gemischt' && !importKontoGilt;
       const satzFehlt = (!kleinunternehmer && !mwstSatz && !importKontoGilt && !erstattungsKonto) || satzGemischt;
-      if (satzFehlt && istEinnahme) { if (satzGemischt) gemischtAusgelassen++; else ohneSatzAusgelassen++; continue; }
+      if (satzFehlt && istEinnahme) { if (satzGemischt) gemischtAusgelassen.push(`${rechnungsnr}${mischsatzUnklarGrund ? ` (${mischsatzUnklarGrund})` : ''}`); else ohneSatzAusgelassen++; continue; }
       let satzHinweis = '';
-      if (satzFehlt) { if (satzGemischt) gemischtMarkiert++; else ohneSatzMarkiert++; satzHinweis = ' [Steuersatz prüfen]'; }
+      if (satzFehlt) { if (satzGemischt) gemischtMarkiert.push(`${rechnungsnr}${mischsatzUnklarGrund ? ` (${mischsatzUnklarGrund})` : ''}`); else ohneSatzMarkiert++; satzHinweis = ' [Steuersatz prüfen]'; }
       // Automatikkonto und Satz des Belegs müssen zusammenpassen (TR-euer-007): DATEV rechnet auf 8400/3400 (SKR04 4400/5400) stets 19 %,
       // auf 8300/3300 (4300/5300) stets 7 %. Passt der Satz des Belegs nicht, wechselt der Export auf das Konto mit passendem Satz.
       if (!importKontoGilt && !kleinunternehmer && (mwstSatz === '19' || mwstSatz === '7')) {
@@ -5155,14 +5218,18 @@ async function handleDatevExport(body, env, cors = {}) {
     if (automatikOhneSteuer > 0) {
       datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${automatikOhneSteuer} Ausgabe(n) ohne Umsatzsteuer stehen auf einem Automatikkonto (DATEV rechnet dort 19 bzw. 7 % Vorsteuer, Buchungstext mit [Konto/Steuersatz prüfen]). Bitte beim Berater auf ein Konto ohne Vorsteuer umbuchen.`;
     }
-    if (gemischtAusgelassen > 0) {
-      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${gemischtAusgelassen} Einnahme(n) mit mehreren Steuersätzen ohne Aufteilung im Beleg wurden NICHT exportiert (der Satz wird nicht geraten). Bitte den Beleg in der App prüfen und erneut exportieren.`;
+    const nummern = (l) => `${l.slice(0, 10).join(', ')}${l.length > 10 ? ', …' : ''}`;
+    if (gemischtAusgelassen.length > 0) {
+      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${gemischtAusgelassen.length} Einnahme(n) mit mehreren Steuersätzen konnten nicht sicher nach Steuersatz aufgeteilt werden und stehen NICHT im Stapel (der Satz wird nicht geraten): ${nummern(gemischtAusgelassen)}. Bitte nenne diese Rechnungen deinem Steuerberater, er bucht sie von Hand (die Aufteilung nach Steuersatz steht auf der Rechnung).`;
     }
-    if (gemischtMarkiert > 0) {
-      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${gemischtMarkiert} Ausgabe(n) mit mehreren Steuersätzen ohne Aufteilung im Beleg sind ohne Steuerschlüssel exportiert (Buchungstext mit [Steuersatz prüfen]). Bitte beim Berater prüfen.`;
+    if (gemischtMarkiert.length > 0) {
+      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${gemischtMarkiert.length} Ausgabe(n) mit mehreren Steuersätzen konnten nicht sicher aufgeteilt werden und stehen ohne Steuerschlüssel im Stapel (Buchungstext mit [Steuersatz prüfen]): ${nummern(gemischtMarkiert)}. Bitte nenne diese Belege deinem Steuerberater, er bucht die Vorsteuer von Hand.`;
     }
-    if (mischsatzOffen.length > 0) {
-      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${mischsatzOffen.length} Beleg(e) mit mehreren Steuersätzen wurden NICHT exportiert (Aufteilung nicht eindeutig): ${mischsatzOffen.slice(0, 10).join(', ')}${mischsatzOffen.length > 10 ? ', …' : ''}. Bitte in der App prüfen und erneut exportieren.`;
+    if (korrekturOffen.length > 0) {
+      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${korrekturOffen.length} Storno-/Gutschrift-Beleg(e) mit Rückzahlung stehen NICHT im Stapel: ${nummern(korrekturOffen)}. Bitte nenne sie deinem Steuerberater, er bucht die Rückzahlung von Hand.`;
+    }
+    if (korrekturOhneRueckzahlung.length > 0) {
+      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `Zu ${korrekturOhneRueckzahlung.length} bezahlten Rechnung(en) gibt es einen Storno oder eine Gutschrift ohne Rückzahlung: ${nummern(korrekturOhneRueckzahlung)}. Im Stapel steht deshalb keine Gegenbuchung, bitte beim Steuerberater klären.`;
     }
     if (plattformOhneNr > 0) {
       datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${plattformOhneNr} Plattform-Beleg(e) ohne Rechnungsnummer: Belegfeld 1 enthält dort das Belegdatum.`;

@@ -146,7 +146,7 @@ test('Ausgang 19/7 (SKR03): zwei Zeilen 8400 und 8300, Summe = Brutto, Bank je Z
   assert.deepEqual(kurz(r, 'M1'), [['119,00', 'S', '1200', '8400', ''], ['53,50', 'S', '1200', '8300', '']]);
   assert.equal(summeCent(r, 'M1'), 17250);
   assert.deepEqual(zeilenVon(r, 'M1').map((x) => ohne(x[13])), ['Rechnung Kunde 19 %', 'Rechnung Kunde 7 %']);
-  assert.equal(r.warnung.includes('Konto der Kategorie'), true); // 8400 -> 8300 beim 7-%-Teil ist ein Kontowechsel
+  assert.equal(r.warnung, ''); // N-1: der erwartete Wechsel 8400 -> 8300 beim 7-%-Teil löst keine Warnung aus
 });
 
 test('Ausgang 19/7 ohne Kategorie und mit Legacy-Satz gemischt (Rechnung v2): Erlöskonto je Satz, SKR04', async () => {
@@ -232,7 +232,8 @@ test('Beleg mit anderer Quelle und Altbeleg gemischt ohne Steuerteil: Einnahme n
   assert.equal(zeilenVon(r, 'G1').length, 0);
   assert.deepEqual(kurz(r, 'G2'), [['100,00', 'H', '1200', '4930', '']]);
   assert.match(ohne(zeilenVon(r, 'G2')[0][13]), /\[Steuersatz prüfen\]$/);
-  assert.match(r.warnung, /mehreren Steuersätzen ohne Aufteilung/);
+  assert.match(r.warnung, /Einnahme\(n\) mit mehreren Steuersätzen.*: G1\..*Steuerberater, er bucht sie von Hand/);
+  assert.match(r.warnung, /Ausgabe\(n\) mit mehreren Steuersätzen.*: G2\./);
   assert.equal(zeilenVon(r, 'OK').length, 1);
 });
 
@@ -251,4 +252,110 @@ test('Nicht eindeutig: Summe weicht vom Betrag ab oder fremder Satz: Beleg nicht
 test('Exportzähler und Sortierung: mehrere Zeilen je Beleg bleiben beieinander und werden mitgezählt', async () => {
   const r = await exportiere({ m11: v2('M11', 'ausgang', [P19(10000), P7(5000)], { kat: 'Einnahmen 19%', mwst: '19' }), ok: alt('OK', 'rechnung_ausgehend', 119, '19', 'Einnahmen 19%') });
   assert.equal(r.zeilen.length, 3);
+});
+
+// ── Gegenlesung 21.11.: H-1, M-1, M-2, B-1 ───────────────────────────────────────────────────────
+test('H-1 Bewirtung 7 % Speisen + 19 % Getränke: je Satz 70/30, vier Zeilen, Summe = Brutto, Vorsteuer je Satz (SKR03 und SKR04)', async () => {
+  const b = v2('B1', 'eingang', [P7(10000), P19(10000)], { kat: 'Bewirtung (70%)', mwst: '19' }); // 107,00 + 119,00
+  const r = await exportiere({ b1: b });
+  assert.deepEqual(kurz(r, 'B1'), [['119,00'.replace('119,00', '83,30'), 'H', '1200', '4650', '9'], ['35,70', 'H', '1200', '4654', '9'], ['74,90', 'H', '1200', '4650', '8'], ['32,10', 'H', '1200', '4654', '8']].sort((x, y) => 0));
+  assert.equal(summeCent(r, 'B1'), 22600);
+  // Vorsteuer aus den Zeilen: BU 9 = 19 %, BU 8 = 7 %: 119 -> 19,00, 107 -> 7,00 (zusammen 26,00, nicht 36,08)
+  const vst = zeilenVon(r, 'B1').reduce((a, x) => a + cent(x[0]) * (x[8] === '9' ? 19 / 119 : x[8] === '8' ? 7 / 107 : 0), 0);
+  assert.equal(Math.round(vst), 2600);
+  const r4 = await exportiere({ b1: b }, { skr: 'SKR04' });
+  assert.deepEqual(kurz(r4, 'B1').map((x) => [x[3], x[4]]), [['6640', '9'], ['6644', '9'], ['6640', '8'], ['6644', '8']]);
+  assert.equal(summeCent(r4, 'B1'), 22600);
+});
+
+test('M-1 Ausgabe mit unklarer Aufteilung (Summe weicht ab, fremder Satz): ohne Schlüssel mit [Steuersatz prüfen] im Stapel, Einnahme bleibt draußen, Nummern in der Warnung', async () => {
+  const b = v2('Y1', 'eingang', [P19(10000), P7(5000)], { kat: 'Bürobedarf', mwst: '19' });
+  const e = v2('Y2', 'ausgang', [P19(10000), P7(5000)], { kat: 'Einnahmen 19%', mwst: '19' });
+  const r = await exportiere({ y1: { ...b, betrag: 150 }, y2: { ...e, betrag: 150 } });
+  assert.deepEqual(kurz(r, 'Y1'), [['150,00', 'H', '1200', '4930', '']]);
+  assert.match(ohne(zeilenVon(r, 'Y1')[0][13]), /\[Steuersatz prüfen\]$/);
+  assert.equal(zeilenVon(r, 'Y2').length, 0);
+  assert.match(r.warnung, /Y2 \(summe_abweichend\)/);
+  assert.match(r.warnung, /Y1 \(summe_abweichend\)/);
+  assert.match(r.warnung, /Steuerberater/);
+});
+
+// Korrekturbeleg wie ihn der Korrektur-Dialog speichert (Kern-Eingabe weg korrektur_dialog, Altfeld typ storno, nie bezahlt)
+function korrekturBeleg(nr, origId, richtung, gruppen, { rz, wirkdatum = '2026-06-15', art = 'storno', extra = {} } = {}) {
+  const e = { weg: 'korrektur_dialog', richtung, steuerwahl: richtung === 'ausgang' ? 'inland_19' : 'inland_19', beleg_art: art, korrektur_grund: 'rueckabwicklung', bezug: { storniert_beleg_id: origId }, wirkdatum, gegenpartei: { name: 'X' },
+    positionen: gruppen.map((g) => ({ bez: 'Korrektur', brutto_cent: g.brutto_cent, satz_bp: g.satz_bp })), ...(rz ? { rueckzahlung: rz } : {}), ...extra };
+  const r = K.normalisiereEingabe(e, { profil: REGEL, stichtag: '2026-11-15' });
+  assert.ok(r.beleg, JSON.stringify(r.fehler || r.pflichtfeld_fehler));
+  const b = r.beleg;
+  b.steuer = { ...b.steuer, legacy_typ: 'storno' };
+  Object.assign(b, K.legacyFelder(b));
+  return { ...b, id: undefined, bezahlt: false, rechnungsnr: nr, datum: wirkdatum, absender: 'Kunde', createdAt: '2026-06-15T09:00:00.000Z' };
+}
+const ohneId = (d) => { const { id, ...rest } = d; return rest; };
+
+test('B-1 bezahlte Rechnung storniert und erstattet: Gegenbuchung mit Rückzahlungsdatum und -betrag, Konto/Kunde vom Original, Original bleibt unverändert', async () => {
+  const orig = alt('R1', 'rechnung_ausgehend', 119, '19', 'Einnahmen 19%');
+  const st = ohneId(korrekturBeleg('ST1', 'o1', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }], { rz: { datum: '2026-06-20', betrag_cent: 11900 } }));
+  const r = await exportiere({ o1: orig, s1: st });
+  assert.deepEqual(kurz(r, 'R1'), [['119,00', 'S', '1200', '8400', '']]);
+  assert.deepEqual(kurz(r, 'ST1'), [['119,00', 'H', '1200', '8400', '']]);
+  assert.match(ohne(zeilenVon(r, 'ST1')[0][13]), /\[Storno\]$/);
+  assert.equal(ohne(zeilenVon(r, 'ST1')[0][9]), '2006'); // Belegdatum = Rückzahlungsdatum
+});
+
+test('B-1 Teilrückzahlung und 19/7: Rückzahlung nach Bruttoanteilen auf die Sätze verteilt, Summe = Rückzahlung', async () => {
+  const orig = v2('R2', 'ausgang', [P19(10000), P7(5000)], { kat: 'Einnahmen 19%', mwst: '19' }); // 119,00 + 53,50 = 172,50
+  const st = ohneId(korrekturBeleg('ST2', 'o2', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }, { brutto_cent: 5350, satz_bp: 700 }], { rz: { datum: '2026-06-20', betrag_cent: 8625 }, art: 'gutschrift_erteilt', extra: { korrektur_grund: 'preisnachlass' } }));
+  const r = await exportiere({ o2: orig, s2: st });
+  assert.deepEqual(kurz(r, 'ST2').map((x) => [x[1], x[3]]), [['H', '8400'], ['H', '8300']]);
+  assert.equal(summeCent(r, 'ST2'), 8625);
+  assert.deepEqual(zeilenVon(r, 'ST2').map((x) => cent(x[0])), [5950, 2675]);
+});
+
+test('B-1 Erstattung einer Ausgabe (Lieferant zahlt zurück): Bank Soll; Kleinunternehmer: KU-Konto ohne Schlüssel', async () => {
+  const orig = alt('E1', 'rechnung_eingehend', 59.5, '19', 'Bürobedarf');
+  const st = ohneId(korrekturBeleg('ST3', 'o3', 'eingang', [{ brutto_cent: 5950, satz_bp: 1900 }], { rz: { datum: '2026-07-01', betrag_cent: 5950 } }));
+  const r = await exportiere({ o3: orig, s3: st });
+  assert.deepEqual(kurz(r, 'ST3'), [['59,50', 'S', '1200', '4930', '9']]);
+  const ko = alt('K1', 'rechnung_ausgehend', 100, undefined, 'Einnahmen 19%');
+  const kst = ohneId(korrekturBeleg('ST4', 'o4', 'ausgang', [{ brutto_cent: 10000, satz_bp: 1900 }], { rz: { datum: '2026-07-01', betrag_cent: 10000 } }));
+  kst.steuer = { ...kst.steuer, steuerfall: 'A_KU' };
+  const rk = await exportiere({ o4: ko, s4: kst }, { ku: true });
+  assert.deepEqual(kurz(rk, 'ST4'), [['100,00', 'H', '1200', '8192', '']]);
+});
+
+test('B-1 Bewirtung storniert: Rückbuchung je Satz mit 70/30, Summe = Rückzahlung', async () => {
+  const orig = v2('BW', 'eingang', [P7(10000), P19(10000)], { kat: 'Bewirtung (70%)', mwst: '19' });
+  const st = ohneId(korrekturBeleg('STB', 'o5', 'eingang', [{ brutto_cent: 10700, satz_bp: 700 }, { brutto_cent: 11900, satz_bp: 1900 }], { rz: { datum: '2026-07-01', betrag_cent: 22600 } }));
+  const r = await exportiere({ o5: orig, s5: st });
+  assert.equal(zeilenVon(r, 'STB').length, 4);
+  assert.ok(zeilenVon(r, 'STB').every((x) => x[1] === 'S'));
+  assert.equal(summeCent(r, 'STB'), 22600);
+});
+
+test('B-1 Grenzen: ohne Rückzahlung nur Hinweis, Original gelöscht oder unbezahlt keine Buchung, Rückzahlung im Vorjahr nicht im Stapel, Rückzahlung zu groß in der Warnung', async () => {
+  const orig = alt('R5', 'rechnung_ausgehend', 119, '19', 'Einnahmen 19%');
+  const ohneRz = ohneId(korrekturBeleg('ST5', 'o', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }]));
+  let r = await exportiere({ o: orig, s: ohneRz });
+  assert.equal(zeilenVon(r, 'ST5').length, 0);
+  assert.match(r.warnung, /Storno oder eine Gutschrift ohne Rückzahlung: ST5/);
+  const mitRz = ohneId(korrekturBeleg('ST6', 'o', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }], { rz: { datum: '2026-06-20', betrag_cent: 11900 } }));
+  r = await exportiere({ o: { ...orig, deleted: true }, s: mitRz });
+  assert.equal(zeilenVon(r, 'ST6').length, 0);
+  r = await exportiere({ o: { ...orig, bezahlt: false }, s: mitRz, ok: alt('OK', 'rechnung_ausgehend', 119, '19', 'Einnahmen 19%') });
+  assert.equal(zeilenVon(r, 'ST6').length, 0);
+  const vorjahr = ohneId(korrekturBeleg('ST7', 'o', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }], { rz: { datum: '2025-12-20', betrag_cent: 11900 } }));
+  r = await exportiere({ o: orig, s: vorjahr });
+  assert.equal(zeilenVon(r, 'ST7').length, 0);
+  const zuGross = ohneId(korrekturBeleg('ST8', 'o', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }], { rz: { datum: '2026-06-20', betrag_cent: 11900 } }));
+  zuGross.steuer = { ...zuGross.steuer, rueckzahlung: { datum: '2026-06-20', betrag_cent: 99999 } };
+  r = await exportiere({ o: orig, s: zuGross });
+  assert.equal(zeilenVon(r, 'ST8').length, 0);
+  assert.match(r.warnung, /ST8 \(rueckzahlung_groesser_als_korrektur\)/);
+});
+
+test('B-1 Rückfall: Altbeleg typ storno ohne Steuerteil und unbezahlte Rechnung bleiben draußen, Stapel der Belege ohne Korrektur unverändert', async () => {
+  const r = await exportiere({ a: alt('R9', 'rechnung_ausgehend', 119, '19', 'Einnahmen 19%'), s: alt('S9', 'storno', 119, '19', 'Einnahmen 19%', { bezahlt: false }) });
+  assert.equal(r.zeilen.length, 1);
+  assert.equal(r.warnung, '');
 });

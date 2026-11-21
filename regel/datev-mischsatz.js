@@ -16,6 +16,7 @@ const ISTCENT = (x) => Number.isSafeInteger(x);
 const ISTOBJEKT = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 
 export const MISCHSATZ_STEUERFAELLE = Object.freeze(['A_INLAND_19', 'A_INLAND_7', 'A_INLAND_0_PV', 'E_INLAND_VORSTEUER']);
+export const KORREKTUR_BELEG_ARTEN = Object.freeze(['storno', 'korrektur', 'gutschrift_erteilt', 'gutschrift_erhalten']);
 export const MISCHSATZ_REIHENFOLGE = Object.freeze(['19', '7', 'keine']);
 
 // Satz einer Position in der Sprache des Exports ('19' | '7' | 'keine') oder null bei unzulässigem Satz.
@@ -52,4 +53,44 @@ export function datevMischsatzGruppen(steuer, betragCent) {
   const abs = gruppen.map((g) => ({ ...g, netto_cent: Math.abs(g.netto_cent), ust_cent: Math.abs(g.ust_cent), brutto_cent: Math.abs(g.brutto_cent) }));
   if (abs.reduce((a, g) => a + g.brutto_cent, 0) !== Math.abs(betragCent)) return { offen: true, grund: 'summe_abweichend' };
   return { gruppen: abs, korrektur };
+}
+
+// Verteilt einen Betrag nach Gewichten auf ganze Cent (größter Rest), Summe = Betrag.
+export function teileCent(betrag, gewichte) {
+  const summe = gewichte.reduce((a, g) => a + g, 0);
+  if (!(summe > 0)) return gewichte.map(() => 0);
+  const roh = gewichte.map((g) => Math.floor((betrag * g) / summe));
+  let rest = betrag - roh.reduce((a, x) => a + x, 0);
+  const reihenfolge = gewichte.map((g, i) => ({ i, r: (betrag * g) % summe })).sort((a, b) => b.r - a.r || a.i - b.i);
+  for (const { i } of reihenfolge) { if (rest <= 0) break; roh[i] += 1; rest -= 1; }
+  return roh;
+}
+
+// B-1 (Gegenlesung 21.11.): Korrekturbeleg (Storno, Gutschrift, Preisnachlass) mit steuer.rueckzahlung als Gegenbuchung. Der Korrekturbeleg ist nie
+// bezahlt (Altfeld), die Bank-Bewegung steht in steuer.rueckzahlung { datum, betrag_cent } (Objekt, nach Kern-Vertrag auch als Liste lesbar).
+// Rückgabe: null = kein Korrekturbeleg mit Rückzahlung; { offen, grund } = nicht buchbar; { datum, rueckzahlung_cent, gruppen, korrektur: true }.
+// Der Rückzahlungsbetrag wird nach den Bruttoanteilen der Gruppen des Korrekturbelegs auf die Sätze verteilt (auch bei nur einem Satz: eine Gruppe).
+export function datevKorrekturGruppen(steuer) {
+  if (!ISTOBJEKT(steuer) || !KORREKTUR_BELEG_ARTEN.includes(steuer.beleg_art) || steuer.wirkungslos === true) return null;
+  const rzListe = Array.isArray(steuer.rueckzahlung) ? steuer.rueckzahlung : (ISTOBJEKT(steuer.rueckzahlung) ? [steuer.rueckzahlung] : []);
+  const rz = rzListe.filter((r) => ISTOBJEKT(r) && ISTCENT(r.betrag_cent) && r.betrag_cent > 0 && /^\d{4}-\d{2}-\d{2}$/.test(String(r.datum || '')));
+  if (!rz.length) return null;
+  if (rz.length > 1) return { offen: true, grund: 'mehrere_rueckzahlungen' };
+  const datum = rz[0].datum;
+  const rzCent = rz[0].betrag_cent;
+  if (steuer.steuerfall === 'A_KU') return { datum, rueckzahlung_cent: rzCent, gruppen: [{ satz: 'keine', brutto_cent: rzCent }], korrektur: true, ku: true };
+  if (!MISCHSATZ_STEUERFAELLE.includes(steuer.steuerfall)) return { offen: true, grund: 'steuerfall_nicht_unterstuetzt' };
+  const pos = Array.isArray(steuer.positionen) ? steuer.positionen.filter(ISTOBJEKT) : [];
+  if (!pos.length) return { offen: true, grund: 'zeilen_fehlen' };
+  const schluessel = pos.map((p) => satzSchluessel(p.satz_bp));
+  if (schluessel.includes(null)) return { offen: true, grund: 'satz_nicht_deutsch' };
+  if (pos.some((p) => !ISTCENT(p.netto_cent) || !ISTCENT(p.ust_cent))) return { offen: true, grund: 'zeilen_fehlen' };
+  const je = new Map();
+  pos.forEach((p, i) => je.set(schluessel[i], (je.get(schluessel[i]) || 0) + Math.abs(p.netto_cent + p.ust_cent)));
+  const saetze = MISCHSATZ_REIHENFOLGE.filter((x) => je.has(x));
+  const gew = saetze.map((x) => je.get(x));
+  const gesamt = gew.reduce((a, g) => a + g, 0);
+  if (rzCent > gesamt) return { offen: true, grund: 'rueckzahlung_groesser_als_korrektur' };
+  const anteile = teileCent(rzCent, gew);
+  return { datum, rueckzahlung_cent: rzCent, gruppen: saetze.map((x, i) => ({ satz: x, brutto_cent: anteile[i] })).filter((g) => g.brutto_cent > 0), korrektur: true };
 }
