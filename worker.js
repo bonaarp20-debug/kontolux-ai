@@ -18,6 +18,8 @@ import { regelAdminFeatures } from './regel/admin-features.js';
 import { regelOssMeldung } from './regel/oss-meldung.js'; // WORKER-C (Release C, BP-29)
 import { regelEzbKurs } from './regel/ezb-kurs.js'; // WORKER-C (Release C, BP-29)
 import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // KX-WC2 (Release C, BP-30 DATEV-Teil)
+import { datevMischsatzGruppen } from './regel/datev-mischsatz.js'; // Branch datev-mischsatz: Belege mit mehreren Steuersätzen je Satz buchen
+import { dekodiereFelder as datevDekodiereFelder } from './regel/firestore.js';
 import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4)
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
@@ -4708,6 +4710,11 @@ const DATEV_BEWIRTUNG_KONTEN = {
 // ohne Kategorie, mwst_satz 'keine') — gleiche Liste wie UST_WEBHOOK_QUELLEN in index.html.
 const DATEV_WEBHOOK_QUELLEN = ['stripe_webhook', 'mollie_webhook', 'digistore24_webhook', 'copecart_webhook', 'paypal_webhook', 'sumup_webhook', 'ablefy_webhook', 'shopify_webhook'];
 
+// Buchungstext einer Mischsatz-Zeile: Satzmarke am Ende, der Beleg-Text wird gekürzt statt die Marke abzuschneiden (DATEV: 60 Zeichen).
+function buchungstextBasisKurz(text, marke) {
+  return String(text).slice(0, Math.max(0, 60 - marke.length)) + marke;
+}
+
 // Gegenkonto aus der Kategorie nur dann übernehmen, wenn sie zur Buchungsrichtung passt.
 function istEinnahmeKategorie(istEinnahme, kategorie) {
   if (!istEinnahme) return true;
@@ -4909,6 +4916,10 @@ async function handleDatevExport(body, env, cors = {}) {
     let ohneSatzMarkiert = 0;
     let kontoGewechselt = 0;
     let automatikOhneSteuer = 0;
+    const mischsatzOffen = [];
+    let mischsatzGebucht = 0;
+    let gemischtAusgelassen = 0;
+    let gemischtMarkiert = 0;
 
     for (const doc of dokDocs) {
       const fields = doc.fields || {};
@@ -4999,6 +5010,42 @@ async function handleDatevExport(body, env, cors = {}) {
       const importKontoGilt = datevKontoImport
         && (firestoreValue(fields.datev_skr) || '') === skr
         && (firestoreValue(fields.datev_kategorie_import) || '') === kategorie;
+      // Mischsatz (Branch datev-mischsatz): Beleg v2 mit mehreren Steuersätzen (steuer.positionen) ergibt eine Buchungszeile je Satz-Gruppe
+      // (Konto und BU-Schlüssel nach Satz, Summe = Belegbrutto). Ein Satz, Kleinunternehmer, Reverse Charge, OSS und Altbelege bleiben auf dem
+      // Pfad darunter (byte-gleich). Satz nicht zulässig oder Summe weicht ab: nicht exportiert, mit Grund in der Warnung (nie raten).
+      if (!kleinunternehmer && !importKontoGilt && kategorie !== 'Bewirtung (70%)' && fields.steuer) {
+        const ms = datevMischsatzGruppen(datevDekodiereFelder({ steuer: fields.steuer }).steuer, Math.round(betrag * 100));
+        if (ms && ms.offen) { mischsatzOffen.push(`${rechnungsnr} (${ms.grund})`); continue; }
+        if (ms) {
+          const freitextMs = firestoreValue(fields.buchungstext) || '';
+          const basisMs = istEinnahme ? `Rechnung ${absender}`.trim() : `Beleg ${absender}`.trim();
+          const buchungstextOhneHinweis = freitextMs ? `${basisMs} ${freitextMs}`.trim() : basisMs;
+          const diverseAdressnummer = istEinnahme ? (kundenNummerById[firestoreValue(fields.kunde_id) || ''] || '') : '';
+          const belegfeld2 = '';
+          const skrK = skr === 'SKR04' ? 'SKR04' : 'SKR03';
+          for (const g of ms.gruppen) {
+            if (g.brutto_cent <= 0) continue;
+            let konto = (istEinnahmeKategorie(istEinnahme, kategorie) ? resolveSachkonto(kategorie, skr) : null)
+              || (istEinnahme ? erloeskontoExport(g.satz, false, skr) : ausgabenGegenkonto);
+            let hinweis = '';
+            if (g.satz === '19' || g.satz === '7') {
+              const tausch = DATEV_AUTOMATIK_SATZ_TAUSCH[skrK][String(konto)];
+              if (tausch && tausch.satz !== g.satz) { konto = tausch.partner; kontoGewechselt++; }
+            } else if (DATEV_AUTOMATIKKONTEN_EXPORT[skrK].has(String(konto))) {
+              if (istEinnahme) { konto = erloeskontoExport('keine', false, skrK); kontoGewechselt++; }
+              else { automatikOhneSteuer++; hinweis = ' [Konto/Steuersatz prüfen]'; }
+            }
+            const ohneSchl = alleErloeskonten.has(String(konto)) && !istEinnahme;
+            const satzBu = buSchluesselExport(ohneSchl ? 'keine' : g.satz, false, istEinnahme, konto, skr);
+            const marke = ` ${g.satz === 'keine' ? '0' : g.satz} %${ms.korrektur ? ' [Storno]' : ''}${hinweis}`;
+            const sh = istEinnahme === !ms.korrektur ? 'S' : 'H';
+            buchungen.push({ betrag: g.brutto_cent / 100, sollHaben: sh, konto: bankkonto, gegenkonto: konto, bu: satzBu, belegDatum, belegfeld1: rechnungsnr, belegfeld2, buchungstext: buchungstextBasisKurz(buchungstextOhneHinweis, marke), diverseAdressnummer });
+          }
+          mischsatzGebucht++;
+          continue;
+        }
+      }
+
       // Einnahme: Gegenkonto nur aus einer Einnahmen-Kategorie. Eine Ausgabenkategorie (z. B. Wareneinkauf) würde sonst
       // den Erlös auf ein Aufwandskonto buchen.
       let gegenkonto = (importKontoGilt ? datevKontoImport : '')
@@ -5023,10 +5070,12 @@ async function handleDatevExport(body, env, cors = {}) {
       // Fehlender Steuersatz bei Regelbesteuerten (Altbeleg): nicht als 19 % raten (TR-euer-005, Konzept 7.3, Kern: UNBEKANNT).
       // Ausgaben gehen ohne Steuerschlüssel und mit Textmarke in den Stapel (die Betriebsausgabe hängt nicht am Satz), Einnahmen auf kein
       // Erlöskonto mit unbekanntem Satz: sie bleiben draußen und stehen in der Warnung.
-      const satzFehlt = !kleinunternehmer && !mwstSatz && !importKontoGilt && !erstattungsKonto;
-      if (satzFehlt && istEinnahme) { ohneSatzAusgelassen++; continue; }
+      // 'gemischt' (Rechnung v2 mit mehreren Sätzen) ohne verwertbare Aufteilung im Steuerteil: der eine Satz des Altfelds fehlt, nicht als 19 % raten.
+      const satzGemischt = !kleinunternehmer && mwstSatz === 'gemischt' && !importKontoGilt;
+      const satzFehlt = (!kleinunternehmer && !mwstSatz && !importKontoGilt && !erstattungsKonto) || satzGemischt;
+      if (satzFehlt && istEinnahme) { if (satzGemischt) gemischtAusgelassen++; else ohneSatzAusgelassen++; continue; }
       let satzHinweis = '';
-      if (satzFehlt) { ohneSatzMarkiert++; satzHinweis = ' [Steuersatz prüfen]'; }
+      if (satzFehlt) { if (satzGemischt) gemischtMarkiert++; else ohneSatzMarkiert++; satzHinweis = ' [Steuersatz prüfen]'; }
       // Automatikkonto und Satz des Belegs müssen zusammenpassen (TR-euer-007): DATEV rechnet auf 8400/3400 (SKR04 4400/5400) stets 19 %,
       // auf 8300/3300 (4300/5300) stets 7 %. Passt der Satz des Belegs nicht, wechselt der Export auf das Konto mit passendem Satz.
       if (!importKontoGilt && !kleinunternehmer && (mwstSatz === '19' || mwstSatz === '7')) {
@@ -5047,7 +5096,8 @@ async function handleDatevExport(body, env, cors = {}) {
       const buchungstextBasis = istEinnahme
         ? `Rechnung ${absender}`.trim()
         : `Beleg ${absender}`.trim();
-      const buchungstext = (freitext ? `${buchungstextBasis} ${freitext}`.trim() : buchungstextBasis) + satzHinweis;
+      const buchungstextOhneHinweis = freitext ? `${buchungstextBasis} ${freitext}`.trim() : buchungstextBasis;
+      const buchungstext = buchungstextOhneHinweis + satzHinweis;
       // Belegfeld 2 ist eine Belegnummer (max. 12 Stellen laut DATEV). Der freie Buchungstext gehört in den Buchungstext (max. 60).
       const belegfeld2 = '';
       // Debitorennummer nur bei Einnahmen (Rechnung an Kunde = Debitor) relevant — bei Ausgaben
@@ -5104,6 +5154,15 @@ async function handleDatevExport(body, env, cors = {}) {
     }
     if (automatikOhneSteuer > 0) {
       datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${automatikOhneSteuer} Ausgabe(n) ohne Umsatzsteuer stehen auf einem Automatikkonto (DATEV rechnet dort 19 bzw. 7 % Vorsteuer, Buchungstext mit [Konto/Steuersatz prüfen]). Bitte beim Berater auf ein Konto ohne Vorsteuer umbuchen.`;
+    }
+    if (gemischtAusgelassen > 0) {
+      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${gemischtAusgelassen} Einnahme(n) mit mehreren Steuersätzen ohne Aufteilung im Beleg wurden NICHT exportiert (der Satz wird nicht geraten). Bitte den Beleg in der App prüfen und erneut exportieren.`;
+    }
+    if (gemischtMarkiert > 0) {
+      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${gemischtMarkiert} Ausgabe(n) mit mehreren Steuersätzen ohne Aufteilung im Beleg sind ohne Steuerschlüssel exportiert (Buchungstext mit [Steuersatz prüfen]). Bitte beim Berater prüfen.`;
+    }
+    if (mischsatzOffen.length > 0) {
+      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${mischsatzOffen.length} Beleg(e) mit mehreren Steuersätzen wurden NICHT exportiert (Aufteilung nicht eindeutig): ${mischsatzOffen.slice(0, 10).join(', ')}${mischsatzOffen.length > 10 ? ', …' : ''}. Bitte in der App prüfen und erneut exportieren.`;
     }
     if (plattformOhneNr > 0) {
       datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${plattformOhneNr} Plattform-Beleg(e) ohne Rechnungsnummer: Belegfeld 1 enthält dort das Belegdatum.`;
