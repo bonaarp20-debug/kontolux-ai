@@ -4694,7 +4694,8 @@ const DATEV_AUTOMATIKKONTEN_EXPORT = {
 };
 // Erlöskonten je Steuersatz (Prüfung 2026-09-28). Kleinunternehmer seit Kontenrahmen 2026:
 // 8192/4184 "Steuerfreie Erlöse Kleinunternehmer nach § 19 Abs. 1 UStG" — 8195/4185 (a.F.) sind
-// gesperrt. 8337/4337 = Erlöse, für die der Leistungsempfänger die USt nach § 13b schuldet.
+// gesperrt (E-M9: für Exportjahre bis 2025 gilt 8195/4185, datevKuKonto). 8337/4337 = Erlöse, für die der Leistungsempfänger die USt nach § 13b im Inland schuldet; Kunden im
+// EU-Ausland 8336/4336, im Drittland 8338/4338 (RC_AUSGANG_KONTEN in regel/datev-export-regeln.js, alle im Kontenrahmen 2026 gelesen, test-sachkonten-sync.mjs).
 const DATEV_ERLOESKONTEN = {
   SKR03: { '19': '8400', '7': '8300', keine: '8200', reverse_charge: '8337', kleinunternehmer: '8192' },
   SKR04: { '19': '4400', '7': '4300', keine: '4200', reverse_charge: '4337', kleinunternehmer: '4184' }
@@ -4712,8 +4713,8 @@ const DATEV_AUTOMATIK_SATZ_TAUSCH = {
   SKR03: { '8400': { satz: '19', partner: '8300' }, '8300': { satz: '7', partner: '8400' }, '3400': { satz: '19', partner: '3300' }, '3300': { satz: '7', partner: '3400' } },
   SKR04: { '4400': { satz: '19', partner: '4300' }, '4300': { satz: '7', partner: '4400' }, '5400': { satz: '19', partner: '5300' }, '5300': { satz: '7', partner: '5400' } }
 };
-// Bewirtung: abziehbarer Teil (70 %) und nicht abziehbarer Teil (30 %). Die Konten 4654/6644 sind nicht gegen den DATEV-Kontenrahmen
-// geprüft (Konzept 7.2, G11, Konfidenz U): vor dem Deploy mit dem Kontenrahmen abgleichen. Fallback laut Konzept: nichtAbziehbar = abziehbar.
+// Bewirtung: abziehbarer Teil (70 %) und nicht abziehbarer Teil (30 %). Konten im Kontenrahmen 2026 im Wortlaut geprüft (SKR03 Art.-Nr. 11174: 4650 "Bewirtungskosten",
+// 4654 "Nicht abzugsfähige Bewirtungskosten"; SKR04 Art.-Nr. 11175: 6640/6644), maschinell in test-sachkonten-sync.mjs (Tabelle WEITERE).
 const DATEV_BEWIRTUNG_KONTEN = {
   SKR03: { abziehbar: '4650', nichtAbziehbar: '4654' },
   SKR04: { abziehbar: '6640', nichtAbziehbar: '6644' }
