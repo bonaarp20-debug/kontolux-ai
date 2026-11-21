@@ -35,14 +35,14 @@ ADMIN_EMAILS = "johannkorn7@gmail.com"
 # Löschen ist nicht rückholbar. Erst "trocken" (zählt und loggt nur), Bericht prüfen, dann einzeln "an". Jede Änderung: eigener Commit plus Deploy.
 # LOESCHLAEUFE_MAX ist die gemeinsame Obergrenze (strengere Einstellung gewinnt): "aus" schaltet alle Läufe ab (Notaus).
 # Stufe 1 (Kontolux docs/regelbesteuerung/19-phase3/loeschlaeufe-pruefung.md Abschnitt 5/6): alle außer TRENNEN "trocken" (zählt nur), TRENNEN "aus".
-LOESCHLAEUFE_MAX = "trocken"
+LOESCHLAEUFE_MAX = "an"
 LOESCHLAUF_WEGWERF = "trocken"
 LOESCHLAUF_ARCHIV = "trocken"
 LOESCHLAUF_ADMIN = "trocken"
 LOESCHLAUF_KONTOLOESCHUNG = "trocken"
-LOESCHLAUF_FEEDBACK = "trocken"
-LOESCHLAUF_ANFRAGEN = "trocken"
-LOESCHLAUF_PROTOKOLL = "trocken"
+LOESCHLAUF_FEEDBACK = "an"
+LOESCHLAUF_ANFRAGEN = "an"
+LOESCHLAUF_PROTOKOLL = "an"
 LOESCHLAUF_PROTOKOLL_KV_ALT = "trocken"
 LOESCHLAUF_UNBESTAETIGT = "trocken"
 LOESCHLAUF_TRENNEN = "aus"

@@ -103,10 +103,13 @@ test('Schalter: ohne Variable ist jeder Lauf aus; LOESCHLAEUFE_MAX deckelt; unbe
 });
 
 // LOESCHLAUF-TROCKEN: Stufe 1 (loeschlaeufe-pruefung.md Abschnitt 5): kein Schalter steht auf "an"; alle außer TRENNEN "trocken", TRENNEN "aus"
-test('wrangler.toml: kein Schalter auf "an" (Stufe 1 trocken, TRENNEN aus), stündlicher Cron passt zu LOESCH_CRON, höchstens 5 Cron-Trigger (Free)', () => {
+test('wrangler.toml: nur FEEDBACK/ANFRAGEN/PROTOKOLL auf "an" (Stufe 2), übrige trocken, TRENNEN aus, stündlicher Cron passt zu LOESCH_CRON, höchstens 5 Cron-Trigger (Free)', () => {
   const toml = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
-  for (const v of ['LOESCHLAEUFE_MAX', ...Object.values(SCHALTER)]) assert.match(toml, new RegExp(`^${v} = "${v === SCHALTER.TRENNEN ? 'aus' : 'trocken'}"$`, 'm'), v);
-  assert.doesNotMatch(toml, /^LOESCH\w* = "an"$/m);
+  // Stufe 2 (21.11.2026, Jona): FEEDBACK, ANFRAGEN, PROTOKOLL auf 'an' (löschen vor 2028/2030 nichts), MAX 'an'; alle übrigen 'trocken', TRENNEN 'aus'
+  const STUFE2_AN = [SCHALTER.FEEDBACK, SCHALTER.ANFRAGEN, SCHALTER.PROTOKOLL];
+  assert.match(toml, /^LOESCHLAEUFE_MAX = "an"$/m, 'LOESCHLAEUFE_MAX');
+  for (const v of Object.values(SCHALTER)) assert.match(toml, new RegExp(`^${v} = "${v === SCHALTER.TRENNEN ? 'aus' : STUFE2_AN.includes(v) ? 'an' : 'trocken'}"$`, 'm'), v);
+  assert.deepEqual([...toml.matchAll(/^(LOESCH\w*) = "an"$/gm)].map((m) => m[1]).sort(), ['LOESCHLAEUFE_MAX', ...STUFE2_AN].sort());
   const crons = JSON.parse(toml.match(/^crons = (\[.*\])$/m)[1]);
   assert.ok(crons.includes(LOESCH_CRON));
   assert.ok(crons.length <= 5);
@@ -519,15 +522,17 @@ test('Nachlauf: entsperrtes Konto mit übrig gebliebenem archiv:-Schlüssel wird
 
 // LOESCHLAUF-TROCKEN (Stufe 1, loeschlaeufe-pruefung.md Abschnitt 5): die Werte aus wrangler.toml [vars] selbst. Alle Läufe außer TRENNEN
 // stehen auf 'trocken', TRENNEN auf 'aus'; mit genau diesen Werten wird zur Fristen-Stunde nichts geschrieben oder gelöscht.
-test('wrangler.toml Stufe 1: alle Löschläufe trocken (TRENNEN aus), mit diesen Werten wird nichts gelöscht', async () => {
+test('wrangler.toml Stufe 2: FEEDBACK/ANFRAGEN/PROTOKOLL an, alle übrigen trocken (TRENNEN aus), mit diesen Werten wird noch nichts gelöscht (nichts fällig)', async () => {
   const toml = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
   const vars = {};
   for (const m of toml.matchAll(/^(LOESCHLAEUFE_MAX|LOESCHLAUF_[A-Z_]+) = "([^"]*)"$/gm)) vars[m[1]] = m[2];
-  assert.equal(vars.LOESCHLAEUFE_MAX, 'trocken');
+  assert.equal(vars.LOESCHLAEUFE_MAX, 'an');
+  const STUFE2_AN = ['FEEDBACK', 'ANFRAGEN', 'PROTOKOLL'];
   for (const [lauf, name] of Object.entries(SCHALTER)) {
+    const soll = lauf === 'TRENNEN' ? 'aus' : STUFE2_AN.includes(lauf) ? 'an' : 'trocken';
     assert.ok(name in vars, `${name} fehlt in wrangler.toml`);
-    assert.equal(vars[name], lauf === 'TRENNEN' ? 'aus' : 'trocken', name);
-    assert.equal(loeschModus(vars, lauf), lauf === 'TRENNEN' ? 'aus' : 'trocken', `wirksamer Modus ${lauf}`);
+    assert.equal(vars[name], soll, name);
+    assert.equal(loeschModus(vars, lauf), soll, `wirksamer Modus ${lauf}`);
   }
   const g = fakeGoogle(); const kv = fakeKv();
   konto(g, kv, 'archivA0000000001');
@@ -540,11 +545,24 @@ test('wrangler.toml Stufe 1: alle Löschläufe trocken (TRENNEN aus), mit diesen
   g.nutzerAnlegen({ localId: 'unbestU000000001', email: 'u@test.invalid', emailVerified: false, createdAt: String(Date.parse('2036-01-01')) });
   g.setze('users/unbestU000000001/profil/settings', { name: 'x' });
   const vorher = JSON.stringify([...g.docs]) + JSON.stringify(g.dateienMit(B)) + JSON.stringify([...g.konten.keys()]);
-  const r = await loeschlaeufeStuendlich(vars, deps(g, kv, STUNDE(4)));
-  for (let i = 0; i < 5; i++) await loeschlaeufeStuendlich(vars, deps(g, kv, STUNDE(5)));
+  // Teil 1 (Stufe 1 als Eigenschaft des Probemodus): sind ALLE Läufe 'trocken', wird in der Simulation (Uhr 2037, alles fällig) nichts geschrieben
+  const varsTrocken = { ...vars, LOESCHLAUF_FEEDBACK: 'trocken', LOESCHLAUF_ANFRAGEN: 'trocken', LOESCHLAUF_PROTOKOLL: 'trocken' };
+  const r = await loeschlaeufeStuendlich(varsTrocken, deps(g, kv, STUNDE(4)));
+  for (let i = 0; i < 5; i++) await loeschlaeufeStuendlich(varsTrocken, deps(g, kv, STUNDE(5)));
   assert.deepEqual(g.log.schreibend, []);
   assert.equal(JSON.stringify([...g.docs]) + JSON.stringify(g.dateienMit(B)) + JSON.stringify([...g.konten.keys()]), vorher);
   assert.equal(r.feedback.gefunden, 1); assert.equal(r.unbestaetigt.wuerde_loeschen, 1);
+  // Teil 2 (Stufe 2, echte Werte aus wrangler.toml, Uhr 21.11.2026): FEEDBACK/ANFRAGEN/PROTOKOLL sind 'an', aber heute ist nichts fällig
+  // (ältestes Feedback 23.07.2026 → frühestens 2028, Anfragen/Protokoll frühestens 2030): es wird nichts geschrieben oder gelöscht
+  const g2 = fakeGoogle(); const kv2 = fakeKv();
+  g2.setze('feedback/f_2026', { userId: 'x', datum: '2026-07-23T10:00:00.000Z' });
+  g2.setze('anfragen/a_2026', { status: 'erledigt', status_am: '2026-10-01T00:00:00.000Z', erstellt_am: '2026-09-01T00:00:00.000Z' });
+  g2.setze('admin_protokoll/p_2026', { zeit: '2026-11-01T00:00:00.000Z', uid: 'irgendwer000', aktion: 'x' });
+  const vorher2 = JSON.stringify([...g2.docs]);
+  const heute = new Date('2026-11-21T04:30:00.000Z');
+  for (let i = 0; i < 3; i++) await loeschlaeufeStuendlich(vars, deps(g2, kv2, heute));
+  assert.deepEqual(g2.log.schreibend, []);
+  assert.equal(JSON.stringify([...g2.docs]), vorher2);
 });
 
 // LOESCHWEG-SCHUTZ (B1 der Gegenlesung, 18.11.2026): der alte 03:00-Weg (gesperrteKontenLoeschen) läuft, solange WEGWERF nicht 'an' ist (also auch bei
