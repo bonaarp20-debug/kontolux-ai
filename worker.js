@@ -4710,6 +4710,17 @@ const DATEV_BEWIRTUNG_KONTEN = {
 // ohne Kategorie, mwst_satz 'keine') — gleiche Liste wie UST_WEBHOOK_QUELLEN in index.html.
 const DATEV_WEBHOOK_QUELLEN = ['stripe_webhook', 'mollie_webhook', 'digistore24_webhook', 'copecart_webhook', 'paypal_webhook', 'sumup_webhook', 'ablefy_webhook', 'shopify_webhook'];
 
+// Belegnummer (Belegfeld 1) eines Belegs wie im Hauptpfad: Feld, sonst Nummer aus der Dokument-ID (beleg_rechnung_<nr>_<ts>), sonst TTMMJJ des Zahlungs- bzw. Belegdatums.
+function datevBelegNr(fields, id, fallbackDatum) {
+  const nr = firestoreValue(fields.rechnungsnr) || firestoreValue(fields.rechnungsnummer);
+  if (nr) return String(nr);
+  const m = /^beleg_(?:rechnung|mahnung)_(.+)_\d+$/.exec(String(id || ''));
+  if (m) return m[1];
+  const d = String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || '');
+  if (/^\d{4}-\d{2}-\d{2}/.test(d)) return datevTTMMJJ(new Date(d.slice(0, 10) + 'T00:00:00'));
+  return fallbackDatum ? datevTTMMJJ(fallbackDatum) : String(id || '');
+}
+
 // Buchungstext einer Mischsatz-Zeile: Satzmarke am Ende, der Beleg-Text wird gekürzt statt die Marke abzuschneiden (DATEV: 60 Zeichen).
 function buchungstextBasisKurz(text, marke) {
   return String(text).slice(0, Math.max(0, 60 - marke.length)) + marke;
@@ -4922,6 +4933,9 @@ async function handleDatevExport(body, env, cors = {}) {
     const gemischtMarkiert = [];
     // B-1: Korrekturbelege (Storno, Gutschrift) mit Rückzahlung als Gegenbuchung; nicht buchbare Fälle stehen mit Nummer in der Warnung.
     let korrekturGebucht = 0;
+    let wirksamGeloeschtAnzahl = 0;
+    let mischsatzAutomatik = 0;
+    const ossStorniert = [];
     const korrekturOffen = [];
     const korrekturOhneRueckzahlung = [];
     const dokById = new Map(dokDocs.map((d) => [String(d.name || '').split('/').pop(), d]));
@@ -4934,6 +4948,8 @@ async function handleDatevExport(body, env, cors = {}) {
     for (const d of dokDocs) {
       const f = d.fields || {};
       if (!f.steuer || firestoreValue(f.deleted) === true || firestoreValue(f.bezahlt) === true) continue;
+      // G3-N2: nur Belege mit schema_version 2 (der Rückfall von stornoMitKorrektur setzt den Storno-Beleg auf 1 zurück, der Kern ignoriert den Steuerteil dann)
+      if (firestoreValue(f.schema_version) !== 2) continue;
       const st = datevDekodiereFelder({ steuer: f.steuer }).steuer;
       if (!st || !KORREKTUR_BELEG_ARTEN.includes(st.beleg_art) || st.wirkungslos === true || !st.bezug) continue;
       const bz = st.bezug.storniert_beleg_id || st.bezug.korrigiert_beleg_id;
@@ -4942,6 +4958,22 @@ async function handleDatevExport(body, env, cors = {}) {
       if (st.beleg_art === 'storno' && st.bezug.storniert_beleg_id) stornoWirksam.add(String(st.bezug.storniert_beleg_id));
       const kgVor = datevKorrekturGruppen(st);
       if (kgVor) rzTraeger.add(String(bz));
+    }
+    // G3-N3: Storno nach voller Gutschrift (Rest 0) bekommt keinen Steuerteil (Altform: typ storno + storniert_rechnungsnr), das Original muss trotzdem wirksam
+    // bleiben, wenn zu ihm schon ein v2-Korrekturbeleg (die Gutschrift) existiert.
+    const belegIdZuNr = new Map();
+    for (const d of dokDocs) {
+      const f = d.fields || {};
+      const nr0 = firestoreValue(f.rechnungsnr) || firestoreValue(f.rechnungsnummer);
+      if (nr0 && (firestoreValue(f.typ) === 'rechnung_ausgehend' || firestoreValue(f.typ) === 'rechnung_eingehend')) belegIdZuNr.set(String(nr0), String(d.name || '').split('/').pop());
+    }
+    const hatV2Korrektur = new Set([...korrekturSteuer.values()].map((st) => String(st.bezug.storniert_beleg_id || st.bezug.korrigiert_beleg_id)));
+    for (const d of dokDocs) {
+      const f = d.fields || {};
+      if (firestoreValue(f.typ) !== 'storno' || firestoreValue(f.deleted) === true || firestoreValue(f.bezahlt) === true || korrekturSteuer.has(String(d.name || '').split('/').pop())) continue;
+      if (firestoreValue(f.quelle) === 'korrektur_dialog' && firestoreValue(f.korrektur_beleg_art) && firestoreValue(f.korrektur_beleg_art) !== 'storno') continue; // Gutschrift, kein Storno
+      const origId = belegIdZuNr.get(String(firestoreValue(f.storniert_rechnungsnr) || ''));
+      if (origId && hatV2Korrektur.has(origId)) stornoWirksam.add(origId);
     }
     const nrBelegt = new Map(); // A-N3: Belegfeld 1 der Gegenbuchungen ohne Belegnummer eindeutig machen
     const ossOriginal = (id, of) => !!(ossPlan && ossPlan.get(String(id))) || !!(of && of.steuer && of.steuer.mapValue && of.steuer.mapValue.fields && of.steuer.mapValue.fields.oss);
@@ -4970,7 +5002,7 @@ async function handleDatevExport(body, env, cors = {}) {
         const marke = ` ${g.satz === 'keine' ? '0' : g.satz} %${korrektur ? ' [Storno]' : ''}${hinweis}`;
         const sh = istEinnahme === !korrektur ? 'S' : 'H';
         const zeile = (betragCent, kontoZeile, zusatz) => buchungen.push({ betrag: betragCent / 100, sollHaben: sh, konto: bankkonto, gegenkonto: kontoZeile, bu: satzBu, belegDatum, belegfeld1, belegfeld2: '', buchungstext: buchungstextBasisKurz(textBasis, marke + zusatz), diverseAdressnummer });
-        if (!istEinnahme && !ku && kategorie === 'Bewirtung (70%)' && String(konto) === bewirtungKonten.abziehbar) {
+        if (!istEinnahme && !importKonto && kategorie === 'Bewirtung (70%)' && String(konto) === bewirtungKonten.abziehbar) {
           const abz = Math.floor((2 * g.brutto_cent * 70 + 100) / 200);
           if (abz > 0) zeile(abz, bewirtungKonten.abziehbar, '');
           if (g.brutto_cent - abz > 0) zeile(g.brutto_cent - abz, bewirtungKonten.nichtAbziehbar, ' davon nicht abziehbar 30 %');
@@ -4989,7 +5021,13 @@ async function handleDatevExport(body, env, cors = {}) {
       // A-H1: ein weich gelöschtes, bezahltes Original, auf das ein v2-Storno zeigt, bleibt wirksam (Kern: Gegenposten statt Wegfall). OSS-Originale ausgenommen
       // (der OSS-Plan kennt gelöschte Belege nicht, die Rückzahlung steht dann als oss_korrektur in der Warnung).
       const docId = String(doc.name || '').split('/').pop();
-      const wirksamGeloescht = firestoreValue(fields.deleted) === true && firestoreValue(fields.bezahlt) === true && stornoWirksam.has(docId) && !ossOriginal(docId, fields);
+      const geloeschtWirksam = firestoreValue(fields.deleted) === true && firestoreValue(fields.bezahlt) === true && stornoWirksam.has(docId);
+      const wirksamGeloescht = geloeschtWirksam && !ossOriginal(docId, fields);
+      // G3-M1: ein gelöschtes, bezahltes OSS-Original mit v2-Storno steht nicht im Stapel; im Zahlungsjahr mit Nummer in die Warnung (Original und Rückzahlung von Hand)
+      if (geloeschtWirksam && !wirksamGeloescht && String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || '').slice(0, 4) === String(jahr)) {
+        ossStorniert.push(`${datevBelegNr(fields, docId, null)} (oss_storniert)`);
+      }
+      if (wirksamGeloescht) wirksamGeloeschtAnzahl++;
       if (firestoreValue(fields.deleted) === true && !wirksamGeloescht) continue;
       // B-1 (Gegenlesung 21.11.): Korrekturbelege (Storno, Gutschrift, Preisnachlass) sind nie bezahlt, die Bank-Bewegung steht in steuer.rueckzahlung.
       // Gegenbuchung zum Original (Konto, Kunde, Text vom Original): Datum der Rückzahlung, Betrag der Rückzahlung, je Satz aufgeteilt, Richtung umgekehrt.
@@ -5007,7 +5045,7 @@ async function handleDatevExport(body, env, cors = {}) {
         const rzRoh = Array.isArray(st.rueckzahlung) ? st.rueckzahlung[0] : st.rueckzahlung;
         const rzJahrGleich = String((rzRoh && rzRoh.datum) || '').slice(0, 4) === String(jahr);
         const korrNr = firestoreValue(fields.rechnungsnr) || firestoreValue(fields.rechnungsnummer) || st.rechnungsnr || '';
-        const origNr = of ? (firestoreValue(of.rechnungsnr) || firestoreValue(of.rechnungsnummer) || bezug) : bezug;
+        const origNr = of ? datevBelegNr(of, bezug, null) : bezug;
         // A-M1: Rückzahlung zu einem OSS-Original bucht der Export nicht (OSS bucht unbezahlte Korrekturbelege nie): mit Nummer in die Warnung
         if (kg && of && origWirksam && ossOriginal(bezug, of)) {
           if (rzJahrGleich) korrekturOffen.push(`${korrNr || origNr} (oss_korrektur)`);
@@ -5038,9 +5076,11 @@ async function handleDatevExport(body, env, cors = {}) {
           const impKonto = firestoreValue(of.datev_konto) || '';
           const impGilt = impKonto && (firestoreValue(of.datev_skr) || '') === skr && (firestoreValue(of.datev_kategorie_import) || '') === katOrig;
           const einSatz = kleinunternehmer || kg.ku === true;
+          const gruppenListe = einSatz ? [{ satz: 'keine', brutto_cent: kg.rueckzahlung_cent }] : kg.gruppen;
           bucheGruppen({
-            gruppen: einSatz ? [{ satz: 'keine', brutto_cent: kg.rueckzahlung_cent }] : kg.gruppen, korrektur: true, ku: kleinunternehmer, istEinnahme: origEinnahme,
-            kategorie: katOrig, importKonto: impGilt ? impKonto : '', belegDatum: rzDatum, belegfeld1: nr,
+            gruppen: gruppenListe, korrektur: true, ku: kleinunternehmer, istEinnahme: origEinnahme,
+            // G3-N5: das Import-Konto nur bei einer Gruppe (sonst bekäme der 7-%-Anteil ohne Schlüssel auf einem Automatikkonto 19 %)
+            kategorie: katOrig, importKonto: impGilt && gruppenListe.length === 1 ? impKonto : '', belegDatum: rzDatum, belegfeld1: nr,
             textBasis: freiOrig ? `${basisOrig} ${freiOrig}`.trim() : basisOrig,
             diverseAdressnummer: origEinnahme ? (kundenNummerById[firestoreValue(of.kunde_id) || ''] || '') : ''
           });
@@ -5049,7 +5089,7 @@ async function handleDatevExport(body, env, cors = {}) {
         }
         // Storno/Gutschrift zu einer bezahlten Rechnung, aber ohne Rückzahlung: keine Bankbuchung, Hinweis (nur im Jahr des Wirkdatums, und nur wenn kein
         // anderer Korrekturbeleg zur selben Rechnung die Rückzahlung trägt)
-        if (!kg && origWirksam && !rzTraeger.has(bezug) && String(st.wirkdatum || '').slice(0, 4) === String(jahr) && st.korrektur_grund !== 'tippfehler_berichtigung') {
+        if (!kg && origWirksam && !(origGeloescht && ossOriginal(bezug, of)) && !rzTraeger.has(bezug) && String(st.wirkdatum || '').slice(0, 4) === String(jahr) && st.korrektur_grund !== 'tippfehler_berichtigung') {
           korrekturOhneRueckzahlung.push(korrNr || origNr);
         }
       }
@@ -5185,7 +5225,7 @@ async function handleDatevExport(body, env, cors = {}) {
       let satzHinweis = '';
       if (satzFehlt) { if (satzGemischt) gemischtMarkiert.push(`${rechnungsnr}${mischsatzUnklarGrund ? ` (${mischsatzUnklarGrund})` : ''}`); else ohneSatzMarkiert++; satzHinweis = ' [Steuersatz prüfen]'; }
       // A-N1: unklarer Mischsatz auf einem Automatikkonto (3400/5400 usw.): DATEV rechnet dort trotz fehlendem Schlüssel selbst Vorsteuer, deshalb eigene Marke und Warnung
-      if (satzGemischt && !istEinnahme && DATEV_AUTOMATIKKONTEN_EXPORT[skr === 'SKR04' ? 'SKR04' : 'SKR03'].has(String(gegenkonto))) { automatikOhneSteuer++; satzHinweis += ' [Konto/Steuersatz prüfen]'; }
+      if (satzGemischt && !istEinnahme && DATEV_AUTOMATIKKONTEN_EXPORT[skr === 'SKR04' ? 'SKR04' : 'SKR03'].has(String(gegenkonto))) { mischsatzAutomatik++; satzHinweis += ' [Konto/Steuersatz prüfen]'; }
       // Automatikkonto und Satz des Belegs müssen zusammenpassen (TR-euer-007): DATEV rechnet auf 8400/3400 (SKR04 4400/5400) stets 19 %,
       // auf 8300/3300 (4300/5300) stets 7 %. Passt der Satz des Belegs nicht, wechselt der Export auf das Konto mit passendem Satz.
       if (!importKontoGilt && !kleinunternehmer && (mwstSatz === '19' || mwstSatz === '7')) {
@@ -5276,7 +5316,16 @@ async function handleDatevExport(body, env, cors = {}) {
       datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${korrekturOffen.length} Storno-/Gutschrift-Beleg(e) mit Rückzahlung stehen NICHT im Stapel: ${nummern(korrekturOffen)}. Bitte nenne sie deinem Steuerberater, er bucht die Rückzahlung von Hand.`;
     }
     if (korrekturOhneRueckzahlung.length > 0) {
-      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `Zu ${korrekturOhneRueckzahlung.length} bezahlten Rechnung(en) gibt es einen Storno oder eine Gutschrift ohne Rückzahlung: ${nummern(korrekturOhneRueckzahlung)}. Im Stapel steht deshalb keine Gegenbuchung, bitte beim Steuerberater klären.`;
+      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `Zu ${korrekturOhneRueckzahlung.length} bezahlten Rechnung(en) gibt es einen Storno oder eine Gutschrift ohne Rückzahlung: ${nummern(korrekturOhneRueckzahlung)}. Im Stapel steht deshalb keine Gegenbuchung, bitte beim Steuerberater klären. Wurde die Zahlung auf eine neue Rechnung angerechnet (Storno mit Neuausstellung) und ist auch die neue Rechnung als bezahlt markiert, steht der Umsatz doppelt im Stapel.`;
+    }
+    if (mischsatzAutomatik > 0) {
+      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${mischsatzAutomatik} Ausgabe(n) mit mehreren Steuersätzen stehen ohne sichere Aufteilung auf einem Automatikkonto (DATEV rechnet dort selbst Vorsteuer, Buchungstext mit [Konto/Steuersatz prüfen]). Bitte beim Berater auf ein Konto ohne Automatik umbuchen und die Vorsteuer je Steuersatz von Hand buchen.`;
+    }
+    if (ossStorniert.length > 0) {
+      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${ossStorniert.length} stornierte(r) Verkauf/Verkäufe ins Ausland (OSS) stehen nicht im Stapel: ${nummern(ossStorniert)}. Bitte nenne sie deinem Steuerberater, er bucht Verkauf und Rückzahlung zusammen von Hand.`;
+    }
+    if (wirksamGeloeschtAnzahl > 0 || korrekturGebucht > 0) {
+      datevWarning = (datevWarning ? datevWarning + ' ' : '') + 'Hinweis: Rechnungen, die nach der Zahlung storniert wurden, stehen im Jahr der Zahlung, die Rückzahlung als Gegenbuchung im Jahr der Rückzahlung. Wurde ein Jahr schon früher exportiert, kann sich die Datei dadurch ändern: bitte erneut exportieren oder dem Steuerberater Bescheid geben.';
     }
     if (plattformOhneNr > 0) {
       datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${plattformOhneNr} Plattform-Beleg(e) ohne Rechnungsnummer: Belegfeld 1 enthält dort das Belegdatum.`;

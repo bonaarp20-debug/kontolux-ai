@@ -104,6 +104,13 @@ function einsatzBelege() {
     v2: v2('V2', 'ausgang', [P19(10000), P19(5000)], { kat: 'Einnahmen 19%' }),
     v3: v2('V3', 'ausgang', [P7(20000)], { wahl: 'inland_7', kat: 'Einnahmen 7%' }),
     v4: v2('V4', 'eingang', [P19(8403)], { kat: 'Bürobedarf' }),
+    // vom Delta der Gegenlesungen berührte Zweige (Golden mit main f011a8c erzeugt): gelöschter bezahlter Beleg ohne v2-Storno, Altform-Storno (typ storno,
+    // unbezahlt), OSS-Beleg ohne Kern-Option (Hauptpfad), Plattform-Erstattung auf den Erlös der Integration
+    d1: alt('D1', 'rechnung_ausgehend', 119, '19', 'Einnahmen 19%', { deleted: true, storniert: true }),
+    d2: alt('D2', 'storno', 119, '19', 'Einnahmen 19%', { bezahlt: false, bezahlt_am: null, storniert_rechnungsnr: 'D1' }),
+    d3: alt('D3', 'rechnung_ausgehend', 120, 'keine', undefined, { schema_version: 2, steuer: { steuerfall: 'UNBEKANNT', unbekannt_grund: 'auslandskunde', oss: { leistungsart: 'ware', land: 'FR', waehrung: 'EUR', zeilen: [{ netto_cent: 10000, ust_cent: 2000, satz_bp: 2000 }] } } }),
+    p1: alt('P1', 'rechnung_ausgehend', 59.5, '19', undefined, { quelle: 'stripe_webhook' }),
+    p2: alt('P2', 'rechnung_eingehend', 11.9, 'keine', undefined, { quelle: 'stripe_webhook' }),
   };
 }
 test('Rückfall: Belege mit einem Satz (SKR03, SKR04, Kleinunternehmer) byte-gleich zum Export vor der Änderung (Golden-Datei)', async () => {
@@ -375,7 +382,8 @@ test('A-H1 echter Weg: gelöschtes+storniertes bezahltes Original bleibt im Stap
   assert.equal(r.zeilen.length, 2);
   assert.deepEqual(kurz(r, 'R1'), [['119,00', 'S', '1200', '8400', '']]);
   assert.deepEqual(kurz(r, 'ST1'), [['119,00', 'H', '1200', '8400', '']]);
-  assert.equal(r.warnung, '');
+  assert.match(r.warnung, /^Hinweis: Rechnungen, die nach der Zahlung storniert wurden/); // G3-N7: nur der Änderungshinweis, sonst nichts
+  assert.doesNotMatch(r.warnung, /ohne Rückzahlung/);
 });
 
 test('A-H1 Jahreswechsel: Original im Zahlungsjahr, Gegenbuchung im Jahr der Rückzahlung; Teilrückzahlung zeigt den Rest', async () => {
@@ -433,7 +441,7 @@ test('A-N2 kein Hinweis „ohne Rückzahlung“, wenn eine zweite Korrektur ders
   const mitRz = ohneId(korrekturBeleg('ST7', 'o', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }], { rz: { datum: '2026-06-20', betrag_cent: 11900 }, art: 'gutschrift_erteilt', extra: { korrektur_grund: 'preisnachlass' } }));
   const r = await exportiere({ o: orig, s6: ohneRz, s7: mitRz });
   assert.equal(zeilenVon(r, 'ST7').length, 1);
-  assert.equal(r.warnung, '');
+  assert.doesNotMatch(r.warnung, /ohne Rückzahlung/);
 });
 
 test('A-N3 Gegenbuchungen ohne Belegnummer: Belegfeld 1 eindeutig (Original, TTMM der Rückzahlung, laufender Zusatz bei gleichem Tag), höchstens 36 Zeichen', async () => {
@@ -455,4 +463,84 @@ test('A-N4 Import-Konto des Originals gilt für die Gegenbuchung; Profil Kleinun
   const kst = ohneId(korrekturBeleg('STK', 'o', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }, { brutto_cent: 5350, satz_bp: 700 }], { rz: { datum: '2026-07-01', betrag_cent: 17250 } }));
   r = await exportiere({ o: ko, s: kst }, { ku: true });
   assert.deepEqual(kurz(r, 'STK'), [['172,50', 'H', '1200', '8192', '']]);
+});
+
+// ── Gegenlesung 3 (G3-M1 ... G3-N8) ─────────────────────────────────────────────────────────────
+const ossOrig = (nr, extra = {}) => ({ ...alt(nr, 'rechnung_ausgehend', 120, 'keine'), schema_version: 2, steuer: { steuerfall: 'UNBEKANNT', oss: { leistungsart: 'ware', land: 'FR', zeilen: [] } }, ...extra });
+
+test('G3-M1 gelöschtes bezahltes OSS-Original mit v2-Storno: Original mit oss_storniert in der Warnung, kein Hinweis „ohne Rückzahlung“, Rückzahlung als oss_korrektur', async () => {
+  const geloescht = ossOrig('FR-1', { deleted: true, storniert: true });
+  const ohneRz = ohneId(korrekturBeleg('ST-FR', 'oo', 'ausgang', [{ brutto_cent: 12000, satz_bp: 1900 }]));
+  let r = await exportiere({ oo: geloescht, s: ohneRz, ok: alt('OK', 'rechnung_ausgehend', 119, '19', 'Einnahmen 19%') });
+  assert.equal(zeilenVon(r, 'FR-1').length, 0);
+  assert.match(r.warnung || '', /FR-1 \(oss_storniert\)/);
+  assert.doesNotMatch(r.warnung || '', /ohne Rückzahlung/);
+  const mitRz = ohneId(korrekturBeleg('ST-FR2', 'oo', 'ausgang', [{ brutto_cent: 12000, satz_bp: 1900 }], { rz: { datum: '2026-06-20', betrag_cent: 12000 } }));
+  r = await exportiere({ oo: geloescht, s: mitRz, ok: alt('OK', 'rechnung_ausgehend', 119, '19', 'Einnahmen 19%') });
+  assert.match(r.warnung, /FR-1 \(oss_storniert\)/);
+  assert.match(r.warnung, /ST-FR2 \(oss_korrektur\)/);
+  assert.equal(zeilenVon(r, 'FR-1').length + zeilenVon(r, 'ST-FR2').length, 0);
+  r = await exportiere({ oo: geloescht, s: mitRz }, { jahr: 2025 });
+  assert.doesNotMatch(r.warnung || '', /oss_storniert/);
+});
+
+test('G3-N1 Hinweistext: Zahlung auf neue Rechnung angerechnet, Umsatz doppelt', async () => {
+  const orig = loeschen(v2('RN1', 'ausgang', [P19(10000)], { kat: 'Einnahmen 19%' }));
+  const ohneRz = ohneId(korrekturBeleg('STN1', 'o', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }]));
+  const r = await exportiere({ o: orig, s: ohneRz });
+  assert.match(r.warnung, /ohne Rückzahlung: STN1.*Neuausstellung.*doppelt/);
+});
+
+test('G3-N2 Storno-Beleg mit schema_version 1 (Rückfall von stornoMitKorrektur): Original bleibt draußen wie im Kern, keine Gegenbuchung', async () => {
+  const orig = loeschen(v2('RN2', 'ausgang', [P19(10000)], { kat: 'Einnahmen 19%' }));
+  const st = { ...ohneId(korrekturBeleg('STN2', 'o', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }], { rz: { datum: '2026-06-20', betrag_cent: 11900 } })), schema_version: 1 };
+  const r = await exportiere({ o: orig, s: st, ok: alt('OK', 'rechnung_ausgehend', 119, '19', 'Einnahmen 19%') });
+  assert.equal(zeilenVon(r, 'RN2').length + zeilenVon(r, 'STN2').length, 0);
+});
+
+test('G3-N3 Storno nach voller Gutschrift (Rest 0, Storno ohne Steuerteil): Original bleibt wirksam, Gegenbuchung der Gutschrift im Rückzahlungsjahr', async () => {
+  const orig = loeschen({ ...v2('RN3', 'ausgang', [P19(10000)], { kat: 'Einnahmen 19%' }), bezahlt_am: '2026-12-10', datum: '2026-12-10' });
+  const gs = ohneId(korrekturBeleg('GS3', 'o', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }], { rz: { datum: '2027-01-20', betrag_cent: 11900 }, art: 'gutschrift_erteilt', extra: { korrektur_grund: 'preisnachlass' }, wirkdatum: '2027-01-15' }));
+  const stAlt = alt('ST3', 'storno', 119, '19', 'Einnahmen 19%', { bezahlt: false, bezahlt_am: null, storniert_rechnungsnr: 'RN3' }); // Altform ohne Steuerteil
+  const belege = { o: orig, g: gs, s: stAlt };
+  const r26 = await exportiere(belege);
+  assert.deepEqual(kurz(r26, 'RN3'), [['119,00', 'S', '1200', '8400', '']]);
+  const r27 = await exportiere(belege, { jahr: 2027 });
+  assert.deepEqual(kurz(r27, 'GS3'), [['119,00', 'H', '1200', '8400', '']]);
+  // ohne die Gutschrift (reiner Altweg) bleibt das gelöschte Original draußen
+  const r0 = await exportiere({ o: orig, s: stAlt, ok: alt('OK', 'rechnung_ausgehend', 119, '19', 'Einnahmen 19%') });
+  assert.equal(zeilenVon(r0, 'RN3').length, 0);
+});
+
+test('G3-N4 Kleinunternehmer mit Bewirtung: Gegenbuchung 70/30 wie im Hauptpfad', async () => {
+  const orig = alt('BW1', 'rechnung_eingehend', 100, '19', 'Bewirtung (70%)');
+  const st = ohneId(korrekturBeleg('STBW', 'o', 'eingang', [{ brutto_cent: 10000, satz_bp: 1900 }], { rz: { datum: '2026-07-01', betrag_cent: 10000 } }));
+  const r = await exportiere({ o: orig, s: st }, { ku: true });
+  assert.deepEqual(kurz(r, 'BW1').map((x) => [x[0], x[3]]), [['70,00', '4650'], ['30,00', '4654']]);
+  assert.deepEqual(kurz(r, 'STBW').map((x) => [x[0], x[1], x[3], x[4]]), [['70,00', 'S', '4650', ''], ['30,00', 'S', '4654', '']]);
+});
+
+test('G3-N5 Import-Konto als Automatikkonto bei Gegenbuchung mit zwei Sätzen: Satz-Tausch statt 8400 ohne Schlüssel für beide', async () => {
+  const imp = alt('IM2', 'rechnung_ausgehend', 172.5, '19', 'Einnahmen 19%', { datev_konto: '8400', datev_skr: 'SKR03', datev_kategorie_import: 'Einnahmen 19%' });
+  const st = ohneId(korrekturBeleg('STI2', 'o', 'ausgang', [{ brutto_cent: 11900, satz_bp: 1900 }, { brutto_cent: 5350, satz_bp: 700 }], { rz: { datum: '2026-07-01', betrag_cent: 17250 } }));
+  const r = await exportiere({ o: imp, s: st });
+  assert.deepEqual(kurz(r, 'STI2').map((x) => x[3]), ['8400', '8300']);
+});
+
+test('G3-N6 Warnung zum Automatikkonto bei unklarem Mischsatz: eigener Text, kein Widerspruch zu „Vorsteuer von Hand“', async () => {
+  const b = v2('N6', 'eingang', [P19(10000), P7(5000)], { kat: 'Wareneinkauf 19%', mwst: '19' });
+  const r = await exportiere({ n6: { ...b, betrag: 150 } });
+  assert.match(r.warnung, /mit mehreren Steuersätzen stehen ohne sichere Aufteilung auf einem Automatikkonto/);
+  assert.doesNotMatch(r.warnung, /ohne Umsatzsteuer stehen auf einem Automatikkonto/);
+});
+
+test('G3-N8 Belegfeld 1 der Gegenbuchung wie im Hauptpfad: Nummer aus der Dokument-ID bzw. TTMMJJ, keine rohe ID, höchstens 36 Zeichen', async () => {
+  const ohneNr = { ...alt('x', 'rechnung_ausgehend', 119, '19', 'Einnahmen 19%'), bezahlt_am: '2026-05-10' };
+  delete ohneNr.rechnungsnr;
+  const g = () => { const b = ohneId(korrekturBeleg('X', 'beleg_rechnung_ABC-7_1700000000000', 'ausgang', [{ brutto_cent: 5000, satz_bp: 1900 }], { rz: { datum: '2026-06-20', betrag_cent: 5000 }, art: 'gutschrift_erteilt', extra: { korrektur_grund: 'preisnachlass' } })); delete b.rechnungsnr; return b; };
+  const r = await exportiere({ beleg_rechnung_ABC_7_1700000000000: ohneNr, 'beleg_rechnung_ABC-7_1700000000000': { ...ohneNr }, g: g(), h: g() });
+  const nrn = r.zeilen.map((x) => ohne(x[10])).filter((n) => n.startsWith('S-'));
+  assert.deepEqual(nrn.sort(), ['S-ABC-7-2006', 'S-ABC-7-2006-2']);
+  const r2 = await exportiere({ pf: { ...ohneNr, quelle: 'stripe_webhook' }, g: { ...g(), steuer: { ...g().steuer, bezug: { korrigiert_beleg_id: 'pf' } } } });
+  assert.deepEqual(r2.zeilen.map((x) => ohne(x[10])).filter((n) => n.startsWith('S-')), ['S-100526-2006']);
 });
