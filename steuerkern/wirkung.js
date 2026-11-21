@@ -1529,9 +1529,9 @@ function kfzHinweisArt(s, profil) {
   return null;
 }
 // NL-KERN-2 (Konfidenz B): Versicherungsbeiträge sind umsatzsteuerfrei (§ 4 Nr. 10 UStG, es fällt Versicherungsteuer an), daraus gibt es keine Vorsteuer.
-// Steht auf einem Beleg der Kategorie Versicherungen ein Umsatzsteuerbetrag (19 %), rechnet der Kern ihn nicht (Zwischenwert mit
-// HN_VERSICHERUNG_VORSTEUER), statt eine nicht abziehbare Vorsteuer in Kz 66 zu buchen. Rückfall: Bestandsbelege dieser Kategorien mit Steuerbetrag waren bis -22
-// mit Vorsteuer gerechnet und werden jetzt ausgeschlossen (bewusst, weil die Vorsteuer sonst zu hoch stünde).
+// Steht auf einem Beleg der Kategorie Versicherungen ein Umsatzsteuerbetrag (19 %), bucht der Kern keine Vorsteuer in Kz 66 (nicht abziehbar) und rechnet den
+// vollen Betrag als Betriebsausgabe, mit Hinweis HN_VERSICHERUNG_VORSTEUER (KERN-24; in -23 war der Beleg ausgeschlossen, die EÜR-Ausgabe fehlte). Bestandsbelege dieser
+// Kategorien mit Steuerbetrag waren bis -22 mit Vorsteuer gerechnet (Vorsteuer zu hoch, EÜR netto).
 export const VERSICHERUNG_KATEGORIEN_KERN = Object.freeze(['Versicherungen', 'Versicherung']);
 function mitSteuerInKategorie(s, liste) {
   return Array.isArray(s.positionen) && s.positionen.some((p) => istObjekt(p) && istCent(p.ust_cent) && p.ust_cent > 0 && liste.includes(p.kategorie || s.kategorie || null));
@@ -1556,7 +1556,11 @@ function eingangWirkungen(s, profil, ctx, out, opt) {
       return;
     }
   }
-  const mitVorsteuer = s.steuerfall === 'E_INLAND_VORSTEUER' && !(s.ausschluss && s.ausschluss.vorsteuer === 'nein');
+  // KERN-24 (SCHLUSS-FIX): Versicherungsbeitrag mit Umsatzsteuerbetrag (19 %) wird wie ohne Vorsteuer gerechnet: keine Vorsteuer in Kz 66, der volle Betrag
+  // (Brutto) steht als Betriebsausgabe in der EÜR (Kz 223). Bis -23 schloss der Kern den Beleg ganz aus (die EÜR-Ausgabe fiel weg); das war ein Datenverlust.
+  const versOhneVorsteuer = s.steuerfall === 'E_INLAND_VORSTEUER' && !(s.ausschluss && s.ausschluss.vorsteuer === 'nein') && versicherungMitSteuer(s);
+  if (versOhneVorsteuer && !ctx.hinweise.includes('HN_VERSICHERUNG_VORSTEUER')) ctx.hinweise.push('HN_VERSICHERUNG_VORSTEUER');
+  const mitVorsteuer = s.steuerfall === 'E_INLAND_VORSTEUER' && !(s.ausschluss && s.ausschluss.vorsteuer === 'nein') && !versOhneVorsteuer;
   const erhalt = istDatum(s.rechnung_erhalt_am) ? s.rechnung_erhalt_am : l.bis;
   // M3: Leistung in der Regelzeit, Rechnung erst nach dem Rückwechsel zum Kleinunternehmer: In welchem Zeitraum der Abzug möglich ist,
   // ist in den Quellen (UStAE 15.1 Abs. 5 S. 6, Abs. 6) nicht belegt: ausschließen statt in einen Zeitraum ohne Voranmeldung buchen.
@@ -1565,10 +1569,6 @@ function eingangWirkungen(s, profil, ctx, out, opt) {
     return;
   }
   if (mitVorsteuer && !KORREKTUR_ARTEN.includes(s.beleg_art) && kfzSteuerVersMitSteuer(s) && !ctx.hinweise.includes('W_KFZ_STEUER_VERSICHERUNG_UST')) ctx.hinweise.push('W_KFZ_STEUER_VERSICHERUNG_UST'); // NL-KERN-2: nur Warnung (Maut hat Umsatzsteuer)
-  if (mitVorsteuer && !KORREKTUR_ARTEN.includes(s.beleg_art) && versicherungMitSteuer(s)) { // NL-KERN-2
-    schliesseAus(s, profil, ctx, out, 'versicherung_mit_umsatzsteuer', ['HN_VERSICHERUNG_VORSTEUER']);
-    return;
-  }
   if (mitVorsteuer && teilzahlungMischsatz(gruppen, zahlungen, stichBis, false)) ctx.hinweise.push('HN_TEILZAHLUNG_MISCHSATZ');
   const hinw = [];
   const kb = s.kleinbetrag === true;

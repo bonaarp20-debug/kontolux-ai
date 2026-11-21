@@ -380,9 +380,11 @@ test('NL-G3: Plausibilitätsgrenze: erfasste Nummer höchstens Stand + 50, sonst
   a.fs.setze(`users/${UID}/dokumente/d1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-11001' }); // Jahr+Monat+Zähler
   a.fs.setze(`users/${UID}/dokumente/d2`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-012' });
   const r = await a.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' });
-  assert.equal(r.json.nummer, 'RE-2026-013', 'springt nicht auf 11002');
+  // SCHLUSS-FIX M5: bei einer unplausiblen erfassten Nummer wird NICHTS davon übernommen (kein Teil-Übernehmen); der Zähler bleibt, Warnung mit der Zahl
+  assert.equal(r.json.nummer, 'RE-2026-001', 'springt weder auf 11002 noch teilweise auf 013');
   assert.equal(r.json.warnung, 'ERFASSTE_NUMMER_UNPLAUSIBEL');
   assert.equal(r.json.ignoriert, 11001);
+  assert.equal(a.fs.lies(`users/${UID}/zaehler/RE`).letzte, 1, 'Zähler nicht angehoben');
   // genau an der Grenze (Stand 0 + 50) wird noch übernommen
   const b = umgebung();
   b.fs.setze(`users/${UID}/dokumente/d1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-050' });
@@ -395,8 +397,51 @@ test('NL-G3: Plausibilitätsgrenze: erfasste Nummer höchstens Stand + 50, sonst
   c.fs.setze(`users/${UID}/dokumente/d1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-111' });
   c.fs.setze(`users/${UID}/dokumente/d2`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-105' });
   const rc = await c.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' });
-  assert.equal(rc.json.nummer, 'RE-2026-106');
+  assert.equal(rc.json.nummer, 'RE-2026-061', 'SCHLUSS-FIX M5: nichts teilweise übernommen (105 nicht)');
   assert.equal(rc.json.ignoriert, 111);
+});
+test('SCHLUSS-FIX M5: 120 von Hand erfasste Rechnungen (001..120), Zähler 0: keine doppelte Nummer, sondern Fehler mit der höchsten erfassten Nummer; nichts geschrieben', async () => {
+  const a = umgebung();
+  for (let n = 1; n <= 120; n++) a.fs.setze(`users/${UID}/dokumente/h${n}`, { typ: 'rechnung_ausgehend', rechnungsnr: `RE-2026-${String(n).padStart(3, '0')}` });
+  const r = await a.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' });
+  assert.equal(r.status, 409);
+  assert.equal(r.json.fehler[0].code, 'ERFASSTE_NUMMERN_BELEGT');
+  assert.equal(r.json.hoechste_erfasst, 120); assert.equal(r.json.naechste_frei, 121);
+  assert.equal(a.fs.pfade(`users/${UID}/rechnungsnummern/`).length, 0, 'keine Nummer vergeben');
+  assert.ok(!a.fs.lies(`users/${UID}/zaehler/RE`), 'Zähler unverändert');
+  // eigene Nummer hinter der Reihe geht weiter (Ausweg für den Nutzer)
+  const m = await a.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung', manuell: 'RE-2026-121' });
+  assert.equal(m.status, 200); assert.equal(m.json.nummer, 'RE-2026-121');
+  const danach = await a.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' });
+  assert.equal(danach.json.nummer, 'RE-2026-122');
+});
+test('SCHLUSS-FIX M5: belegte erfasste Nummern werden übersprungen (bis 49 Schritte), nie eine doppelte; bei 60 belegten Fehler', async () => {
+  const a = umgebung();
+  for (let n = 1; n <= 49; n++) a.fs.setze(`users/${UID}/dokumente/h${n}`, { typ: 'rechnung_ausgehend', rechnungsnr: `RE-2026-${String(n).padStart(3, '0')}` });
+  a.fs.setze(`users/${UID}/dokumente/d1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-11001' }); // unplausibel: Zähler wird nicht angehoben
+  const r = await a.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.nummer, 'RE-2026-050');
+  assert.equal(r.json.warnung, 'ERFASSTE_NUMMER_UNPLAUSIBEL');
+  const b = umgebung();
+  for (let n = 1; n <= 60; n++) b.fs.setze(`users/${UID}/dokumente/h${n}`, { typ: 'rechnung_ausgehend', rechnungsnr: `RE-2026-${String(n).padStart(3, '0')}` });
+  b.fs.setze(`users/${UID}/dokumente/d1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-11001' });
+  const rb = await b.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' });
+  assert.equal(rb.status, 409); assert.equal(rb.json.fehler[0].code, 'ERFASSTE_NUMMERN_BELEGT');
+  // eingehende, gelöschte und fremde Nummern blockieren nicht
+  const c = umgebung();
+  c.fs.setze(`users/${UID}/dokumente/d1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-11001' });
+  c.fs.setze(`users/${UID}/dokumente/e1`, { typ: 'rechnung_eingehend', rechnungsnr: 'RE-2026-001' });
+  c.fs.setze(`users/${UID}/dokumente/g1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-001', deleted: true });
+  assert.equal((await c.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' })).json.nummer, 'RE-2026-001');
+});
+test('SCHLUSS-FIX M5: Unteranfragen je Aufruf bleiben unter 30 (auch mit Überspringen)', async () => {
+  const a = umgebung();
+  for (let n = 1; n <= 49; n++) a.fs.setze(`users/${UID}/dokumente/h${n}`, { typ: 'rechnung_ausgehend', rechnungsnr: `RE-2026-${String(n).padStart(3, '0')}` });
+  a.fs.setze(`users/${UID}/dokumente/d1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-11001' });
+  const r = await a.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' });
+  assert.equal(r.status, 200);
+  assert.ok(r.anfragen <= 30, `Unteranfragen ${r.anfragen}`);
 });
 test('NL-G3: Abfrage vergleicht numerisch und liest mehr als 30 (RE-2026-1000 steht im Textbereich hinter 999)', async () => {
   const a = umgebung();

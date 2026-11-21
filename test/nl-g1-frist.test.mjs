@@ -18,12 +18,14 @@ test('Zeitfenster: erinnerung_7 bei 1 < Tage <= 7, erinnerung_1 bei 0 <= Tage <=
   assert.equal(fristErinnerungFeld(NaN), null);
 });
 
-const frist = (uid, id, datum, extra = {}) => ({ document: { name: `projects/kontolux-ai/databases/(default)/documents/users/${uid}/eigenefristen/${id}`, fields: { datum: { stringValue: datum }, titel: { stringValue: 'Frist ' + id }, erinnerung_mail: { booleanValue: true }, ...extra } } });
+const frist = (uid, id, datum, extra = {}) => ({ document: { name: `projects/kontolux-ai/databases/(default)/documents/users/${uid}/eigenefristen/${id}`, fields: { datum: { stringValue: datum }, titel: { stringValue: 'Frist ' + id }, erinnerung_mail: { booleanValue: true }, ...extra }, updateTime: '2026-11-19T10:00:00.000000Z' } }); // updateTime wie die Abfrage sie liefert
 function aufbauen(zeilen, { mailOk = true, indexFehlt = false } = {}) {
   const users = { t1: { uid: 'u1', email: 'u1@example.invalid' }, t2: { uid: 'u2', email: 'u2@example.invalid' } };
   const dienste = mockExterneDienste({ users });
   const basis = globalThis.fetch;
-  const log = { abfragen: [], patches: [], mails: 0 };
+  const log = { abfragen: [], patches: [], mails: 0, events: [] };
+  const stand = new Map(); // SCHLUSS-FIX: updateTime je Frist (Pfad), wie Firestore für die Vorbedingung
+  for (const z of zeilen) stand.set(z.document.name.split('/documents/')[1], z.document.updateTime);
   globalThis.fetch = async (input, init = {}) => {
     const url = typeof input === 'string' ? input : input.url;
     if (url.endsWith(':runQuery') && init.body && /eigenefristen/.test(String(init.body))) {
@@ -33,8 +35,15 @@ function aufbauen(zeilen, { mailOk = true, indexFehlt = false } = {}) {
       if (mitDatum && indexFehlt) return new Response(JSON.stringify({ error: { code: 400, status: 'FAILED_PRECONDITION' } }), { status: 400 });
       return new Response(JSON.stringify(zeilen), { status: 200 });
     }
-    if (url.startsWith('https://firestore.googleapis.com/') && init.method === 'PATCH' && /eigenefristen/.test(url)) { log.patches.push({ url, body: JSON.parse(init.body) }); return new Response('{}', { status: 200 }); }
-    if (url.startsWith('https://api.resend.com/emails')) { log.mails++; if (!mailOk) return new Response('{}', { status: 500 }); }
+    if (url.startsWith('https://firestore.googleapis.com/') && init.method === 'PATCH' && /eigenefristen/.test(url)) {
+      const pfad = url.split('/documents/')[1].split('?')[0];
+      const bed = /currentDocument\.updateTime=([^&]+)/.exec(url);
+      if (bed && decodeURIComponent(bed[1]) !== stand.get(pfad)) return new Response(JSON.stringify({ error: { code: 400, status: 'FAILED_PRECONDITION' } }), { status: 400 });
+      stand.set(pfad, new Date().toISOString() + Math.random());
+      log.patches.push({ url, body: JSON.parse(init.body), bedingt: !!bed }); log.events.push('patch');
+      return new Response('{}', { status: 200 });
+    }
+    if (url.startsWith('https://api.resend.com/emails')) { log.mails++; log.events.push('mail'); if (!mailOk) return new Response('{}', { status: 500 }); }
     return basis(input, init);
   };
   return { log, restore: () => { globalThis.fetch = basis; dienste.restore(); } };
@@ -71,8 +80,42 @@ test('Frist-Mails: Fehlschlag beim Versand verbraucht kein Kontingent und setzt 
   const a = aufbauen([frist('u1', 'a', '2026-11-22'), frist('u2', 'b', '2026-11-22')], { mailOk: false, indexFehlt: true });
   try {
     assert.equal(await fristErinnerungenSenden(env, { heute: '2026-11-20' }), 0);
-    assert.equal(a.log.patches.length, 0, 'kein Feld gesetzt');
+    // SCHLUSS-FIX: Marke vor dem Versand gesetzt, nach dem Fehlschlag zurückgenommen (Feld ohne Wert in der Maske): am Ende steht kein Feld
+    assert.deepEqual(a.log.patches.map((p) => Object.keys(p.body.fields).length), [1, 0, 1, 0], 'je Frist: setzen, dann zurücknehmen');
+    assert.deepEqual(a.log.events, ['patch', 'mail', 'patch', 'patch', 'mail', 'patch']);
     assert.deepEqual(a.log.abfragen.map((x) => x.mitDatum), [true, false], 'Rückfall ohne Datum');
     assert.equal(a.log.mails, 2, 'beide Konten versucht (Fehler verbrauchte kein Kontingent)');
   } finally { a.restore(); }
+});
+
+test('SCHLUSS-FIX: Marke wird VOR dem Versand bedingt gesetzt (updateTime); zwei gleichzeitige Läufe senden höchstens eine Mail', async () => {
+  const env = await erzeugeTestEnv({ RESEND_API_KEY: 'x' });
+  const a = aufbauen([frist('u1', 'f1', '2026-11-21')]);
+  try {
+    assert.equal(await fristErinnerungenSenden(env, { heute: '2026-11-20' }), 1);
+    assert.deepEqual(a.log.events, ['patch', 'mail'], 'Marke vor der Mail');
+    assert.equal(a.log.patches[0].bedingt, true, 'mit Vorbedingung auf den gelesenen Stand');
+    // zweiter Lauf mit demselben (alten) Stand der Abfrage: Vorbedingung scheitert, keine zweite Mail
+    assert.equal(await fristErinnerungenSenden(env, { heute: '2026-11-20' }), 0);
+    assert.equal(a.log.mails, 1);
+  } finally { a.restore(); }
+});
+test('SCHLUSS-FIX: parallele Läufe (Promise.all) senden die Erinnerung nur einmal', async () => {
+  const env = await erzeugeTestEnv({ RESEND_API_KEY: 'x' });
+  const a = aufbauen([frist('u1', 'f1', '2026-11-21'), frist('u2', 'f2', '2026-11-22')]);
+  try {
+    const r = await Promise.all([fristErinnerungenSenden(env, { heute: '2026-11-20' }), fristErinnerungenSenden(env, { heute: '2026-11-20' })]);
+    assert.equal(r[0] + r[1], 2, 'zwei Fristen, je eine Mail');
+    assert.equal(a.log.mails, 2);
+  } finally { a.restore(); }
+});
+test('SCHLUSS-FIX: ein Fehler beim Setzen der Marke (Netz) sendet keine Mail', async () => {
+  const env = await erzeugeTestEnv({ RESEND_API_KEY: 'x' });
+  const a = aufbauen([frist('u1', 'f1', '2026-11-21')]);
+  const basis = globalThis.fetch;
+  globalThis.fetch = async (input, init = {}) => ((typeof input === 'string' ? input : input.url).includes('/eigenefristen/') && init.method === 'PATCH' ? new Response('{}', { status: 500 }) : basis(input, init));
+  try {
+    assert.equal(await fristErinnerungenSenden(env, { heute: '2026-11-20' }), 0);
+    assert.equal(a.log.mails, 0);
+  } finally { globalThis.fetch = basis; a.restore(); }
 });

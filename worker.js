@@ -5297,10 +5297,17 @@ export async function fristErinnerungenSenden(env, optionen = {}) {
     if ((jeKonto.get(uid) || 0) >= FRIST_MAILS_JE_KONTO) continue; // SEC-F3 M-C: Rest folgt am nächsten Lauf (das Feld bleibt leer, das Zeitfenster hält die Frist offen)
     if ((fehlerJeKonto.get(uid) || 0) >= FRIST_MAILS_JE_KONTO) continue; // viele Fehlversuche: den Rest dieses Kontos auf morgen verschieben
     const titel = sicherEinzeiler(f.titel?.stringValue || 'Frist', 120) || 'Frist';
+    const fristPfad = `users/${uid}/eigenefristen/${fristId}`;
+    let markeGesetzt = false;
     try {
       if (!mailCache.has(uid)) mailCache.set(uid, await mailAdresseFuerErinnerung(uid, env));
       const email = mailCache.get(uid);
       if (!email) continue;
+      // SCHLUSS-FIX: Marke VOR dem Versand, bedingt auf den gelesenen Stand des Dokuments (updateTime): zwei gleichzeitige Läufe senden so höchstens einmal
+      // (der zweite scheitert an der Vorbedingung und überspringt die Frist). Scheitert der Versand, wird die Marke zurückgenommen (die Frist bleibt im Zeitfenster offen).
+      const reserviert = await firestorePatchBedingt(fristPfad, { [feldName]: { stringValue: new Date().toISOString() } }, adminToken, { updateTime: zeile.document.updateTime || null });
+      if (!reserviert) continue;
+      markeGesetzt = true;
       const datumDe = datum.split('-').reverse().join('.');
       const wann = tage === 0 ? 'heute' : tage === 1 ? 'morgen' : tage === 7 ? 'in 7 Tagen' : `in ${tage} Tagen`;
       const html = emailShell(`${escapeHtml(titel)} ist ${wann} fällig`, `
@@ -5310,13 +5317,18 @@ export async function fristErinnerungenSenden(env, optionen = {}) {
         <a href="https://app.kontolux-ai.de" style="display:inline-block;background:#1d5d96;color:#ffffff;padding:13px 28px;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px">Kontolux AI öffnen</a>
       `);
       const ok = await sendEmail(email, `Erinnerung: ${titel} ist ${wann} fällig`, html, env, 'Kontolux AI <jona@kontolux-ai.de>');
-      if (ok === false) { fehlerJeKonto.set(uid, (fehlerJeKonto.get(uid) || 0) + 1); continue; } // Fehlschlag verbraucht kein Kontingent
-      await firestorePatchFields(`users/${uid}/eigenefristen/${fristId}`, { [feldName]: { stringValue: new Date().toISOString() } }, adminToken);
+      if (ok === false) { // Fehlschlag verbraucht kein Kontingent; Marke zurücknehmen
+        fehlerJeKonto.set(uid, (fehlerJeKonto.get(uid) || 0) + 1);
+        markeGesetzt = false;
+        await firestorePatchBedingt(fristPfad, {}, adminToken, { loeschen: [feldName] }).catch((e) => console.error('Fristen-Erinnerung: Marke nicht zurückgenommen:', e.message));
+        continue;
+      }
       jeKonto.set(uid, (jeKonto.get(uid) || 0) + 1); // NL-G1: Zähler erst NACH erfolgreichem Versand
       gesendet++;
     } catch(e) {
       fehlerJeKonto.set(uid, (fehlerJeKonto.get(uid) || 0) + 1);
       console.error('Fristen-Erinnerung fehlgeschlagen:', e.message);
+      if (markeGesetzt) await firestorePatchBedingt(fristPfad, {}, adminToken, { loeschen: [feldName] }).catch((e2) => console.error('Fristen-Erinnerung: Marke nicht zurückgenommen:', e2.message));
     }
   }
   return gesendet;
@@ -7548,6 +7560,23 @@ async function firestorePatchFields(docPath, felder, token) {
     const errText = await res.text();
     throw new Error(`Firestore PATCH fehlgeschlagen (${res.status}): ${errText.slice(0, 200)}`);
   }
+}
+
+// SCHLUSS-FIX: PATCH mit Vorbedingung. updateTime (aus der Abfrage): scheitert der Schreibvorgang an der Vorbedingung (ein anderer Lauf hat das Dokument
+// inzwischen geändert), ist das Ergebnis false und es wurde nichts geschrieben. loeschen: Felder, die entfernt werden (ohne Wert in der Maske).
+async function firestorePatchBedingt(docPath, felder, token, { updateTime = null, loeschen = [] } = {}) {
+  const namen = [...Object.keys(felder), ...loeschen];
+  const mask = namen.map(k => `updateMask.fieldPaths=${encodeURIComponent(k)}`).join('&');
+  const bed = updateTime ? `&currentDocument.updateTime=${encodeURIComponent(updateTime)}` : '';
+  const res = await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/${docPath}?${mask}${bed}`, {
+    method: 'PATCH',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields: felder })
+  });
+  if (res.ok) return true;
+  const errText = await res.text();
+  if (updateTime && (res.status === 409 || res.status === 412 || (res.status === 400 && /FAILED_PRECONDITION/.test(errText)))) return false;
+  throw new Error(`Firestore PATCH fehlgeschlagen (${res.status}): ${errText.slice(0, 200)}`);
 }
 
 /**

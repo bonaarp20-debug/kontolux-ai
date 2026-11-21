@@ -92,6 +92,7 @@ async function nachSchluessel(fs, uid, def, schluessel) {
 // hinter 'RE-2026-1000'), und nur eigene ausgehende Rechnungen zählen.
 export const ERFASST_SPRUNG_MAX = 50;
 export const ERFASST_LESEGRENZE = 300;
+export const ERFASST_UEBERSPRUNG_MAX = 50;
 export async function hoechsteErfassteNummer(fs, uid, def, stand = null, meldung = null) {
   try {
     const treffer = await fs.runQuery(`users/${uid}`, {
@@ -106,15 +107,20 @@ export async function hoechsteErfassteNummer(fs, uid, def, stand = null, meldung
     const grenze = Number.isSafeInteger(stand) && stand >= 0 ? stand + ERFASST_SPRUNG_MAX : Infinity;
     let hoechste = 0;
     let ignoriert = 0;
+    const alle = new Set(); // SCHLUSS-FIX M5: alle erfassten Laufnummern (zum Überspringen belegter Nummern)
     for (const t of treffer) {
       const d = t.daten || {};
       if (d.typ !== 'rechnung_ausgehend' || d.deleted === true) continue;
       const n = laufnummerAusFormat(def, d.rechnungsnr);
       if (!n) continue;
+      alle.add(n);
       if (n > grenze) { if (n > ignoriert) ignoriert = n; continue; }
       if (n > hoechste) hoechste = n;
     }
-    if (ignoriert && meldung && typeof meldung === 'object') meldung.ignoriert = ignoriert;
+    if (meldung && typeof meldung === 'object') meldung.nummern = alle;
+    // SCHLUSS-FIX M5: Liegt die höchste erfasste Nummer unplausibel weit über dem Zähler, wird der Zähler gar nicht angehoben (kein Teil-Übernehmen: das
+    // führte zu Nummern mitten in einer von Hand erfassten Reihe) und der Aufrufer bekommt die Zahl als Warnung.
+    if (ignoriert) { if (meldung && typeof meldung === 'object') meldung.ignoriert = ignoriert; return 0; }
     return hoechste;
   } catch (e) {
     console.warn('regel_zaehler_abgleich_fehlt ' + String(e && e.message).slice(0, 80));
@@ -195,7 +201,19 @@ async function reservieren(body, cors, deps) {
       // (ALREADY_EXISTS), springt der nächste Versuch über diese Laufnummer, statt sie zehnmal zu wiederholen. Ohne Zusatzanfrage: kam der
       // Fehler in Wahrheit vom gleichzeitigen Anlegen des Zählers, steht der Zähler beim nächsten Lesen ohnehin mindestens dort.
       if (erfasst === null) erfasst = await hoechsteErfassteNummer(fs, uid, def, stand, abgleich); // REST-G3, NL-G3: einmal je Aufruf, nur bei automatischer Vergabe
-      const laufnummer = Math.max(stand, erfasst, mindest - 1) + 1;
+      let laufnummer = Math.max(stand, erfasst, mindest - 1) + 1;
+      // SCHLUSS-FIX M5: nie eine Nummer vergeben, die als eigene ausgehende Rechnung schon erfasst ist (sonst doppelte Rechnungsnummer): nächste freie nehmen,
+      // höchstens ERFASST_UEBERSPRUNG_MAX Schritte, danach Fehler mit klarer Meldung statt eines Duplikats
+      if (abgleich.nummern && abgleich.nummern.has(laufnummer)) {
+        let schritte = 0;
+        while (abgleich.nummern.has(laufnummer)) {
+          laufnummer++;
+          if (++schritte >= ERFASST_UEBERSPRUNG_MAX) {
+            const letzte = Math.max(...abgleich.nummern);
+            return fehlerAntwort(409, 'ERFASSTE_NUMMERN_BELEGT', cors, { hoechste_erfasst: letzte, naechste_frei: letzte + 1 });
+          }
+        }
+      }
       const jahr = jahrAus(deps);
       const nummer = nummerFormat(def.praefix, jahr, laufnummer, def.stellen);
       const d = { nummer, zaehler: name, laufnummer, jahr, zweck: body.zweck, schluessel, status: 'reserviert', herkunft: 'zaehler', reserviert_am: zeit };
