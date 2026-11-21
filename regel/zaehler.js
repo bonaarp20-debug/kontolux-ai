@@ -54,9 +54,11 @@ export function nummerDokId(nummer) {
 
 // FIX-RB Z1: Laufnummer einer Nummer im Format dieses Zählers (PRAEFIX-JJJJ-N...), sonst null. Der Zähler läuft jahresübergreifend
 // (wie das Altformular), deshalb zählt jede Jahreszahl.
-export function laufnummerAusFormat(def, nummer) {
+// SCHLUSS-FIX2 N5: mit jahr (JJJJ) nur Nummern genau dieses Jahres (die Zahl allein ist dann ein Duplikat nur im selben Jahr möglich; die Nummer enthält das Jahr).
+export function laufnummerAusFormat(def, nummer, jahr = null) {
   const m = new RegExp(`^${def.praefix}-(\\d{4})-(\\d{1,9})$`).exec(String(nummer ?? ''));
   if (!m) return null;
+  if (jahr !== null && jahr !== undefined && m[1] !== String(jahr)) return null;
   const n = Number(m[2]);
   return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
@@ -93,7 +95,9 @@ async function nachSchluessel(fs, uid, def, schluessel) {
 export const ERFASST_SPRUNG_MAX = 50;
 export const ERFASST_LESEGRENZE = 300;
 export const ERFASST_UEBERSPRUNG_MAX = 50;
-export async function hoechsteErfassteNummer(fs, uid, def, stand = null, meldung = null) {
+// SCHLUSS-FIX2 N5: Der Zähler läuft jahresübergreifend: für den Stand (Anheben) zählt eine erfasste Nummer jedes Jahres wie bisher. Zum ÜBERSPRINGEN (meldung.nummern)
+// zählen nur Nummern des Jahres der neuen Nummer (jahr): RE-2025-050 blockiert RE-2026-050 nicht, eine Nummer ist nur im selben Jahr doppelt möglich.
+export async function hoechsteErfassteNummer(fs, uid, def, stand = null, meldung = null, jahr = null) {
   try {
     const treffer = await fs.runQuery(`users/${uid}`, {
       from: [{ collectionId: 'dokumente' }],
@@ -113,7 +117,8 @@ export async function hoechsteErfassteNummer(fs, uid, def, stand = null, meldung
       if (d.typ !== 'rechnung_ausgehend' || d.deleted === true) continue;
       const n = laufnummerAusFormat(def, d.rechnungsnr);
       if (!n) continue;
-      alle.add(n);
+      const nj = laufnummerAusFormat(def, d.rechnungsnr, jahr);
+      if (nj) alle.add(nj);
       if (n > grenze) { if (n > ignoriert) ignoriert = n; continue; }
       if (n > hoechste) hoechste = n;
     }
@@ -200,7 +205,7 @@ async function reservieren(body, cors, deps) {
       // FIX-RB Z1: belegt ist eine Nummer auch, wenn es ihr Dokument schon gibt (Altbestand vor dem Fix). Scheitert das create-only Anlegen
       // (ALREADY_EXISTS), springt der nächste Versuch über diese Laufnummer, statt sie zehnmal zu wiederholen. Ohne Zusatzanfrage: kam der
       // Fehler in Wahrheit vom gleichzeitigen Anlegen des Zählers, steht der Zähler beim nächsten Lesen ohnehin mindestens dort.
-      if (erfasst === null) erfasst = await hoechsteErfassteNummer(fs, uid, def, stand, abgleich); // REST-G3, NL-G3: einmal je Aufruf, nur bei automatischer Vergabe
+      if (erfasst === null) erfasst = await hoechsteErfassteNummer(fs, uid, def, stand, abgleich, jahrAus(deps)); // REST-G3, NL-G3: einmal je Aufruf, nur bei automatischer Vergabe
       let laufnummer = Math.max(stand, erfasst, mindest - 1) + 1;
       // SCHLUSS-FIX M5: nie eine Nummer vergeben, die als eigene ausgehende Rechnung schon erfasst ist (sonst doppelte Rechnungsnummer): nächste freie nehmen,
       // höchstens ERFASST_UEBERSPRUNG_MAX Schritte, danach Fehler mit klarer Meldung statt eines Duplikats

@@ -5305,6 +5305,10 @@ export async function fristErinnerungenSenden(env, optionen = {}) {
       if (!email) continue;
       // SCHLUSS-FIX: Marke VOR dem Versand, bedingt auf den gelesenen Stand des Dokuments (updateTime): zwei gleichzeitige Läufe senden so höchstens einmal
       // (der zweite scheitert an der Vorbedingung und überspringt die Frist). Scheitert der Versand, wird die Marke zurückgenommen (die Frist bleibt im Zeitfenster offen).
+      // SCHLUSS-FIX2 N4 (bewusste at-most-once-Entscheidung): Bricht der Worker NACH dem Setzen der Marke und VOR dem Versand ab (Absturz, Zeitlimit), bleibt die Marke
+      // stehen und die Mail geht nie hinaus (eine Erinnerung zu wenig). Das ist gewollt: lieber eine verpasste Erinnerung als eine doppelte Mail bei parallelen oder
+      // wiederholten Läufen; die Frist selbst steht weiter in der App. Die Rücknahme der Marke läuft nur bei einem bekannten Fehlschlag und mit exists=true
+      // (kein leeres Dokument, wenn die Frist inzwischen gelöscht wurde).
       const reserviert = await firestorePatchBedingt(fristPfad, { [feldName]: { stringValue: new Date().toISOString() } }, adminToken, { updateTime: zeile.document.updateTime || null });
       if (!reserviert) continue;
       markeGesetzt = true;
@@ -5320,7 +5324,7 @@ export async function fristErinnerungenSenden(env, optionen = {}) {
       if (ok === false) { // Fehlschlag verbraucht kein Kontingent; Marke zurücknehmen
         fehlerJeKonto.set(uid, (fehlerJeKonto.get(uid) || 0) + 1);
         markeGesetzt = false;
-        await firestorePatchBedingt(fristPfad, {}, adminToken, { loeschen: [feldName] }).catch((e) => console.error('Fristen-Erinnerung: Marke nicht zurückgenommen:', e.message));
+        await firestorePatchBedingt(fristPfad, {}, adminToken, { loeschen: [feldName], existiert: true }).catch((e) => console.error('Fristen-Erinnerung: Marke nicht zurückgenommen:', e.message));
         continue;
       }
       jeKonto.set(uid, (jeKonto.get(uid) || 0) + 1); // NL-G1: Zähler erst NACH erfolgreichem Versand
@@ -5328,7 +5332,7 @@ export async function fristErinnerungenSenden(env, optionen = {}) {
     } catch(e) {
       fehlerJeKonto.set(uid, (fehlerJeKonto.get(uid) || 0) + 1);
       console.error('Fristen-Erinnerung fehlgeschlagen:', e.message);
-      if (markeGesetzt) await firestorePatchBedingt(fristPfad, {}, adminToken, { loeschen: [feldName] }).catch((e2) => console.error('Fristen-Erinnerung: Marke nicht zurückgenommen:', e2.message));
+      if (markeGesetzt) await firestorePatchBedingt(fristPfad, {}, adminToken, { loeschen: [feldName], existiert: true }).catch((e2) => console.error('Fristen-Erinnerung: Marke nicht zurückgenommen:', e2.message));
     }
   }
   return gesendet;
@@ -7564,10 +7568,12 @@ async function firestorePatchFields(docPath, felder, token) {
 
 // SCHLUSS-FIX: PATCH mit Vorbedingung. updateTime (aus der Abfrage): scheitert der Schreibvorgang an der Vorbedingung (ein anderer Lauf hat das Dokument
 // inzwischen geändert), ist das Ergebnis false und es wurde nichts geschrieben. loeschen: Felder, die entfernt werden (ohne Wert in der Maske).
-async function firestorePatchBedingt(docPath, felder, token, { updateTime = null, loeschen = [] } = {}) {
+// existiert: true -> Vorbedingung currentDocument.exists=true (schließt sich mit updateTime aus; updateTime hat Vorrang). Ohne Vorbedingung legt ein PATCH ein fehlendes
+// Dokument leer an (Upsert): SCHLUSS-FIX2 N4: die Rücknahme der Frist-Marke darf kein Dokument neu erzeugen, das der Nutzer inzwischen gelöscht hat.
+async function firestorePatchBedingt(docPath, felder, token, { updateTime = null, loeschen = [], existiert = false } = {}) {
   const namen = [...Object.keys(felder), ...loeschen];
   const mask = namen.map(k => `updateMask.fieldPaths=${encodeURIComponent(k)}`).join('&');
-  const bed = updateTime ? `&currentDocument.updateTime=${encodeURIComponent(updateTime)}` : '';
+  const bed = updateTime ? `&currentDocument.updateTime=${encodeURIComponent(updateTime)}` : (existiert ? '&currentDocument.exists=true' : '');
   const res = await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/${docPath}?${mask}${bed}`, {
     method: 'PATCH',
     headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -7575,7 +7581,7 @@ async function firestorePatchBedingt(docPath, felder, token, { updateTime = null
   });
   if (res.ok) return true;
   const errText = await res.text();
-  if (updateTime && (res.status === 409 || res.status === 412 || (res.status === 400 && /FAILED_PRECONDITION/.test(errText)))) return false;
+  if ((updateTime || existiert) && (res.status === 404 || res.status === 409 || res.status === 412 || (res.status === 400 && /FAILED_PRECONDITION/.test(errText)))) return false;
   throw new Error(`Firestore PATCH fehlgeschlagen (${res.status}): ${errText.slice(0, 200)}`);
 }
 

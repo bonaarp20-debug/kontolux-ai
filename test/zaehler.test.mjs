@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { regelZaehler, ZAEHLER_PFADE, ZAEHLER, nummerFormat, nummerDokId } from '../regel/zaehler.js';
+import { regelZaehler, ZAEHLER_PFADE, ZAEHLER, nummerFormat, nummerDokId, laufnummerAusFormat } from '../regel/zaehler.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
 import { erzeugeTestEnv, anfrage } from './harness.mjs';
 
@@ -449,4 +449,41 @@ test('NL-G3: Abfrage vergleicht numerisch und liest mehr als 30 (RE-2026-1000 st
   for (const n of [995, 1000]) a.fs.setze(`users/${UID}/dokumente/h${n}`, { typ: 'rechnung_ausgehend', rechnungsnr: `RE-2026-${n}` });
   const r = await a.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' });
   assert.equal(r.json.nummer, 'RE-2026-1001');
+});
+
+// ---- SCHLUSS-FIX2 N5: belegte Nummern zum Überspringen nur aus dem Jahr der neuen Nummer ----
+test('SCHLUSS-FIX2 N5: laufnummerAusFormat mit Jahr: nur Nummern dieses Jahres, ohne Jahr wie bisher jedes Jahr', () => {
+  const def = ZAEHLER.RE;
+  assert.equal(laufnummerAusFormat(def, 'RE-2026-045'), 45);
+  assert.equal(laufnummerAusFormat(def, 'RE-2025-045'), 45);
+  assert.equal(laufnummerAusFormat(def, 'RE-2025-045', '2026'), null);
+  assert.equal(laufnummerAusFormat(def, 'RE-2026-045', '2026'), 45);
+  assert.equal(laufnummerAusFormat(def, 'RE-2026-045', 2026), 45);
+  assert.equal(laufnummerAusFormat(def, 'KD-17', '2026'), null);
+});
+test('SCHLUSS-FIX2 N5: 49 Rechnungen RE-2025-001..049 aus dem Vorjahr plus unplausible Nummer: RE-2026-001 ist frei, kein Überspringen, keine Doppelnummer', async () => {
+  const a = umgebung();
+  for (let n = 1; n <= 49; n++) a.fs.setze(`users/${UID}/dokumente/h${n}`, { typ: 'rechnung_ausgehend', rechnungsnr: `RE-2025-${String(n).padStart(3, '0')}` });
+  a.fs.setze(`users/${UID}/dokumente/d1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-11001' });
+  const r = await a.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.nummer, 'RE-2026-001', 'Vorjahresnummern blockieren das neue Jahr nicht');
+  assert.equal(r.json.warnung, 'ERFASSTE_NUMMER_UNPLAUSIBEL');
+});
+test('SCHLUSS-FIX2 N5: 60 Vorjahresnummern führen nicht mehr zu ERFASSTE_NUMMERN_BELEGT; im selben Jahr belegte Nummern werden weiter übersprungen (nie doppelt)', async () => {
+  const a = umgebung();
+  for (let n = 1; n <= 60; n++) a.fs.setze(`users/${UID}/dokumente/h${n}`, { typ: 'rechnung_ausgehend', rechnungsnr: `RE-2025-${String(n).padStart(3, '0')}` });
+  a.fs.setze(`users/${UID}/dokumente/d1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-11001' });
+  const r = await a.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.nummer, 'RE-2026-001');
+  // gemischt: 2026-001 und 2026-002 von Hand erfasst, Vorjahr 003: die neue Nummer ist RE-2026-003 (Vorjahr blockiert nicht), 001/002 bleiben tabu
+  const b = umgebung();
+  b.fs.setze(`users/${UID}/dokumente/x1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-001' });
+  b.fs.setze(`users/${UID}/dokumente/x2`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-002' });
+  b.fs.setze(`users/${UID}/dokumente/x3`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2025-003' });
+  b.fs.setze(`users/${UID}/dokumente/d1`, { typ: 'rechnung_ausgehend', rechnungsnr: 'RE-2026-11001' });
+  const rb = await b.rufe('/zaehler/reservieren', { anfrage_id: key(), zaehler: 'RE', zweck: 'rechnung' });
+  assert.equal(rb.status, 200, JSON.stringify(rb.json));
+  assert.equal(rb.json.nummer, 'RE-2026-003');
 });

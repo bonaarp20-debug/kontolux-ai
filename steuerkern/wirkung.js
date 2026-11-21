@@ -402,8 +402,13 @@ function gruppiere(s, mitBis) {
     const g = map.get(k);
     g.netto_cent += p.netto_cent;
     g.ust_cent += p.ust_cent;
-    g.abziehbar_cent += istCent(p.vorsteuer_abziehbar_cent) ? p.vorsteuer_abziehbar_cent : p.ust_cent;
+    // KERN-25: Versicherungsposition mit Umsatzsteuerbetrag: je Position keine abziehbare Vorsteuer (gemischter Beleg: die übrigen Positionen behalten ihre Vorsteuer)
+    const vp = versicherungPosition(s, p);
+    g.abziehbar_cent += vp ? 0 : (istCent(p.vorsteuer_abziehbar_cent) ? p.vorsteuer_abziehbar_cent : p.ust_cent);
+    if (vp) g.vers_n = (g.vers_n || 0) + 1;
+    else if (!(istCent(p.ust_cent) && p.ust_cent === 0)) g.vers_fremd = true;
   }
+  for (const g of map.values()) { g.vers_nur = (g.vers_n || 0) > 0 && !g.vers_fremd; delete g.vers_n; delete g.vers_fremd; }
   return [...map.values()].sort((a, b) => (a.satz_bp === b.satz_bp ? (a.bis === b.bis ? 0 : a.bis < b.bis ? -1 : 1) : a.satz_bp === null ? -1 : b.satz_bp === null ? 1 : b.satz_bp - a.satz_bp));
 }
 
@@ -1537,6 +1542,11 @@ function mitSteuerInKategorie(s, liste) {
   return Array.isArray(s.positionen) && s.positionen.some((p) => istObjekt(p) && istCent(p.ust_cent) && p.ust_cent > 0 && liste.includes(p.kategorie || s.kategorie || null));
 }
 const versicherungMitSteuer = (s) => mitSteuerInKategorie(s, VERSICHERUNG_KATEGORIEN_KERN);
+// KERN-25: je Position entscheiden (gemischter Beleg: Versicherungsposition mit USt plus andere 19-%-Position). Nur Eingang mit Vorsteuerabzug, ohne Ausschluss.
+function versicherungPosition(s, p) {
+  return s.steuerfall === 'E_INLAND_VORSTEUER' && !(s.ausschluss && s.ausschluss.vorsteuer === 'nein') && istObjekt(p) && istCent(p.ust_cent) && p.ust_cent > 0
+    && VERSICHERUNG_KATEGORIEN_KERN.includes(p.kategorie || s.kategorie || null);
+}
 // Kfz-Steuern/Versicherung umfasst auch Maut (mit Umsatzsteuer): dort nur die Warnung, kein Ausschluss.
 const kfzSteuerVersMitSteuer = (s) => mitSteuerInKategorie(s, ['Kfz-Steuern/Versicherung']);
 function eingangWirkungen(s, profil, ctx, out, opt) {
@@ -1558,8 +1568,12 @@ function eingangWirkungen(s, profil, ctx, out, opt) {
   }
   // KERN-24 (SCHLUSS-FIX): Versicherungsbeitrag mit Umsatzsteuerbetrag (19 %) wird wie ohne Vorsteuer gerechnet: keine Vorsteuer in Kz 66, der volle Betrag
   // (Brutto) steht als Betriebsausgabe in der EÜR (Kz 223). Bis -23 schloss der Kern den Beleg ganz aus (die EÜR-Ausgabe fiel weg); das war ein Datenverlust.
-  const versOhneVorsteuer = s.steuerfall === 'E_INLAND_VORSTEUER' && !(s.ausschluss && s.ausschluss.vorsteuer === 'nein') && versicherungMitSteuer(s);
-  if (versOhneVorsteuer && !ctx.hinweise.includes('HN_VERSICHERUNG_VORSTEUER')) ctx.hinweise.push('HN_VERSICHERUNG_VORSTEUER');
+  // KERN-25: gemischter Beleg (Versicherungsposition mit USt und andere Positionen mit USt): die Versicherungsposition bleibt ohne Vorsteuer (gruppiere), die Vorsteuer
+  // der übrigen Positionen bleibt (Kz 66); der Hinweis steht trotzdem. Nur wenn alle Positionen mit Steuer Versicherung sind, läuft der ganze Beleg ohne Vorsteuer.
+  const versAlle = s.steuerfall === 'E_INLAND_VORSTEUER' && !(s.ausschluss && s.ausschluss.vorsteuer === 'nein') && versicherungMitSteuer(s);
+  const versGemischt = versAlle && s.positionen.some((p) => istObjekt(p) && istCent(p.ust_cent) && p.ust_cent > 0 && !versicherungPosition(s, p));
+  const versOhneVorsteuer = versAlle && !versGemischt;
+  if (versAlle && !ctx.hinweise.includes('HN_VERSICHERUNG_VORSTEUER')) ctx.hinweise.push('HN_VERSICHERUNG_VORSTEUER');
   const mitVorsteuer = s.steuerfall === 'E_INLAND_VORSTEUER' && !(s.ausschluss && s.ausschluss.vorsteuer === 'nein') && !versOhneVorsteuer;
   const erhalt = istDatum(s.rechnung_erhalt_am) ? s.rechnung_erhalt_am : l.bis;
   // M3: Leistung in der Regelzeit, Rechnung erst nach dem Rückwechsel zum Kleinunternehmer: In welchem Zeitraum der Abzug möglich ist,
@@ -1604,6 +1618,7 @@ function eingangWirkungen(s, profil, ctx, out, opt) {
       gruppen.forEach((g, gi) => {
         const a = anteileAnz[zi][gi];
         if (a.netto_cent === 0 && a.ust_cent === 0) return;
+        if (g.vers_nur) return; // KERN-25: reine Versicherungsgruppe: keine Vorsteuerzeile
         const abz = g.ust_cent === 0 ? 0 : (g.abziehbar_cent === g.ust_cent ? a.ust_cent : mulDivRund(a.ust_cent, g.abziehbar_cent, g.ust_cent));
         nettoRest[gi] -= a.netto_cent;
         ustRest[gi] -= abz;
@@ -1613,6 +1628,7 @@ function eingangWirkungen(s, profil, ctx, out, opt) {
     // TR-orakel-002: Rückgängigmachung vor der Leistung (Wirkdatum der Korrektur vor Leistung bzw. Rechnungserhalt): kein Vorsteuerabzug aus der nie
     // ausgeführten Leistung; Anzahlungen bleiben bis zur Rückgewähr (UStAE 17.1 Abs. 7), siehe Ausgang.
     gruppen.forEach((g, gi) => {
+      if (g.vers_nur) return; // KERN-25: reine Versicherungsgruppe: keine Vorsteuerzeile (wie der Beleg ganz ohne Vorsteuer)
       let nr = nettoRest[gi];
       let ur = ustRest[gi];
       if (vl) {
@@ -1635,6 +1651,7 @@ function eingangWirkungen(s, profil, ctx, out, opt) {
       if (!je || skontoVorZ[zi]) return;
       gruppen.forEach((g, gi) => {
         if (je[gi].netto_cent === 0 && je[gi].abziehbar_cent === 0) return;
+        if (g.vers_nur) return; // KERN-25
         out.push(mk(ctx, { welt: 'ust', periode: ustPeriode(profil, z.datum, hinw), datum_wirk: z.datum, kz: 66, netto_cent: 0 - je[gi].netto_cent, ust_cent: 0 - je[gi].abziehbar_cent, rolle: 'vorsteuer_minderung', satz_bp: g.satz_bp, regel_id: 'R-KOR-02', hinweise: hinw.slice(), ereignis_id: z.id }));
       });
     });

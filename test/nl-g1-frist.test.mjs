@@ -119,3 +119,45 @@ test('SCHLUSS-FIX: ein Fehler beim Setzen der Marke (Netz) sendet keine Mail', a
     assert.equal(a.log.mails, 0);
   } finally { globalThis.fetch = basis; a.restore(); }
 });
+
+// ---- SCHLUSS-FIX2 N4: Rücknahme der Marke legt kein leeres Dokument an ----
+test('SCHLUSS-FIX2 N4: Versand scheitert, Frist wurde inzwischen gelöscht: die Rücknahme der Marke läuft mit exists=true und legt kein leeres Dokument an', async () => {
+  const env = await erzeugeTestEnv({ RESEND_API_KEY: 'x' });
+  const a = aufbauen([frist('u1', 'f1', '2026-11-21')], { mailOk: false });
+  const basis = globalThis.fetch;
+  const dokumente = new Map([['users/u1/eigenefristen/f1', true]]); // Frist existiert
+  const urls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/eigenefristen/') && init.method === 'PATCH') {
+      urls.push(url);
+      const pfad = url.split('/documents/')[1].split('?')[0];
+      if (/currentDocument\.exists=true/.test(url) && !dokumente.get(pfad)) return new Response(JSON.stringify({ error: { code: 404, status: 'NOT_FOUND' } }), { status: 404 });
+      if (!/currentDocument\.exists=true/.test(url) && !dokumente.get(pfad) && !/updateTime/.test(url)) dokumente.set(pfad, 'leer'); // Upsert wie Firestore ohne Vorbedingung
+      if (/updateTime/.test(url)) { dokumente.set(pfad, true); return basis(input, init); } // Marke setzen: gelingt; danach löscht der Nutzer die Frist
+      return new Response('{}', { status: 200 });
+    }
+    if (url.startsWith('https://api.resend.com/emails')) dokumente.delete('users/u1/eigenefristen/f1'); // Nutzer löscht die Frist während des Versands
+    return basis(input, init);
+  };
+  try {
+    assert.equal(await fristErinnerungenSenden(env, { heute: '2026-11-20' }), 0);
+    assert.equal(urls.length, 2, 'Marke setzen, Marke zurücknehmen');
+    assert.match(urls[0], /currentDocument\.updateTime=/);
+    assert.match(urls[1], /currentDocument\.exists=true/, 'Rücknahme nur auf ein vorhandenes Dokument');
+    assert.equal(dokumente.has('users/u1/eigenefristen/f1'), false, 'kein leeres Dokument neu angelegt');
+  } finally { globalThis.fetch = basis; a.restore(); }
+});
+test('SCHLUSS-FIX2 N4: Rücknahme bei vorhandener Frist läuft normal (Marke entfernt); Quelltext trägt die at-most-once-Entscheidung', async () => {
+  const env = await erzeugeTestEnv({ RESEND_API_KEY: 'x' });
+  const a = aufbauen([frist('u1', 'f1', '2026-11-21')], { mailOk: false });
+  try {
+    assert.equal(await fristErinnerungenSenden(env, { heute: '2026-11-20' }), 0);
+    assert.equal(a.log.patches.length, 2);
+    assert.match(a.log.patches[1].url, /currentDocument\.exists=true/);
+    assert.deepEqual(Object.keys(a.log.patches[1].body.fields), []);
+  } finally { a.restore(); }
+  const { readFileSync } = await import('node:fs');
+  const q = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
+  assert.ok(q.includes('bewusste at-most-once-Entscheidung'));
+});
