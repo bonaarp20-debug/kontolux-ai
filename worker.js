@@ -3291,7 +3291,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
         }
       } catch(e) { console.warn('Duplikat-Check (BELEG_MANUELL):', e.message); }
       // Kassen-P0 0.5(c): gleiche Rechnungsnummer vom selben Absender, ohne Zeitgrenze, nur als Warnung in der Antwort (nie Ablehnung)
-      const duplikatWarnung = duplikatBestaetigt ? null : await rechnungsnrDuplikatWarnung(userId, token, { rechnungsnr, absender, typ: typ || 'rechnung_eingehend' });
+      const duplikatWarnung = duplikatBestaetigt ? null : await rechnungsnrDuplikatWarnung(userId, token, { rechnungsnr, absender, typ: typ || 'rechnung_eingehend', mwst_satz });
 
       // Speichere DIREKT in Firestore (nur Metadaten, keine Datei)
       const docId = docIdManuell || `beleg_manual_${Date.now()}_${crypto.randomUUID().slice(0, 6)}`;
@@ -3500,7 +3500,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
         }
       } catch(e) { console.warn('Duplikat-Check (BELEG_SPEICHERN):', e.message); }
       // Kassen-P0 0.5(c): gleiche Rechnungsnummer vom selben Absender, ohne Zeitgrenze, nur als Warnung in der Antwort (nie Ablehnung)
-      const duplikatWarnung = duplikatBestaetigt ? null : await rechnungsnrDuplikatWarnung(userId, token, { rechnungsnr, absender, typ: typ || 'rechnung_eingehend' });
+      const duplikatWarnung = duplikatBestaetigt ? null : await rechnungsnrDuplikatWarnung(userId, token, { rechnungsnr, absender, typ: typ || 'rechnung_eingehend', mwst_satz });
 
       const docId = docIdDatei || `beleg_${Date.now()}_${crypto.randomUUID().slice(0, 6)}`;
       const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}${belegAnfrageId ? '?currentDocument.exists=false' : ''}`;
@@ -4768,11 +4768,11 @@ async function belegeMitRechnungsnr(userId, token, rechnungsnr) {
 }
 
 // Warnung (nie Ablehnung), wenn dieselbe Nummer vom selben Absender mit gleichem Typ schon liegt. Fehler beim Lesen = keine Warnung.
-async function rechnungsnrDuplikatWarnung(userId, token, { rechnungsnr, absender, typ }) {
+async function rechnungsnrDuplikatWarnung(userId, token, { rechnungsnr, absender, typ, mwst_satz }) {
   try {
     if (!rechnungsnr || !absender) return null;
     const vorhanden = await belegeMitRechnungsnr(userId, token, String(rechnungsnr).trim());
-    return rechnungsnrDuplikat(vorhanden, { rechnungsnr, absender, typ }) ? RECHNUNGSNR_DUPLIKAT_WARNUNG : null;
+    return rechnungsnrDuplikat(vorhanden, { rechnungsnr, absender, typ, mwst_satz }) ? RECHNUNGSNR_DUPLIKAT_WARNUNG : null;
   } catch (e) { console.warn('Duplikat-Check (Rechnungsnummer):', e.message); return null; }
 }
 

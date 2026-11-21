@@ -28,6 +28,15 @@ test('rechnungsnrDuplikat: gelöschte und stornierte Belege zählen nicht, Typ f
   assert.equal(rechnungsnrDuplikat(null, { rechnungsnr: 'R1', absender: 'X' }), null);
 });
 
+test('rechnungsnrDuplikat H1: zwei Steuersätze derselben Z-Nummer sind kein Duplikat, gleicher Satz schon', () => {
+  const satz19 = dok({ rechnungsnr: s('Z123'), absender: s('Tageskasse'), typ: s('rechnung_ausgehend'), mwst_satz: s('19') });
+  const frage = { rechnungsnr: 'Z123', absender: 'Tageskasse', typ: 'rechnung_ausgehend' };
+  assert.equal(rechnungsnrDuplikat([satz19], { ...frage, mwst_satz: '7' }), null, '7 % neben 19 % mit derselben Nummer');
+  assert.ok(rechnungsnrDuplikat([satz19], { ...frage, mwst_satz: '19' }), 'derselbe Satz = Duplikat');
+  assert.ok(rechnungsnrDuplikat([satz19], frage), 'ohne Satz in der Anfrage wie bisher');
+  assert.ok(rechnungsnrDuplikat([dok({ rechnungsnr: s('Z123'), absender: s('Tageskasse'), typ: s('rechnung_ausgehend') })], { ...frage, mwst_satz: '7' }), 'Altbeleg ohne Satz zählt');
+});
+
 // ── Router ──
 const UID = 'nutzerK0000000000000000001';
 const TOK = 'tok-k0';
@@ -87,6 +96,9 @@ for (const [name, bau] of [['BELEG_SPEICHERN', speichernBody], ['BELEG_MANUELL',
     assert.equal(bestaetigt.status, 200);
     assert.equal(bestaetigt.runQuerys.length, 0);
     assert.equal(bestaetigt.json.duplikat_warnung, undefined);
+    const anderer = await lauf(bau({ mwst_satz: '7' }), [{ ...gleicher, mwst_satz: s('19') }]);
+    assert.equal(anderer.status, 200);
+    assert.equal(anderer.json.duplikat_warnung, undefined, 'andere MwSt bei gleicher Nummer: keine Warnung');
     const fehler = await lauf(bau(), 'fehler');
     assert.equal(fehler.status, 200);
     assert.equal(fehler.json.duplikat_warnung, undefined);

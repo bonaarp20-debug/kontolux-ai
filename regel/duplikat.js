@@ -5,7 +5,8 @@ const text = (f) => (f && typeof f.stringValue === 'string' ? f.stringValue : ''
 const ja = (f) => !!(f && f.booleanValue === true);
 
 // dokumente: Firestore-REST-Dokumente ({ name, fields }), schon über rechnungsnr gefiltert. Liefert das erste passende Dokument oder null.
-export function rechnungsnrDuplikat(dokumente, { rechnungsnr, absender, typ } = {}) {
+// Tragen beide Belege einen mwst_satz und die Sätze weichen ab, ist es kein Duplikat (ein Z-Bon mit 19 % und 7 % = zwei Belege mit derselben Z-Nummer).
+export function rechnungsnrDuplikat(dokumente, { rechnungsnr, absender, typ, mwst_satz } = {}) {
   const nr = String(rechnungsnr || '').trim();
   const ab = String(absender || '').trim();
   if (!nr || !ab) return null;
@@ -16,6 +17,8 @@ export function rechnungsnrDuplikat(dokumente, { rechnungsnr, absender, typ } = 
     if (text(f.rechnungsnr).trim() !== nr) continue;
     if (text(f.absender).trim() !== ab) continue;
     if ((text(f.typ) || 'rechnung_eingehend') !== art) continue;
+    const alt = text(f.mwst_satz);
+    if (alt !== '' && mwst_satz != null && String(mwst_satz) !== '' && alt !== String(mwst_satz)) continue;
     return d;
   }
   return null;

@@ -43,10 +43,13 @@ test('Inhalt: Erkennungswörter, kein Speichern, Erfassungsweg, Kartenauszahlung
   assert.match(t, /je Steuersatz eine Einnahme/);
   assert.match(t, /bar und Karte zusammen/);
   assert.match(t, /bezahlt am Tag des Bons/);
-  assert.match(t, /Rechnungsnummer = Z-Nummer/);
+  assert.match(t, /Z-Nummer mit dem Steuersatz, z\. B\. Z123-19 und Z123-7/);
   assert.match(t, /Auszahlung einer Zahlungsplattform/);
   assert.match(t, /SumUp verbunden[^.]*nicht zusätzlich/);
   assert.match(t, /Eingangsrechnung über einen Finanzbericht/);
+  assert.match(t, /EIGENEN Kasse/);
+  assert.match(t, /Kassenbon über einen Einkauf des Nutzers[^.]*Supermarkt, Tankstelle oder Baumarkt[^.]*bleibt eine normale Ausgabe[^.]*Eingangsbeleg/);
+  assert.ok(!/deiner/.test(t), 'der Prompt spricht die KI an, kein "deiner"');
   assert.match(t, /Kassenbuch in Kontolux gibt es noch nicht/);
 });
 
