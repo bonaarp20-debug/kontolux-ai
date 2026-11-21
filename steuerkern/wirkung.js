@@ -1357,7 +1357,7 @@ function ausgangWirkungen(s, profil, ctx, out, opt) {
   }
   // EÜR: Zufluss je Zahlung (R-ZP-20), unabhängig von Soll und Ist
   zahlungen.forEach((z, zi) => {
-    if (z.kanal === KANAL_MEHRZWECK) return; // KERN-26 (SB-3): Einlösung eines Mehrzweck-Gutscheins: Umsatzsteuer ja, aber kein Zufluss (stand beim Verkauf in Kz 103)
+    if (z.kanal === KANAL_MEHRZWECK && s.beleg_art === 'tagesabschluss') return; // KERN-26 (SB-3), O2 N2 nur am Kassenbeleg: Einlösung eines Mehrzweck-Gutscheins: Umsatzsteuer ja, aber kein Zufluss (stand beim Verkauf in Kz 103)
     const jahr = String(jahrVon(z.datum));
     let nettoS = 0;
     let ustS = 0;
@@ -1490,13 +1490,13 @@ function kuWirkungen(s, profil, ctx, out) {
     const nachWechsel = statusAm(profil, z.datum).status === 'regel';
     // KERN-26 (SB-3): Einlösung eines Mehrzweck-Gutscheins beim Kleinunternehmer: keine Einnahme (stand beim Verkauf in Kz 111), aber steuerbarer Umsatz
     // nach § 19 Abs. 2 UStG im Jahr der Einlösung (Vermerk für die Grenzprüfung, auswertung.js umsatzPosten)
-    if (z.kanal === KANAL_MEHRZWECK) {
+    // KERN-26 (SB-5): Kassen-Tagesabschluss als Kleinunternehmer, Geschäftstag nach dem Wechsel zur Regelbesteuerung: der ganze Tag ist regelbesteuert
+    // (08 2.11 B.7). Nicht still in Kz 103: Warnung „Tagesabschluss stornieren und mit Steuersätzen neu erfassen“ (O2 N4: auch bei reiner Gutschein-Einlösung).
+    if (nachWechsel && s.beleg_art === 'tagesabschluss' && !ctx.hinweise.includes('W_KASSE_KU_NACH_WECHSEL')) ctx.hinweise.push('W_KASSE_KU_NACH_WECHSEL');
+    if (z.kanal === KANAL_MEHRZWECK && s.beleg_art === 'tagesabschluss') {
       out.push(mk(ctx, { welt: 'euer', periode: String(jahrVon(z.datum)), datum_wirk: z.datum, kz: null, netto_cent: b, betrag_cent: b, rolle: 'ku_umsatz_mehrzweck', status: 'information', regel_id: 'R-KU-02', ereignis_id: z.id }));
       return;
     }
-    // KERN-26 (SB-5): Kassen-Tagesabschluss als Kleinunternehmer, Geschäftstag nach dem Wechsel zur Regelbesteuerung: der ganze Tag ist regelbesteuert
-    // (08 2.11 B.7). Nicht still in Kz 103: Warnung „Tagesabschluss stornieren und mit Steuersätzen neu erfassen“.
-    if (nachWechsel && s.beleg_art === 'tagesabschluss' && !ctx.hinweise.includes('W_KASSE_KU_NACH_WECHSEL')) ctx.hinweise.push('W_KASSE_KU_NACH_WECHSEL');
     out.push(mk(ctx, {
       welt: 'euer', periode: String(jahrVon(z.datum)), datum_wirk: z.datum, kz: nachWechsel ? 103 : 111, netto_cent: b, betrag_cent: b, rolle: 'einnahme', spalte: 'einnahme',
       regel_id: nachWechsel ? 'R-EUER-03' : 'R-EUER-01', hinweise: nachWechsel ? ['HN_KU_UMSATZ_NACH_WECHSEL'] : [], ereignis_id: z.id,
@@ -2164,16 +2164,25 @@ function kassenStornoSpiegelt(s, os) {
 }
 function kassenStornoWirkungen(s, profil, ctx, opt, out, orig) {
   const wirk = s.wirkdatum;
-  if (!istDatum(wirk) || !kassenStornoSpiegelt(s, orig.steuer)) {
+  // O2 N1: Das Wirkdatum muss der Geschäftstag des Originals sein (Kap. 6 Nr. 22), sonst stünden Original und Gegenwirkung in verschiedenen Zeiträumen
+  const os = orig.steuer;
+  const tagOrig = istObjekt(os.leistung) && istDatum(os.leistung.bis) ? os.leistung.bis : (istDatum(os.rechnungsdatum) ? os.rechnungsdatum : null);
+  const grund = !istDatum(wirk) || !kassenStornoSpiegelt(s, os) ? 'kassen_storno_nicht_gespiegelt' : (wirk !== tagOrig ? 'kassen_storno_wirkdatum' : null);
+  if (grund) {
     ctx.beleg_status = 'ausgeschlossen';
     if (!ctx.hinweise.includes('HN_NOCH_NICHT_UNTERSTUETZT')) ctx.hinweise.push('HN_NOCH_NICHT_UNTERSTUETZT');
-    out.push(mk(ctx, { welt: 'ust', periode: istDatum(wirk) ? ustPeriode(profil, wirk, ctx.hinweise) : null, datum_wirk: istDatum(wirk) ? wirk : null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-KOR-01', hinweis_detail: 'kassen_storno_nicht_gespiegelt' }));
+    out.push(mk(ctx, { welt: 'ust', periode: istDatum(wirk) ? ustPeriode(profil, wirk, ctx.hinweise) : null, datum_wirk: istDatum(wirk) ? wirk : null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-KOR-01', hinweis_detail: grund }));
     return;
   }
   const hinw = [];
   const perUst = ustPeriode(profil, wirk, hinw);
   const perEuer = String(jahrVon(wirk));
   for (const w of belegWirkungen(orig, profil, nurRegeln(opt))) {
+    // O2 M2: Vermerk der Mehrzweck-Einlösung beim Kleinunternehmer (Gesamtumsatz § 19 Abs. 2, Status information, ohne Kennzahl) mitspiegeln
+    if (w.welt === 'euer' && w.status === 'information' && w.rolle === 'ku_umsatz_mehrzweck') {
+      out.push(mk(ctx, { welt: 'euer', periode: perEuer, datum_wirk: wirk, kz: null, netto_cent: 0 - w.netto_cent, betrag_cent: 0 - w.betrag_cent, rolle: w.rolle, status: 'information', regel_id: w.regel_id, hinweise: hinw.slice() }));
+      continue;
+    }
     if (w.status !== 'berechnet' || w.kz === null || w.kz === undefined) continue;
     if (w.welt === 'ust') {
       out.push(mk(ctx, { welt: 'ust', periode: perUst, datum_wirk: wirk, kz: w.kz, netto_cent: 0 - w.netto_cent, ust_cent: 0 - w.ust_cent, rolle: w.rolle === 'vorsteuer' ? 'vorsteuer_minderung' : 'minderung', satz_bp: w.satz_bp, regel_id: 'R-KOR-01', hinweise: hinw.slice() }));

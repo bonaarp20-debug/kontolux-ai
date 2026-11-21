@@ -344,6 +344,10 @@ export function pruefeKassentag(fassung, ctx) {
   if (sfs.includes('A_INLAND_0_PV') && sfs.length > 1) fehler.push({ code: 'STEUERFALL_UNZULAESSIG', steuerfall: 'A_INLAND_0_PV', grund: 'null_prozent_nur_allein' });
   // Negativer Tagessaldo je Steuersatz (Kap. 6 Nr. 20): in Release 1 kein Speichern, kein Korrekturbeleg ohne Original
   for (const z of st.zeilen) if (z.brutto_cent < 0) fehler.push({ code: 'TAGESSALDO_NEGATIV', steuerfall: z.steuerfall, fehlbetrag_cent: 0 - z.brutto_cent });
+  // O2 M1: Mit Mehrzweck-Einlösung kann das Brutto positiv sein, obwohl bar und Karte zusammen negativ sind (mehr Geld zurückgegeben als eingenommen).
+  // Die Gutschein-Zahlung wäre dann höher als das Brutto (W_UEBERZAHLUNG, Beleg ausgeschlossen). Gleiche Politik wie Kap. 6 Nr. 20: nicht speichern.
+  const geld = st.bar_cent + st.unbar_cent;
+  if (geld < 0 && !st.zeilen.some((z) => z.brutto_cent < 0)) fehler.push({ code: 'TAGESSALDO_NEGATIV', grund: 'geld_negativ', fehlbetrag_cent: 0 - geld });
   if (st.brutto_cent > 0 && (st.bar_cent < 0 || st.unbar_cent < 0)) hinweise.push({ code: 'KANAL_VERRECHNET', grund: st.bar_cent < 0 ? 'bar_negativ' : 'unbar_negativ' });
   // Kontrollsumme Z-Bon (optional)
   if (fassung.zbon_gesamt_cent !== undefined && fassung.zbon_gesamt_cent !== null) {
@@ -414,6 +418,7 @@ export function kassentagZuBelegEingabe(fassung, kasse, profil) {
   const st = kassenSteuerJeSatz(fassung);
   const neg = st.zeilen.find((z) => z.brutto_cent < 0);
   if (neg) throw new RangeError(`TAGESSALDO_NEGATIV: ${neg.steuerfall}`);
+  if (st.bar_cent + st.unbar_cent < 0) throw new RangeError('TAGESSALDO_NEGATIV: geld_negativ'); // O2 M1: Gutschein-Betrag nie kürzen
   const zeilen = st.zeilen.filter((z) => z.brutto_cent > 0);
   if (!zeilen.length) return null;
   const sfs = zeilen.map((z) => z.steuerfall);

@@ -178,12 +178,13 @@ function summiere(positionen) {
   return { netto_cent: netto, ust_cent: ust, brutto_cent: netto + ust };
 }
 
-function baueZahlungen(e, belegId, leistungBis, richtung, vorschlaege, unsicherheiten) {
+function baueZahlungen(e, belegId, leistungBis, richtung, vorschlaege, unsicherheiten, belegArt) {
   const roh = Array.isArray(e.zahlungen) ? e.zahlungen : (istObjekt(e.zahlung) ? [e.zahlung] : []);
   const out = [];
   roh.forEach((z, i) => {
     if (!istObjekt(z)) return;
-    const kanalBekannt = z.kanal === undefined || z.kanal === null || z.kanal === '' || KANAELE.includes(z.kanal);
+    // O2 N2: 'gutschein_mehrzweck' gilt nur am Tagesabschluss (sonst verlöre eine Rechnung still ihre EÜR-Einnahme)
+    const kanalBekannt = z.kanal === undefined || z.kanal === null || z.kanal === '' || (KANAELE.includes(z.kanal) && (z.kanal !== 'gutschein_mehrzweck' || belegArt === 'tagesabschluss'));
     if (!kanalBekannt && Array.isArray(unsicherheiten)) unsicherheiten.push(hin('KANAL_UNBEKANNT', `zahlungen[${i}].kanal`, String(z.kanal).slice(0, 40)));
     const art = z.art || (istDatum(z.datum) && leistungBis && z.datum < leistungBis && richtung === 'ausgang' ? 'anzahlung' : 'zahlung');
     if (!z.art && art === 'anzahlung') vorschlaege.push({ feld: `zahlungen[${i}].art`, wert: 'anzahlung', grund: 'Zahlung vor Ende der Leistung (R-ZP-04)' });
@@ -543,8 +544,9 @@ export function normalisiereEingabe(eingabe, kontext) {
     if (oe.hinweis) unsicherheiten.push(hin(oe.hinweis, 'gegenpartei.land', 'Land des Kunden fehlt'));
     satzBp = null;
     herkunft = herkunft === 'nutzer' ? 'beleg' : herkunft;
-  } else if (wahl === 'gutschein_mehrzweck' && richtung === 'ausgang' && !istKorrektur) {
-    // KERN-26 (Kassenbuch, SB-3): Verkauf eines Mehrzweck-Gutscheins, nicht steuerbar (§ 3 Abs. 15 UStG), unabhängig vom Status
+  } else if (wahl === 'gutschein_mehrzweck' && richtung === 'ausgang' && belegArt === 'tagesabschluss') {
+    // KERN-26 (Kassenbuch, SB-3): Verkauf eines Mehrzweck-Gutscheins, nicht steuerbar (§ 3 Abs. 15 UStG), unabhängig vom Status; nur am Kassenbeleg
+    // (O2 N2: an einer gewöhnlichen Rechnung bleibt die Wahl unbekannt, Steuerfall UNBEKANNT)
     steuerfall = 'A_GUTSCHEIN_MEHRZWECK';
     satzBp = null;
   } else if (!istKorrektur && status === 'unbekannt') {
@@ -818,7 +820,7 @@ export function normalisiereEingabe(eingabe, kontext) {
 
   // --- Zahlungen (Schritt 7) ---
   const belegId = id || 'beleg';
-  const zahlungen = baueZahlungen(e, belegId, leistung ? leistung.bis : null, richtung, vorschlaege, unsicherheiten);
+  const zahlungen = baueZahlungen(e, belegId, leistung ? leistung.bis : null, richtung, vorschlaege, unsicherheiten, belegArt);
 
   // --- Beleg bauen ---
   const steuer = {
