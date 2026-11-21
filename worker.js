@@ -18,7 +18,8 @@ import { regelAdminFeatures } from './regel/admin-features.js';
 import { regelOssMeldung } from './regel/oss-meldung.js'; // WORKER-C (Release C, BP-29)
 import { regelEzbKurs } from './regel/ezb-kurs.js'; // WORKER-C (Release C, BP-29)
 import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // KX-WC2 (Release C, BP-30 DATEV-Teil)
-import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4)
+import { rechnungsnrDuplikat, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c)
+import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen, kiKassenberichtText } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4)
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
 import { v2Vorbereiten, clientSteuerVorbereiten, v2RestFelder, nachFestschreibungAntwort, festPruefungMarkieren } from './regel/schreibweg-v2.js';
@@ -1783,6 +1784,8 @@ Hochgeladene Rechnung → jeden Punkt ✅/❌: vollständiger Name+Anschrift bei
 
 // ── Modul TOOLS — Dokument-Upload, Zeiterfassung, Reisekosten (~2.200 T) ──
 const _KI_TOOLS = `## DOKUMENT-UPLOAD ERKENNUNG
+${kiKassenberichtText()}
+
 PDF/Bild hochgeladen: Inhalt direkt lesen, nicht nach Infos fragen die im Dokument stehen.
 Rechnung erkannt → Betrag/Absender-Name/Empfänger-Name/Datum/Rechnungsnummer/MwSt-Satz lesen.
 
@@ -3287,6 +3290,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
           });
         }
       } catch(e) { console.warn('Duplikat-Check (BELEG_MANUELL):', e.message); }
+      // Kassen-P0 0.5(c): gleiche Rechnungsnummer vom selben Absender, ohne Zeitgrenze, nur als Warnung in der Antwort (nie Ablehnung)
+      const duplikatWarnung = duplikatBestaetigt ? null : await rechnungsnrDuplikatWarnung(userId, token, { rechnungsnr, absender, typ: typ || 'rechnung_eingehend' });
 
       // Speichere DIREKT in Firestore (nur Metadaten, keine Datei)
       const docId = docIdManuell || `beleg_manual_${Date.now()}_${crypto.randomUUID().slice(0, 6)}`;
@@ -3409,7 +3414,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
         message: 'Beleg erfolgreich gespeichert',
         ...(steuerGespeichert ? { steuer_gespeichert: true } : {}),
         ...nachFestschreibungAntwort(v2), // ABSCHLUSS-FIX C1-01
-        ...(tagesbewegungWarnung ? { warning: tagesbewegungWarnung } : {})
+        ...((tagesbewegungWarnung || duplikatWarnung) ? { warning: [tagesbewegungWarnung, duplikatWarnung].filter(Boolean).join(' ') } : {}),
+        ...(duplikatWarnung ? { duplikat_warnung: true } : {})
       }), {
         status: 200,
         headers: { ...cors, 'Content-Type': 'application/json' }
@@ -3493,6 +3499,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
           });
         }
       } catch(e) { console.warn('Duplikat-Check (BELEG_SPEICHERN):', e.message); }
+      // Kassen-P0 0.5(c): gleiche Rechnungsnummer vom selben Absender, ohne Zeitgrenze, nur als Warnung in der Antwort (nie Ablehnung)
+      const duplikatWarnung = duplikatBestaetigt ? null : await rechnungsnrDuplikatWarnung(userId, token, { rechnungsnr, absender, typ: typ || 'rechnung_eingehend' });
 
       const docId = docIdDatei || `beleg_${Date.now()}_${crypto.randomUUID().slice(0, 6)}`;
       const firestoreUrl = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}/dokumente/${docId}${belegAnfrageId ? '?currentDocument.exists=false' : ''}`;
@@ -3632,7 +3640,8 @@ async function handleDocument(body, env, cors = {}, ctx) {
         ...(steuerGespeichert ? { steuer_gespeichert: true } : {}),
         ...(clientSteuerCodes ? { steuer_gespeichert: false, steuer_codes: clientSteuerCodes } : {}),
         ...nachFestschreibungAntwort(v2), // ABSCHLUSS-FIX C1-01
-        ...(tagesbewegungWarnung ? { warning: tagesbewegungWarnung } : {})
+        ...((tagesbewegungWarnung || duplikatWarnung) ? { warning: [tagesbewegungWarnung, duplikatWarnung].filter(Boolean).join(' ') } : {}),
+        ...(duplikatWarnung ? { duplikat_warnung: true } : {})
       }), {
         status: 200,
         headers: { ...cors, 'Content-Type': 'application/json' }
@@ -4740,6 +4749,31 @@ async function belegeSeit(userId, token, seitMs) {
   if (!res.ok) throw new Error(`Firestore-Abfrage fehlgeschlagen (${res.status})`);
   const rows = await res.json();
   return Array.isArray(rows) ? rows.filter(r => r.document).map(r => r.document) : [];
+}
+
+// Kassen-P0 0.5(c): Belege mit derselben Rechnungsnummer (Gleichheitsfilter auf ein Feld, kein zusammengesetzter Index nötig), höchstens 20.
+async function belegeMitRechnungsnr(userId, token, rechnungsnr) {
+  const res = await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${encodeURIComponent(userId)}:runQuery`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ structuredQuery: {
+      from: [{ collectionId: 'dokumente' }],
+      where: { fieldFilter: { field: { fieldPath: 'rechnungsnr' }, op: 'EQUAL', value: { stringValue: String(rechnungsnr) } } },
+      limit: 20
+    } })
+  });
+  if (!res.ok) throw new Error(`Firestore-Abfrage fehlgeschlagen (${res.status})`);
+  const rows = await res.json();
+  return Array.isArray(rows) ? rows.filter(r => r.document).map(r => r.document) : [];
+}
+
+// Warnung (nie Ablehnung), wenn dieselbe Nummer vom selben Absender mit gleichem Typ schon liegt. Fehler beim Lesen = keine Warnung.
+async function rechnungsnrDuplikatWarnung(userId, token, { rechnungsnr, absender, typ }) {
+  try {
+    if (!rechnungsnr || !absender) return null;
+    const vorhanden = await belegeMitRechnungsnr(userId, token, String(rechnungsnr).trim());
+    return rechnungsnrDuplikat(vorhanden, { rechnungsnr, absender, typ }) ? RECHNUNGSNR_DUPLIKAT_WARNUNG : null;
+  } catch (e) { console.warn('Duplikat-Check (Rechnungsnummer):', e.message); return null; }
 }
 
 async function firestoreListAll(baseUrl, authHeader) {

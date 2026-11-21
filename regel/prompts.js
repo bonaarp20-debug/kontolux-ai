@@ -80,6 +80,13 @@ export const KI_FEATURE_TEXTE = Object.freeze({
 export const KI_RC_LAND_BEFEHL_AKTIV = false;
 export const KI_RC_LAND_TEXT = ' Im Befehl DOKUMENT_SPEICHERN nach j zusätzlich land=[Ländercode des Anbieters laut Beleg, z. B. IE; unklar: weglassen], daraus folgt EU oder Drittland.';
 
+// KASSE P0 (Baukonzept 2.2 / 2.12 M22, M23): Kassen-Tagesbericht (Z-Bon, Tagesabschluss) ist keine Rechnung. Fester Text (kein Feature, gleich für alle
+// Konten, der Cache-Block bleibt gleich), als Funktion hier statt in worker.js, damit das spätere Kassenbuch-Paket nur diese Datei ändert. Höchstens
+// etwa 600 Token. Er steht am Anfang des Abschnitts DOKUMENT-UPLOAD ERKENNUNG (Modul tools). Gilt nur für eigene (ausgehende) Belege: eine Eingangsrechnung
+// über einen Finanzbericht (z. B. von der Beratung) bleibt eine normale Eingangsrechnung. Kein Versprechen eines Kassenbuch-Moduls.
+export const KI_KASSENBERICHT_TEXT = 'KASSEN-TAGESBERICHT: Ein Beleg mit Z-Bon, Z-Bericht, X-Bericht, Tagesabschluss, Tagesbericht, Kassenbericht, Kassenabschluss, Finanzbericht, "Bericht Nr." oder Umsatzsummen je MwSt-Satz ohne Empfänger ist ein Kassenbericht des Nutzers, keine Rechnung an einen Kunden. Dann KEIN DOKUMENT_SPEICHERN und kein AUSGABE_UPDATE, auch nicht als "ausgehend" und auch nicht nach Rückfrage. Erkläre stattdessen kurz: Im Belegarchiv je Steuersatz eine Einnahme mit dem Gesamtumsatz des Tages anlegen (bar und Karte zusammen), als bezahlt am Tag des Bons, Rechnungsnummer = Z-Nummer des Bons. Die spätere Auszahlung des Kartenanbieters im Kontoauszug als "Auszahlung einer Zahlungsplattform" zuordnen, nicht als neue Einnahme. Wer SumUp verbunden hat, trägt den SumUp-Bon nicht zusätzlich ein, denn Kontolux übernimmt die SumUp-Zahlungen einzeln. Eine Eingangsrechnung über einen Finanzbericht (z. B. für eine Leistung deiner Beratung) ist davon nicht betroffen. Ein Kassenbuch in Kontolux gibt es noch nicht, versprich keines.';
+export function kiKassenberichtText() { return KI_KASSENBERICHT_TEXT; }
+
 // Abschnitt für ein Modul (leer, wenn dort kein Feature steht). stand: { name: true|false }, fehlend = aus.
 // WORKER-C2: an_mit_oss ersetzt den An-Text, wenn oss an ist; rcLand hängt den Land-Satz an den Abschnitt ausland (Standard KI_RC_LAND_BEFEHL_AKTIV).
 export function kiFeatureAbschnitt(modul, stand = KI_FEATURES_AUS, { rcLand = KI_RC_LAND_BEFEHL_AKTIV } = {}) {
