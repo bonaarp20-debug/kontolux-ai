@@ -14,7 +14,7 @@ import {
   antwort, fehlerAntwort, featureAusAntwort, grundpruefung, istObjekt, CONFIG_PFAD, configBereinigen, featureAktiv, agbFassungenLaden, agbFassungVergleich,
   AGB_MINDESTFASSUNG_KASSE, kernOptionenFuerKontoLaden, jetztIso, schichtFuer, regelFehler, listeAlle,
 } from './gemeinsam.js';
-import { schreibe, zeitstempel, FirestoreFehler } from './firestore.js';
+import { schreibe, zeitstempel, FirestoreFehler, vollerName } from './firestore.js';
 import { auditKette, kopfPfad } from './audit.js';
 import { profilBereit, wirkPerioden, nachFestschreibungAntwort, festPruefungMarkieren } from './schreibweg-v2.js';
 import { legacyHash } from './drift.js';
@@ -268,27 +268,38 @@ async function sumupLesen(c, tag) {
 }
 
 // Gesamtumsatz nach § 19 Abs. 2 UStG des Jahres bis einschließlich Vortag (Näherung aus den Belegen mit Belegdatum im Jahr vor dem Tag; Kern grenzenFuerJahr)
-const KU_BELEGE_LIMIT = 2000;
+// hyg M5: Die Summe rechnet der Kern aus den Belegen (Wirkungen, Stornos, Steuerfälle); eine Firestore-Summe über ein Feld (runAggregationQuery sum) gäbe diese
+// Bedeutung nicht wieder, ein mitgeführter Jahreszähler ginge nicht, weil der Client dokumente direkt schreibt. Darum: alle Belege des Zeitraums vollständig lesen,
+// seitenweise mit Cursor (datum, Dokumentname), ohne Abschneiden. Erst wenn die erste Seite voll ist, zählt runAggregationQuery (count) die Treffer: über
+// KU_BELEGE_MAX 503 KU_SUMME_ZU_GROSS (Budget), weniger gelesen als gezählt 503 KU_SUMME_UNVOLLSTAENDIG. Nie eine geschätzte oder abgeschnittene (zu kleine) Summe.
+// Doppelt gelesene Dokumente (Datum zwischen zwei Seiten geändert) zählen einmal.
+export const KU_SEITE = 2000;
+export const KU_BELEGE_MAX = 10000; // 5 Seiten plus eine Zählung; reicht für jede Kleinunternehmerin (Umsatzgrenze), schont das Budget (REGEL_UNTERANFRAGEN_MAX 35)
 async function kuSummeVorTag(c, tag, kernOptionen) {
   const { fs, uid, profil } = c;
   const jahr = Number(tag.slice(0, 4));
-  const lesen = (von, bis) => fs.runQuery(`users/${uid}`, { from: [{ collectionId: 'dokumente' }], where: { compositeFilter: { op: 'AND', filters: [
-    { fieldFilter: { field: { fieldPath: 'datum' }, op: 'GREATER_THAN_OR_EQUAL', value: { stringValue: von } } },
-    { fieldFilter: { field: { fieldPath: 'datum' }, op: 'LESS_THAN', value: { stringValue: bis } } },
-  ] } }, limit: KU_BELEGE_LIMIT });
-  let r = await lesen(`${jahr}-01-01`, tag);
-  // O6 M5: eine volle Antwort kann abgeschnitten sein (zu kleine Summe, KU_GRENZE_AM_TAG griffe zu spät, Umsätze würden als A_KU statt regelbesteuert gebucht):
-  // dann monatsweise lesen; ist auch ein einzelner Monat voll, fail-closed (503), nie eine geschätzte Summe
-  if (r.length >= KU_BELEGE_LIMIT) {
-    r = [];
-    for (let m = 1; m <= Number(tag.slice(5, 7)); m += 1) {
-      const von = `${jahr}-${String(m).padStart(2, '0')}-01`;
-      const naechster = m < 12 ? `${jahr}-${String(m + 1).padStart(2, '0')}-01` : `${jahr + 1}-01-01`;
-      const x = await lesen(von, naechster < tag ? naechster : tag);
-      if (x.length >= KU_BELEGE_LIMIT) throw new KasseLesefehler('KU_SUMME_ZU_GROSS', 'KU-Summe: mehr Belege je Monat als lesbar');
-      r.push(...x);
+  const basis = { from: [{ collectionId: 'dokumente' }], where: { compositeFilter: { op: 'AND', filters: [
+    { fieldFilter: { field: { fieldPath: 'datum' }, op: 'GREATER_THAN_OR_EQUAL', value: { stringValue: `${jahr}-01-01` } } },
+    { fieldFilter: { field: { fieldPath: 'datum' }, op: 'LESS_THAN', value: { stringValue: tag } } },
+  ] } } };
+  const seite = (nach) => fs.runQuery(`users/${uid}`, {
+    ...basis, orderBy: [{ field: { fieldPath: 'datum' }, direction: 'ASCENDING' }, { field: { fieldPath: '__name__' }, direction: 'ASCENDING' }],
+    ...(nach ? { startAt: { values: [{ stringValue: nach.daten.datum }, { referenceValue: vollerName(nach.pfad) }], before: false } } : {}),
+    limit: KU_SEITE,
+  });
+  let x = await seite(null);
+  const gelesen = new Map(x.map((d) => [d.pfad, d]));
+  if (x.length >= KU_SEITE) {
+    const { n } = await fs.runAggregationQuery(`users/${uid}`, basis, [{ alias: 'n', count: { upTo: String(KU_BELEGE_MAX + 1) } }]);
+    if (!Number.isSafeInteger(n) || n > KU_BELEGE_MAX) throw new KasseLesefehler('KU_SUMME_ZU_GROSS', 'KU-Summe: mehr Belege als lesbar');
+    while (x.length >= KU_SEITE) {
+      x = await seite(x[x.length - 1]);
+      for (const d of x) gelesen.set(d.pfad, d);
+      if (gelesen.size > KU_BELEGE_MAX) throw new KasseLesefehler('KU_SUMME_ZU_GROSS', 'KU-Summe: mehr Belege als lesbar');
     }
+    if (gelesen.size < n) throw new KasseLesefehler('KU_SUMME_UNVOLLSTAENDIG', 'KU-Summe: weniger Belege gelesen als gezählt');
   }
+  const r = [...gelesen.values()];
   const belege = Steuerkern.belegeFuerKern(r.map((d) => ({ ...d.daten, id: idVon(d) })), profil, kernOptionen).belege;
   const wirkungen = Steuerkern.alleWirkungen(belege, profil, kernOptionen).filter((x) => !(typeof x.datum_wirk === 'string' && x.datum_wirk >= tag));
   const g = Steuerkern.grenzenFuerJahr(wirkungen, profil, jahr, null, {});

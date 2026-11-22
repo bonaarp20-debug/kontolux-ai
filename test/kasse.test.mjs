@@ -2084,36 +2084,62 @@ test('O6 M3: Festschreibung, die zwischen Lesen und Commit startet (Commit schei
   assert.deepEqual(c.fs.pfade(P('kassenbewegungen/')).length, 1);
 });
 
-test('O6 M5: KU-Summe bei mehr als 2.000 Belegen vor dem Tag wird nicht abgeschnitten (monatsweise gelesen, KU_GRENZE_AM_TAG greift); ein einzelner Monat mit 2.000 Belegen: fail-closed 503 KU_SUMME_ZU_GROSS', async () => {
+test('hyg M5: KU-Summe ohne Abschneiden: alle Belege seitenweise (Cursor datum/Name), count-Aggregation erst bei voller Seite; 2.100 Belege in EINEM Monat (früher 503) ergeben die volle Summe; über 10.000: 503 KU_SUMME_ZU_GROSS; weniger gelesen als gezählt oder Zählung kaputt: fail-closed', async () => {
   const belege = (u, anzahl, monate) => {
     for (let i = 0; i < anzahl; i += 1) {
       const d = `2026-${String(1 + (i % monate)).padStart(2, '0')}-15`;
-      u.fs.setze(P(`dokumente/vor${i}`), { typ: 'rechnung_ausgehend', betrag: 49, betrag_netto: 49, mwst_satz: 'keine', datum: d, bezahlt: true, bezahlt_am: d, absender: 'K', rechnungsnr: `R${i}` });
+      u.fs.setze(P(`dokumente/vor${String(i).padStart(5, '0')}`), { typ: 'rechnung_ausgehend', betrag: 49, betrag_netto: 49, mwst_satz: 'keine', datum: d, bezahlt: true, bezahlt_am: d, absender: 'K', rechnungsnr: `R${i}` });
     }
   };
   const ku = (id, cent) => ({ ...abschluss(id, '2026-11-02'), umsaetze: [{ steuerfall: 'A_KU', bar_cent: cent, unbar_cent: 0 }], gezaehlt_cent: 10000 + cent });
-  // 2.100 mal 49,00 = 102.900,00 über zehn Monate; abgeschnitten auf 2.000 Belege wären es 98.000,00 und 98.000 + 100,00 liegt unter 100.000,00
-  const u = umgebung({ profil: KU });
-  const id = await u.legeKasseAn();
-  belege(u, 2100, 10);
-  const r = await u.tagRufe(ku(id, 10000));
-  assert.equal(r.status, 409, JSON.stringify(r.json));
-  assert.equal(r.json.fehler[0].code, 'KU_GRENZE_AM_TAG');
-  assert.equal(r.json.fehler[0].summe_cent, 10290000 + 10000);
-  assert.deepEqual(u.fs.pfade(P('kassentage/')), []);
-  // unter 2.000 Belegen bleibt es bei der einen Abfrage; 1.999 mal 49,00 = 97.951,00: 100,00 mehr geht
+  // 2.100 mal 49,00 = 102.900,00 in EINEM Monat (früher fail-closed 503) und über zehn Monate: volle Summe, KU_GRENZE_AM_TAG greift
+  for (const monate of [1, 10]) {
+    const u = umgebung({ profil: KU });
+    const id = await u.legeKasseAn();
+    belege(u, 2100, monate);
+    const r = await u.tagRufe(ku(id, 10000));
+    assert.equal(r.status, 409, JSON.stringify(r.json));
+    assert.equal(r.json.fehler[0].code, 'KU_GRENZE_AM_TAG');
+    assert.equal(r.json.fehler[0].summe_cent, 10290000 + 10000);
+    assert.ok(u.fs.log.methoden.includes('runAggregationQuery'));
+    assert.deepEqual(u.fs.pfade(P('kassentage/')), []);
+  }
+  // unter 2.000 Belegen: eine Abfrage, keine Zählung; 1.999 mal 49,00 = 97.951,00: 100,00 mehr geht
   const v = umgebung({ profil: KU });
   const vid = await v.legeKasseAn();
   belege(v, 1999, 10);
   assert.equal((await v.tagRufe(ku(vid, 10000))).status, 200);
-  // ein einzelner Monat mit 2.000 oder mehr Belegen: lieber blockieren als falsch entscheiden
+  assert.ok(!v.fs.log.methoden.includes('runAggregationQuery'));
+  // ein zwischen zwei Seiten verschobenes Datum (Beleg der ersten Seite wandert nach hinten) zählt einmal, nicht doppelt
+  const d = umgebung({ profil: KU });
+  const did = await d.legeKasseAn();
+  belege(d, 2040, 1); // 2.040 mal 49,00 = 99.960,00; doppelt gezählt wären es 100.009,00 und 0,01 mehr läge über der Grenze
+  d.fs.haken.fehler = (url, init) => {
+    if (url.endsWith(':runQuery') && String(init.body).includes('"startAt"') && String(init.body).includes('"datum"')) d.fs.setze(P('dokumente/vor00000'), { ...d.fs.lies(P('dokumente/vor00000')), datum: '2026-10-31' });
+    return null;
+  };
+  const dr = await d.tagRufe(ku(did, 1));
+  assert.equal(dr.status, 200, JSON.stringify(dr.json));
+  d.fs.haken.fehler = null;
+  // über KU_BELEGE_MAX (10.000): 503 KU_SUMME_ZU_GROSS, nichts geschrieben
   const w = umgebung({ profil: KU });
   const wid = await w.legeKasseAn();
-  belege(w, 2100, 1);
+  belege(w, 10001, 10);
   const x = await w.tagRufe(ku(wid, 100));
   assert.equal(x.status, 503, JSON.stringify(x.json));
   assert.equal(x.json.fehler[0].code, 'KU_SUMME_ZU_GROSS');
   assert.deepEqual(w.fs.pfade(P('kassentage/')), []);
+  // Zählung meldet mehr als gelesen (z. B. Beleg zwischendurch weggefallen): 503 KU_SUMME_UNVOLLSTAENDIG; Zählung scheitert: Fehler, nichts geschrieben
+  for (const [antwort, status, code] of [[{ result: { aggregateFields: { n: { integerValue: '2500' } } } }, 503, 'KU_SUMME_UNVOLLSTAENDIG'], [null, 500, null], [{ result: { aggregateFields: {} } }, 500, null]]) {
+    const z = umgebung({ profil: KU });
+    const zid = await z.legeKasseAn();
+    belege(z, 2100, 3);
+    z.fs.haken.fehler = (url) => (url.endsWith(':runAggregationQuery') ? (antwort ? new Response(JSON.stringify([antwort])) : new Response('{}', { status: 500 })) : null);
+    const y = await z.tagRufe(ku(zid, 100));
+    assert.equal(y.status, status, JSON.stringify(y.json));
+    if (code) assert.equal(y.json.fehler[0].code, code);
+    assert.deepEqual(z.fs.pfade(P('kassentage/')), []);
+  }
 });
 
 test('O6 N1: ein vom Client gefälschtes Dokument mit quelle kasse (ohne gesperrt) umgeht die Ähnlichkeitsprüfung nicht; echte Kassenbelege (gesperrt, gesperrt_durch kasse) zählen weiter nicht', async () => {
