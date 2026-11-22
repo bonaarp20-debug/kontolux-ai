@@ -25,7 +25,7 @@ import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // 
 import { rechnungsnrDuplikat, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c)
 import { datevMischsatzGruppen, datevKorrekturGruppen, KORREKTUR_BELEG_ARTEN } from './regel/datev-mischsatz.js'; // Branch datev-mischsatz: Belege mit mehreren Steuersätzen je Satz buchen
 import { dekodiereFelder as datevDekodiereFelder } from './regel/firestore.js';
-import { DATEV_KASSE_KONTEN, KASSE_DURCHLAUF_KONTO, KASSE_ERLOES_0_KONTO, KASSE_MEHRZWECK_KONTO, kassenKontoWahl, istKasseTagesbeleg, kasseBelegPlan, kasseBewegungBuchung, kasseBewegungOhneBuchung, kasseTagesPosten, istSumupBarbeleg, sumupKasseWahl } from './regel/datev-kasse.js'; // Kassenbuch P1b-5: DATEV-Kassenzweig
+import { DATEV_KASSE_KONTEN, KASSE_DURCHLAUF_KONTO, KASSE_ERLOES_0_KONTO, KASSE_MEHRZWECK_KONTO, kassenKontoWahl, istKasseTagesbeleg, kasseBelegPlan, kasseBewegungBuchung, kasseBewegungOhneBuchung, kasseGeldtransitGegenbein, kasseTagesPosten, istSumupBarbeleg, sumupKasseWahl } from './regel/datev-kasse.js'; // Kassenbuch P1b-5: DATEV-Kassenzweig
 import { datevBelegfeldBereinigen, datevFeldGequotet, datevNummerPruefen, datevKontoVierstellig, datevGeldkontoImBereich, datevKuKonto, RC_EINGANG_KONTEN, RC_AUSGANG_KONTEN, datevRcLage, datevUstId, GWG_KONTEN, AFA_KATEGORIE, GWG_KATEGORIE, FA_EST_ART, UST_KATEGORIEN, datevWarnHeader } from './regel/datev-export-regeln.js'; // DATEV-Gesamtcheck 21.11.2026: Belegfeld 1, § 13b, GWG, Konten
 import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen, kiKassenberichtText } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4); Kassen-P0: kiKassenberichtText
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
@@ -5544,9 +5544,21 @@ async function handleDatevExport(body, env, cors = {}) {
       for (const [bewId, b] of await kassenBewegungen()) {
         const bu = kasseBewegungBuchung(b);
         const jahrBew = String((b && b.geschaeftstag) || '').slice(0, 4);
-        if (bu === null) { if (kasseBewegungOhneBuchung(b) && jahrBew === String(jahr)) kasseOhneBewegung.push(String((b && b.kassennummer) || bewId)); continue; }
+        // _ein-Bein des Geldtransits zwischen Kassen: keine eigene Buchung (das _aus-Bein der anderen Kasse bucht); Warnung nur, wenn dieses fehlt
+        if (bu === null) { if (kasseBewegungOhneBuchung(b) && b.art !== 'storno' && jahrBew === String(jahr) && !kasseGeldtransitGegenbein(b, (await kassenBewegungen()).values())) kasseOhneBewegung.push(String((b && b.kassennummer) || bewId)); continue; }
         if (bu.offen) { if (jahrBew === String(jahr)) kasseOffen.push(`${(b && b.kassennummer) || bewId} (${bu.grund})`); continue; }
         if (jahrBew !== String(jahr)) continue;
+        // _aus-Bein zwischen Kassen: Kasse Haben an die Kasse der Gegenseite; bei gleichem DATEV-Konto (gemeinsames Standardkonto) wirkt es nicht, keine Zeile
+        if (bu.gegen === 'kasse') {
+          const alleKassen = await kassenLaden();
+          if (!alleKassen.has(String(bu.gegenkasse_id))) { kasseOffen.push(`${bu.kassennummer} (gegenkasse_unbekannt)`); continue; }
+          const eigenKto = await kassenKonto(bu.kasse_id);
+          const gegenKto = await kassenKonto(bu.gegenkasse_id);
+          if (eigenKto === gegenKto) continue;
+          buchungen.push({ betrag: bu.betrag_cent / 100, sollHaben: bu.sollHaben, konto: eigenKto, gegenkonto: gegenKto, bu: '', belegDatum: new Date(bu.datum + 'T00:00:00'), belegfeld1: bu.kassennummer, belegfeld2: '', buchungstext: buchungstextBasisKurz(bu.text, bu.storno ? ' [Storno]' : ''), diverseAdressnummer: '' });
+          kasseBewGebucht++;
+          continue;
+        }
         buchungen.push({ betrag: bu.betrag_cent / 100, sollHaben: bu.sollHaben, konto: await kassenKonto(bu.kasse_id), gegenkonto: bu.gegen === 'durchlauf' ? KASSE_DURCHLAUF_KONTO[skrK0] : geldtransitkonto, bu: '', belegDatum: new Date(bu.datum + 'T00:00:00'), belegfeld1: bu.kassennummer, belegfeld2: '', buchungstext: buchungstextBasisKurz(bu.text, bu.storno ? ' [Storno]' : ''), diverseAdressnummer: '' });
         kasseBewGebucht++;
       }
@@ -5578,7 +5590,7 @@ async function handleDatevExport(body, env, cors = {}) {
       if (kasseSumupBar > 0) warnen(`${kasseSumupBar} SumUp-Barzahlung(en) stehen auf dem Kassenkonto der SumUp-Kasse statt auf der Bank (Bareinnahmen der Kasse mit SumUp-Anbindung). SumUp-Rückerstattungen und Rückbuchungen stehen weiter auf der Bank, weil nicht erkennbar ist, ob bar zurückgezahlt wurde: bitte beim Steuerberater prüfen.`);
       if (kasseSumupMehrere > 0) warnen(`${kasseSumupMehrere} SumUp-Barzahlung(en) konnten keiner Kasse eindeutig zugeordnet werden (mehr als eine Kasse mit SumUp-Anbindung) und stehen auf der Bank, nicht auf dem Kassenkonto. Bitte beim Steuerberater umbuchen.`);
       if (kasseMehrzweck > 0) warnen(`${kasseMehrzweck} Verkauf/Verkäufe von Mehrzweck-Gutscheinen aus dem Kassenbuch stehen auf ${erloeskontoExport('keine', false, skr)} (Erlöse, ohne Umsatzsteuer). Diese Kontowahl muss dein Steuerberater bestätigen.`);
-      if (kasseOhneBewegung.length) warnen(`${kasseOhneBewegung.length} Kassenbewegung(en) (Geldtransit zwischen Kassen, Auszahlung Trinkgeld an Mitarbeiter) stehen nicht im Stapel, weil die Gegenseite fehlt: ${nummern(kasseOhneBewegung)}. Bitte beim Steuerberater von Hand buchen.`);
+      if (kasseOhneBewegung.length) warnen(`${kasseOhneBewegung.length} Kassenbewegung(en) „Geldtransit von einer anderen Kasse“ stehen nicht im Stapel, weil die passende Ausgabe der anderen Kasse (gleicher Tag, gleicher Betrag) fehlt: ${nummern(kasseOhneBewegung)}. Bitte beim Steuerberater von Hand buchen.`);
       if (kasseZeilen > 0) {
         if (kasseWahl.ungueltig) warnen(`Das Kassenkonto in den Einstellungen ist keine vierstellige Kontonummer. Es wurde das Standardkonto ${kasseStandard.kasse} verwendet. Bitte korrigieren.`);
         if (transitWahl.ungueltig) warnen(`Das Geldtransitkonto in den Einstellungen ist keine vierstellige Kontonummer. Es wurde das Standardkonto ${kasseStandard.transit} verwendet. Bitte korrigieren.`);

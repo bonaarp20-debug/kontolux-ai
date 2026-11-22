@@ -41,7 +41,7 @@ export const KASSE_UMSATZ_STEUERFAELLE = Object.freeze(['A_INLAND_19', 'A_INLAND
 // Dazu die Auszahlung des Trinkgelds an Mitarbeiter (Kasse an Durchlaufende Posten) und das _aus-Bein des Geldtransits zwischen Kassen (Kasse an andere Kasse).
 // Das _ein-Bein hat keine eigene Buchung (die Gegenseite steht im _aus-Bein der anderen Kasse); ohne passendes _aus warnt der Export.
 export const BEWEGUNG_GELDTRANSIT_BANK = Object.freeze(['geldtransit_bank_ein', 'geldtransit_bank_aus']);
-export const BEWEGUNG_OHNE_BUCHUNG = Object.freeze(['geldtransit_kasse_ein', 'geldtransit_kasse_aus']);
+export const BEWEGUNG_OHNE_BUCHUNG = Object.freeze(['geldtransit_kasse_ein']);
 
 // Konto aus einem Profilfeld: leer = Standard; vierstellig = verwenden; sonst Standard mit Merker ungueltig (der Export warnt).
 export function kassenKontoWahl(roh, standard) {
@@ -180,6 +180,16 @@ export function kasseBewegungBuchung(b) {
     return { datum: b.geschaeftstag, kassennummer: nr, kasse_id: typeof b.kasse_id === 'string' ? b.kasse_id : '', betrag_cent: b.betrag_cent, sollHaben: storno ? 'S' : 'H', storno, gegen: 'durchlauf',
       text: `Auszahlung Trinkgeld an Mitarbeiter${b.text ? ` ${String(b.text)}` : ''}` };
   }
+  if (art === 'geldtransit_kasse_aus') {
+    // Geldtransit zwischen Kassen: nur das _aus-Bein bucht (Kasse Haben an die Kasse der Gegenseite), das _ein-Bein der anderen Kasse ist dieselbe Bewegung. Gleiche DATEV-Konten
+    // (gemeinsames Standardkonto) ergeben keine Zeile (der Export entscheidet das, er kennt die Konten).
+    if (!DATUM.test(String(b.geschaeftstag || '')) || !ISTCENT(b.betrag_cent) || b.betrag_cent <= 0) return offen('bewegung_ungueltig');
+    const nr = typeof b.kassennummer === 'string' ? b.kassennummer.trim() : '';
+    if (!nr) return offen('kassennummer_fehlt');
+    if (typeof b.gegenkasse_id !== 'string' || !b.gegenkasse_id) return offen('gegenkasse_fehlt');
+    return { datum: b.geschaeftstag, kassennummer: nr, kasse_id: typeof b.kasse_id === 'string' ? b.kasse_id : '', gegenkasse_id: b.gegenkasse_id, betrag_cent: b.betrag_cent, sollHaben: storno ? 'S' : 'H', storno, gegen: 'kasse',
+      text: `Geldtransit Kasse an Kasse${b.text ? ` ${String(b.text)}` : ''}` };
+  }
   if (!BEWEGUNG_GELDTRANSIT_BANK.includes(art)) return null;
   if (!DATUM.test(String(b.geschaeftstag || '')) || !ISTCENT(b.betrag_cent) || b.betrag_cent <= 0) return offen('bewegung_ungueltig');
   const nr = typeof b.kassennummer === 'string' ? b.kassennummer.trim() : '';
@@ -189,7 +199,7 @@ export function kasseBewegungBuchung(b) {
     text: `${art === 'geldtransit_bank_ein' ? 'Geldtransit Bank an Kasse' : 'Geldtransit Kasse an Bank'}${b.text ? ` ${String(b.text)}` : ''}` };
 }
 
-// Art ohne Buchung im Stapel (Geldtransit zwischen Kassen, Trinkgeld-Auszahlung, auch als Storno): für die Warnung.
+// Art ohne eigene Buchung im Stapel (_ein-Bein des Geldtransits zwischen Kassen, auch als Storno): der Export warnt nur, wenn das _aus-Bein der anderen Kasse fehlt.
 export function kasseBewegungOhneBuchung(b) {
   if (!ISTOBJEKT(b)) return false;
   const art = b.art === 'storno' ? b.storno_art : b.art;
@@ -250,4 +260,13 @@ export function kasseTagesPosten(fassung, kasse = null) {
     if (d !== 0) posten.push({ art: 'kanal_verrechnet', konto: 'kasse', gegen: 'transit', sollHaben: d > 0 ? 'S' : 'H', betrag_cent: Math.abs(d), text: 'Verrechnung Bargeld und Karte lt. Tagesabschluss' });
   }
   return { posten };
+}
+
+// Passendes _aus-Bein zu einem _ein-Bein des Geldtransits zwischen Kassen (gleicher Tag, gleicher Betrag, Kassen vertauscht). bewegungen: Iterable dekodierter Bewegungen.
+export function kasseGeldtransitGegenbein(ein, bewegungen) {
+  if (!ISTOBJEKT(ein)) return false;
+  for (const b of bewegungen) {
+    if (ISTOBJEKT(b) && b.art === 'geldtransit_kasse_aus' && b.kasse_id === ein.gegenkasse_id && b.gegenkasse_id === ein.kasse_id && b.geschaeftstag === ein.geschaeftstag && b.betrag_cent === ein.betrag_cent) return true;
+  }
+  return false;
 }

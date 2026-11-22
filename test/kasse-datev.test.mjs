@@ -10,7 +10,7 @@ import { kassenAusgabeBeleg } from '../regel/kasse-ausgabe.js';
 import { AGB_MINDESTFASSUNG_KASSE } from '../regel/gemeinsam.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
 import { datevWarnHeader, WARN_HEADER_MAX } from '../regel/datev-export-regeln.js';
-import { kasseBelegPlan, kasseBewegungBuchung, kassenKontoWahl, DATEV_KASSE_KONTEN, istSumupBarbeleg, sumupKasseWahl, kasseTagesPosten } from '../regel/datev-kasse.js';
+import { kasseBelegPlan, kasseBewegungBuchung, kassenKontoWahl, DATEV_KASSE_KONTEN, istSumupBarbeleg, sumupKasseWahl, kasseTagesPosten, kasseGeldtransitGegenbein } from '../regel/datev-kasse.js';
 
 const UID = 'kassenDatevUid000000000001';
 const HEUTE = '2026-11-20';
@@ -594,6 +594,52 @@ test('A-N2 (d): datevWarnHeader kürzt auf ganze Sätze innerhalb der Grenze, mi
   assert.equal(riesig.gekuerzt, true);
   // einzelnes Surrogat am Eingang wird ersetzt (kein URIError)
   assert.doesNotThrow(() => datevWarnHeader('Text \uD83D ohne Paar.'));
+});
+
+// A-N2 (e): Geldtransit zwischen Kassen wirkte bei verschiedenen DATEV-Konten gar nicht (keine Buchung, nur eine Warnung). Jetzt bucht das _aus-Bein Kasse A Haben an Kasse B.
+const zweiteKasse = async (w, konto) => {
+  const b = await w.kasse({ ...KASSE_ANLEGEN, kuerzel: 'NEB', bezeichnung: 'Nebenkasse', ...(konto ? { datev_konto: konto } : {}) });
+  assert.equal(b.status, 200, JSON.stringify(b.json));
+  return b.json.kasse_id;
+};
+test('A-N2 (e): Geldtransit zwischen Kassen mit verschiedenen DATEV-Konten: das _aus-Bein bucht Kasse 1000 Haben an Nebenkasse 1010, das _ein-Bein keine zweite Zeile, keine Warnung; Storno kehrt um', async () => {
+  const w = await welt();
+  const b = await zweiteKasse(w, '1010');
+  ok200(await w.tag(nur19(w.id, '2026-11-02')));
+  const aus = ok200(await w.bew(bewegung(w.id, '2026-11-03', 'geldtransit_kasse_aus', 5000, { gegenkasse_id: b })));
+  ok200(await w.bew(bewegung(b, '2026-11-03', 'geldtransit_kasse_ein', 5000, { gegenkasse_id: w.id })));
+  const aus2 = ok200(await w.bew(bewegung(w.id, '2026-11-03', 'geldtransit_kasse_aus', 700, { gegenkasse_id: b })));
+  ok200(await w.bew({ aktion: 'stornieren', kasse_id: w.id, bewegung_id: aus2.bewegung_id, grund: 'falsch erfasst' }));
+  const r = await w.exp();
+  assert.equal(r.status, 200, r.text);
+  const z = r.zeilen.filter((x) => /Geldtransit Kasse an Kasse/.test(x[13])).map((x) => [x[0], x[1], x[6], x[7], ohne(x[10])]).sort();
+  assert.deepEqual(z.map((x) => x.slice(0, 4)), [['50,00', 'H', '1000', '1010'], ['7,00', 'H', '1000', '1010'], ['7,00', 'S', '1000', '1010']].sort());
+  assert.ok(z.some((x) => x[4] === aus.kassennummer));
+  const k = nachKonto(r.zeilen.filter((x) => /Geldtransit Kasse an Kasse/.test(x[13])));
+  assert.equal(k['1000'], -5000, 'Kasse A -50,00 (Storno hebt die 7,00 auf)');
+  assert.equal(k['1010'], 5000, 'Nebenkasse +50,00');
+  assert.doesNotMatch(r.warnung, /Geldtransit von einer anderen Kasse/);
+});
+
+test('A-N2 (e): gleiche DATEV-Konten (gemeinsames Standardkonto): keine Zeile und keine Warnung; ein _ein ohne passendes _aus warnt weiter; unbekannte Gegenkasse steht mit Grund in der Warnung', async () => {
+  const w = await welt();
+  const b = await zweiteKasse(w, null);
+  ok200(await w.tag(nur19(w.id, '2026-11-02')));
+  ok200(await w.bew(bewegung(w.id, '2026-11-03', 'geldtransit_kasse_aus', 5000, { gegenkasse_id: b })));
+  ok200(await w.bew(bewegung(b, '2026-11-03', 'geldtransit_kasse_ein', 5000, { gegenkasse_id: w.id })));
+  let r = await w.exp();
+  assert.equal(r.zeilen.filter((x) => /Geldtransit Kasse an Kasse/.test(x[13])).length, 0);
+  assert.doesNotMatch(r.warnung, /Geldtransit von einer anderen Kasse/);
+  // ein _ein ohne passendes _aus
+  ok200(await w.bew(bewegung(b, '2026-11-04', 'geldtransit_kasse_ein', 900, { gegenkasse_id: w.id })));
+  r = await w.exp();
+  assert.match(r.warnung, /1 Kassenbewegung\(en\) „Geldtransit von einer anderen Kasse“ stehen nicht im Stapel/);
+  // unbekannte Gegenkasse (Kasse gelöscht / Altbestand)
+  w.fs.setze(P(`kassenbewegungen/${w.id}_2026-11-05_001`), { kasse_id: w.id, geschaeftstag: '2026-11-05', art: 'geldtransit_kasse_aus', betrag_cent: 100, kassennummer: 'K-THK-2026-0800', gegenkasse_id: 'weg0000000000000000000001' });
+  r = await w.exp();
+  assert.match(r.warnung, /K-THK-2026-0800 \(gegenkasse_unbekannt\)/);
+  assert.equal(kasseGeldtransitGegenbein({ kasse_id: 'b', gegenkasse_id: 'a', geschaeftstag: '2026-11-03', betrag_cent: 5, art: 'geldtransit_kasse_ein' }, [{ art: 'geldtransit_kasse_aus', kasse_id: 'a', gegenkasse_id: 'b', geschaeftstag: '2026-11-03', betrag_cent: 5 }]), true);
+  assert.equal(kasseGeldtransitGegenbein({ kasse_id: 'b', gegenkasse_id: 'a', geschaeftstag: '2026-11-03', betrag_cent: 6 }, [{ art: 'geldtransit_kasse_aus', kasse_id: 'a', gegenkasse_id: 'b', geschaeftstag: '2026-11-03', betrag_cent: 5 }]), false);
 });
 
 // ── 6. Bestandsnutzer unverändert, Jahr, Hinweis ─────────────────────────────────────────────────
