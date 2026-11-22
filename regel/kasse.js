@@ -587,8 +587,11 @@ async function ruhetage(c, aktion) {
 // /kassentag ruhetag_aufheben (B-N3, ergänzt O6 M2): ein irrtümlich bestätigter Ruhetag NACH dem letzten Abschluss wird wieder ein offener Tag (Tagesplatz entfernt,
 // Vorbedingung updateTime), damit eine Bewegung erfasst oder der Tag normal abgeschlossen werden kann, ohne Storno-Spur. Ein Ruhetag hat keine Bestandswirkung, keine
 // Kassennummer und keinen Beleg; der Nachweis bleibt in der Audit-Kette (kassentag_ruhetag_aufgehoben mit vorher). Vor dem letzten Abschluss: 409 SPAETERE_TAGE
-// (Weg rückwärts über den Storno, Nr. 13). Eine Wiederholung nach Erfolg findet keinen Tagesplatz mehr (404, nichts geschrieben).
+// (Weg rückwärts über den Storno, Nr. 13). F1-Fix B-1: Gilt ein Stammdatenwechsel (art_ab, grundaufzeichnung_ab, datenquelle_ab) erst nach dem Tag, ließe sich der Tag
+// danach nie abschließen (abschliessen gibt dann 409 STAMMDATEN_WECHSEL_SPAETER): das Aufheben wird mit demselben Code abgelehnt (stammdaten_ab, felder), der Ruhetag
+// bleibt. Eine Wiederholung nach Erfolg findet keinen Tagesplatz mehr (404, nichts geschrieben).
 // ---------------------------------------------------------------------------------------------
+const STAMMDATEN_AB = Object.freeze(['art_ab', 'grundaufzeichnung_ab', 'datenquelle_ab']);
 async function ruhetagAufheben(c) {
   const { fs, uid, body, cors, zeit, heute } = c;
   const f = pruefeRuhetage(body, 'ruhetag', { heute });
@@ -607,6 +610,8 @@ async function ruhetagAufheben(c) {
     if (tagDok.daten.status !== 'ruhetag') return { antwort: fehlerAntwort(409, 'KEIN_RUHETAG', cors, { kassentag_id: tagId, status: tagDok.daten.status ?? null }) };
     const zeiger = zeigerAus(kasse.letzter_abschluss);
     if (zeiger && tag < zeiger.tag) return { antwort: fehlerAntwort(409, 'SPAETERE_TAGE', cors, { letzter_tag: zeiger.tag }) };
+    const felder = STAMMDATEN_AB.filter((x) => typeof kasse[x] === 'string' && kasse[x] > tag);
+    if (felder.length) return { antwort: fehlerAntwort(409, 'STAMMDATEN_WECHSEL_SPAETER', cors, { kassentag_id: tagId, felder, stammdaten_ab: felder.map((x) => kasse[x]).sort()[0] }) };
     const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{
       aktion: 'kassentag_ruhetag_aufgehoben', ziel: `kassentage/${tagId}`, vorher: tagDok.daten, nachher: null, details: { kasse_id: kasseId, kassentag_id: tagId, weg: 'aufheben' },
     }], zeit);

@@ -305,6 +305,25 @@ test('Stammdaten gelten ab …_ab: ein Abschluss für einen Tag davor wäre mit 
   assert.equal((await u.tagRufe(abschluss(id, '2026-11-10'))).status, 200);
 });
 
+test('F1-Fix B-1: ruhetag_aufheben vor einem Stammdatenwechsel (…_ab nach dem Tag) gibt 409 STAMMDATEN_WECHSEL_SPAETER (felder, stammdaten_ab), der Ruhetag bleibt; am Tag des Wechsels geht es', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-02'))).status, 200);
+  assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-03' })).status, 200);
+  // Wechsel gilt ab dem nächsten freien Tag nach dem Ruhetag
+  const w = await u.kasse({ aktion: 'aendern', kasse_id: id, art: 'pc_kasse', art_ab: '2026-11-04' });
+  assert.equal(w.status, 200, JSON.stringify(w.json));
+  const vorher = u.audit().length;
+  const r = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-03' });
+  assert.deepEqual([r.status, r.json.fehler[0].code, r.json.felder, r.json.stammdaten_ab, r.json.kassentag_id], [409, 'STAMMDATEN_WECHSEL_SPAETER', ['art_ab'], '2026-11-04', `${id}_2026-11-03`], JSON.stringify(r.json));
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-03`)).status, 'ruhetag');
+  assert.equal(u.audit().length, vorher, 'nichts geschrieben');
+  // Ruhetag am Tag des Wechsels (art_ab = Tag): Aufheben geht, der Tag lässt sich danach abschließen
+  assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-04' })).status, 200);
+  assert.equal((await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04' })).status, 200);
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-04'))).status, 200);
+});
+
 test('/kasse aendern: Verlauf höchstens 200, ältere Einträge landen create-only in kassen/{id}/verlauf/{n}', async () => {
   const u = umgebung();
   const id = await u.legeKasseAn();
