@@ -362,6 +362,14 @@ async function abschliessen(c) {
     if (['art_ab', 'grundaufzeichnung_ab', 'datenquelle_ab'].some((x) => typeof kasse[x] === 'string' && kasse[x] > tag)) return { antwort: fehlerAntwort(409, 'STAMMDATEN_WECHSEL_SPAETER', cors) };
     const letzter = await letzterAbgeschlossenerTag(fs, uid, kasseId);
     if (letzter && tag <= letzter.daten.geschaeftstag) return { antwort: fehlerAntwort(409, 'SPAETERE_TAGE', cors, { letzter_tag: letzter.daten.geschaeftstag }) };
+    // O6 H1: Bewegungen an einem offenen Tag VOR diesem Tag (nach dem letzten Abschluss) fehlten in der Soll-Rechnung dieses Abschlusses und wären danach gesperrt
+    // (SPAETERE_TAGE): der Nutzer schließt zuerst diese Tage ab (oder storniert die Bewegung).
+    const lueckeVon = letzter ? Steuerkern.addiereTage(letzter.daten.geschaeftstag, 1) : kasse.anfangsbestand_am;
+    const lueckeBis = Steuerkern.addiereTage(tag, -1);
+    if (lueckeVon <= lueckeBis) {
+      const offen = await bewegungenImBereich(fs, uid, kasseId, lueckeVon, lueckeBis);
+      if (offen.length) return { antwort: fehlerAntwort(409, 'OFFENE_BEWEGUNGEN_VORTAG', cors, { tage: [...new Set(offen.map((d) => d.daten.geschaeftstag))].sort().slice(0, 31) }) };
+    }
     const anfangsbestand = letzter ? letzter.daten.gezaehlt_cent : kasse.anfangsbestand_cent;
     if (!Number.isSafeInteger(anfangsbestand) || anfangsbestand < 0) throw new Error('Anfangsbestand unlesbar');
     const bewegungen = (await bewegungenDesTages(fs, uid, kasseId, tag)).map((d) => bewegungFuerKern(d.daten));

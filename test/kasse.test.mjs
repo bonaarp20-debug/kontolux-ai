@@ -537,11 +537,15 @@ test('BESTAND_NEGATIV 422 (fehlbetrag_cent): Bewegung des Tages macht den Soll-B
   assert.equal(r.status, 422, JSON.stringify(r.json));
   assert.equal(r.json.fehler[0].code, 'BESTAND_NEGATIV');
   assert.equal(r.json.fehler[0].fehlbetrag_cent, 3000);
-  const neg = await u.tagRufe(abschluss(id, '2026-11-03', { umsaetze: [], korrekturen: [{ art: 'retoure', steuerfall: 'A_INLAND_19', bar_cent: 1190, unbar_cent: 0 }], gezaehlt_cent: 8810 }));
+  // (eigenes Konto: am 02.11. liegt oben eine offene Bewegung, die einen späteren Abschluss mit OFFENE_BEWEGUNGEN_VORTAG stoppen würde, O6 H1)
+  const u2 = umgebung();
+  const id2 = await u2.legeKasseAn();
+  const neg = await u2.tagRufe(abschluss(id2, '2026-11-03', { umsaetze: [], korrekturen: [{ art: 'retoure', steuerfall: 'A_INLAND_19', bar_cent: 1190, unbar_cent: 0 }], gezaehlt_cent: 8810 }));
   assert.equal(neg.status, 422, JSON.stringify(neg.json));
   assert.equal(neg.json.fehler[0].code, 'TAGESSALDO_NEGATIV');
   assert.deepEqual([neg.json.fehler[0].steuerfall, neg.json.fehler[0].fehlbetrag_cent], ['A_INLAND_19', 1190]);
   assert.deepEqual(u.fs.pfade(P('kassentage/')), []);
+  assert.deepEqual(u2.fs.pfade(P('kassentage/')), []);
   assert.deepEqual(u.fs.pfade(P('dokumente/')), []);
 });
 
@@ -1769,4 +1773,38 @@ test('Nr. 28: KI-Aktionen mit Datei (Chat, /image, /document, Monatsabschluss-PD
     assert.equal(log.uploadlimit, 0, 'keine Upload-Reservierung in Firestore');
     assert.equal(env.PROFIL_KV._m.get(`uploads:${A}:${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`), '50', 'der Altzähler wird nicht verändert');
   } finally { globalThis.fetch = original; }
+});
+
+// ---------------------------------------------------------------------------------------------
+// O6-Fix (Gegenlesung o6-gegenlesung.md): H1, H2, M1, M2, M3, M5 und Niedrig
+// ---------------------------------------------------------------------------------------------
+test('O6 H1: Abschluss eines späteren Tages übergeht keine Bewegung an einem offenen Tag davor (409 OFFENE_BEWEGUNGEN_VORTAG mit Tagen); erst den Vortag abschließen, dann geht es mit richtigem Soll', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  // 02.11.: Geldtransit zur Bank 50,00, Tag bleibt offen; Abschluss des 03.11. mit gezählten 50,00 wäre eine falsche Differenz von -50,00
+  assert.equal((await u.bewRufe(bewegung(id, '2026-11-02', 'geldtransit_bank_aus', 5000))).status, 200);
+  const vor = u.fs.log.commits;
+  const r = await u.tagRufe(ohneUmsatz(id, '2026-11-03', { gezaehlt_cent: 5000 }));
+  assert.equal(r.status, 409, JSON.stringify(r.json));
+  assert.equal(r.json.fehler[0].code, 'OFFENE_BEWEGUNGEN_VORTAG');
+  assert.deepEqual(r.json.tage, ['2026-11-02']);
+  assert.equal(u.fs.log.commits, vor, 'nichts geschrieben');
+  assert.deepEqual(u.fs.pfade(P('dokumente/')), [], 'kein Fehlbetragsbeleg');
+  // der Vortag zuerst: Soll 100,00 - 50,00 = 50,00, keine Differenz; danach der 03.11. mit Anfangsbestand 50,00
+  const a = await u.tagRufe(ohneUmsatz(id, '2026-11-02', { gezaehlt_cent: 5000 }));
+  assert.equal(a.status, 200, JSON.stringify(a.json));
+  assert.equal(a.json.differenz_cent, 0);
+  const b = await u.tagRufe(ohneUmsatz(id, '2026-11-03', { gezaehlt_cent: 5000 }));
+  assert.equal(b.status, 200, JSON.stringify(b.json));
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-03`)).anfangsbestand_cent, 5000);
+  // Lücke ohne Bewegung (Ruhetage) bleibt erlaubt; auch die erste Lücke ab dem Anfangsbestandstag wird geprüft (kein Abschluss vorher)
+  const v = umgebung();
+  const vid = await v.legeKasseAn();
+  assert.equal((await v.bewRufe(bewegung(vid, '2026-11-01', 'geldtransit_bank_aus', 100))).status, 200);
+  const x = await v.tagRufe(ohneUmsatz(vid, '2026-11-04'));
+  assert.deepEqual([x.status, x.json.fehler[0].code, x.json.tage], [409, 'OFFENE_BEWEGUNGEN_VORTAG', ['2026-11-01']]);
+  assert.equal((await v.tagRufe(ohneUmsatz(vid, '2026-11-02', { gezaehlt_cent: 10000 }))).status, 409, 'der 01.11. liegt davor und ist offen mit Bewegung');
+  // erst der 01.11., dann der 04.11. (Anfangsbestand 99,00)
+  assert.equal((await v.tagRufe(ohneUmsatz(vid, '2026-11-01', { gezaehlt_cent: 9900 }))).status, 200);
+  assert.equal((await v.tagRufe(ohneUmsatz(vid, '2026-11-04', { gezaehlt_cent: 9900 }))).status, 200);
 });
