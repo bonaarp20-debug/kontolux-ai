@@ -351,6 +351,30 @@ test('F1-Fix B-4: Wiederholung von ruhetag_aufheben mit derselben anfrage_id (Ne
   assert.deepEqual([y.status, y.json.fehler[0].code], [404, 'KASSENTAG_UNBEKANNT']);
 });
 
+test('G1-Fix N-1: verspätete Wiederholung von ruhetag_aufheben, nachdem derselbe Tag neu als Ruhetag angelegt (oder abgeschlossen) wurde: 200 schon_aufgehoben, der neue Platz bleibt, nichts geschrieben; Audit nennt den aufgehobenen Ruhetag', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-02'))).status, 200);
+  assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-04', anfrage_id: 'ruhetag-alt-0001' })).status, 200);
+  const body = { aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04', anfrage_id: 'aufheben-n1-0001' };
+  assert.equal((await u.tagRufe(body)).status, 200);
+  assert.equal(u.audit().at(-1).details.ruhetag_anfrage_id, 'ruhetag-alt-0001');
+  assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-04', anfrage_id: 'ruhetag-neu-0001' })).status, 200);
+  const vor = u.fs.log.commits;
+  const spaet = await u.tagRufe(body);
+  assert.deepEqual([spaet.status, spaet.json.schon_aufgehoben, spaet.json.idempotent], [200, true, true], JSON.stringify(spaet.json));
+  assert.equal(u.fs.log.commits, vor, 'nichts geschrieben');
+  const platz = u.fs.lies(P(`kassentage/${id}_2026-11-04`));
+  assert.deepEqual([platz.status, platz.anfrage_id], ['ruhetag', 'ruhetag-neu-0001'], 'der neue Ruhetag bleibt');
+  // ein neuer Aufhebe-Auftrag (andere anfrage_id) wirkt auf den neuen Ruhetag
+  assert.equal((await u.tagRufe({ ...body, anfrage_id: 'aufheben-n1-0002' })).status, 200);
+  // Tag danach abgeschlossen: die alte Wiederholung bestätigt weiter statt 409 KEIN_RUHETAG, und schreibt nichts
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-04'))).status, 200);
+  const nachAbschluss = await u.tagRufe(body);
+  assert.deepEqual([nachAbschluss.status, nachAbschluss.json.schon_aufgehoben], [200, true]);
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-04`)).status, 'abgeschlossen');
+});
+
 // ---------------------------------------------------------------------------------------------
 // G1-Fix H-1 (o-final-a-gegenlesung 1c): Storno und Neuerfassung vor einem Stammdatenwechsel
 // ---------------------------------------------------------------------------------------------
