@@ -242,14 +242,20 @@ test('Storno eines Tages mit Differenz: auch die Differenzbelege werden gegengeb
 // ── 4. Privatvorgänge, Geldtransit, Ausgabe ──────────────────────────────────────────────────────
 test('Privatvorgang aus der Kasse (zahlweg kasse) bucht gegen das Kassenkonto; Privatvorgänge ohne zahlweg bleiben gegen die Bank; Anfangsbestand aus Privateinlage ebenfalls gegen die Kasse', async () => {
   const w = await welt({ kasseExtra: { anfangsbestand_herkunft: 'einlage_privat' } });
-  ok200(await w.bew(bewegung(w.id, '2026-11-02', 'entnahme', 2000, { eigenbeleg_pfad: eigen(w.id, '2026-11-02') })));
-  ok200(await w.bew(bewegung(w.id, '2026-11-02', 'einlage', 5050, { eigenbeleg_pfad: eigen(w.id, '2026-11-02', 'e2.pdf') })));
+  const bwEnt = ok200(await w.bew(bewegung(w.id, '2026-11-02', 'entnahme', 2000, { eigenbeleg_pfad: eigen(w.id, '2026-11-02') })));
+  const bwEin = ok200(await w.bew(bewegung(w.id, '2026-11-02', 'einlage', 5050, { eigenbeleg_pfad: eigen(w.id, '2026-11-02', 'e2.pdf') })));
   w.fs.setze(P('privatvorgaenge/alt1'), { art: 'entnahme', datum: '2026-11-03', betrag: 30, notiz: 'Bestand', storniert: false });
   const r = await w.exp();
   const privat = r.zeilen.filter((x) => /Privat/.test(x[13]));
   const nach = (text) => privat.filter((x) => x[13].includes(text)).map((x) => [x[0], x[1], x[6], x[7]]).sort();
   assert.deepEqual(nach('Privatentnahme'), [['20,00', 'H', '1000', '1800'], ['30,00', 'H', '1200', '1800']].sort());
   assert.deepEqual(nach('Privateinlage'), [['100,00', 'S', '1000', '1890'], ['50,50', 'S', '1000', '1890']].sort());
+  // A-N2: Belegfeld 1 = Kassennummer der Bewegung (nicht PRIV-JJJJMMTT); der Altvorgang ohne Bewegung und der Anfangsbestand ohne Bewegung behalten PRIV-
+  const feld = (text, betrag) => privat.filter((x) => x[13].includes(text) && x[0] === betrag).map((x) => ohne(x[10]));
+  assert.deepEqual(feld('Privatentnahme', '20,00'), [bwEnt.kassennummer]);
+  assert.deepEqual(feld('Privateinlage', '50,50'), [bwEin.kassennummer]);
+  assert.match(bwEnt.kassennummer, /^K-THK-2026-/);
+  assert.deepEqual(feld('Privatentnahme', '30,00'), ['PRIV-20261103']);
 });
 
 test('Storno einer Entnahme: der stornierte Privatvorgang steht nicht im Stapel (bisheriges Verhalten, beide ergeben 0)', async () => {

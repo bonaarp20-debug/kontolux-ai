@@ -5529,6 +5529,12 @@ async function handleDatevExport(body, env, cors = {}) {
       // Kassenbuch P1b-5: Privatvorgang aus der Kasse (zahlweg 'kasse') läuft gegen das Kassenkonto statt gegen die Bank
       const ausKasse = firestoreValue(f.zahlweg) === 'kasse';
       const b = privatvorgangBuchung(v, skr, ausKasse ? await kassenKonto(firestoreValue(f.kasse_id)) : bankkonto);
+      if (b && ausKasse) {
+        // A-N2 (Gegenlesung o-p1c): Belegfeld 1 eines Privatvorgangs aus der Kasse ist die Kassennummer der Bewegung (der Prüfer findet die Kassenbuch-Zeile direkt); ohne Bewegung PRIV-JJJJMMTT
+        const bewId = firestoreValue(f.kassenbewegung_id);
+        const bw = bewId ? (await kassenBewegungen()).get(String(bewId)) : null;
+        if (bw && typeof bw.kassennummer === 'string' && bw.kassennummer.trim()) b.belegfeld1 = bw.kassennummer.trim();
+      }
       if (b) { buchungen.push(b); if (ausKasse) kassePrivat++; }
     }
 
