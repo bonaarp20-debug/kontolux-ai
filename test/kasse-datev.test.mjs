@@ -454,11 +454,88 @@ test('istSumupBarbeleg und sumupKasseWahl (rein): nur Einnahme-Barbelege der Int
   assert.equal(istSumupBarbeleg(b({ typ: 'rechnung_eingehend', buchungstext: 'SumUp-Rückerstattung TC1' })), false);
   assert.equal(istSumupBarbeleg(b({ deleted: true })), false);
   assert.equal(istSumupBarbeleg(b({ quelle: 'kasse' })), false);
-  const kassen = new Map([['k1', { datenquelle: 'sumup_integration', datenquelle_ab: '2026-11-05' }], ['k2', { datenquelle: 'manuell' }]]);
-  assert.equal(sumupKasseWahl(kassen, '2026-11-04'), null);
+  // K1-Fix M-1: Kassen ohne Historie (vor J1): vor datenquelle_ab ist die Datenquelle unbekannt (vorher still null = Bank), ab datenquelle_ab gilt der Wert der Kasse
+  const kassen = new Map([['k1', { datenquelle: 'sumup_integration', datenquelle_ab: '2026-11-05', anfangsbestand_am: '2026-11-05' }], ['k2', { datenquelle: 'manuell', datenquelle_ab: '2026-11-01', anfangsbestand_am: '2026-11-01' }]]);
+  assert.equal(sumupKasseWahl(kassen, '2026-11-04'), null, 'k1 gab es am 04.11. noch nicht');
   assert.deepEqual(sumupKasseWahl(kassen, '2026-11-05'), { id: 'k1' });
-  kassen.set('k3', { datenquelle: 'sumup_integration' });
+  kassen.set('k3', { datenquelle: 'sumup_integration', datenquelle_ab: '2026-11-01' });
   assert.deepEqual(sumupKasseWahl(kassen, '2026-11-05'), { mehrere: true });
+  kassen.set('k4', { datenquelle: 'manuell', datenquelle_ab: '2026-11-04', anfangsbestand_am: '2026-11-01' });
+  assert.deepEqual(sumupKasseWahl(kassen, '2026-11-03'), { unbekannt: true }, 'k4 ohne Historie: was vor dem 04.11. galt, ist unbekannt');
+});
+
+// K1-Fix M-1 (Gegenlesung E): der Export nahm die Datenquelle von heute. Mit Historie zählt der Wert am Tag; der Archiv-Eintrag eines Systemwechsels zählt nicht.
+test('K1-Fix M-1: sumupKasseWahl und kasseTagesPosten (rein) lesen die Datenquelle am Tag aus der Stammdaten-Historie bzw. der Fassung', () => {
+  const sv = (dq) => ({ art: [{ wert: 'registrierkasse', ab: '2026-10-30' }], grundaufzeichnung: [{ wert: 'tse_kasse', ab: '2026-10-30' }], datenquelle: dq, karte_ueber_integration: [{ wert: 'keine', ab: '2026-10-30' }] });
+  const kasse = (dq, extra = {}) => ({ art: 'registrierkasse', art_ab: '2026-10-30', grundaufzeichnung: 'tse_kasse', grundaufzeichnung_ab: '2026-10-30', datenquelle: dq.at(-1).wert, datenquelle_ab: dq.at(-1).ab,
+    karte_ueber_integration: 'keine', anfangsbestand_am: '2026-10-30', stammdaten_verlauf: sv(dq), ...extra });
+  // heute manuell, sumup vom 01.11. bis 03.11.
+  const k = kasse([{ wert: 'manuell', ab: '2026-10-30' }, { wert: 'sumup_integration', ab: '2026-11-01' }, { wert: 'manuell', ab: '2026-11-04' }]);
+  const m = new Map([['k', k]]);
+  assert.equal(sumupKasseWahl(m, '2026-10-31'), null);
+  assert.deepEqual(sumupKasseWahl(m, '2026-11-01'), { id: 'k' });
+  assert.deepEqual(sumupKasseWahl(m, '2026-11-03'), { id: 'k' }, 'vorher: null (heute manuell), der Barbeleg landete still auf der Bank');
+  assert.equal(sumupKasseWahl(m, '2026-11-04'), null);
+  assert.equal(sumupKasseWahl(m, '2026-10-29'), null, 'vor dem Anfangsbestand');
+  // Archiv-Eintrag eines Systemwechsels (ohne Historie, alte Datenquelle sumup) zählt nicht, wenn die Kasse selbst da ist
+  m.set('arch', { datenquelle: 'sumup_integration', anfangsbestand_am: '2026-10-30', aktiv: false, ausser_betrieb_am: '2026-11-03', ausser_betrieb_grund: 'systemwechsel', nachfolger_kasse_id: 'k', kassenbuch: false });
+  assert.deepEqual(sumupKasseWahl(m, '2026-11-02'), { id: 'k' });
+  assert.equal(sumupKasseWahl(m, '2026-11-05'), null);
+  // Historie unlesbar (letzter Eintrag widerspricht der Kasse): unbekannt, nie raten
+  assert.deepEqual(sumupKasseWahl(new Map([['k', { ...k, datenquelle: 'sumup_integration' }]]), '2026-11-02'), { unbekannt: true });
+  // kasseTagesPosten: die Fassung entscheidet (Wert am Geschäftstag), nicht die Kasse von heute
+  const retoure = (dq) => ({ geschaeftstag: '2026-10-31', ...(dq ? { datenquelle: dq } : {}), umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 10000, unbar_cent: 30000 }], korrekturen: [{ steuerfall: 'A_INLAND_19', art: 'retoure', bar_cent: 15000, unbar_cent: 0 }] });
+  const heuteSumup = kasse([{ wert: 'manuell', ab: '2026-10-30' }, { wert: 'sumup_integration', ab: '2026-11-01' }]);
+  assert.deepEqual(kasseTagesPosten(retoure('manuell'), heuteSumup).posten.map((p) => [p.art, p.sollHaben, p.betrag_cent]), [['kanal_verrechnet', 'H', 5000]], 'vorher: [] (Kasse heute sumup)');
+  assert.deepEqual(kasseTagesPosten(retoure('sumup_integration'), k).posten, []);
+  // Fassung ohne datenquelle: Historie am Geschäftstag; ohne beides: der Tag bleibt mit Grund aus dem Stapel
+  assert.deepEqual(kasseTagesPosten(retoure(null), heuteSumup).posten.map((p) => p.art), ['kanal_verrechnet']);
+  assert.equal(kasseTagesPosten({ ...retoure(null), geschaeftstag: '2026-11-02' }, heuteSumup).posten.length, 0);
+  assert.equal(kasseTagesPosten(retoure(null), null).grund, 'datenquelle_unbekannt');
+  assert.deepEqual(kasseTagesPosten({ geschaeftstag: '2026-10-31', bareingang_forderungen_cent: 500 }, null).posten.map((p) => p.art), ['bareingang'], 'ohne Verrechnung braucht es die Datenquelle nicht');
+});
+
+test('K1-Fix M-1 Szenario (Gegenlesung E): Wechsel auf SumUp ab 01.11. und zurück auf manuell ab 02.11.: SumUp-Barbeleg der SumUp-Zeit auf der Kasse, davor und danach auf der Bank; die Verrechnung des manuellen Tags bleibt', async () => {
+  const w = await welt({ kasseExtra: { anfangsbestand_am: '2026-10-30' } });
+  // 31.10. manuell: 100,00 bar, 300,00 Karte, Retoure 150,00 bar (Verrechnung Kasse Haben an Geldtransit 50,00); gezählt 100,00 - 50,00 = 50,00
+  ok200(await w.tag({ aktion: 'abschliessen', kasse_id: w.id, geschaeftstag: '2026-10-31', z_nummern: ['Z-1'], umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 10000, unbar_cent: 30000 }],
+    korrekturen: [{ steuerfall: 'A_INLAND_19', art: 'retoure', bar_cent: 15000, unbar_cent: 0 }], gezaehlt_cent: 5000, bestand_gezaehlt_bestaetigt: true, grundaufzeichnung_bestaetigt: true }));
+  ok200(await w.kasse({ aktion: 'aendern', kasse_id: w.id, datenquelle: 'sumup_integration', datenquelle_ab: '2026-11-01' }));
+  w.fs.setze(P('webhook_secrets/sumup'), { enabled: true, sync_letzter_lauf: '2026-11-06T06:00:00Z' });
+  w.fs.setze(P('dokumente/s0'), sumupBeleg('TCVOR', 'Barzahlung', 50, { bezahlt_am: '2026-10-31', datum: '2026-10-31' }));
+  w.fs.setze(P('dokumente/s1'), sumupBeleg('TCSUMUP', 'Barzahlung', 119, { bezahlt_am: '2026-11-01', datum: '2026-11-01' }));
+  // Stand „heute sumup“: die Verrechnung des manuellen 31.10. bleibt im Stapel (vorher fehlte sie, weil die Kasse heute sumup ist)
+  const r1 = await w.exp();
+  assert.equal(r1.status, 200, r1.text);
+  assert.deepEqual(kurz(r1.zeilen, 'K-THK-2026-0001-Z').map((x) => x.slice(0, 4)), [['50,00', 'H', '1000', '1360']]);
+  assert.deepEqual(kurz(r1.zeilen, 'TCVOR').map((x) => x.slice(0, 4)), [['50,00', 'S', '1200', '8400']], 'vor dem Wechsel: Bank');
+  assert.deepEqual(kurz(r1.zeilen, 'TCSUMUP').map((x) => x.slice(0, 4)), [['119,00', 'S', '1000', '8400']]);
+  // 01.11. mit sumup abschließen (50,00 + 119,00 SumUp bar = 169,00), dann zurück auf manuell ab 02.11.
+  ok200(await w.tag({ aktion: 'abschliessen', kasse_id: w.id, geschaeftstag: '2026-11-01', z_nummern: ['Z-2'], umsaetze: [], gezaehlt_cent: 16900, bestand_gezaehlt_bestaetigt: true, grundaufzeichnung_bestaetigt: true }));
+  ok200(await w.kasse({ aktion: 'aendern', kasse_id: w.id, datenquelle: 'manuell', datenquelle_ab: '2026-11-02' }));
+  w.fs.setze(P('dokumente/s2'), sumupBeleg('TCNACH', 'Barzahlung', 20, { bezahlt_am: '2026-11-02', datum: '2026-11-02' }));
+  const r2 = await w.exp();
+  assert.equal(r2.status, 200, r2.text);
+  assert.deepEqual(kurz(r2.zeilen, 'TCSUMUP').map((x) => x.slice(0, 4)), [['119,00', 'S', '1000', '8400']], 'SumUp-Zeit: Kasse (vorher: Bank 1200, ohne Warnung)');
+  assert.deepEqual(kurz(r2.zeilen, 'TCVOR').map((x) => x.slice(0, 4)), [['50,00', 'S', '1200', '8400']]);
+  assert.deepEqual(kurz(r2.zeilen, 'TCNACH').map((x) => x.slice(0, 4)), [['20,00', 'S', '1200', '8400']], 'nach dem Wechsel zurück: Bank');
+  assert.deepEqual(kurz(r2.zeilen, 'K-THK-2026-0001-Z').map((x) => x.slice(0, 4)), [['50,00', 'H', '1000', '1360']]);
+  assert.match(r2.warnung, /1 SumUp-Barzahlung\(en\) stehen auf dem Kassenkonto der SumUp-Kasse/);
+  assert.doesNotMatch(r2.warnung, /nicht sicher bekannt|eindeutig zugeordnet|datenquelle_unbekannt/);
+  // Kassenkonto 1000 = Kassenbuch ohne Anfangsbestand: 31.10. -50,00, 01.11. +119,00 = 69,00 (gezählt 169,00 - 100,00)
+  assert.equal(nachKonto(r2.zeilen)['1000'], 6900);
+});
+
+test('K1-Fix M-1: Historie der Kasse unlesbar: SumUp-Barbeleg bleibt auf der Bank mit klarer Warnung (nicht still)', async () => {
+  const w = await welt({ kasseExtra: { datenquelle: 'sumup_integration' } });
+  const pk = P(`kassen/${w.id}`);
+  const k = w.fs.lies(pk);
+  w.fs.setze(pk, { ...k, stammdaten_verlauf: { ...k.stammdaten_verlauf, datenquelle: [{ wert: 'manuell', ab: '2026-11-01', am: null }] } });
+  w.fs.setze(P('dokumente/s1'), sumupBeleg('TCBAR1', 'Barzahlung', 119));
+  const r = await w.exp();
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(kurz(r.zeilen, 'TCBAR1').map((x) => x.slice(0, 4)), [['119,00', 'S', '1200', '8400']]);
+  assert.match(r.warnung, /1 SumUp-Barzahlung\(en\) stehen auf der Bank, nicht auf dem Kassenkonto: für ihren Tag ist nicht sicher bekannt/);
 });
 
 // A-M1 (Gegenlesung o-p1c, Baukonzept 2.11 H/#F35): Bareingang auf Rechnung, Durchlaufendes und Trinkgeld der Mitarbeiter fehlten im Stapel. Die Werte stehen nur in der
@@ -558,8 +635,8 @@ test('A-M2: Karten-Rückerstattung bei Barumsätzen (Karte negativ): Kasse Soll 
   assert.equal(r.zeilen.filter((x) => ohne(x[10]) === 'K-THK-2026-0002-Z').length, 0, 'normaler Tag: keine Umbuchung');
   const f = (bar, unbar) => ({ umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: bar, unbar_cent: unbar }], korrekturen: [] });
   assert.deepEqual(kasseTagesPosten(f(100, 200)).posten, []);
-  assert.deepEqual(kasseTagesPosten({ umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 10000, unbar_cent: 30000 }], korrekturen: [{ steuerfall: 'A_INLAND_19', art: 'retoure', bar_cent: 15000, unbar_cent: 0 }] }).posten.map((p) => [p.konto, p.gegen, p.sollHaben, p.betrag_cent]), [['kasse', 'transit', 'H', 5000]]);
-  assert.deepEqual(kasseTagesPosten({ umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 10000, unbar_cent: 30000 }], korrekturen: [{ steuerfall: 'A_INLAND_19', art: 'retoure', bar_cent: 15000, unbar_cent: 0 }] }, { datenquelle: 'sumup_integration' }).posten, []);
+  assert.deepEqual(kasseTagesPosten({ datenquelle: 'manuell', umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 10000, unbar_cent: 30000 }], korrekturen: [{ steuerfall: 'A_INLAND_19', art: 'retoure', bar_cent: 15000, unbar_cent: 0 }] }).posten.map((p) => [p.konto, p.gegen, p.sollHaben, p.betrag_cent]), [['kasse', 'transit', 'H', 5000]]);
+  assert.deepEqual(kasseTagesPosten({ datenquelle: 'sumup_integration', umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 10000, unbar_cent: 30000 }], korrekturen: [{ steuerfall: 'A_INLAND_19', art: 'retoure', bar_cent: 15000, unbar_cent: 0 }] }).posten, []);
 });
 
 // A-N2 (c): datev_konto der Kasse nur vierstellig (wie der Export und die Sachkontenlänge im DATEV-Kopf)

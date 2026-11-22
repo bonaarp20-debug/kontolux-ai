@@ -5218,7 +5218,7 @@ async function handleDatevExport(body, env, cors = {}) {
     const kasseOhneBewegung = [];
     const kasseKontoUngueltig = new Set();
     const kasseEinloesung = []; // Tagesabschlüsse mit Einlösung von Mehrzweck-Gutscheinen: { nr, cent }
-    let kasseSumupBar = 0; let kasseSumupMehrere = 0; // A-H2: SumUp-Barbelege auf dem Kassenkonto bzw. ohne eindeutige Kasse
+    let kasseSumupBar = 0; let kasseSumupMehrere = 0; let kasseSumupUnbekannt = 0; // A-H2: SumUp-Barbelege auf dem Kassenkonto bzw. ohne eindeutige Kasse; K1-Fix M-1: Datenquelle am Tag unbekannt
     let kasseMehrzweck = 0; let kasseAusgabeJahr = 0; let kasseBewGebucht = 0; let kassePrivat = 0;
     const userBasis = base; // users/{uid}
     let kassenDocs = null;
@@ -5383,7 +5383,7 @@ async function handleDatevExport(body, env, cors = {}) {
       let sumupKasse = null;
       if (!istKasseAusgabe && firestoreValue(fields.quelle) === 'sumup_webhook' && istSumupBarbeleg({ quelle: 'sumup_webhook', typ: firestoreValue(fields.typ), deleted: firestoreValue(fields.deleted), storniert: firestoreValue(fields.storniert), buchungstext: firestoreValue(fields.buchungstext), name: firestoreValue(fields.name) })) {
         sumupKasse = sumupKasseWahl(await kassenLaden({ ohneKassenbuch: !hatKasseDok }), String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || ''));
-        if (sumupKasse && firestoreValue(fields.bezahlt) === true && String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || '').slice(0, 4) === String(jahr)) { if (sumupKasse.mehrere) kasseSumupMehrere++; else kasseSumupBar++; }
+        if (sumupKasse && firestoreValue(fields.bezahlt) === true && String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || '').slice(0, 4) === String(jahr)) { if (sumupKasse.mehrere) kasseSumupMehrere++; else if (sumupKasse.unbekannt) kasseSumupUnbekannt++; else kasseSumupBar++; }
       }
       const kasseKonto = istKasseAusgabe ? await kassenKonto(firestoreValue(fields.kasse_id)) : (sumupKasse && sumupKasse.id ? await kassenKonto(sumupKasse.id) : bankkonto);
       if (istKasseAusgabe && String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || '').slice(0, 4) === String(jahr)) kasseAusgabeJahr++;
@@ -5881,11 +5881,12 @@ async function handleDatevExport(body, env, cors = {}) {
         else if (spiegelImJahr) kasseOffen.push(`${nrOrig} (kassennummer_fehlt)`);
       }
     }
-    if (kasseAktiv || kasseSumupMehrere > 0) {
+    if (kasseAktiv || kasseSumupMehrere > 0 || kasseSumupUnbekannt > 0) {
       const kasseZeilen = kasseAusgabeJahr + kasseBewGebucht + kassePrivat + kasseSumupBar + kasseTagesPostenGebucht + buchungen.filter((x) => /^K-/.test(String(x.belegfeld1))).length;
       if (kasseOffen.length) warnen(`${kasseOffen.length} Beleg(e) und Bewegung(en) aus dem Kassenbuch stehen NICHT im Stapel (Grund in Klammern): ${nummern(kasseOffen)}. Bitte nenne sie deinem Steuerberater, er bucht sie von Hand.`);
       if (kasseEinloesung.length) warnen(`${kasseEinloesung.length} Tagesabschluss/-abschlüsse mit Einlösung von Mehrzweck-Gutscheinen (zusammen ${(kasseEinloesung.reduce((a, x) => a + x.cent, 0) / 100).toFixed(2).replace('.', ',')} €): ${nummern(kasseEinloesung.map((x) => x.nr))}. Bar und Karte stehen voll im Stapel, die Einlösung steht als Umbuchung von ${KASSE_MEHRZWECK_KONTO[skrK0]} auf das Erlöskonto des Satzes (die Umsatzsteuer rechnet das Erlöskonto). Diese Buchung muss dein Steuerberater bestätigen.`);
       if (kasseSumupBar > 0) warnen(`${kasseSumupBar} SumUp-Barzahlung(en) stehen auf dem Kassenkonto der SumUp-Kasse statt auf der Bank (Bareinnahmen der Kasse mit SumUp-Anbindung). SumUp-Rückerstattungen und Rückbuchungen stehen weiter auf der Bank, weil nicht erkennbar ist, ob bar zurückgezahlt wurde: bitte beim Steuerberater prüfen.`);
+      if (kasseSumupUnbekannt > 0) warnen(`${kasseSumupUnbekannt} SumUp-Barzahlung(en) stehen auf der Bank, nicht auf dem Kassenkonto: für ihren Tag ist nicht sicher bekannt, ob eine Kasse damals über SumUp lief (Verlauf der Kassen-Stammdaten fehlt). Bitte prüfe die Kasse und lass die Barzahlungen beim Steuerberater umbuchen, wenn sie in die Kasse gehören.`);
       if (kasseSumupMehrere > 0) warnen(`${kasseSumupMehrere} SumUp-Barzahlung(en) konnten keiner Kasse eindeutig zugeordnet werden (mehr als eine Kasse mit SumUp-Anbindung) und stehen auf der Bank, nicht auf dem Kassenkonto. Bitte beim Steuerberater umbuchen.`);
       if (kasseMehrzweck > 0) warnen(`${kasseMehrzweck} Verkauf/Verkäufe von Mehrzweck-Gutscheinen aus dem Kassenbuch stehen auf ${erloeskontoExport('keine', false, skr)} (Erlöse, ohne Umsatzsteuer). Diese Kontowahl muss dein Steuerberater bestätigen.`);
       if (kasseOhneBewegung.length) warnen(`${kasseOhneBewegung.length} Kassenbewegung(en) „Geldtransit von einer anderen Kasse“ stehen nicht im Stapel, weil die passende Ausgabe der anderen Kasse (gleicher Tag, gleicher Betrag) fehlt: ${nummern(kasseOhneBewegung)}. Bitte beim Steuerberater von Hand buchen.`);

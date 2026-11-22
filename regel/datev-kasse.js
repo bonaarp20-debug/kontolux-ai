@@ -19,6 +19,7 @@
 // entsteht so genau die gespeicherte Verteilung. Steuerlich ohne Wirkung (die Erlöskonten je Satz stimmen immer, die Kanalsummen auch).
 import * as Steuerkern from '../steuerkern/index.js';
 import { satzSchluessel, MISCHSATZ_REIHENFOLGE } from './datev-mischsatz.js';
+import { stammVerlaufAus, stammAm } from './kasse-daten.js';
 
 const ISTCENT = (x) => Number.isSafeInteger(x);
 const ISTOBJEKT = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -213,17 +214,49 @@ export function istSumupBarbeleg(f) {
   return ISTOBJEKT(f) && f.quelle === 'sumup_webhook' && f.typ === 'rechnung_ausgehend' && f.deleted !== true && f.storniert !== true
     && /^SumUp-Barzahlung/.test(String(f.buchungstext || f.name || ''));
 }
-// kassen: Map Kassen-ID -> dekodierte Kasse. Rückgabe: { id } (genau eine SumUp-Kasse, gültig am Tag) | { mehrere: true } | null (keine).
+// K1-Fix M-1 (Gegenlesung E): Datenquelle einer Kasse AM TAG (nicht die von heute). Quelle: Stammdaten-Historie der Kasse (stammdaten_verlauf, J1-Fix), Wert am Tag =
+// letzter Eintrag mit ab <= Tag. Rückgabe: { wert: 'manuell'|'import_dsfinvk'|'sumup_integration' } | { wert: null } (Kasse an dem Tag nicht in Betrieb: vor dem
+// Anfangsbestand oder nach ausser_betrieb_am) | { unbekannt: true } (Historie fehlt oder ist unlesbar und der Tag liegt vor dem …_ab der Kasse: nie raten, der Aufrufer warnt).
+export function kasseDatenquelleAm(kasse, tag) {
+  if (!ISTOBJEKT(kasse) || !DATUM.test(String(tag || ''))) return { unbekannt: true };
+  if (DATUM.test(String(kasse.anfangsbestand_am || '')) && tag < kasse.anfangsbestand_am) return { wert: null };
+  if (DATUM.test(String(kasse.ausser_betrieb_am || '')) && tag > kasse.ausser_betrieb_am) return { wert: null };
+  let sv;
+  try { sv = stammVerlaufAus(kasse); } catch { return { unbekannt: true }; }
+  if (sv) {
+    const am = stammAm(sv, tag);
+    return am.fehlend.includes('datenquelle') ? { unbekannt: true } : { wert: am.werte.datenquelle };
+  }
+  // Kasse ohne Historie (vor J1, nur Testkonten): der Wert der Kasse gilt sicher erst ab datenquelle_ab, davor ist er unbekannt
+  if (Steuerkern.KASSEN_DATENQUELLEN.includes(kasse.datenquelle) && DATUM.test(String(kasse.datenquelle_ab || '')) && tag >= kasse.datenquelle_ab) return { wert: kasse.datenquelle };
+  return { unbekannt: true };
+}
+
+// kassen: Map Kassen-ID -> dekodierte Kasse. Rückgabe: { id } (genau eine Kasse lief AM TAG über SumUp) | { mehrere: true } | { unbekannt: true } (für mindestens eine Kasse
+// ist die Datenquelle am Tag nicht sicher bekannt: der Beleg bleibt auf der Bank, der Export warnt) | null (keine).
+// K1-Fix M-1: vorher zählte die Datenquelle von heute (eine Kasse, die vom 03. bis 04.11. über SumUp lief und heute manuell ist, verlor ihre SumUp-Barbelege still an die Bank).
+// Der Archiv-Eintrag eines Systemwechsels (ausser_betrieb_grund systemwechsel, nachfolger_kasse_id) zählt nicht: die Kasse selbst behält Bestand, Kassenbuch und die
+// vollständige Historie (system_wechseln hängt an deren Historie an), der Archiv-Eintrag ist nur der Nachweis des alten Systems.
 export function sumupKasseWahl(kassen, datum) {
   if (!kassen || typeof kassen.entries !== 'function') return null;
   const treffer = [];
+  let unbekannt = false;
   for (const [id, k] of kassen.entries()) {
-    if (!ISTOBJEKT(k) || k.datenquelle !== 'sumup_integration') continue;
-    if (typeof k.datenquelle_ab === 'string' && DATUM.test(k.datenquelle_ab) && DATUM.test(String(datum || '')) && k.datenquelle_ab > datum) continue;
-    treffer.push(id);
+    if (!ISTOBJEKT(k)) continue;
+    if (k.ausser_betrieb_grund === 'systemwechsel' && typeof k.nachfolger_kasse_id === 'string' && kassen.has && kassen.has(k.nachfolger_kasse_id)) continue;
+    const dq = kasseDatenquelleAm(k, datum);
+    if (dq.unbekannt) unbekannt = true;
+    else if (dq.wert === 'sumup_integration') treffer.push(id);
   }
+  if (unbekannt) return { unbekannt: true };
   if (treffer.length === 1) return { id: treffer[0] };
   return treffer.length ? { mehrere: true } : null;
+}
+
+// Datenquelle eines Tagesabschlusses: aus der Fassung (seit P1b immer geschrieben, Wert am Geschäftstag), sonst aus der Historie der Kasse am Geschäftstag.
+function fassungDatenquelle(fassung, kasse) {
+  if (Steuerkern.KASSEN_DATENQUELLEN.includes(fassung.datenquelle)) return { wert: fassung.datenquelle };
+  return kasseDatenquelleAm(kasse, fassung.geschaeftstag);
 }
 
 // A-M1/A-M2 (Gegenlesung o-p1c, Baukonzept 2.11 H, 12-steuer 3.4 Nr. 6 und 7): Posten eines Tagesabschlusses, die nicht im Umsatzbeleg stehen, aber den Kassenstand
@@ -251,12 +284,16 @@ export function kasseTagesPosten(fassung, kasse = null) {
   // A-M2: Barrückgabe für einen Kartenkauf (KANAL_VERRECHNET, Kern kassentagZuBelegEingabe) verrechnet bar mit Karte, der Umsatzbeleg trägt nur die Nettozahlungen. Das Kassenbuch
   // führt die rohen Kanalsummen: Kasse = rohe Bar-Summe, der Unterschied zum Beleg wandert zwischen Kasse und Geldtransit (Kasse Haben an Geldtransit bei Bar-Rückgabe,
   // Kasse Soll an Geldtransit bei Karten-Rückerstattung). Kassen mit sumup_integration haben keinen Umsatzbeleg (keine Umsatzzeilen).
-  if (!(ISTOBJEKT(kasse) && kasse.datenquelle === 'sumup_integration')) {
+  // K1-Fix M-1: die Datenquelle AM GESCHÄFTSTAG entscheidet (Fassung, sonst Historie), nicht die der Kasse von heute. Ist sie unbekannt und gäbe es eine Verrechnung,
+  // bleibt der Tag mit Grund aus dem Stapel (Warnung), statt still eine Zeile zu verlieren oder zu erfinden.
+  const dq = fassungDatenquelle(fassung, kasse);
+  if (dq.wert !== 'sumup_integration') {
     let st;
     try { st = Steuerkern.kassenSteuerJeSatz(fassung); } catch { return offen('fassung_ungueltig'); }
     let belegBar = 0;
     if (st.zeilen.some((z) => z.brutto_cent > 0)) belegBar = st.bar_cent < 0 ? 0 : (st.unbar_cent < 0 ? st.bar_cent + st.unbar_cent : st.bar_cent);
     const d = st.bar_cent - belegBar;
+    if (d !== 0 && dq.unbekannt) return offen('datenquelle_unbekannt');
     if (d !== 0) posten.push({ art: 'kanal_verrechnet', konto: 'kasse', gegen: 'transit', sollHaben: d > 0 ? 'S' : 'H', betrag_cent: Math.abs(d), text: 'Verrechnung Bargeld und Karte lt. Tagesabschluss' });
   }
   return { posten };
