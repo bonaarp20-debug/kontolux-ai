@@ -9,7 +9,25 @@
 //
 // Nutzung: node test-sachkonten-sync.mjs
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+// K1-Fix N-7 (Gegenlesung E): der Wächter liest den App-Checkout daneben (../Kontolux). Fehlt er ganz (zum Beispiel ein einzelner Worker-Checkout), wird
+// ÜBERSPRUNGEN mit Warnung (Exit 0, wie scripts/test-skripte.mjs). Liegt er daneben, aber eine gebrauchte Datei fehlt (App-Checkout nicht auf dem Kassenbuch-Stand),
+// bleibt der Wächter ROT (Exit 1) mit klarer Meldung statt ENOENT: die Vorprüfung (npm test, der App-Checkout liegt dort immer daneben) wird nicht schwächer.
+const APP = new URL('../Kontolux/', import.meta.url);
+if (!existsSync(new URL('index.html', APP))) {
+  console.warn(`ÜBERSPRUNGEN test-sachkonten-sync: App-Checkout nicht gefunden (${fileURLToPath(APP)}index.html). Der Wächter braucht das App-Repo neben dem Worker-Repo.`);
+  process.exit(0);
+}
+const appLesen = (pfad) => {
+  const u = new URL(pfad, APP);
+  if (!existsSync(u)) {
+    console.error(`✗ test-sachkonten-sync: ${fileURLToPath(u)} fehlt. Der App-Checkout neben dem Worker ist nicht auf dem passenden Stand (Kassenbuch-Dokumente); bitte den App-Zweig auschecken, der zu diesem Worker gehört.`);
+    process.exit(1);
+  }
+  return readFileSync(u, 'utf8');
+};
 
 const extrahiere = (src) => {
   const i = src.indexOf('SACHKONTO_MAPPING = {');
@@ -19,7 +37,7 @@ const extrahiere = (src) => {
   return new Function('return ' + src.slice(start, j + 1))();
 };
 const worker = extrahiere(readFileSync(new URL('./worker.js', import.meta.url), 'utf8'));
-const app = extrahiere(readFileSync(new URL('../Kontolux/index.html', import.meta.url), 'utf8'));
+const app = extrahiere(appLesen('index.html'));
 
 // Kategorie → [SKR03-Konto + DATEV-Bezeichnung, SKR04-Konto + DATEV-Bezeichnung]
 const DATEV_2026 = {
@@ -179,7 +197,7 @@ for (const skr of ['SKR03', 'SKR04']) {
   pruefe(`${skr}: keine Tabelle enthält ein Konto „Kassendifferenz“ und 2370/6972 sind nicht im Einsatz`, !Object.values(WEITERE[skr]).some(v => /Kassendifferenz/i.test(v)) && !Object.values(imCode).some(v => v === '2370' || v === '6972') && !Object.values(app).some(e => e[skr] === '2370' || e[skr] === '6972'));
 }
 // b) und c): Kontentabelle aus sb-antworten.md (Zeilen „| Zweck | SKR03 | SKR04 | Bezeichnung | … |“ des Blocks mit „Gebühr Kartenanbieter“)
-const sbText = readFileSync(new URL('../Kontolux/docs/kassenbuch/sb-antworten.md', import.meta.url), 'utf8').split('\n');
+const sbText = appLesen('docs/kassenbuch/sb-antworten.md').split('\n');
 const sbStart = sbText.findIndex(z => z.startsWith('| Gebühr Kartenanbieter |'));
 let sbVon = sbStart, sbBis = sbStart;
 while (sbVon > 0 && sbText[sbVon - 1].startsWith('|')) sbVon--;
@@ -195,7 +213,7 @@ for (const name of Object.keys(KASSE_BELEGT.SKR03)) {
 }
 const [bank03, bank04] = DATEV_2026['Bankgebühren'];
 pruefe(`Gebühr Kartenanbieter ${bank03[0]}/${bank04[0]} (${bank03[1]}) steht so in sb-antworten.md`, bank03[1] === bank04[1] && sbHat(bank03[0], bank04[0], bank03[1]));
-const standText = readFileSync(new URL('../Kontolux/docs/kassenbuch/stand-kasse.md', import.meta.url), 'utf8');
+const standText = appLesen('docs/kassenbuch/stand-kasse.md');
 const abschnitt7a = standText.slice(standText.indexOf('## 7a.'), standText.indexOf('## 8.'));
 const paare7a = [...abschnitt7a.matchAll(/(\d{4})\/(\d{4})(?:\s*„([^“]+)“)?/g)];
 pruefe('stand-kasse.md 7a: Kontenpaare gefunden', paare7a.length >= 3, `${paare7a.length}`);
