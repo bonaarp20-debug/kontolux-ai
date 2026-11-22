@@ -3029,8 +3029,9 @@ export async function eingebettetEntpacken(stream, maxBytes = ENTPACKEN_MAX_BYTE
     } catch (_) { return null; }
   }
   if (roh.length > 1024 * 1024) return null;
-  // Hotfix: auch hier begrenzt entpacken (eine Kette wie [/ASCIIHexDecode /FlateDecode] wurde vorher ohne Grenze entpackt); Filterketten: übergehen
-  try { return stromEntpackenBegrenzt(stream, pdfBudget(maxBytes), { stromMax: maxBytes }); } catch (_) { return null; }
+  // Hotfix: auch hier begrenzt entpacken (eine Kette wie [/ASCIIHexDecode /FlateDecode] wurde vorher ohne Grenze entpackt); Ketten bis 2 Filter
+  // Stufe für Stufe, jede Stufe höchstens maxBytes; längere Ketten: übergehen
+  try { return stromEntpackenBegrenzt(stream, pdfBudget(maxBytes), { stromMax: maxBytes, kette: 2 }); } catch (_) { return null; }
 }
 
 // Sucht im /Names /EmbeddedFiles-Baum eines PDFs nach einer eingebetteten XML-Datei.
@@ -3074,7 +3075,7 @@ export async function detectAndParseERechnung(bytes, filename, mimeType, sellerN
       // Hotfix: PDFDocument.load entpackt Objekt- und XRef-Ströme ohne Grenze (Entpack-Bombe: 474 Byte -> 200 MB, Isolat-Abbruch).
       // Gleicher Ladeweg mit Grenze (regel/pdf-sicher.js, je Strom 4 MB, je Datei 16 MB); bei Überschreitung wie jede unlesbare Datei: keine E-Rechnung.
       const geladen = await ladePdfBegrenzt(bytes, { ignoreEncryption: true, updateMetadata: true });
-      if (geladen.zuGross) { console.warn('detectAndParseERechnung: PDF nicht lesbar (Entpack-Grenze)'); return { format: null }; }
+      if (geladen.zuGross) { console.warn(`detectAndParseERechnung: PDF nicht lesbar (${geladen.isolatVoll ? 'Isolat-Obergrenze' : 'Entpack-Grenze'})`); return { format: null }; }
       const pdfDoc = geladen.pdf;
       const embedded = await findEmbeddedXml(pdfDoc);
       if (!embedded) return { format: null };
