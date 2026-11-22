@@ -4724,6 +4724,10 @@ const DATEV_BEWIRTUNG_KONTEN = {
 const DATEV_WEBHOOK_QUELLEN = ['stripe_webhook', 'mollie_webhook', 'digistore24_webhook', 'copecart_webhook', 'paypal_webhook', 'sumup_webhook', 'ablefy_webhook', 'shopify_webhook'];
 
 // Belegnummer (Belegfeld 1) eines Belegs wie im Hauptpfad: Feld, sonst Nummer aus der Dokument-ID (beleg_rechnung_<nr>_<ts>), sonst TTMMJJ des Zahlungs- bzw. Belegdatums.
+// N1: encodeURIComponent wirft bei einem einzelnen Surrogat (zerschnittenes Emoji) einen URIError (Export 500). Einzelne Surrogate durch U+FFFD ersetzen.
+function datevWohlgeformt(text) {
+  return String(text ?? '').replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD');
+}
 function datevBelegNr(fields, id, fallbackDatum) {
   const nr = firestoreValue(fields.rechnungsnr) || firestoreValue(fields.rechnungsnummer);
   if (nr) return String(nr);
@@ -5008,6 +5012,7 @@ async function handleDatevExport(body, env, cors = {}) {
     let korrekturGebucht = 0;
     let wirksamGeloeschtAnzahl = 0;
     let mischsatzAutomatik = 0;
+    const mischsatzGwg = []; // N2: GWG-Belege mit mehreren Steuersätzen (keine Sofortabschreibungszeile, Beleg mit Nummer in der Warnung)
     const ossStorniert = [];
     const korrekturOffen = [];
     const korrekturOhneRueckzahlung = [];
@@ -5274,6 +5279,7 @@ async function handleDatevExport(body, env, cors = {}) {
             textBasis: (() => { const f = firestoreValue(fields.buchungstext) || ''; const b = istEinnahme ? `Rechnung ${absender}`.trim() : `Beleg ${absender}`.trim(); return f ? `${b} ${f}`.trim() : b; })(),
             diverseAdressnummer: istEinnahme ? (kundenNummerById[firestoreValue(fields.kunde_id) || ''] || '') : ''
           });
+          if (!istEinnahme && kategorie === GWG_KATEGORIE) mischsatzGwg.push(rechnungsnr);
           mischsatzGebucht++;
           continue;
         }
@@ -5446,6 +5452,11 @@ async function handleDatevExport(body, env, cors = {}) {
     if (korrekturOhneRueckzahlung.length > 0) {
       datevWarning = (datevWarning ? datevWarning + ' ' : '') + `Zu ${korrekturOhneRueckzahlung.length} bezahlten Rechnung(en) gibt es einen Storno oder eine Gutschrift ohne Rückzahlung: ${nummern(korrekturOhneRueckzahlung)}. Im Stapel steht deshalb keine Gegenbuchung, bitte beim Steuerberater klären. Wurde die Zahlung auf eine neue Rechnung angerechnet (Storno mit Neuausstellung) und ist auch die neue Rechnung als bezahlt markiert, steht der Umsatz doppelt im Stapel.`;
     }
+    // N2: Mischsatz-Belege laufen nicht durch die GWG-Logik des Einzelpfads. Keine Steuerlogik raten: der Zugang steht je Steuersatz auf dem GWG-Konto, die Sofortabschreibung fehlt.
+    if (mischsatzGwg.length > 0) {
+      const gk = GWG_KONTEN[skr === 'SKR04' ? 'SKR04' : 'SKR03'];
+      datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${mischsatzGwg.length} Beleg(e) „GWG bis 800€“ mit mehreren Steuersätzen: Der Zugang steht je Steuersatz auf ${gk.anlage}, die Sofortabschreibung auf ${gk.sofort} fehlt im Stapel: ${nummern(mischsatzGwg)}. Bitte nenne diese Belege deinem Steuerberater und prüfe sie von Hand (GWG-Grenze und Abschreibung).`;
+    }
     if (mischsatzAutomatik > 0) {
       datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${mischsatzAutomatik} Ausgabe(n) mit mehreren Steuersätzen stehen ohne sichere Aufteilung auf einem Automatikkonto (DATEV rechnet dort selbst Vorsteuer, Buchungstext mit [Konto/Steuersatz prüfen]). Bitte beim Berater auf ein Konto ohne Automatik umbuchen und die Vorsteuer je Steuersatz von Hand buchen.`;
     }
@@ -5514,7 +5525,7 @@ async function handleDatevExport(body, env, cors = {}) {
       const bf = datevBelegfeldBereinigen(b.belegfeld1);
       if (!belegfeldWerte.has(bf.wert)) belegfeldWerte.set(bf.wert, new Set());
       belegfeldWerte.get(bf.wert).add(String(b.belegfeld1 ?? ''));
-      if (bf.geaendert) { belegfeldGeaendert++; if (!belegfeldBeispiel) belegfeldBeispiel = `„${String(b.belegfeld1 ?? '').slice(0, 40)}“ wurde zu „${bf.wert}“`; }
+      if (bf.geaendert) { belegfeldGeaendert++; if (!belegfeldBeispiel) belegfeldBeispiel = `„${Array.from(String(b.belegfeld1 ?? '')).slice(0, 40).join('')}“ wurde zu „${bf.wert}“`; }
       const zeile = [
       b.betrag.toFixed(2).replace('.', ','),
       b.sollHaben,
@@ -5571,7 +5582,7 @@ async function handleDatevExport(body, env, cors = {}) {
         'X-Datev-Skipped-Unpaid-Count': String(skippedUnpaid),
         // encodeURIComponent, da HTTP-Header-Werte kein Latin1-Freitext mit Umlauten zuverlässig
         // transportieren — Frontend deodiert mit decodeURIComponent() wieder.
-        ...(datevWarning ? { 'X-Datev-Warning': encodeURIComponent(datevWarning) } : {})
+        ...(datevWarning ? { 'X-Datev-Warning': encodeURIComponent(datevWohlgeformt(datevWarning)) } : {})
       }
     });
 

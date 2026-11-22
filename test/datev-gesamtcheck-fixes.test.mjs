@@ -236,3 +236,12 @@ test('Reine Funktionen: Belegfeld, Nummern, Konten, Lage', () => {
   assert.equal(datevUstId({ gegenpartei: { ust_id: ' fr 123 456 789 01' } }), 'FR12345678901');
   assert.equal(datevUstId({ gegenpartei: { ust_id: 'abc' } }), '');
 });
+
+test('N1: Emoji in der Belegnummer: Export 200 statt URIError (Warnung zerschneidet kein Surrogatpaar), auch einzelne Surrogate in Belegnummern', async () => {
+  const nr = 'A'.repeat(39) + '😀' + 'B'; // Zeichen 40 und 41 (UTF-16) sind das Emoji: slice(0, 40) würde es zerschneiden
+  const z = await exportiere({ a: beleg(nr, 'rechnung_eingehend', 10, '19', 'Bürobedarf'), b: beleg('Ü\uD83D-Lone', 'rechnung_eingehend', 10, '19', 'Bürobedarf') });
+  assert.equal(z.status, 200);
+  assert.match(z.warnung, /Belegnummer\(n\) enthielten für DATEV unzulässige Zeichen/);
+  assert.ok(z.warnung.includes('A'.repeat(39) + '😀'), 'das Emoji steht ganz in der Warnung');
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(z.warnung), 'kein einzelnes Surrogat in der Warnung');
+});

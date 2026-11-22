@@ -544,3 +544,17 @@ test('G3-N8 Belegfeld 1 der Gegenbuchung wie im Hauptpfad: Nummer aus der Dokume
   const r2 = await exportiere({ pf: { ...ohneNr, quelle: 'stripe_webhook' }, g: { ...g(), steuer: { ...g().steuer, bezug: { korrigiert_beleg_id: 'pf' } } } });
   assert.deepEqual(r2.zeilen.map((x) => ohne(x[10])).filter((n) => n.startsWith('S-')), ['S-100526-2006']);
 });
+
+test('N2: GWG-Beleg mit mehreren Steuersätzen: keine Sofortabschreibungszeile, klare Warnung mit Belegnummer (SKR03 und SKR04); Einzelsatz-GWG und Bürobedarf mit Mischsatz ohne GWG-Warnung', async () => {
+  const g = v2('GW1', 'eingang', [P19(10000), P7(5000)], { kat: 'GWG bis 800€', mwst: '19' });
+  const r = await exportiere({ g1: g });
+  assert.equal(r.status, 200);
+  assert.deepEqual(kurz(r, 'GW1').map((x) => x[3]), ['0480', '0480'], 'Zugang je Satz auf dem GWG-Konto, keine 4855-Zeile');
+  assert.ok(!zeilenVon(r, 'GW1').some((x) => x[6] === '4855'), 'nichts geraten: keine Sofortabschreibung');
+  assert.match(r.warnung, /1 Beleg\(e\) „GWG bis 800€“ mit mehreren Steuersätzen: Der Zugang steht je Steuersatz auf 0480, die Sofortabschreibung auf 4855 fehlt im Stapel: GW1\./);
+  const r4 = await exportiere({ g1: g }, { skr: 'SKR04' });
+  assert.match(r4.warnung, /auf 0670, die Sofortabschreibung auf 6260 fehlt im Stapel: GW1\./);
+  const ohneGwg = await exportiere({ b: v2('B2', 'eingang', [P19(10000), P7(5000)], { kat: 'Bürobedarf', mwst: '19' }), e: alt('G9', 'rechnung_eingehend', 119, '19', 'GWG bis 800€') });
+  assert.doesNotMatch(ohneGwg.warnung, /mit mehreren Steuersätzen: Der Zugang/);
+  assert.ok(zeilenVon(ohneGwg, 'G9').some((x) => x[6] === '4855'), 'Einzelsatz-GWG bucht weiter die Sofortabschreibung');
+});
