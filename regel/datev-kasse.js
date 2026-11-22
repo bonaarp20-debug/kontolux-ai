@@ -10,6 +10,10 @@
 //   Kontenrahmen 2026 nicht; steht in SACHKONTO_MAPPING von worker.js und index.html), Kassenüberschuss auf dem Erlöskonto des Steuerfalls (8400/4400 bzw.
 //   KU 8192/4184, nicht über die Kategorie), Mehrzweck-Verkauf auf 8200/4200 "Erlöse" (Vorschlag, Konfidenz C: Steuerberater bestätigt).
 //
+// DK-FIX (Gegenlesung o-p1c, 22.11.2026): Einlösung von Mehrzweck-Gutscheinen im Tagesabschluss (A-H1), 0-%-Konto 8290/4290 (A-N1, 12-steuer 3.4 Konfidenz A),
+// Durchlaufende Posten 1590/1370 (12-steuer 3.4 und Nr. 6, Konto A, Trinkgeld Mitarbeiter B), Bareingang auf Rechnung (Baukonzept 2.11 H, 12-steuer 3.4 Nr. 7),
+// verrechnete Barrückgabe (A-M2), Geldtransit zwischen Kassen (nur das _aus-Bein, wenn die DATEV-Konten verschieden sind).
+//
 // Bar/Karte je Steuersatz stehen im Beleg nicht einzeln (Entscheidung Nr. 27 offen): der Beleg trägt nur die Zahlungssummen je Kanal. Die Karte wird nach dem
 // Anteil des Satzes am Umsatz verteilt (größter Rest, Steuerkern teile, dasselbe Verfahren wie kassenKarteAnteilig). Wurde im Dialog anteilig gespeichert,
 // entsteht so genau die gespeicherte Verteilung. Steuerlich ohne Wirkung (die Erlöskonten je Satz stimmen immer, die Kanalsummen auch).
@@ -24,11 +28,18 @@ export const DATEV_KASSE_KONTEN = Object.freeze({
   SKR03: Object.freeze({ kasse: '1000', transit: '1360' }),
   SKR04: Object.freeze({ kasse: '1600', transit: '1460' }),
 });
+// Durchlaufende Posten (Lotto, Post, Fahrkarten, Trinkgeld Mitarbeiter): SKR03 1590 / SKR04 1370 "Durchlaufende Posten" (12-steuer 3.4, Konto A, Trinkgeld Mitarbeiter dort B)
+export const KASSE_DURCHLAUF_KONTO = Object.freeze({ SKR03: '1590', SKR04: '1370' });
+// Erlöse 0 % (PV): SKR03 8290 / SKR04 4290 "Erlöse 0 % USt" (12-steuer 3.4, Konfidenz A); nur dieses Konto führt DATEV in die Voranmeldung für 0-%-Umsätze
+export const KASSE_ERLOES_0_KONTO = Object.freeze({ SKR03: '8290', SKR04: '4290' });
+// Mehrzweck-Konto (Verkauf und Gegenseite der Einlösung): 8200 / 4200 "Erlöse", ohne USt-Automatik (12-steuer 3.4 Nr. 3, Konfidenz C)
+export const KASSE_MEHRZWECK_KONTO = Object.freeze({ SKR03: '8200', SKR04: '4200' });
 export const KASSEN_FEHLBETRAG = Steuerkern.KASSEN_KATEGORIEN.fehlbetrag;
 export const KASSEN_UEBERSCHUSS = Steuerkern.KASSEN_KATEGORIEN.ueberschuss;
 export const KASSE_UMSATZ_STEUERFAELLE = Object.freeze(['A_INLAND_19', 'A_INLAND_7', 'A_INLAND_0_PV', 'A_KU']);
 // Bewegungsarten, die über Belege (ausgabe), Privatvorgänge (entnahme, einlage, wechselgeld_einlage) oder den Geldtransit zur Bank gebucht werden.
-// Alles andere (Geldtransit zwischen Kassen, Trinkgeld-Auszahlung) hat im Stapel keine Buchung (Gegenseite fehlt, siehe Warnung im Export).
+// Dazu die Auszahlung des Trinkgelds an Mitarbeiter (Kasse an Durchlaufende Posten) und das _aus-Bein des Geldtransits zwischen Kassen (Kasse an andere Kasse).
+// Das _ein-Bein hat keine eigene Buchung (die Gegenseite steht im _aus-Bein der anderen Kasse); ohne passendes _aus warnt der Export.
 export const BEWEGUNG_GELDTRANSIT_BANK = Object.freeze(['geldtransit_bank_ein', 'geldtransit_bank_aus']);
 export const BEWEGUNG_OHNE_BUCHUNG = Object.freeze(['geldtransit_kasse_ein', 'geldtransit_kasse_aus', 'trinkgeld_ma_auszahlung']);
 
@@ -45,9 +56,30 @@ export const istKasseTagesbeleg = (d) => ISTOBJEKT(d) && d.quelle === 'kasse' &&
 
 const offen = (grund) => ({ offen: true, grund });
 
+// Schlüssel der Fassung eines Kassenbelegs (kassentag_id und Fassungsnummer), für die Tabelle fassungen von kasseBelegPlan
+export const kasseFassungSchluessel = (d) => (ISTOBJEKT(d) && typeof d.kassentag_id === 'string' && Number.isSafeInteger(d.kassen_fassung) ? `${d.kassentag_id}|${d.kassen_fassung}` : null);
+
+// Einlösung von Mehrzweck-Gutscheinen je Satz aus der Fassung (A-H1): steuerwirksam ist der ganze Satz, bezahlt ist der Teil mit dem Gutschein ohne Geldfluss.
+// Rückgabe: Map Satzschlüssel -> Cent | null (Fassung nicht lesbar)
+function gutscheinJeSatz(fassung) {
+  let st;
+  try { st = Steuerkern.kassenSteuerJeSatz(fassung); } catch { return null; }
+  const m = new Map();
+  for (const z of st.zeilen) {
+    if (!(z.mehrzweck_eingeloest_cent > 0)) continue;
+    const k = satzSchluessel(z.satz_bp);
+    if (k === null) return null;
+    m.set(k, (m.get(k) || 0) + z.mehrzweck_eingeloest_cent);
+  }
+  return m;
+}
+
 // d: dekodiertes Dokument (dokumente) eines Kassenbelegs mit Original (nur Storno). original: dekodiertes Dokument des Originals (oder null).
-// Rückgabe: { offen: true, grund } | { datum: 'JJJJ-MM-TT', kassennummer, korrektur, einnahme, kategorie, ku, art, kanaele: [{ kanal: 'bar'|'karte', gruppen: [{ satz, brutto_cent }] }] }
-export function kasseBelegPlan(d, original = null) {
+// fassungen: Map kasseFassungSchluessel -> dekodierte Fassung (nur nötig bei einer Einlösung von Mehrzweck-Gutscheinen über mehrere Sätze: der Satz der Einlösung steht nur dort).
+// Rückgabe: { offen: true, grund } | { datum: 'JJJJ-MM-TT', kassennummer, korrektur, einnahme, kategorie, ku, art, gutschein_cent,
+//   kanaele: [{ kanal: 'bar'|'karte'|'gutschein', gruppen: [{ satz, brutto_cent, konto0? }] }] }
+// Kanal 'gutschein' = Einlösung eines Mehrzweck-Gutscheins: ohne Geldfluss, bucht als Umbuchung vom Mehrzweck-Konto auf das Erlöskonto des Satzes (die USt rechnet das Erlöskonto).
+export function kasseBelegPlan(d, original = null, fassungen = null) {
   if (!istKasseTagesbeleg(d)) return offen('kein_kassenbeleg');
   const st = d.steuer;
   if (!ISTOBJEKT(st)) return offen('steuer_fehlt');
@@ -58,7 +90,7 @@ export function kasseBelegPlan(d, original = null) {
     if (!bezug || !original) return offen('original_fehlt');
     if (!DATUM.test(String(st.wirkdatum || ''))) return offen('wirkdatum_fehlt');
     if (ISTOBJEKT(original.steuer) && original.steuer.beleg_art === 'storno') return offen('storno_von_storno');
-    const op = kasseBelegPlan(original, null);
+    const op = kasseBelegPlan(original, null, fassungen);
     if (op.offen) return op;
     if (!ISTOBJEKT(st.summe) || !ISTCENT(st.summe.brutto_cent) || !ISTCENT(original.steuer && original.steuer.summe && original.steuer.summe.brutto_cent)
       || st.summe.brutto_cent !== 0 - original.steuer.summe.brutto_cent) return offen('storno_summe');
@@ -88,27 +120,48 @@ export function kasseBelegPlan(d, original = null) {
   }
   if (!ISTOBJEKT(st.summe) || st.summe.brutto_cent !== brutto) return offen('summe_abweichend');
   if (!Number.isFinite(d.betrag) || Math.round(d.betrag * 100) !== brutto) return offen('betrag_abweichend');
-  // Zahlungen: bar und Karte je Kanal (Brutto = Summe). Mehrzweck-Einlösung (kanal gutschein_mehrzweck) ist ohne Geldfluss: Buchung offen (Konfidenz C)
+  // Zahlungen: bar, Karte und Einlösung eines Mehrzweck-Gutscheins (kanal gutschein_mehrzweck, ohne Geldfluss), Brutto = Summe. A-H1: Bar und Karte werden immer gebucht,
+  // die Einlösung als eigener Kanal (Umbuchung, Konfidenz C: der Steuerberater bestätigt), nie fällt der ganze Tag aus dem Stapel.
   const zahlungen = Array.isArray(st.zahlungen) ? st.zahlungen : [];
   let bar = 0;
   let karte = 0;
+  let gutschein = 0;
   for (const z of zahlungen) {
     if (!ISTOBJEKT(z) || !ISTCENT(z.betrag_cent) || z.betrag_cent < 0) return offen('zahlungen_summe');
     if (z.kanal === 'bar') bar += z.betrag_cent;
     else if (z.kanal === 'karte') karte += z.betrag_cent;
-    else if (z.kanal === 'gutschein_mehrzweck') { if (z.betrag_cent > 0) return offen('mehrzweck_einloesung'); } else return offen('zahlungen_kanal');
+    else if (z.kanal === 'gutschein_mehrzweck') gutschein += z.betrag_cent;
+    else return offen('zahlungen_kanal');
   }
-  if (bar + karte !== brutto) return offen('zahlungen_summe');
+  if (bar + karte + gutschein !== brutto) return offen('zahlungen_summe');
   if ((art === 'fehlbetrag' || art === 'ueberschuss') && karte !== 0) return offen('zahlungen_kanal');
+  if (art !== 'umsatz' && gutschein !== 0) return offen('zahlungen_kanal'); // eine Einlösung gibt es nur im Tagesumsatz
   const saetze = MISCHSATZ_REIHENFOLGE.filter((s) => je.has(s));
   const gewichte = saetze.map((s) => je.get(s));
-  const karteJe = karte === 0 ? gewichte.map(() => 0) : Steuerkern.teile(karte, gewichte);
+  // Einlösung je Satz: ein Satz -> der ganze Betrag; mehrere Sätze -> genau aus der Fassung (Summe muss stimmen, nie raten). Karte danach anteilig auf den Rest.
+  let gutscheinJe = gewichte.map(() => 0);
+  if (gutschein > 0) {
+    if (saetze.length === 1) gutscheinJe = [gutschein];
+    else {
+      const fassung = fassungen && typeof fassungen.get === 'function' ? fassungen.get(kasseFassungSchluessel(d)) : null;
+      const m = fassung ? gutscheinJeSatz(fassung) : null;
+      if (!m) return offen('mehrzweck_fassung_fehlt');
+      gutscheinJe = saetze.map((s) => m.get(s) || 0);
+      if (gutscheinJe.reduce((a, x) => a + x, 0) !== gutschein || gutscheinJe.some((x, i) => x > gewichte[i])) return offen('mehrzweck_summe');
+    }
+    if (gutscheinJe.some((x, i) => x > gewichte[i])) return offen('mehrzweck_summe');
+  }
+  const rest = gewichte.map((g, i) => g - gutscheinJe[i]);
+  const karteJe = karte === 0 ? rest.map(() => 0) : Steuerkern.teile(karte, rest);
+  const gr = (s, i, b) => ({ satz: s, brutto_cent: b });
   const kanaele = [];
-  const barGruppen = saetze.map((s, i) => ({ satz: s, brutto_cent: gewichte[i] - karteJe[i] })).filter((g) => g.brutto_cent > 0);
-  const karteGruppen = saetze.map((s, i) => ({ satz: s, brutto_cent: karteJe[i] })).filter((g) => g.brutto_cent > 0);
+  const barGruppen = saetze.map((s, i) => gr(s, i, rest[i] - karteJe[i])).filter((g) => g.brutto_cent > 0);
+  const karteGruppen = saetze.map((s, i) => gr(s, i, karteJe[i])).filter((g) => g.brutto_cent > 0);
+  const gutscheinGruppen = saetze.map((s, i) => gr(s, i, gutscheinJe[i])).filter((g) => g.brutto_cent > 0);
   if (barGruppen.length) kanaele.push({ kanal: 'bar', gruppen: barGruppen });
   if (karteGruppen.length) kanaele.push({ kanal: 'karte', gruppen: karteGruppen });
-  return { datum: d.bezahlt_am, kassennummer, korrektur: false, einnahme: art !== 'fehlbetrag', kategorie: art === 'fehlbetrag' ? KASSEN_FEHLBETRAG : '', ku: fall === 'A_KU' && art !== 'mehrzweck', art, kanaele };
+  if (gutscheinGruppen.length) kanaele.push({ kanal: 'gutschein', gruppen: gutscheinGruppen });
+  return { datum: d.bezahlt_am, kassennummer, korrektur: false, einnahme: art !== 'fehlbetrag', kategorie: art === 'fehlbetrag' ? KASSEN_FEHLBETRAG : '', ku: fall === 'A_KU' && art !== 'mehrzweck', art, gutschein_cent: gutschein, kanaele };
 }
 
 // Geldtransit zur Bank (bewegung: dekodiertes Dokument aus kassenbewegungen). Richtung aus Sicht der Kasse: _ein = Geld kommt in die Kasse (Kasse Soll),

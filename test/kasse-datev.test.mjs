@@ -320,15 +320,79 @@ test('Mehrzweck-Gutschein: der Verkauf steht auf Erlöse 8200 (SKR04 4200) gegen
   const gm = r.zeilen.filter((x) => /Mehrzweck/.test(x[13]));
   assert.deepEqual(gm.map((x) => [x[0], x[1], x[6], x[7], x[8]]).sort(), [['20,00', 'S', '1360', '8200', ''], ['50,00', 'S', '1000', '8200', '']].sort());
   assert.match(r.warnung, /Mehrzweck-Gutscheinen.*8200.*Steuerberater/);
+});
+
+// A-H1 (Gegenlesung o-p1c): eine Einlösung von Mehrzweck-Gutscheinen nahm den ganzen Tagesbeleg aus dem Stapel. Jetzt stehen Bar, Karte, Erlöse und USt voll im Stapel,
+// die Einlösung als Umbuchung 8200 an das Erlöskonto des Satzes (12-steuer 3.4 Nr. 3), mit Warnung.
+test('A-H1: Einlösung eines Mehrzweck-Gutscheins bei einem Satz: Bar, Karte und Erlöse voll gebucht, die Einlösung als Umbuchung 8200 an 8400, Soll gleich Haben, Warnung', async () => {
   const e = await welt();
   ok200(await e.tag({ ...nur19(e.id, '2026-11-02'), umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 40000, unbar_cent: 30000, mehrzweck_eingeloest_cent: 10000 }], gezaehlt_cent: 50000 }));
-  const re = await e.exp();
-  assert.equal(re.status, 404, 'kein anderer buchbarer Beleg');
-  assert.match(re.text, /K-THK-2026-0001 \(mehrzweck_einloesung\)/, 'die Antwort nennt den nicht gebuchten Kassenbeleg');
-  ok200(await e.tag({ ...nur19(e.id, '2026-11-03'), gezaehlt_cent: 50000 + 50000 }));
-  const re2 = await e.exp();
-  assert.equal(re2.zeilen.some((x) => ohne(x[10]) === 'K-THK-2026-0001'), false);
-  assert.match(re2.warnung, /K-THK-2026-0001 \(mehrzweck_einloesung\)/);
+  const r = await e.exp();
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(kurz(r.zeilen, 'K-THK-2026-0001').map((x) => x.slice(0, 5)).sort(), [['100,00', 'S', '8200', '8400', ''], ['300,00', 'S', '1360', '8400', ''], ['400,00', 'S', '1000', '8400', '']].sort());
+  const k = nachKonto(r.zeilen);
+  assert.equal(k['8400'], -80000, 'Erlöse 800,00 brutto (Bar + Karte + Gutschein)');
+  assert.equal(k['8200'], 10000);
+  assert.equal(Object.values(k).reduce((a, b) => a + b, 0), 0, 'Soll gleich Haben');
+  assert.match(r.warnung, /1 Tagesabschluss\/-abschlüsse mit Einlösung von Mehrzweck-Gutscheinen \(zusammen 100,00 €\): K-THK-2026-0001.*8200.*Steuerberater/);
+  assert.doesNotMatch(r.warnung, /mehrzweck_einloesung/);
+  // SKR04: 4200 an 4400
+  const e4 = await welt({ skr: 'SKR04' });
+  ok200(await e4.tag({ ...nur19(e4.id, '2026-11-02'), umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 40000, unbar_cent: 30000, mehrzweck_eingeloest_cent: 10000 }], gezaehlt_cent: 50000 }));
+  assert.deepEqual(kurz((await e4.exp()).zeilen, 'K-THK-2026-0001').map((x) => x.slice(0, 4)).sort(), [['100,00', 'S', '4200', '4400'], ['300,00', 'S', '1460', '4400'], ['400,00', 'S', '1600', '4400']].sort());
+});
+
+test('A-H1 (Szenario S5): 400 bar, 300 Karte, 10 Gutschein (19 %) und 200 bar (7 %): die Einlösung steht nur auf 19 % (Satz aus der Fassung), alles auf den Cent, Summe der Zeilen = Brutto', async () => {
+  const w = await welt();
+  ok200(await w.tag(abschluss(w.id, '2026-11-02', {
+    umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 40000, unbar_cent: 30000, mehrzweck_eingeloest_cent: 1000 }, { steuerfall: 'A_INLAND_7', bar_cent: 20000, unbar_cent: 0 }], gezaehlt_cent: 10000 + 60000 })));
+  const r = await w.exp();
+  assert.equal(r.status, 200, r.text);
+  // 19 %: 710,00 brutto, 7 %: 200,00 brutto; Karte 300,00 anteilig auf den Rest (700,00 und 200,00): 30000 * 70000 / 90000 = 23333,33 -> 233,33 / 66,67
+  assert.deepEqual(kurz(r.zeilen, 'K-THK-2026-0001').map((x) => x.slice(0, 5)).sort(), [
+    ['10,00', 'S', '8200', '8400', ''], ['233,33', 'S', '1360', '8400', ''], ['66,67', 'S', '1360', '8300', ''], ['466,67', 'S', '1000', '8400', ''], ['133,33', 'S', '1000', '8300', ''],
+  ].sort());
+  const k = nachKonto(r.zeilen);
+  assert.equal(k['1000'], 60000, 'Bar 600,00');
+  assert.equal(k['1360'], 30000, 'Karte 300,00');
+  assert.equal(k['8200'], 1000);
+  assert.equal(k['8400'], -71000, '19 %: 710,00');
+  assert.equal(k['8300'], -20000, '7 %: 200,00, ohne Einlösung');
+  assert.equal(Object.values(k).reduce((a, b) => a + b, 0), 0);
+  assert.equal(r.zeilen.filter((x) => ohne(x[10]) === 'K-THK-2026-0001').reduce((a, x) => a + cent(x[0]), 0), 91000, 'Summe der Zeilen = Brutto des Belegs');
+});
+
+test('A-H1: Einlösung über zwei Sätze (je ein Teil): die Umbuchung folgt den Sätzen der Fassung (8400 und 8300), ohne Fassung bleibt der Beleg wie bisher mit Grund aus dem Stapel (nie raten)', async () => {
+  const w = await welt();
+  ok200(await w.tag(abschluss(w.id, '2026-11-02', {
+    umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 10000, unbar_cent: 0, mehrzweck_eingeloest_cent: 2000 }, { steuerfall: 'A_INLAND_7', bar_cent: 5000, unbar_cent: 0, mehrzweck_eingeloest_cent: 1000 }], gezaehlt_cent: 10000 + 15000 })));
+  const r = await w.exp();
+  const gu = r.zeilen.filter((x) => x[6] === '8200').map((x) => [x[0], x[1], x[7]]).sort();
+  assert.deepEqual(gu, [['10,00', 'S', '8300'], ['20,00', 'S', '8400']].sort());
+  assert.equal(nachKonto(r.zeilen)['1000'], 15000);
+  // Pure Funktion ohne Fassung: Grund statt Raten
+  const d = { quelle: 'kasse', kassentag_id: 't1', kassen_fassung: 1, kassennummer: 'K-X-2026-0001', bezahlt: true, bezahlt_am: '2026-05-10', betrag: 150,
+    steuer: { beleg_art: 'tagesabschluss', steuerfall: 'A_INLAND_19', positionen: [{ netto_cent: 8403, ust_cent: 1597, satz_bp: 1900 }, { netto_cent: 4673, ust_cent: 327, satz_bp: 700 }], summe: { brutto_cent: 15000 },
+      zahlungen: [{ kanal: 'bar', betrag_cent: 12000 }, { kanal: 'gutschein_mehrzweck', betrag_cent: 3000 }] } };
+  assert.equal(kasseBelegPlan(d).grund, 'mehrzweck_fassung_fehlt');
+  const fassung = { umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 8000, unbar_cent: 0, mehrzweck_eingeloest_cent: 2000 }, { steuerfall: 'A_INLAND_7', bar_cent: 4000, unbar_cent: 0, mehrzweck_eingeloest_cent: 1000 }] };
+  const p = kasseBelegPlan(d, null, new Map([['t1|1', fassung]]));
+  assert.deepEqual(p.kanaele.map((k) => [k.kanal, k.gruppen.map((g) => [g.satz, g.brutto_cent])]), [['bar', [['19', 8000], ['7', 4000]]], ['gutschein', [['19', 2000], ['7', 1000]]]]);
+  // Fassung passt nicht zur Zahlung (Summe der Einlösungen weicht ab): nie raten
+  const falsch = { umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 8000, unbar_cent: 0, mehrzweck_eingeloest_cent: 2500 }, { steuerfall: 'A_INLAND_7', bar_cent: 4000, unbar_cent: 0, mehrzweck_eingeloest_cent: 1000 }] };
+  assert.equal(kasseBelegPlan(d, null, new Map([['t1|1', falsch]])).grund, 'mehrzweck_summe');
+});
+
+test('A-H1: Storno eines Tages mit Einlösung spiegelt auch die Einlösung (Summe je Konto 0)', async () => {
+  const w = await welt();
+  ok200(await w.tag({ ...nur19(w.id, '2026-11-02'), umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 40000, unbar_cent: 30000, mehrzweck_eingeloest_cent: 10000 }], gezaehlt_cent: 50000 }));
+  ok200(await w.tag({ aktion: 'stornieren', kasse_id: w.id, geschaeftstag: '2026-11-02', grund: 'Fehler beim Erfassen' }));
+  const r = await w.exp();
+  assert.equal(r.status, 200, r.text);
+  const k = nachKonto(r.zeilen);
+  for (const [konto, v] of Object.entries(k)) assert.equal(v, 0, `Konto ${konto}`);
+  assert.ok(r.zeilen.filter((x) => x[6] === '8200').length === 2, 'Einlösung und Gegenbuchung');
+  assert.match(r.warnung, /1 Tagesabschluss\/-abschlüsse mit Einlösung von Mehrzweck-Gutscheinen \(zusammen 100,00 €\)/, 'der Storno zählt nicht als weitere Einlösung');
 });
 
 // ── 6. Bestandsnutzer unverändert, Jahr, Hinweis ─────────────────────────────────────────────────
@@ -398,7 +462,9 @@ test('kasseBelegPlan: Prüfungen mit Grund (nie raten): Summe, Betrag, Zahlungen
   assert.equal(grund(basis({ betrag: 118.99 })), 'betrag_abweichend');
   assert.equal(grund(basis({}, { zahlungen: [{ kanal: 'bar', betrag_cent: 11800 }] })), 'zahlungen_summe');
   assert.equal(grund(basis({}, { zahlungen: [{ kanal: 'bar', betrag_cent: 11900 }, { kanal: 'paypal', betrag_cent: 0 }] })), 'zahlungen_kanal');
-  assert.equal(grund(basis({}, { zahlungen: [{ kanal: 'bar', betrag_cent: 1900 }, { kanal: 'gutschein_mehrzweck', betrag_cent: 10000 }] })), 'mehrzweck_einloesung');
+  // A-H1: eine Einlösung ist kein Grund mehr, den Beleg wegzulassen (ein Satz: der ganze Betrag ist Einlösung)
+  assert.equal(grund(basis({}, { zahlungen: [{ kanal: 'bar', betrag_cent: 1900 }, { kanal: 'gutschein_mehrzweck', betrag_cent: 10000 }] })), undefined);
+  assert.equal(grund(basis({}, { zahlungen: [{ kanal: 'bar', betrag_cent: 1900 }, { kanal: 'gutschein_mehrzweck', betrag_cent: 9000 }] })), 'zahlungen_summe');
   assert.equal(grund(basis({}, { steuerfall: 'A_OSS' })), 'steuerfall_unbekannt');
   assert.equal(grund(basis({ kassennummer: '' })), 'kassennummer_fehlt');
   assert.equal(grund(basis({ bezahlt: false })), 'zahlung_fehlt');

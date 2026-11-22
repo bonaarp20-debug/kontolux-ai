@@ -25,7 +25,7 @@ import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // 
 import { rechnungsnrDuplikat, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c)
 import { datevMischsatzGruppen, datevKorrekturGruppen, KORREKTUR_BELEG_ARTEN } from './regel/datev-mischsatz.js'; // Branch datev-mischsatz: Belege mit mehreren Steuersätzen je Satz buchen
 import { dekodiereFelder as datevDekodiereFelder } from './regel/firestore.js';
-import { DATEV_KASSE_KONTEN, kassenKontoWahl, istKasseTagesbeleg, kasseBelegPlan, kasseBewegungBuchung, kasseBewegungOhneBuchung } from './regel/datev-kasse.js'; // Kassenbuch P1b-5: DATEV-Kassenzweig
+import { DATEV_KASSE_KONTEN, KASSE_DURCHLAUF_KONTO, KASSE_ERLOES_0_KONTO, KASSE_MEHRZWECK_KONTO, kassenKontoWahl, istKasseTagesbeleg, kasseBelegPlan, kasseBewegungBuchung, kasseBewegungOhneBuchung } from './regel/datev-kasse.js'; // Kassenbuch P1b-5: DATEV-Kassenzweig
 import { datevBelegfeldBereinigen, datevFeldGequotet, datevNummerPruefen, datevKontoVierstellig, datevGeldkontoImBereich, datevKuKonto, RC_EINGANG_KONTEN, RC_AUSGANG_KONTEN, datevRcLage, datevUstId, GWG_KONTEN, AFA_KATEGORIE, GWG_KATEGORIE, FA_EST_ART, UST_KATEGORIEN } from './regel/datev-export-regeln.js'; // DATEV-Gesamtcheck 21.11.2026: Belegfeld 1, § 13b, GWG, Konten
 import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen, kiKassenberichtText } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4); Kassen-P0: kiKassenberichtText
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
@@ -4978,11 +4978,12 @@ async function handleDatevExport(body, env, cors = {}) {
       const bewirtungKonten = DATEV_BEWIRTUNG_KONTEN[skrK];
       for (const g of gruppen) {
         if (g.brutto_cent <= 0) continue;
-        let konto = importKonto || (istEinnahmeKategorie(istEinnahme, kategorie) ? resolveSachkonto(kategorie, skr) : null)
+        const festKonto = g.konto || importKonto; // g.konto: Konto je Gruppe (Kassenzweig, 0 % auf 8290/4290), wie ein Konto der Quelldatei ohne Tausch
+        let konto = festKonto || (istEinnahmeKategorie(istEinnahme, kategorie) ? resolveSachkonto(kategorie, skr) : null)
           || (istEinnahme ? erloeskontoExport(g.satz, ku, skr, jahr) : ausgabenGegenkonto);
-        if (ku && !importKonto && istEinnahme && alleErloeskonten.has(String(konto))) konto = erloeskontoExport('keine', true, skr, jahr);
+        if (ku && !festKonto && istEinnahme && alleErloeskonten.has(String(konto))) konto = erloeskontoExport('keine', true, skr, jahr);
         let hinweis = '';
-        if (importKonto) { /* Konto der Quelldatei bleibt, kein Tausch */ } else if (!ku && (g.satz === '19' || g.satz === '7')) {
+        if (festKonto) { /* Konto der Quelldatei bleibt, kein Tausch */ } else if (!ku && (g.satz === '19' || g.satz === '7')) {
           const tausch = DATEV_AUTOMATIK_SATZ_TAUSCH[skrK][String(konto)];
           if (tausch && tausch.satz !== g.satz) konto = tausch.partner; // erwarteter Wechsel (Konto der Kategorie hat den anderen Satz), keine Warnung
         } else if (!ku && DATEV_AUTOMATIKKONTEN_EXPORT[skrK].has(String(konto))) {
@@ -5016,6 +5017,7 @@ async function handleDatevExport(body, env, cors = {}) {
     const kasseOffen = []; // Kassenbelege ohne sichere Buchung (Nummer und Grund in der Warnung)
     const kasseOhneBewegung = [];
     const kasseKontoUngueltig = new Set();
+    const kasseEinloesung = []; // Tagesabschlüsse mit Einlösung von Mehrzweck-Gutscheinen: { nr, cent }
     let kasseMehrzweck = 0; let kasseAusgabeJahr = 0; let kasseBewGebucht = 0; let kassePrivat = 0;
     let kassenDocs = null; let kassenLesefehler = false;
     const kassenKonto = async (kasseId) => {
@@ -5030,6 +5032,22 @@ async function handleDatevExport(body, env, cors = {}) {
         return w.konto;
       }
       return kasseWahl.konto;
+    };
+    // DK-FIX: Tagesplätze und Fassungen des Kassenbuchs (A-H1: Satz der Mehrzweck-Einlösung, A-M1/A-M2: Posten außerhalb des Umsatzbelegs). Eine Anfrage für die Tage,
+    // je 300 Fassungen eine Anfrage über alle Nachfahren (kein Lesen je Tag). Nur bei Kassendaten.
+    let kassenTageDaten = null; let tageLesefehler = false;
+    const kassenTageLesen = async () => {
+      if (kassenTageDaten === null) {
+        kassenTageDaten = { tage: new Map(), fassungen: new Map() };
+        try {
+          for (const t of await firestoreListAll(`${base}/kassentage`, authHeader)) kassenTageDaten.tage.set(String(t.name || '').split('/').pop(), datevDekodiereFelder(t.fields || {}));
+          for (const f of await untersammlungLesen(userId, 'fassungen', authHeader, fetch)) {
+            const seg = String(f.name || '').split('/documents/').pop().split('/');
+            if (seg[2] === 'kassentage' && seg[4] === 'fassungen') kassenTageDaten.fassungen.set(`${seg[3]}|${Number(seg[5])}`, datevDekodiereFelder(f.fields || {}));
+          }
+        } catch (e) { console.error('DATEV-Export Kassentage:', e?.message); tageLesefehler = true; }
+      }
+      return kassenTageDaten;
     };
     let kassenBew = null; let bewegungenLesefehler = false;
     const kassenBewegungen = async () => {
@@ -5050,6 +5068,7 @@ async function handleDatevExport(body, env, cors = {}) {
       kasseMarke = null;
     };
 
+    const kasseTageVorab = hatKasseDok ? await kassenTageLesen() : null;
     for (const doc of dokDocs) {
       kasseMarkeAbschliessen();
       const fields = doc.fields || {};
@@ -5073,7 +5092,7 @@ async function handleDatevExport(body, env, cors = {}) {
         const kd = datevDekodiereFelder(fields);
         const bezugId = kd.steuer && kd.steuer.bezug ? kd.steuer.bezug.storniert_beleg_id : null;
         const origDoc = bezugId ? dokById.get(String(bezugId)) : null;
-        const plan = kasseBelegPlan(kd, origDoc ? datevDekodiereFelder(origDoc.fields || {}) : null);
+        const plan = kasseBelegPlan(kd, origDoc ? datevDekodiereFelder(origDoc.fields || {}) : null, kasseTageVorab ? kasseTageVorab.fassungen : null);
         const nrKasse = String(kd.kassennummer || docId);
         if (plan.offen) {
           const jahrDes = String((kd.steuer && kd.steuer.wirkdatum) || kd.bezahlt_am || kd.datum || '').slice(0, 4);
@@ -5086,11 +5105,15 @@ async function handleDatevExport(body, env, cors = {}) {
         const absenderKasse = String(kd.absender || '').trim();
         const textKasse = ({ umsatz: 'Tagesabschluss', mehrzweck: 'Mehrzweck-Gutscheine', fehlbetrag: 'Kassendifferenz (Fehlbetrag)', ueberschuss: 'Kassendifferenz (Überschuss)' })[plan.art];
         for (const k of plan.kanaele) {
+          // A-N1: 0 % auf 8290/4290 (Konto je Gruppe); A-H1: Einlösung eines Mehrzweck-Gutscheins als Umbuchung vom Mehrzweck-Konto auf das Erlöskonto des Satzes
+          const gruppenKasse = k.gruppen.map((g) => (g.konto0 ? { ...g, konto: KASSE_ERLOES_0_KONTO[skrK0] } : g));
+          const kanalKonto = k.kanal === 'karte' ? geldtransitkonto : k.kanal === 'gutschein' ? KASSE_MEHRZWECK_KONTO[skrK0] : kasseKto;
           bucheGruppen({
-            gruppen: k.gruppen, korrektur: plan.korrektur, ku: plan.ku, istEinnahme: plan.einnahme, kategorie: plan.kategorie, belegDatum: datumKasse, belegfeld1: plan.kassennummer,
-            textBasis: `${textKasse} ${absenderKasse}`.trim(), diverseAdressnummer: '', buchungskonto: k.kanal === 'karte' ? geldtransitkonto : kasseKto, markeZusatz: k.kanal === 'karte' ? ' Karte' : ''
+            gruppen: gruppenKasse, korrektur: plan.korrektur, ku: plan.ku, istEinnahme: plan.einnahme, kategorie: plan.kategorie, belegDatum: datumKasse, belegfeld1: plan.kassennummer,
+            textBasis: `${textKasse} ${absenderKasse}`.trim(), diverseAdressnummer: '', buchungskonto: kanalKonto, markeZusatz: k.kanal === 'karte' ? ' Karte' : k.kanal === 'gutschein' ? ' Gutschein-Einlösung' : ''
           });
         }
+        if (plan.gutschein_cent > 0 && !plan.korrektur) kasseEinloesung.push({ nr: plan.kassennummer, cent: plan.gutschein_cent });
         if (plan.art === 'mehrzweck') kasseMehrzweck++;
         continue;
       }
@@ -5513,6 +5536,7 @@ async function handleDatevExport(body, env, cors = {}) {
     if (hatKasseDok || kassePrivat > 0) {
       const kasseZeilen = kasseAusgabeJahr + kasseBewGebucht + kassePrivat + buchungen.filter((x) => /^K-/.test(String(x.belegfeld1))).length;
       if (kasseOffen.length) warnen(`${kasseOffen.length} Beleg(e) und Bewegung(en) aus dem Kassenbuch stehen NICHT im Stapel (Grund in Klammern): ${nummern(kasseOffen)}. Bitte nenne sie deinem Steuerberater, er bucht sie von Hand.`);
+      if (kasseEinloesung.length) warnen(`${kasseEinloesung.length} Tagesabschluss/-abschlüsse mit Einlösung von Mehrzweck-Gutscheinen (zusammen ${(kasseEinloesung.reduce((a, x) => a + x.cent, 0) / 100).toFixed(2).replace('.', ',')} €): ${nummern(kasseEinloesung.map((x) => x.nr))}. Bar und Karte stehen voll im Stapel, die Einlösung steht als Umbuchung von ${KASSE_MEHRZWECK_KONTO[skrK0]} auf das Erlöskonto des Satzes (die Umsatzsteuer rechnet das Erlöskonto). Diese Buchung muss dein Steuerberater bestätigen.`);
       if (kasseMehrzweck > 0) warnen(`${kasseMehrzweck} Verkauf/Verkäufe von Mehrzweck-Gutscheinen aus dem Kassenbuch stehen auf ${erloeskontoExport('keine', false, skr)} (Erlöse, ohne Umsatzsteuer). Diese Kontowahl muss dein Steuerberater bestätigen.`);
       if (kasseOhneBewegung.length) warnen(`${kasseOhneBewegung.length} Kassenbewegung(en) (Geldtransit zwischen Kassen, Auszahlung Trinkgeld an Mitarbeiter) stehen nicht im Stapel, weil die Gegenseite fehlt: ${nummern(kasseOhneBewegung)}. Bitte beim Steuerberater von Hand buchen.`);
       if (kasseZeilen > 0) {
