@@ -219,6 +219,25 @@ test('6 Kasse: unbekannt/fremd 404, inaktiv 422, sumup 422, andere Datenquelle 4
   await abgelehnt(umgebung({ kasse: { datenquelle: undefined } }), {}, 422, 'DATENQUELLE_NICHT_MANUELL');
 });
 
+// K1-Fix N-5 (Gegenlesung E): Datenquelle am Geschäftstag des Dialogs aus der Stammdaten-Historie, nicht die von heute
+test('K1-Fix N-5: Datenquelle am Dialogtag aus der Historie (heute sumup, am 03.11. manuell: KI-Hilfe; umgekehrt 422); Historie unlesbar 503', async () => {
+  const mitVerlauf = (dq) => {
+    const sv = { art: [{ wert: 'registrierkasse', ab: '2026-01-01' }], grundaufzeichnung: [{ wert: 'tse_kasse', ab: '2026-01-01' }], datenquelle: dq, karte_ueber_integration: [{ wert: 'keine', ab: '2026-01-01' }] };
+    return { art: 'registrierkasse', art_ab: '2026-01-01', grundaufzeichnung: 'tse_kasse', grundaufzeichnung_ab: '2026-01-01', datenquelle: dq.at(-1).wert, datenquelle_ab: dq.at(-1).ab, karte_ueber_integration: 'keine', stammdaten_verlauf: sv };
+  };
+  const heuteSumup = mitVerlauf([{ wert: 'manuell', ab: '2026-01-01' }, { wert: 'sumup_integration', ab: '2026-11-05' }]);
+  const u = umgebung({ kasse: heuteSumup });
+  const r = await u.rufe({ geschaeftstag_dialog: '2026-11-03' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(u.aufrufe.length, 1);
+  await abgelehnt(umgebung({ kasse: heuteSumup }), { geschaeftstag_dialog: '2026-11-05' }, 422, 'DATENQUELLE_SUMUP');
+  const sumupZeit = mitVerlauf([{ wert: 'manuell', ab: '2026-01-01' }, { wert: 'sumup_integration', ab: '2026-11-01' }, { wert: 'manuell', ab: '2026-11-05' }]);
+  await abgelehnt(umgebung({ kasse: sumupZeit }), { geschaeftstag_dialog: '2026-11-03' }, 422, 'DATENQUELLE_SUMUP');
+  const ok = umgebung({ kasse: sumupZeit });
+  assert.equal((await ok.rufe({ geschaeftstag_dialog: '2026-11-06' })).status, 200);
+  await abgelehnt(umgebung({ kasse: { ...heuteSumup, datenquelle: 'manuell' } }), { geschaeftstag_dialog: '2026-11-03' }, 503, 'STAMMDATEN_VERLAUF_UNGUELTIG');
+});
+
 test('7 Positivliste der Schlüssel und Werte', async () => {
   const u = umgebung();
   const pdf = await pdfB64(1);

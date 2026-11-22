@@ -31,6 +31,7 @@ import {
   jetztIso, schichtFuer, regelFehler, agbZustimmungAb, codesBereinigen,
 } from './gemeinsam.js';
 import { schreibe, vorbedingungAus } from './firestore.js';
+import { stammVerlaufAus, stammAm } from './kasse-daten.js';
 import { heuteBerlin } from './oss-meldung.js';
 
 export const KASSE_ZBON_PFAD = '/kasse-zbon-lesen';
@@ -704,8 +705,17 @@ export async function regelKasseZbonLesen(body, env, cors = {}, deps = {}) {
     if (!kasseDok || !istObjekt(kasseDok.daten)) return fehler(404, 'KASSE_UNBEKANNT', cors);
     const kasse = kasseDok.daten;
     if (kasse.aktiv !== true) return fehler(422, 'KASSE_INAKTIV', cors);
-    if (kasse.datenquelle === 'sumup_integration') return fehler(422, 'DATENQUELLE_SUMUP', cors);
-    if (kasse.datenquelle !== 'manuell') return fehler(422, 'DATENQUELLE_NICHT_MANUELL', cors);
+    // K1-Fix N-5 (Gegenlesung E): die Datenquelle AM GESCHÄFTSTAG des Dialogs (Stammdaten-Historie der Kasse), nicht die von heute: ein stornierter Tag aus der
+    // manuellen Zeit einer Kasse, die heute über SumUp läuft, bekommt KI-Hilfe; ein Tag aus der SumUp-Zeit nicht. Ohne gültiges Datum (400 FORMAT folgt unten), ohne
+    // Historie (Kasse vor J1) oder ohne Eintrag am Tag: der Wert der Kasse wie bisher (der Abschluss prüft danach selbst mit dem Wert am Tag). Historie unlesbar: 503.
+    let datenquelle = kasse.datenquelle;
+    if (istDatum(body.geschaeftstag_dialog)) {
+      let sv;
+      try { sv = stammVerlaufAus(kasse); } catch { return fehler(503, 'STAMMDATEN_VERLAUF_UNGUELTIG', cors); }
+      if (sv) { const am = stammAm(sv, body.geschaeftstag_dialog); if (!am.fehlend.includes('datenquelle')) datenquelle = am.werte.datenquelle; }
+    }
+    if (datenquelle === 'sumup_integration') return fehler(422, 'DATENQUELLE_SUMUP', cors);
+    if (datenquelle !== 'manuell') return fehler(422, 'DATENQUELLE_NICHT_MANUELL', cors);
     // 7. Positivliste der Schlüssel
     if (!nurSchluessel(body, SCHLUESSEL)) return fehler(400, 'FORMAT', cors, { feld: 'schluessel' });
     if (!istDatum(body.geschaeftstag_dialog) || body.geschaeftstag_dialog < ZBON_DATUM_MIN || body.geschaeftstag_dialog > heute) return fehler(400, 'FORMAT', cors, { feld: 'geschaeftstag_dialog' });
