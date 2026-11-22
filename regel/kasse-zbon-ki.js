@@ -708,19 +708,22 @@ export async function regelKasseZbonLesen(body, env, cors = {}, deps = {}) {
     // K1-Fix N-5 (Gegenlesung E): die Datenquelle AM GESCHÄFTSTAG des Dialogs (Stammdaten-Historie der Kasse), nicht die von heute: ein stornierter Tag aus der
     // manuellen Zeit einer Kasse, die heute über SumUp läuft, bekommt KI-Hilfe; ein Tag aus der SumUp-Zeit nicht. Ohne gültiges Datum (400 FORMAT folgt unten), ohne
     // Historie (Kasse vor J1) oder ohne Eintrag am Tag: der Wert der Kasse wie bisher (der Abschluss prüft danach selbst mit dem Wert am Tag). Historie unlesbar: 503.
+    // L1-Fix F-2: hat die Historie am Dialogtag keinen Eintrag (Tag vor dem Anfangsbestand), sperrt der Abschluss den Tag mit stammdaten_unbekannt: dann kein KI-Aufruf (409 weiter unten, kein Zähler).
     let datenquelle = kasse.datenquelle;
+    let datenquelleAmTagUnbekannt = false;
     if (istDatum(body.geschaeftstag_dialog)) {
       let sv;
       try { sv = stammVerlaufAus(kasse); } catch { return fehler(503, 'STAMMDATEN_VERLAUF_UNGUELTIG', cors); }
-      if (sv) { const am = stammAm(sv, body.geschaeftstag_dialog); if (!am.fehlend.includes('datenquelle')) datenquelle = am.werte.datenquelle; }
+      if (sv) { const am = stammAm(sv, body.geschaeftstag_dialog); if (am.fehlend.includes('datenquelle')) datenquelleAmTagUnbekannt = true; else datenquelle = am.werte.datenquelle; }
     }
-    if (datenquelle === 'sumup_integration') return fehler(422, 'DATENQUELLE_SUMUP', cors);
-    if (datenquelle !== 'manuell') return fehler(422, 'DATENQUELLE_NICHT_MANUELL', cors);
+    if (!datenquelleAmTagUnbekannt && datenquelle === 'sumup_integration') return fehler(422, 'DATENQUELLE_SUMUP', cors);
+    if (!datenquelleAmTagUnbekannt && datenquelle !== 'manuell') return fehler(422, 'DATENQUELLE_NICHT_MANUELL', cors);
     // 7. Positivliste der Schlüssel
     if (!nurSchluessel(body, SCHLUESSEL)) return fehler(400, 'FORMAT', cors, { feld: 'schluessel' });
     if (!istDatum(body.geschaeftstag_dialog) || body.geschaeftstag_dialog < ZBON_DATUM_MIN || body.geschaeftstag_dialog > heute) return fehler(400, 'FORMAT', cors, { feld: 'geschaeftstag_dialog' });
     if (!istObjekt(body.datei) || !nurSchluessel(body.datei, DATEI_SCHLUESSEL) || typeof body.datei.base64 !== 'string' || typeof body.datei.type !== 'string'
       || (body.datei.name !== undefined && (typeof body.datei.name !== 'string' || body.datei.name.length > 200))) return fehler(400, 'FORMAT', cors, { feld: 'datei' });
+    if (datenquelleAmTagUnbekannt) return fehler(409, 'STAMMDATEN_UNBEKANNT', cors, { feld: 'geschaeftstag_dialog', hinweis: 'Für diesen Tag ist die Datenquelle der Kasse nicht eindeutig (der Tag liegt vor dem Anfangsbestand der Kasse). Hier ist keine KI-Hilfe möglich.' });
     const anfangsbestandAm = istDatum(kasse.anfangsbestand_am) ? kasse.anfangsbestand_am : null;
     // Besteuerung am Geschäftstag aus dem bestätigten Profil (Kern statusAm): unbekannt = kein Aufruf
     const status = statusDes(profilDok.daten, body.geschaeftstag_dialog);

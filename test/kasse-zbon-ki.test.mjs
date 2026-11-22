@@ -238,6 +238,18 @@ test('K1-Fix N-5: Datenquelle am Dialogtag aus der Historie (heute sumup, am 03.
   await abgelehnt(umgebung({ kasse: { ...heuteSumup, datenquelle: 'manuell' } }), { geschaeftstag_dialog: '2026-11-03' }, 503, 'STAMMDATEN_VERLAUF_UNGUELTIG');
 });
 
+test('L1-Fix F-2: Tag ohne Historien-Eintrag (vor dem Anfangsbestand) -> 409 STAMMDATEN_UNBEKANNT, kein KI-Aufruf, kein Zähler', async () => {
+  const sv = { art: [{ wert: 'registrierkasse', ab: '2026-11-01' }], grundaufzeichnung: [{ wert: 'tse_kasse', ab: '2026-11-01' }], datenquelle: [{ wert: 'manuell', ab: '2026-11-01' }], karte_ueber_integration: [{ wert: 'keine', ab: '2026-11-01' }] };
+  const kasse = { art: 'registrierkasse', art_ab: '2026-11-01', grundaufzeichnung: 'tse_kasse', grundaufzeichnung_ab: '2026-11-01', datenquelle: 'manuell', datenquelle_ab: '2026-11-01', karte_ueber_integration: 'keine', stammdaten_verlauf: sv };
+  const u = umgebung({ kasse });
+  const r = await u.rufe({ geschaeftstag_dialog: '2026-10-20' });
+  assert.equal(r.status, 409, JSON.stringify(r.json));
+  assert.equal(code(r), 'STAMMDATEN_UNBEKANNT');
+  assert.equal(u.aufrufe.length, 0, 'kein KI-Aufruf');
+  assert.equal(u.zaehler(), 0, 'kein Zählerverbrauch');
+  assert.equal((await umgebung({ kasse }).rufe({ geschaeftstag_dialog: '2026-11-03' })).status, 200, 'Tag mit Eintrag unverändert');
+});
+
 test('7 Positivliste der Schlüssel und Werte', async () => {
   const u = umgebung();
   const pdf = await pdfB64(1);
