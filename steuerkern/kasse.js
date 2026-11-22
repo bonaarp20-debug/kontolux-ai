@@ -432,7 +432,12 @@ export function kassentagZuBelegEingabe(fassung, kasse, profil) {
   if (bar > 0) zahlungen.push({ datum: tag, betrag_cent: bar, art: 'zahlung', kanal: 'bar' });
   if (karte > 0) zahlungen.push({ datum: tag, betrag_cent: karte, art: 'zahlung', kanal: 'karte' });
   // SB-3: Einlösung von Mehrzweck-Gutscheinen: Teil des Umsatzes (Umsatzsteuer), bezahlt mit dem Gutschein (kein Zufluss, wirkung.js kanal gutschein_mehrzweck)
-  if (st.mehrzweck_eingeloest_cent > 0) zahlungen.push({ datum: tag, betrag_cent: st.mehrzweck_eingeloest_cent, art: 'zahlung', kanal: 'gutschein_mehrzweck' });
+  // K3-Fix (K-N3, ABWEICHUNGEN 5.40): Bei mehr als einem Satz (oder Einlösung in einer Zeile ohne eigene Position) je Satz eine Gutschein-Zahlung mit
+  // mehrzweck_satz_bp; wirkung.js ordnet das Geld dann je Satz zu (EÜR Kz 112/140). Ein Satz: eine Zahlung ohne Feld wie bisher.
+  const mzZeilen = st.zeilen.filter((z) => z.mehrzweck_eingeloest_cent > 0);
+  const mzJeSatz = !ku && mzZeilen.length > 0 && !(zeilen.length === 1 && mzZeilen.every((z) => z.steuerfall === zeilen[0].steuerfall));
+  if (mzJeSatz) for (const z of mzZeilen) zahlungen.push({ datum: tag, betrag_cent: z.mehrzweck_eingeloest_cent, art: 'zahlung', kanal: 'gutschein_mehrzweck', mehrzweck_satz_bp: z.satz_bp });
+  else if (st.mehrzweck_eingeloest_cent > 0) zahlungen.push({ datum: tag, betrag_cent: st.mehrzweck_eingeloest_cent, art: 'zahlung', kanal: 'gutschein_mehrzweck' });
   const e = {
     weg: 'kasse', richtung: 'ausgang', beleg_art: 'tagesabschluss', herkunft: 'nutzer',
     steuerwahl: ku ? 'ohne_ust_ausgewiesen' : (sfs.includes('A_INLAND_19') ? 'inland_19' : sfs.includes('A_INLAND_7') ? 'inland_7' : 'inland_0_pv'),
