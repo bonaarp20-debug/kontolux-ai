@@ -153,7 +153,8 @@ export function kasseBelegPlan(d, original = null, fassungen = null) {
   }
   const rest = gewichte.map((g, i) => g - gutscheinJe[i]);
   const karteJe = karte === 0 ? rest.map(() => 0) : Steuerkern.teile(karte, rest);
-  const gr = (s, i, b) => ({ satz: s, brutto_cent: b });
+  const konto0 = fall === 'A_INLAND_0_PV' && art === 'umsatz'; // A-N1: 0 % auf 8290/4290 (der Export setzt das Konto je Kontenrahmen, KASSE_ERLOES_0_KONTO)
+  const gr = (s, i, b) => ({ satz: s, brutto_cent: b, ...(konto0 && s === 'keine' ? { konto0: true } : {}) });
   const kanaele = [];
   const barGruppen = saetze.map((s, i) => gr(s, i, rest[i] - karteJe[i])).filter((g) => g.brutto_cent > 0);
   const karteGruppen = saetze.map((s, i) => gr(s, i, karteJe[i])).filter((g) => g.brutto_cent > 0);

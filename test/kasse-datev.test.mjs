@@ -157,12 +157,23 @@ test('Kleinunternehmer (A_KU): Erlöskonto 8192 (SKR04 4184), kein Steuerschlüs
   }
 });
 
-test('Satz 0 % (A_INLAND_0_PV) bucht auf das Erlöskonto ohne Umsatzsteuer 8200 wie die übrigen Belege (DATEV_ERLOESKONTEN), ohne Schlüssel', async () => {
+test('A-N1: Satz 0 % (A_INLAND_0_PV) im Kassenzweig bucht auf 8290 (SKR04 4290) "Erlöse 0 % USt" (12-steuer 3.4), ohne Schlüssel; der Bestand (Beleg ohne Kasse) bleibt auf 8200; Mehrzweck-Konto 8200 bleibt', async () => {
+  for (const [skr, kasse, null0, bestand] of [['SKR03', '1000', '8290', '8200'], ['SKR04', '1600', '4290', '4200']]) {
+    const w = await welt({ skr });
+    ok200(await w.tag({ ...nur19(w.id, '2026-11-02'), umsaetze: [{ steuerfall: 'A_INLAND_0_PV', bar_cent: 50000, unbar_cent: 0 }], gezaehlt_cent: 60000 }));
+    w.fs.setze(P('dokumente/best0'), { typ: 'rechnung_ausgehend', betrag: 10, mwst_satz: 'keine', kategorie: 'Einnahmen steuerfrei', datum: '2026-11-03', bezahlt: true, bezahlt_am: '2026-11-03', rechnungsnr: 'B0', absender: 'Kunde' });
+    const r = await w.exp();
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(kurz(r.zeilen, 'K-THK-2026-0001').map((x) => x.slice(0, 5)), [['500,00', 'S', kasse, null0, '']], skr);
+    assert.deepEqual(kurz(r.zeilen, 'B0').map((x) => x.slice(0, 4)), [['10,00', 'S', skr === 'SKR04' ? '1800' : '1200', bestand]], `${skr}: Bestandsexport unverändert`);
+  }
+  // Storno spiegelt auf dasselbe Konto
   const w = await welt();
   ok200(await w.tag({ ...nur19(w.id, '2026-11-02'), umsaetze: [{ steuerfall: 'A_INLAND_0_PV', bar_cent: 50000, unbar_cent: 0 }], gezaehlt_cent: 60000 }));
-  const r = await w.exp();
-  assert.equal(r.status, 200, r.text);
-  assert.deepEqual(kurz(r.zeilen, 'K-THK-2026-0001').map((x) => x.slice(0, 5)), [['500,00', 'S', '1000', '8200', '']]);
+  ok200(await w.tag({ aktion: 'stornieren', kasse_id: w.id, geschaeftstag: '2026-11-02', grund: 'Fehler beim Erfassen' }));
+  const k = nachKonto((await w.exp()).zeilen);
+  assert.equal(k['8290'], 0);
+  assert.equal(k['8200'], undefined);
 });
 
 // ── 2. Storno ────────────────────────────────────────────────────────────────────────────────────

@@ -111,6 +111,8 @@ const WEITERE = {
     '1800': 'F Privatentnahmen allgemein', '1890': 'F Privateinlagen', '4530': 'Laufende Fahrzeug-Betriebskosten',
     // Kassenbuch P1b-5 (12-steuer-vertiefung 3.4, Kontenrahmen 2026, Bezeichnung wörtlich)
     '1000': 'Kasse', '1360': 'Geldtransit', '8200': 'Erlöse', '8400': 'Erlöse 19 % USt (Automatik)',
+    // DK-FIX (12-steuer-vertiefung 3.4, Bezeichnung laut dortigem Auszug des Kontenrahmens 2026, Konfidenz A; nicht erneut gegen das PDF geprüft)
+    '8290': 'Erlöse 0 % USt', '1590': 'Durchlaufende Posten',
   },
   SKR04: {
     '5923': 'U AV Sonstige Leistungen eines im anderen EU-Land ansässigen Unternehmers 19 % Vorsteuer und 19 % Umsatzsteuer',
@@ -125,6 +127,7 @@ const WEITERE = {
     '6644': 'Nicht abzugsfähige Bewirtungskosten', '6640': 'Bewirtungskosten', '6300': 'Sonstige betriebliche Aufwendungen',
     '2100': 'F Privatentnahmen allgemein', '2180': 'F Privateinlagen', '6530': 'Laufende Fahrzeug-Betriebskosten',
     '1600': 'Kasse', '1460': 'Geldtransit', '4200': 'Erlöse', '4400': 'Erlöse 19 % USt (Automatik)',
+    '4290': 'Erlöse 0 % USt', '1370': 'Durchlaufende Posten',
   },
 };
 for (const skr of ['SKR03', 'SKR04']) {
@@ -135,10 +138,12 @@ for (const skr of ['SKR03', 'SKR04']) {
   pruefe(`${skr}: Kleinunternehmer-Konto 2026 ist AM, das Vorjahreskonto ${KU_KONTO[skr].bis2025} ist im Kontenrahmen 2026 reserviert (nicht in der Tabelle)`, /^U AM /.test(WEITERE[skr][KU_KONTO[skr].ab2026]) && !WEITERE[skr][KU_KONTO[skr].bis2025]);
 }
 // Kassenzweig des Exports (regel/datev-kasse.js): Kassen- und Geldtransitkonto stehen in der Tabelle WEITERE (Kontenrahmen 2026), die Standardwerte sind genau diese Konten
-import { DATEV_KASSE_KONTEN } from './regel/datev-kasse.js';
+import { DATEV_KASSE_KONTEN, KASSE_DURCHLAUF_KONTO, KASSE_ERLOES_0_KONTO, KASSE_MEHRZWECK_KONTO } from './regel/datev-kasse.js';
 for (const skr of ['SKR03', 'SKR04']) {
   const k = DATEV_KASSE_KONTEN[skr];
   pruefe(`${skr}: Kassenkonto ${k.kasse} (Kasse) und Geldtransitkonto ${k.transit} (Geldtransit) laut Kontenrahmen 2026`, WEITERE[skr][k.kasse] === 'Kasse' && WEITERE[skr][k.transit] === 'Geldtransit');
+  pruefe(`${skr}: Konten des Kassenzweigs ${KASSE_DURCHLAUF_KONTO[skr]} (Durchlaufende Posten), ${KASSE_ERLOES_0_KONTO[skr]} (Erlöse 0 % USt), ${KASSE_MEHRZWECK_KONTO[skr]} (Erlöse) stehen in der Tabelle`,
+    WEITERE[skr][KASSE_DURCHLAUF_KONTO[skr]] === 'Durchlaufende Posten' && WEITERE[skr][KASSE_ERLOES_0_KONTO[skr]] === 'Erlöse 0 % USt' && WEITERE[skr][KASSE_MEHRZWECK_KONTO[skr]] === 'Erlöse');
   pruefe(`${skr}: Kassendifferenz (Fehlbetrag) steht auf dem Konto ${app['Kassendifferenz (Fehlbetrag)'][skr]} (Sonstige betriebliche Aufwendungen)`, app['Kassendifferenz (Fehlbetrag)'][skr] === app['Sonstiges'][skr]);
 }
 // Der Export darf die Konten nicht von Hand verdrahten: die Konstanten im Worker stehen in der Tabelle (4654/6644, 1800/1890, 2100/2180, 4900/6300)
