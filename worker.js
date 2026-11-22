@@ -26,7 +26,7 @@ import { rechnungsnrDuplikat, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/dupli
 import { datevMischsatzGruppen, datevKorrekturGruppen, KORREKTUR_BELEG_ARTEN } from './regel/datev-mischsatz.js'; // Branch datev-mischsatz: Belege mit mehreren Steuersätzen je Satz buchen
 import { dekodiereFelder as datevDekodiereFelder } from './regel/firestore.js';
 import { DATEV_KASSE_KONTEN, KASSE_DURCHLAUF_KONTO, KASSE_ERLOES_0_KONTO, KASSE_MEHRZWECK_KONTO, kassenKontoWahl, istKasseTagesbeleg, kasseBelegPlan, kasseBewegungBuchung, kasseBewegungOhneBuchung, kasseTagesPosten, istSumupBarbeleg, sumupKasseWahl } from './regel/datev-kasse.js'; // Kassenbuch P1b-5: DATEV-Kassenzweig
-import { datevBelegfeldBereinigen, datevFeldGequotet, datevNummerPruefen, datevKontoVierstellig, datevGeldkontoImBereich, datevKuKonto, RC_EINGANG_KONTEN, RC_AUSGANG_KONTEN, datevRcLage, datevUstId, GWG_KONTEN, AFA_KATEGORIE, GWG_KATEGORIE, FA_EST_ART, UST_KATEGORIEN } from './regel/datev-export-regeln.js'; // DATEV-Gesamtcheck 21.11.2026: Belegfeld 1, § 13b, GWG, Konten
+import { datevBelegfeldBereinigen, datevFeldGequotet, datevNummerPruefen, datevKontoVierstellig, datevGeldkontoImBereich, datevKuKonto, RC_EINGANG_KONTEN, RC_AUSGANG_KONTEN, datevRcLage, datevUstId, GWG_KONTEN, AFA_KATEGORIE, GWG_KATEGORIE, FA_EST_ART, UST_KATEGORIEN, datevWarnHeader } from './regel/datev-export-regeln.js'; // DATEV-Gesamtcheck 21.11.2026: Belegfeld 1, § 13b, GWG, Konten
 import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen, kiKassenberichtText } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4); Kassen-P0: kiKassenberichtText
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
@@ -5690,7 +5690,7 @@ async function handleDatevExport(body, env, cors = {}) {
         'X-Datev-Skipped-Unpaid-Count': String(skippedUnpaid),
         // encodeURIComponent, da HTTP-Header-Werte kein Latin1-Freitext mit Umlauten zuverlässig
         // transportieren — Frontend deodiert mit decodeURIComponent() wieder.
-        ...(datevWarning ? { 'X-Datev-Warning': encodeURIComponent(datevWohlgeformt(datevWarning)) } : {})
+        ...(datevWarning ? { 'X-Datev-Warning': datevWarnHeader(datevWohlgeformt(datevWarning)).wert } : {}) // A-N2 (d): auf 8.000 Zeichen kodiert gekürzt (Cloudflare-Headerlimit)
       }
     });
 

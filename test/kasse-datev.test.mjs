@@ -9,6 +9,7 @@ import { regelKasse } from '../regel/kasse.js';
 import { kassenAusgabeBeleg } from '../regel/kasse-ausgabe.js';
 import { AGB_MINDESTFASSUNG_KASSE } from '../regel/gemeinsam.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
+import { datevWarnHeader, WARN_HEADER_MAX } from '../regel/datev-export-regeln.js';
 import { kasseBelegPlan, kasseBewegungBuchung, kassenKontoWahl, DATEV_KASSE_KONTEN, istSumupBarbeleg, sumupKasseWahl, kasseTagesPosten } from '../regel/datev-kasse.js';
 
 const UID = 'kassenDatevUid000000000001';
@@ -568,6 +569,31 @@ test('A-N2 (c): datev_konto der Kasse: vierstellig wird angenommen, 3, 5 und 8 S
   }
   assert.equal((await w.kasse({ aktion: 'aendern', kasse_id: w.id, datev_konto: '1020' })).status, 200);
   assert.equal(w.fs.lies(P(`kassen/${w.id}`)).datev_konto, '1020');
+});
+
+// A-N2 (d): Länge des Warn-Headers (encodeURIComponent verdreifacht Leerzeichen und Umlaute; Cloudflare lehnt Header über etwa 16 KB ab)
+test('A-N2 (d): datevWarnHeader kürzt auf ganze Sätze innerhalb der Grenze, mit Hinweis; kurze Texte bleiben unverändert; Emoji an der Schnittstelle und ein überlanger erster Satz bleiben gültig', () => {
+  const kurzText = 'Kassenbuch: Im Stapel stehen die Tageseinnahmen. Bitte prüfen.';
+  assert.deepEqual(datevWarnHeader(kurzText), { wert: encodeURIComponent(kurzText), gekuerzt: false, saetze: 2, behalten: 2 });
+  // 60 Warnungen mit Umlauten (je rund 250 Zeichen): ungekürzt rund 19 KB kodiert
+  const viele = Array.from({ length: 60 }, (_, i) => `${i + 1} Beleg(e) aus dem Kassenbuch stehen NICHT im Stapel (Grund in Klammern): K-THK-2026-${String(i).padStart(4, '0')} (storno_summe), für Größe und Prüfung äußerst wichtig 😀. Bitte nenne sie deinem Steuerberater, er bucht sie von Hand.`).join(' ');
+  assert.ok(encodeURIComponent(viele).length > 16000, 'ungekürzt über der üblichen Headergrenze');
+  const h = datevWarnHeader(viele);
+  assert.equal(h.gekuerzt, true);
+  assert.ok(h.wert.length <= WARN_HEADER_MAX, `Länge ${h.wert.length}`);
+  assert.ok(h.behalten > 5 && h.behalten < h.saetze);
+  const text = decodeURIComponent(h.wert);
+  assert.match(text, /^1 Beleg\(e\) aus dem Kassenbuch/);
+  assert.match(text, new RegExp(`\\(${h.saetze - h.behalten} weitere Hinweise wegen der Länge gekürzt`));
+  assert.doesNotMatch(text, /\uFFFD/, 'kein zerschnittenes Zeichen');
+  assert.doesNotThrow(() => new Headers({ 'X-Datev-Warning': h.wert }), 'gültiger Header-Wert (nur ASCII)');
+  // erster Satz allein zu lang: nach Zeichen gekürzt, trotzdem innerhalb der Grenze und dekodierbar
+  const riesig = datevWarnHeader('Ä'.repeat(9000) + ' 😀 Ende. Zweiter Satz.');
+  assert.ok(riesig.wert.length <= WARN_HEADER_MAX);
+  assert.doesNotThrow(() => decodeURIComponent(riesig.wert));
+  assert.equal(riesig.gekuerzt, true);
+  // einzelnes Surrogat am Eingang wird ersetzt (kein URIError)
+  assert.doesNotThrow(() => datevWarnHeader('Text \uD83D ohne Paar.'));
 });
 
 // ── 6. Bestandsnutzer unverändert, Jahr, Hinweis ─────────────────────────────────────────────────
