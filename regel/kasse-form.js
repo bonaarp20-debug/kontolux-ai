@@ -278,8 +278,9 @@ export function pruefeKasse(body, aktion, { heute }) {
     const bestandIn = body.bestand_in_kasse_id === undefined ? null : body.bestand_in_kasse_id;
     if (bestandIn !== null && !(typeof bestandIn === 'string' && KASSE_ID_MUSTER.test(bestandIn))) return fehl('bestand_in_kasse_id');
     if (bestandIn !== null && body.kassenbuch !== false) return fehl('bestand_in_kasse_id');
+    // DK-FIX (A-N2 c): vierstellig wie die Sachkontenlänge im DATEV-Kopf und wie der Export (datevKontoVierstellig); 5 bis 8 Stellen nahm der Export nie an (Rückfall mit Warnung)
     const konto = body.datev_konto === undefined ? null : body.datev_konto;
-    if (konto !== null && !(typeof konto === 'string' && /^\d{4,8}$/.test(konto))) return fehl('datev_konto');
+    if (konto !== null && !(typeof konto === 'string' && /^\d{4}$/.test(konto))) return fehl('datev_konto');
     return ok({
       bezeichnung: body.bezeichnung.trim(), kuerzel: body.kuerzel, art: body.art, grundaufzeichnung: body.grundaufzeichnung, datenquelle: body.datenquelle === undefined ? 'manuell' : body.datenquelle,
       anfangsbestand_cent: body.anfangsbestand_cent, anfangsbestand_am: body.anfangsbestand_am, anfangsbestand_herkunft: body.anfangsbestand_herkunft,
@@ -293,7 +294,7 @@ export function pruefeKasse(body, aktion, { heute }) {
     if (body.bezeichnung !== undefined) { if (!textOk(body.bezeichnung, 1, 60)) return fehl('bezeichnung'); w.felder.bezeichnung = body.bezeichnung.trim(); }
     if (body.ruhetage_wochentage !== undefined) { const r = wochentagePruefen(body.ruhetage_wochentage); if (r === null) return fehl('ruhetage_wochentage'); w.felder.ruhetage_wochentage = r; }
     if (body.datev_konto !== undefined) {
-      if (body.datev_konto !== null && !(typeof body.datev_konto === 'string' && /^\d{4,8}$/.test(body.datev_konto))) return fehl('datev_konto');
+      if (body.datev_konto !== null && !(typeof body.datev_konto === 'string' && /^\d{4}$/.test(body.datev_konto))) return fehl('datev_konto');
       w.felder.datev_konto = body.datev_konto;
     }
     if (body.karte_ueber_integration !== undefined) { if (!KARTE_INTEGRATIONEN.includes(body.karte_ueber_integration)) return fehl('karte_ueber_integration'); w.felder.karte_ueber_integration = body.karte_ueber_integration; }

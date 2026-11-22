@@ -58,6 +58,14 @@ function konto(g, kv, uid, { belege = 5, chats = 2, dateien = 3, uploads = 2, ar
   g.setze(`uploadlimit/${uid}_2036-12`, { anzahl: 9 });
   g.setze(`kassezbonlimit/${uid}_2037-01-05`, { anzahl: 4 }); // Kassenbuch P1c: Tageszähler Z-Bon lesen (heute und vorgestern)
   g.setze(`kassezbonlimit/${uid}_2037-01-03`, { anzahl: 1 });
+  // A-M3 (Gegenlesung o-p1c): alte Zähler früherer Tage und Monate tragen die UID in der ID und müssen mit der Kontolöschung weg (Art. 17 DSGVO)
+  g.setze(`kassezbonlimit/${uid}_2030-03-14`, { anzahl: 5 });
+  g.setze(`kassezbonlimit/${uid}_2036-11-30`, { anzahl: 2 });
+  g.setze(`uploadlimit/${uid}_2031-05`, { anzahl: 50 });
+  g.setze(`uploadlimit/${uid}_2025-02`, { anzahl: 7 });
+  // fremde Zähler (andere UID, auch mit gleichem Anfang) bleiben
+  g.setze(`kassezbonlimit/${uid}X_2030-03-14`, { anzahl: 1 });
+  g.setze(`uploadlimit/${uid}X_2031-05`, { anzahl: 1 });
   g.setze(`feedback/${uid}_1`, { userId: uid, gut: 'x', datum: '2036-06-01T00:00:00.000Z' });
   g.nutzerAnlegen({ localId: uid, email: `${uid.toLowerCase()}@test.invalid`, emailVerified: true, disabled: !!archiviert, createdAt: String(Date.parse('2026-01-01')) });
   if (archiviert) {
@@ -223,6 +231,8 @@ test('Archiv-Ende an: wiederaufnehmbar unter Budget, vollständig, idempotent; l
   assert.equal(g.lies('uploadlimit/archivA0000000001_2036-12'), null);
   assert.equal(g.lies('kassezbonlimit/archivA0000000001_2037-01-05'), null, 'Kassenbuch P1c: Tageszähler Z-Bon lesen mit gelöscht');
   assert.equal(g.lies('kassezbonlimit/archivA0000000001_2037-01-03'), null);
+  for (const p of ['kassezbonlimit/archivA0000000001_2030-03-14', 'kassezbonlimit/archivA0000000001_2036-11-30', 'uploadlimit/archivA0000000001_2031-05', 'uploadlimit/archivA0000000001_2025-02']) assert.equal(g.lies(p), null, `A-M3: alter Zähler ${p} mit gelöscht`);
+  assert.ok(g.lies('kassezbonlimit/archivA0000000001X_2030-03-14') && g.lies('uploadlimit/archivA0000000001X_2031-05'), 'A-M3: Zähler anderer UIDs bleiben');
   assert.equal(g.lies('feedback/archivA0000000001_1'), null);
   assert.equal(g.konten.has('archivA0000000001'), false, 'Login gelöscht');
   assert.equal(kvAbo._m.size, 0, 'Erinnerungs-Verteiler ausgetragen');
@@ -341,6 +351,8 @@ test('Nachlauf Kontolöschung an (A5, B2, B5, B8): nur Zähler, Feedback, Kalend
   assert.equal(g.lies('nachrichtenlimit/archivA0000000001'), null);
   assert.equal(g.lies('uploadlimit/archivA0000000001_2037-01'), null, 'NL-F: Nachlauf löscht auch uploadlimit');
   assert.equal(g.lies('kassezbonlimit/archivA0000000001_2037-01-05'), null, 'Kassenbuch P1c: Nachlauf löscht auch den Tageszähler Z-Bon lesen');
+  for (const p of ['kassezbonlimit/archivA0000000001_2030-03-14', 'kassezbonlimit/archivA0000000001_2036-11-30', 'uploadlimit/archivA0000000001_2031-05', 'uploadlimit/archivA0000000001_2025-02']) assert.equal(g.lies(p), null, `A-M3: Nachlauf löscht alten Zähler ${p}`);
+  assert.ok(g.lies('kassezbonlimit/archivA0000000001X_2030-03-14') && g.lies('uploadlimit/archivA0000000001X_2031-05'), 'A-M3: Zähler anderer UIDs bleiben');
   assert.equal(g.lies('feedback/archivA0000000001_1'), null);
   assert.ok(g.lies('feedback/fremd_1'));
   assert.equal(g.lies('users/archivA0000000001/profil/kalender'), null);

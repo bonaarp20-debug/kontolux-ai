@@ -9,7 +9,8 @@ import { regelKasse } from '../regel/kasse.js';
 import { kassenAusgabeBeleg } from '../regel/kasse-ausgabe.js';
 import { AGB_MINDESTFASSUNG_KASSE } from '../regel/gemeinsam.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
-import { kasseBelegPlan, kasseBewegungBuchung, kassenKontoWahl, DATEV_KASSE_KONTEN } from '../regel/datev-kasse.js';
+import { datevWarnHeader, WARN_HEADER_MAX } from '../regel/datev-export-regeln.js';
+import { kasseBelegPlan, kasseBewegungBuchung, kassenKontoWahl, DATEV_KASSE_KONTEN, istSumupBarbeleg, sumupKasseWahl, kasseTagesPosten, kasseGeldtransitGegenbein } from '../regel/datev-kasse.js';
 
 const UID = 'kassenDatevUid000000000001';
 const HEUTE = '2026-11-20';
@@ -79,7 +80,7 @@ async function welt({ skr = 'SKR03', profil = REGEL, settings = {}, kasseExtra =
   };
   const a = await ruf('/kasse', { ...KASSE_ANLEGEN, ...kasseExtra });
   assert.equal(a.status, 200, JSON.stringify(a.json));
-  return { fs, id: a.json.kasse_id, tag: (b) => ruf('/kassentag', b), bew: (b) => ruf('/kassenbewegung', b), exp: (jahr) => exportiere(fs, jahr) };
+  return { fs, id: a.json.kasse_id, kasse: (b) => ruf('/kasse', b), tag: (b) => ruf('/kassentag', b), bew: (b) => ruf('/kassenbewegung', b), exp: (jahr) => exportiere(fs, jahr) };
 }
 const abschluss = (kasseId, tag, extra = {}) => ({
   aktion: 'abschliessen', kasse_id: kasseId, geschaeftstag: tag, z_nummern: ['Z-17'],
@@ -141,7 +142,8 @@ test('Profilfelder datev_kassenkonto und datev_geldtransitkonto, DATEV-Konto der
   assert.deepEqual(kurz(r3.zeilen, 'K-THK-2026-0001').map((x) => x.slice(0, 4)), [['500,00', 'S', '1000', '8400'], ['300,00', 'S', '1360', '8400']]);
   assert.match(r3.warnung, /Kassenkonto in den Einstellungen ist keine vierstellige Kontonummer/);
   assert.match(r3.warnung, /Geldtransitkonto in den Einstellungen ist keine vierstellige Kontonummer/);
-  const w4 = await welt({ kasseExtra: { datev_konto: '1000123' } });
+  const w4 = await welt();
+  w4.fs.setze(P(`kassen/${w4.id}`), { ...w4.fs.lies(P(`kassen/${w4.id}`)), datev_konto: '1000123' }); // Altbestand: die Eingabe lässt nur noch vier Stellen zu (A-N2 c), der Export fängt andere Werte weiter ab
   ok200(await w4.tag(nur19(w4.id, '2026-11-02')));
   const r4 = await w4.exp();
   assert.equal(kurz(r4.zeilen, 'K-THK-2026-0001')[0][2], '1000');
@@ -157,12 +159,23 @@ test('Kleinunternehmer (A_KU): Erlöskonto 8192 (SKR04 4184), kein Steuerschlüs
   }
 });
 
-test('Satz 0 % (A_INLAND_0_PV) bucht auf das Erlöskonto ohne Umsatzsteuer 8200 wie die übrigen Belege (DATEV_ERLOESKONTEN), ohne Schlüssel', async () => {
+test('A-N1: Satz 0 % (A_INLAND_0_PV) im Kassenzweig bucht auf 8290 (SKR04 4290) "Erlöse 0 % USt" (12-steuer 3.4), ohne Schlüssel; der Bestand (Beleg ohne Kasse) bleibt auf 8200; Mehrzweck-Konto 8200 bleibt', async () => {
+  for (const [skr, kasse, null0, bestand] of [['SKR03', '1000', '8290', '8200'], ['SKR04', '1600', '4290', '4200']]) {
+    const w = await welt({ skr });
+    ok200(await w.tag({ ...nur19(w.id, '2026-11-02'), umsaetze: [{ steuerfall: 'A_INLAND_0_PV', bar_cent: 50000, unbar_cent: 0 }], gezaehlt_cent: 60000 }));
+    w.fs.setze(P('dokumente/best0'), { typ: 'rechnung_ausgehend', betrag: 10, mwst_satz: 'keine', kategorie: 'Einnahmen steuerfrei', datum: '2026-11-03', bezahlt: true, bezahlt_am: '2026-11-03', rechnungsnr: 'B0', absender: 'Kunde' });
+    const r = await w.exp();
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(kurz(r.zeilen, 'K-THK-2026-0001').map((x) => x.slice(0, 5)), [['500,00', 'S', kasse, null0, '']], skr);
+    assert.deepEqual(kurz(r.zeilen, 'B0').map((x) => x.slice(0, 4)), [['10,00', 'S', skr === 'SKR04' ? '1800' : '1200', bestand]], `${skr}: Bestandsexport unverändert`);
+  }
+  // Storno spiegelt auf dasselbe Konto
   const w = await welt();
   ok200(await w.tag({ ...nur19(w.id, '2026-11-02'), umsaetze: [{ steuerfall: 'A_INLAND_0_PV', bar_cent: 50000, unbar_cent: 0 }], gezaehlt_cent: 60000 }));
-  const r = await w.exp();
-  assert.equal(r.status, 200, r.text);
-  assert.deepEqual(kurz(r.zeilen, 'K-THK-2026-0001').map((x) => x.slice(0, 5)), [['500,00', 'S', '1000', '8200', '']]);
+  ok200(await w.tag({ aktion: 'stornieren', kasse_id: w.id, geschaeftstag: '2026-11-02', grund: 'Fehler beim Erfassen' }));
+  const k = nachKonto((await w.exp()).zeilen);
+  assert.equal(k['8290'], 0);
+  assert.equal(k['8200'], undefined);
 });
 
 // ── 2. Storno ────────────────────────────────────────────────────────────────────────────────────
@@ -231,14 +244,20 @@ test('Storno eines Tages mit Differenz: auch die Differenzbelege werden gegengeb
 // ── 4. Privatvorgänge, Geldtransit, Ausgabe ──────────────────────────────────────────────────────
 test('Privatvorgang aus der Kasse (zahlweg kasse) bucht gegen das Kassenkonto; Privatvorgänge ohne zahlweg bleiben gegen die Bank; Anfangsbestand aus Privateinlage ebenfalls gegen die Kasse', async () => {
   const w = await welt({ kasseExtra: { anfangsbestand_herkunft: 'einlage_privat' } });
-  ok200(await w.bew(bewegung(w.id, '2026-11-02', 'entnahme', 2000, { eigenbeleg_pfad: eigen(w.id, '2026-11-02') })));
-  ok200(await w.bew(bewegung(w.id, '2026-11-02', 'einlage', 5050, { eigenbeleg_pfad: eigen(w.id, '2026-11-02', 'e2.pdf') })));
+  const bwEnt = ok200(await w.bew(bewegung(w.id, '2026-11-02', 'entnahme', 2000, { eigenbeleg_pfad: eigen(w.id, '2026-11-02') })));
+  const bwEin = ok200(await w.bew(bewegung(w.id, '2026-11-02', 'einlage', 5050, { eigenbeleg_pfad: eigen(w.id, '2026-11-02', 'e2.pdf') })));
   w.fs.setze(P('privatvorgaenge/alt1'), { art: 'entnahme', datum: '2026-11-03', betrag: 30, notiz: 'Bestand', storniert: false });
   const r = await w.exp();
   const privat = r.zeilen.filter((x) => /Privat/.test(x[13]));
   const nach = (text) => privat.filter((x) => x[13].includes(text)).map((x) => [x[0], x[1], x[6], x[7]]).sort();
   assert.deepEqual(nach('Privatentnahme'), [['20,00', 'H', '1000', '1800'], ['30,00', 'H', '1200', '1800']].sort());
   assert.deepEqual(nach('Privateinlage'), [['100,00', 'S', '1000', '1890'], ['50,50', 'S', '1000', '1890']].sort());
+  // A-N2: Belegfeld 1 = Kassennummer der Bewegung (nicht PRIV-JJJJMMTT); der Altvorgang ohne Bewegung und der Anfangsbestand ohne Bewegung behalten PRIV-
+  const feld = (text, betrag) => privat.filter((x) => x[13].includes(text) && x[0] === betrag).map((x) => ohne(x[10]));
+  assert.deepEqual(feld('Privatentnahme', '20,00'), [bwEnt.kassennummer]);
+  assert.deepEqual(feld('Privateinlage', '50,50'), [bwEin.kassennummer]);
+  assert.match(bwEnt.kassennummer, /^K-THK-2026-/);
+  assert.deepEqual(feld('Privatentnahme', '30,00'), ['PRIV-20261103']);
 });
 
 test('Storno einer Entnahme: der stornierte Privatvorgang steht nicht im Stapel (bisheriges Verhalten, beide ergeben 0)', async () => {
@@ -266,10 +285,10 @@ test('Geldtransit Bank: _ein = Kasse Soll an Geldtransit, _aus = Kasse Haben; St
   assert.equal(nachKonto(g)['1360'], 4000, 'Original und Storno heben sich auf, übrig bleibt die Auszahlung (Geldtransit Soll)');
 });
 
-test('Geldtransit zwischen Kassen und Trinkgeld-Auszahlung haben keine Buchung (Gegenseite fehlt): Warnung mit Nummer statt stiller Lücke', async () => {
+test('Geldtransit zwischen Kassen (_ein ohne passendes _aus) hat keine Buchung (Gegenseite fehlt): Warnung mit Nummer statt stiller Lücke', async () => {
   const w = await welt();
   ok200(await w.tag(nur19(w.id, '2026-11-02')));
-  w.fs.setze(P(`kassenbewegungen/${w.id}_2026-11-03_001`), { kasse_id: w.id, geschaeftstag: '2026-11-03', art: 'trinkgeld_ma_auszahlung', betrag_cent: 500, text: 'TG', kassennummer: 'K-THK-2026-0900' });
+  w.fs.setze(P(`kassenbewegungen/${w.id}_2026-11-03_001`), { kasse_id: w.id, geschaeftstag: '2026-11-03', art: 'geldtransit_kasse_ein', betrag_cent: 500, text: 'TG', kassennummer: 'K-THK-2026-0900', gegenkasse_id: 'andereKasse000000000000001' });
   const r = await w.exp();
   assert.match(r.warnung, /1 Kassenbewegung\(en\).*K-THK-2026-0900/);
   assert.equal(r.zeilen.some((x) => ohne(x[10]) === 'K-THK-2026-0900'), false);
@@ -320,15 +339,312 @@ test('Mehrzweck-Gutschein: der Verkauf steht auf Erlöse 8200 (SKR04 4200) gegen
   const gm = r.zeilen.filter((x) => /Mehrzweck/.test(x[13]));
   assert.deepEqual(gm.map((x) => [x[0], x[1], x[6], x[7], x[8]]).sort(), [['20,00', 'S', '1360', '8200', ''], ['50,00', 'S', '1000', '8200', '']].sort());
   assert.match(r.warnung, /Mehrzweck-Gutscheinen.*8200.*Steuerberater/);
+});
+
+// A-H1 (Gegenlesung o-p1c): eine Einlösung von Mehrzweck-Gutscheinen nahm den ganzen Tagesbeleg aus dem Stapel. Jetzt stehen Bar, Karte, Erlöse und USt voll im Stapel,
+// die Einlösung als Umbuchung 8200 an das Erlöskonto des Satzes (12-steuer 3.4 Nr. 3), mit Warnung.
+test('A-H1: Einlösung eines Mehrzweck-Gutscheins bei einem Satz: Bar, Karte und Erlöse voll gebucht, die Einlösung als Umbuchung 8200 an 8400, Soll gleich Haben, Warnung', async () => {
   const e = await welt();
   ok200(await e.tag({ ...nur19(e.id, '2026-11-02'), umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 40000, unbar_cent: 30000, mehrzweck_eingeloest_cent: 10000 }], gezaehlt_cent: 50000 }));
-  const re = await e.exp();
-  assert.equal(re.status, 404, 'kein anderer buchbarer Beleg');
-  assert.match(re.text, /K-THK-2026-0001 \(mehrzweck_einloesung\)/, 'die Antwort nennt den nicht gebuchten Kassenbeleg');
-  ok200(await e.tag({ ...nur19(e.id, '2026-11-03'), gezaehlt_cent: 50000 + 50000 }));
-  const re2 = await e.exp();
-  assert.equal(re2.zeilen.some((x) => ohne(x[10]) === 'K-THK-2026-0001'), false);
-  assert.match(re2.warnung, /K-THK-2026-0001 \(mehrzweck_einloesung\)/);
+  const r = await e.exp();
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(kurz(r.zeilen, 'K-THK-2026-0001').map((x) => x.slice(0, 5)).sort(), [['100,00', 'S', '8200', '8400', ''], ['300,00', 'S', '1360', '8400', ''], ['400,00', 'S', '1000', '8400', '']].sort());
+  const k = nachKonto(r.zeilen);
+  assert.equal(k['8400'], -80000, 'Erlöse 800,00 brutto (Bar + Karte + Gutschein)');
+  assert.equal(k['8200'], 10000);
+  assert.equal(Object.values(k).reduce((a, b) => a + b, 0), 0, 'Soll gleich Haben');
+  assert.match(r.warnung, /1 Tagesabschluss\/-abschlüsse mit Einlösung von Mehrzweck-Gutscheinen \(zusammen 100,00 €\): K-THK-2026-0001.*8200.*Steuerberater/);
+  assert.doesNotMatch(r.warnung, /mehrzweck_einloesung/);
+  // SKR04: 4200 an 4400
+  const e4 = await welt({ skr: 'SKR04' });
+  ok200(await e4.tag({ ...nur19(e4.id, '2026-11-02'), umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 40000, unbar_cent: 30000, mehrzweck_eingeloest_cent: 10000 }], gezaehlt_cent: 50000 }));
+  assert.deepEqual(kurz((await e4.exp()).zeilen, 'K-THK-2026-0001').map((x) => x.slice(0, 4)).sort(), [['100,00', 'S', '4200', '4400'], ['300,00', 'S', '1460', '4400'], ['400,00', 'S', '1600', '4400']].sort());
+});
+
+test('A-H1 (Szenario S5): 400 bar, 300 Karte, 10 Gutschein (19 %) und 200 bar (7 %): die Einlösung steht nur auf 19 % (Satz aus der Fassung), alles auf den Cent, Summe der Zeilen = Brutto', async () => {
+  const w = await welt();
+  ok200(await w.tag(abschluss(w.id, '2026-11-02', {
+    umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 40000, unbar_cent: 30000, mehrzweck_eingeloest_cent: 1000 }, { steuerfall: 'A_INLAND_7', bar_cent: 20000, unbar_cent: 0 }], gezaehlt_cent: 10000 + 60000 })));
+  const r = await w.exp();
+  assert.equal(r.status, 200, r.text);
+  // 19 %: 710,00 brutto, 7 %: 200,00 brutto; Karte 300,00 anteilig auf den Rest (700,00 und 200,00): 30000 * 70000 / 90000 = 23333,33 -> 233,33 / 66,67
+  assert.deepEqual(kurz(r.zeilen, 'K-THK-2026-0001').map((x) => x.slice(0, 5)).sort(), [
+    ['10,00', 'S', '8200', '8400', ''], ['233,33', 'S', '1360', '8400', ''], ['66,67', 'S', '1360', '8300', ''], ['466,67', 'S', '1000', '8400', ''], ['133,33', 'S', '1000', '8300', ''],
+  ].sort());
+  const k = nachKonto(r.zeilen);
+  assert.equal(k['1000'], 60000, 'Bar 600,00');
+  assert.equal(k['1360'], 30000, 'Karte 300,00');
+  assert.equal(k['8200'], 1000);
+  assert.equal(k['8400'], -71000, '19 %: 710,00');
+  assert.equal(k['8300'], -20000, '7 %: 200,00, ohne Einlösung');
+  assert.equal(Object.values(k).reduce((a, b) => a + b, 0), 0);
+  assert.equal(r.zeilen.filter((x) => ohne(x[10]) === 'K-THK-2026-0001').reduce((a, x) => a + cent(x[0]), 0), 91000, 'Summe der Zeilen = Brutto des Belegs');
+});
+
+test('A-H1: Einlösung über zwei Sätze (je ein Teil): die Umbuchung folgt den Sätzen der Fassung (8400 und 8300), ohne Fassung bleibt der Beleg wie bisher mit Grund aus dem Stapel (nie raten)', async () => {
+  const w = await welt();
+  ok200(await w.tag(abschluss(w.id, '2026-11-02', {
+    umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 10000, unbar_cent: 0, mehrzweck_eingeloest_cent: 2000 }, { steuerfall: 'A_INLAND_7', bar_cent: 5000, unbar_cent: 0, mehrzweck_eingeloest_cent: 1000 }], gezaehlt_cent: 10000 + 15000 })));
+  const r = await w.exp();
+  const gu = r.zeilen.filter((x) => x[6] === '8200').map((x) => [x[0], x[1], x[7]]).sort();
+  assert.deepEqual(gu, [['10,00', 'S', '8300'], ['20,00', 'S', '8400']].sort());
+  assert.equal(nachKonto(r.zeilen)['1000'], 15000);
+  // Pure Funktion ohne Fassung: Grund statt Raten
+  const d = { quelle: 'kasse', kassentag_id: 't1', kassen_fassung: 1, kassennummer: 'K-X-2026-0001', bezahlt: true, bezahlt_am: '2026-05-10', betrag: 150,
+    steuer: { beleg_art: 'tagesabschluss', steuerfall: 'A_INLAND_19', positionen: [{ netto_cent: 8403, ust_cent: 1597, satz_bp: 1900 }, { netto_cent: 4673, ust_cent: 327, satz_bp: 700 }], summe: { brutto_cent: 15000 },
+      zahlungen: [{ kanal: 'bar', betrag_cent: 12000 }, { kanal: 'gutschein_mehrzweck', betrag_cent: 3000 }] } };
+  assert.equal(kasseBelegPlan(d).grund, 'mehrzweck_fassung_fehlt');
+  const fassung = { umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 8000, unbar_cent: 0, mehrzweck_eingeloest_cent: 2000 }, { steuerfall: 'A_INLAND_7', bar_cent: 4000, unbar_cent: 0, mehrzweck_eingeloest_cent: 1000 }] };
+  const p = kasseBelegPlan(d, null, new Map([['t1|1', fassung]]));
+  assert.deepEqual(p.kanaele.map((k) => [k.kanal, k.gruppen.map((g) => [g.satz, g.brutto_cent])]), [['bar', [['19', 8000], ['7', 4000]]], ['gutschein', [['19', 2000], ['7', 1000]]]]);
+  // Fassung passt nicht zur Zahlung (Summe der Einlösungen weicht ab): nie raten
+  const falsch = { umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 8000, unbar_cent: 0, mehrzweck_eingeloest_cent: 2500 }, { steuerfall: 'A_INLAND_7', bar_cent: 4000, unbar_cent: 0, mehrzweck_eingeloest_cent: 1000 }] };
+  assert.equal(kasseBelegPlan(d, null, new Map([['t1|1', falsch]])).grund, 'mehrzweck_summe');
+});
+
+test('A-H1: Storno eines Tages mit Einlösung spiegelt auch die Einlösung (Summe je Konto 0)', async () => {
+  const w = await welt();
+  ok200(await w.tag({ ...nur19(w.id, '2026-11-02'), umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 40000, unbar_cent: 30000, mehrzweck_eingeloest_cent: 10000 }], gezaehlt_cent: 50000 }));
+  ok200(await w.tag({ aktion: 'stornieren', kasse_id: w.id, geschaeftstag: '2026-11-02', grund: 'Fehler beim Erfassen' }));
+  const r = await w.exp();
+  assert.equal(r.status, 200, r.text);
+  const k = nachKonto(r.zeilen);
+  for (const [konto, v] of Object.entries(k)) assert.equal(v, 0, `Konto ${konto}`);
+  assert.ok(r.zeilen.filter((x) => x[6] === '8200').length === 2, 'Einlösung und Gegenbuchung');
+  assert.match(r.warnung, /1 Tagesabschluss\/-abschlüsse mit Einlösung von Mehrzweck-Gutscheinen \(zusammen 100,00 €\)/, 'der Storno zählt nicht als weitere Einlösung');
+});
+
+// A-H2 (Gegenlesung o-p1c): bei einer Kasse mit sumup_integration liefen die SumUp-Barbelege gegen die Bank, die DATEV-Kasse hatte keinen Barumsatz, ohne Warnung.
+const sumupBeleg = (id, art, betrag, extra = {}) => ({ typ: 'rechnung_ausgehend', betrag, absender: 'SumUp-Kunde', rechnungsnr: id, bezahlt: true, bezahlt_am: '2026-11-03', datum: '2026-11-03', mwst_satz: '19', kategorie: 'Einnahmen 19%',
+  quelle: 'sumup_webhook', name: `SumUp-${art} 11/2026`, buchungstext: `SumUp-${art} ${id}`, ...extra });
+test('A-H2: SumUp-Barzahlung einer Kasse mit sumup_integration bucht gegen das Kassenkonto, SumUp-Kartenzahlung bleibt auf der Bank; Belegfeld 1 = Transaktionscode; Soll gleich Haben', async () => {
+  const w = await welt({ kasseExtra: { datenquelle: 'sumup_integration' } });
+  w.fs.setze(P('dokumente/s1'), sumupBeleg('TCBAR1', 'Barzahlung', 119));
+  w.fs.setze(P('dokumente/s2'), sumupBeleg('TCKARTE1', 'Kartenzahlung', 59.5));
+  const r = await w.exp();
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(kurz(r.zeilen, 'TCBAR1').map((x) => x.slice(0, 4)), [['119,00', 'S', '1000', '8400']]);
+  assert.deepEqual(kurz(r.zeilen, 'TCKARTE1').map((x) => x.slice(0, 4)), [['59,50', 'S', '1200', '8400']]);
+  assert.match(r.warnung, /1 SumUp-Barzahlung\(en\) stehen auf dem Kassenkonto der SumUp-Kasse statt auf der Bank/);
+  assert.match(r.warnung, /Kassenbuch:/, 'die Kassenhinweise gelten auch ohne Tagesabschluss-Beleg');
+  // eigenes DATEV-Konto der Kasse geht vor dem Profil
+  const w2 = await welt({ kasseExtra: { datenquelle: 'sumup_integration', datev_konto: '1010' } });
+  w2.fs.setze(P('dokumente/s1'), sumupBeleg('TCBAR1', 'Barzahlung', 119));
+  assert.deepEqual(kurz((await w2.exp()).zeilen, 'TCBAR1').map((x) => x.slice(0, 4)), [['119,00', 'S', '1010', '8400']]);
+});
+
+test('A-H2: ohne SumUp-Kasse (manuelle Kasse oder kein Kassenbuch) bleibt die SumUp-Barzahlung auf der Bank; bei mehr als einer SumUp-Kasse bleibt sie auf der Bank mit Warnung', async () => {
+  const w = await welt();
+  w.fs.setze(P('dokumente/s1'), sumupBeleg('TCBAR1', 'Barzahlung', 119));
+  assert.deepEqual(kurz((await w.exp()).zeilen, 'TCBAR1').map((x) => x.slice(0, 4)), [['119,00', 'S', '1200', '8400']]);
+  const m = await welt({ kasseExtra: { datenquelle: 'sumup_integration' } });
+  const zweite = await m.fs.pfade(P('kassen/')).map((p) => p)[0];
+  const alt = m.fs.lies(zweite);
+  m.fs.setze(P('kassen/zweiteSumupKasse0000000000001'), { ...alt, bezeichnung: 'Zweite', kuerzel: 'ZW2' });
+  m.fs.setze(P('dokumente/s1'), sumupBeleg('TCBAR1', 'Barzahlung', 119));
+  const r = await m.exp();
+  assert.deepEqual(kurz(r.zeilen, 'TCBAR1').map((x) => x.slice(0, 4)), [['119,00', 'S', '1200', '8400']]);
+  assert.match(r.warnung, /1 SumUp-Barzahlung\(en\) konnten keiner Kasse eindeutig zugeordnet werden/);
+});
+
+test('istSumupBarbeleg und sumupKasseWahl (rein): nur Einnahme-Barbelege der Integration, Kasse gültig ab datenquelle_ab', () => {
+  const b = (x = {}) => ({ quelle: 'sumup_webhook', typ: 'rechnung_ausgehend', buchungstext: 'SumUp-Barzahlung TC1', ...x });
+  assert.equal(istSumupBarbeleg(b()), true);
+  assert.equal(istSumupBarbeleg(b({ buchungstext: 'SumUp-Kartenzahlung TC1' })), false);
+  assert.equal(istSumupBarbeleg(b({ typ: 'rechnung_eingehend', buchungstext: 'SumUp-Rückerstattung TC1' })), false);
+  assert.equal(istSumupBarbeleg(b({ deleted: true })), false);
+  assert.equal(istSumupBarbeleg(b({ quelle: 'kasse' })), false);
+  const kassen = new Map([['k1', { datenquelle: 'sumup_integration', datenquelle_ab: '2026-11-05' }], ['k2', { datenquelle: 'manuell' }]]);
+  assert.equal(sumupKasseWahl(kassen, '2026-11-04'), null);
+  assert.deepEqual(sumupKasseWahl(kassen, '2026-11-05'), { id: 'k1' });
+  kassen.set('k3', { datenquelle: 'sumup_integration' });
+  assert.deepEqual(sumupKasseWahl(kassen, '2026-11-05'), { mehrere: true });
+});
+
+// A-M1 (Gegenlesung o-p1c, Baukonzept 2.11 H/#F35): Bareingang auf Rechnung, Durchlaufendes und Trinkgeld der Mitarbeiter fehlten im Stapel. Die Werte stehen nur in der
+// Fassung (kassentage/{tag}/fassungen/{n}), der Export liest die aktive Fassung. Konten: 1590/1370 Durchlaufende Posten (12-steuer 3.4 Nr. 6), Bareingang Kasse an Bank (Nr. 7).
+const RE_BAR = { typ: 'rechnung_ausgehend', betrag: 500, absender: 'Kunde Meier', rechnungsnr: 'RE-1', bezahlt: true, bezahlt_am: '2026-11-02', datum: '2026-11-02', mwst_satz: '19', kategorie: 'Einnahmen 19%' };
+test('A-M1 (Szenario S3): Bareingang auf Rechnung 500,00 bar: Kasse an Bank, die Kasse wird nicht negativ (20 + 500 - 500), die Bank gleicht die als bezahlt gebuchte Rechnung aus', async () => {
+  const w = await welt();
+  w.fs.setze(P('dokumente/re1'), RE_BAR);
+  ok200(await w.tag({ aktion: 'abschliessen', kasse_id: w.id, geschaeftstag: '2026-11-02', z_nummern: ['Z-1'], umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 2000, unbar_cent: 0 }], bareingang_forderungen_cent: 50000,
+    gezaehlt_cent: 10000 + 2000 + 50000, bestand_gezaehlt_bestaetigt: true, grundaufzeichnung_bestaetigt: true }));
+  ok200(await w.bew(bewegung(w.id, '2026-11-03', 'geldtransit_bank_aus', 50000)));
+  // Die Fassungen liest der Export einzeln nach Name (batchGet), nie über allDescendants: diese Abfrage erlaubt die Regel dem Nutzertoken nicht (403)
+  const bodies = [];
+  const alt = w.fs.fetchFn;
+  w.fs.fetchFn = async (input, init = {}) => { if (typeof init.body === 'string' && /datev-export|runQuery/.test(String(typeof input === 'string' ? input : input.url))) bodies.push(init.body); return alt(input, init); };
+  const r = await w.exp();
+  assert.equal(bodies.some((b) => b.includes('allDescendants')), false, 'keine Abfrage über alle Nachfahren');
+  assert.equal(r.status, 200, r.text);
+  const z = kurz(r.zeilen, 'K-THK-2026-0001-Z');
+  assert.deepEqual(z.map((x) => x.slice(0, 4)), [['500,00', 'S', '1000', '1200']]);
+  assert.equal(z[0][5], '0211');
+  assert.match(r.zeilen.find((x) => ohne(x[10]) === 'K-THK-2026-0001-Z')[13], /Barzahlung auf Rechnung lt\. Tagesabschluss/);
+  const k = nachKonto(r.zeilen);
+  assert.equal(k['1000'], 2000 + 50000 - 50000, 'Kasse in DATEV = Kassenbuch (120,00) minus Anfangsbestand 100,00, ohne die Posten wäre sie 20 - 500 = -480');
+  assert.equal(k['1200'], 0, 'Bank: Rechnung als bezahlt (+500) und Richtigstellung (-500) heben sich auf');
+  assert.equal(k['1360'], 50000, 'Geldtransit zur Bank unverändert');
+  assert.equal(Object.values(k).reduce((a, b) => a + b, 0), 0);
+});
+
+test('A-M1: Durchlaufendes (Lotto bar 80,00, Karte 20,00) und Trinkgeld der Mitarbeiter (bar 5,00, Karte 30,00) buchen gegen 1590 (SKR04 1370), die Auszahlung des Trinkgelds Kasse Haben; ein Storno der Auszahlung kehrt um', async () => {
+  for (const [skr, kasse, transit, dl, bank] of [['SKR03', '1000', '1360', '1590', '1200'], ['SKR04', '1600', '1460', '1370', '1800']]) {
+    const w = await welt({ skr });
+    const aus = ok200(await w.bew(bewegung(w.id, '2026-11-02', 'trinkgeld_ma_auszahlung', 3500)));
+    const aus2 = ok200(await w.bew(bewegung(w.id, '2026-11-02', 'trinkgeld_ma_auszahlung', 100)));
+    ok200(await w.bew({ aktion: 'stornieren', kasse_id: w.id, bewegung_id: aus2.bewegung_id, grund: 'falsch erfasst' }));
+    ok200(await w.tag({ aktion: 'abschliessen', kasse_id: w.id, geschaeftstag: '2026-11-02', z_nummern: ['Z-1'], umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 2000, unbar_cent: 30000 }],
+      durchlaufend: [{ art: 'lotto_toto', bar_cent: 8000, unbar_cent: 2000 }], trinkgeld_mitarbeiter_bar_cent: 500, trinkgeld_mitarbeiter_unbar_cent: 3000,
+      gezaehlt_cent: 10000 + 2000 + 8000 + 500 - 3500, bestand_gezaehlt_bestaetigt: true, grundaufzeichnung_bestaetigt: true }));
+    const r = await w.exp();
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(r.zeilen.filter((x) => /lt\. Tagesabschluss/.test(x[13]) && /-Z"?$/.test(x[10])).map((x) => [x[0], x[1], x[6], x[7]]).sort(), [
+      ['20,00', 'S', transit, dl], ['30,00', 'S', transit, dl], ['5,00', 'S', kasse, dl], ['80,00', 'S', kasse, dl]].sort(), skr);
+    const t = r.zeilen.filter((x) => /Auszahlung Trinkgeld/.test(x[13])).map((x) => [x[0], x[1], x[6], x[7]]).sort();
+    assert.deepEqual(t, [['1,00', 'H', kasse, dl], ['1,00', 'S', kasse, dl], ['35,00', 'H', kasse, dl]].sort());
+    const k = nachKonto(r.zeilen);
+    assert.equal(k[dl], -(8000 + 2000 + 500 + 3000 - 3500), 'Durchlaufende Posten (Haben): Eingänge minus Auszahlung');
+    assert.equal(k[kasse], 2000 + 8000 + 500 - 3500, 'Kasse = Kassenbuch ohne Anfangsbestand: 80 + 20 + 5 - 35');
+    assert.equal(Object.values(k).reduce((a, b) => a + b, 0), 0, `${bank}: Soll gleich Haben`);
+    assert.doesNotMatch(r.warnung, /Auszahlung Trinkgeld an Mitarbeiter\) stehen nicht im Stapel/);
+    assert.ok(aus.bewegung_id);
+  }
+});
+
+test('A-M1: ein stornierter Tag hat keine Posten (nur der aktiven Fassung), die neue Fassung bucht ihre eigenen; kasseTagesPosten (rein): leere Werte ergeben keine Zeile, ungültige Werte einen Grund', async () => {
+  const w = await welt();
+  const mit = (extra) => ({ aktion: 'abschliessen', kasse_id: w.id, geschaeftstag: '2026-11-02', z_nummern: ['Z-1'], umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 2000, unbar_cent: 0 }], bareingang_forderungen_cent: 7000,
+    gezaehlt_cent: 10000 + 2000 + 7000, bestand_gezaehlt_bestaetigt: true, grundaufzeichnung_bestaetigt: true, ...extra });
+  ok200(await w.tag(mit({})));
+  ok200(await w.tag({ aktion: 'stornieren', kasse_id: w.id, geschaeftstag: '2026-11-02', grund: 'Fehler beim Erfassen' }));
+  ok200(await w.tag(mit({ bareingang_forderungen_cent: 1000, gezaehlt_cent: 10000 + 2000 + 1000 })));
+  const r = await w.exp();
+  const z = r.zeilen.filter((x) => /Barzahlung auf Rechnung/.test(x[13]));
+  assert.deepEqual(z.map((x) => [ohne(x[10]), x[0], x[1]]), [['K-THK-2026-0003-Z', '10,00', 'S']], 'nur die aktive Fassung 2 (Kassennummer 0003)');
+  assert.deepEqual(kasseTagesPosten({}).posten, []);
+  assert.equal(kasseTagesPosten({ bareingang_forderungen_cent: -1 }).grund, 'fassung_ungueltig');
+  assert.equal(kasseTagesPosten({ durchlaufend: [{ art: 'lotto_toto', bar_cent: 1.5 }] }).grund, 'fassung_ungueltig');
+  assert.equal(kasseTagesPosten(null).grund, 'fassung_fehlt');
+});
+
+// A-M2 (Gegenlesung o-p1c): bei KANAL_VERRECHNET (Bargeld zurück für einen Kartenkauf) trug der Beleg nur die verrechneten Kanäle, Kasse und Geldtransit stimmten nicht, ohne Warnung.
+test('A-M2 (Szenario S2): Umsatz 100,00 bar und 300,00 Karte, Retoure 150,00 bar: Kasse -50,00 und Geldtransit 300,00 wie im Kassenbuch (Umbuchung Geldtransit an Kasse über 50,00), Erlöse 400,00 - 150,00', async () => {
+  const w = await welt();
+  ok200(await w.tag({ aktion: 'abschliessen', kasse_id: w.id, geschaeftstag: '2026-11-02', z_nummern: ['Z-1'], umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 10000, unbar_cent: 30000 }],
+    korrekturen: [{ steuerfall: 'A_INLAND_19', art: 'retoure', bar_cent: 15000, unbar_cent: 0 }], gezaehlt_cent: 10000 + 10000 - 15000, bestand_gezaehlt_bestaetigt: true, grundaufzeichnung_bestaetigt: true }));
+  const r = await w.exp();
+  assert.equal(r.status, 200, r.text);
+  // Beleg: Erlöse 250,00 (400,00 - 150,00) nur als Karte; die Umbuchung stellt Kasse und Geldtransit richtig
+  assert.deepEqual(kurz(r.zeilen, 'K-THK-2026-0001').map((x) => x.slice(0, 4)), [['250,00', 'S', '1360', '8400']]);
+  assert.deepEqual(kurz(r.zeilen, 'K-THK-2026-0001-Z').map((x) => x.slice(0, 4)), [['50,00', 'H', '1000', '1360']]);
+  const k = nachKonto(r.zeilen);
+  assert.equal(k['1000'], -5000, 'Kasse wie im Kassenbuch: 100,00 - 150,00');
+  assert.equal(k['1360'], 30000, 'Geldtransit = echte Kartenabrechnung 300,00');
+  assert.equal(k['8400'], -25000);
+  assert.equal(Object.values(k).reduce((a, b) => a + b, 0), 0);
+  assert.match(r.zeilen.find((x) => ohne(x[10]) === 'K-THK-2026-0001-Z')[13], /Verrechnung Bargeld und Karte lt\. Tagesabschluss/);
+});
+
+test('A-M2: Karten-Rückerstattung bei Barumsätzen (Karte negativ): Kasse Soll an Geldtransit; ohne Verrechnung keine Umbuchung; kasseTagesPosten rein', async () => {
+  const w = await welt();
+  ok200(await w.tag({ aktion: 'abschliessen', kasse_id: w.id, geschaeftstag: '2026-11-02', z_nummern: ['Z-1'], umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 40000, unbar_cent: 0 }],
+    korrekturen: [{ steuerfall: 'A_INLAND_19', art: 'retoure', bar_cent: 0, unbar_cent: 5000 }], gezaehlt_cent: 10000 + 40000, bestand_gezaehlt_bestaetigt: true, grundaufzeichnung_bestaetigt: true }));
+  ok200(await w.tag(nur19(w.id, '2026-11-03', { gezaehlt_cent: 50000 + 50000 })));
+  const r = await w.exp();
+  assert.deepEqual(kurz(r.zeilen, 'K-THK-2026-0001-Z').map((x) => x.slice(0, 4)), [['50,00', 'S', '1000', '1360']]);
+  assert.equal(kurz(r.zeilen, 'K-THK-2026-0001').map((x) => x[0]).join(), '350,00', 'Beleg: bar 350,00 verrechnet');
+  assert.equal(r.zeilen.filter((x) => ohne(x[10]) === 'K-THK-2026-0002-Z').length, 0, 'normaler Tag: keine Umbuchung');
+  const f = (bar, unbar) => ({ umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: bar, unbar_cent: unbar }], korrekturen: [] });
+  assert.deepEqual(kasseTagesPosten(f(100, 200)).posten, []);
+  assert.deepEqual(kasseTagesPosten({ umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 10000, unbar_cent: 30000 }], korrekturen: [{ steuerfall: 'A_INLAND_19', art: 'retoure', bar_cent: 15000, unbar_cent: 0 }] }).posten.map((p) => [p.konto, p.gegen, p.sollHaben, p.betrag_cent]), [['kasse', 'transit', 'H', 5000]]);
+  assert.deepEqual(kasseTagesPosten({ umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 10000, unbar_cent: 30000 }], korrekturen: [{ steuerfall: 'A_INLAND_19', art: 'retoure', bar_cent: 15000, unbar_cent: 0 }] }, { datenquelle: 'sumup_integration' }).posten, []);
+});
+
+// A-N2 (c): datev_konto der Kasse nur vierstellig (wie der Export und die Sachkontenlänge im DATEV-Kopf)
+test('A-N2 (c): datev_konto der Kasse: vierstellig wird angenommen, 3, 5 und 8 Stellen und Text ergeben 400 FORMAT (Anlegen und Ändern)', async () => {
+  const w = await welt({ kasseExtra: { datev_konto: '1010' } });
+  assert.equal(w.fs.lies(P(`kassen/${w.id}`)).datev_konto, '1010');
+  for (const falsch of ['101', '10100', '10100000', 'Kasse']) {
+    const a = await w.kasse({ ...KASSE_ANLEGEN, kuerzel: 'NEU', bezeichnung: 'Neu', anfangsbestand_am: '2026-11-01', datev_konto: falsch });
+    assert.equal(a.status, 400, `anlegen ${falsch}`);
+    assert.equal(a.json.feld, 'datev_konto');
+    const c = await w.kasse({ aktion: 'aendern', kasse_id: w.id, datev_konto: falsch });
+    assert.equal(c.status, 400, `ändern ${falsch}`);
+  }
+  assert.equal((await w.kasse({ aktion: 'aendern', kasse_id: w.id, datev_konto: '1020' })).status, 200);
+  assert.equal(w.fs.lies(P(`kassen/${w.id}`)).datev_konto, '1020');
+});
+
+// A-N2 (d): Länge des Warn-Headers (encodeURIComponent verdreifacht Leerzeichen und Umlaute; Cloudflare lehnt Header über etwa 16 KB ab)
+test('A-N2 (d): datevWarnHeader kürzt auf ganze Sätze innerhalb der Grenze, mit Hinweis; kurze Texte bleiben unverändert; Emoji an der Schnittstelle und ein überlanger erster Satz bleiben gültig', () => {
+  const kurzText = 'Kassenbuch: Im Stapel stehen die Tageseinnahmen. Bitte prüfen.';
+  assert.deepEqual(datevWarnHeader(kurzText), { wert: encodeURIComponent(kurzText), gekuerzt: false, saetze: 2, behalten: 2 });
+  // 60 Warnungen mit Umlauten (je rund 250 Zeichen): ungekürzt rund 19 KB kodiert
+  const viele = Array.from({ length: 60 }, (_, i) => `${i + 1} Beleg(e) aus dem Kassenbuch stehen NICHT im Stapel (Grund in Klammern): K-THK-2026-${String(i).padStart(4, '0')} (storno_summe), für Größe und Prüfung äußerst wichtig 😀. Bitte nenne sie deinem Steuerberater, er bucht sie von Hand.`).join(' ');
+  assert.ok(encodeURIComponent(viele).length > 16000, 'ungekürzt über der üblichen Headergrenze');
+  const h = datevWarnHeader(viele);
+  assert.equal(h.gekuerzt, true);
+  assert.ok(h.wert.length <= WARN_HEADER_MAX, `Länge ${h.wert.length}`);
+  assert.ok(h.behalten > 5 && h.behalten < h.saetze);
+  const text = decodeURIComponent(h.wert);
+  assert.match(text, /^1 Beleg\(e\) aus dem Kassenbuch/);
+  assert.match(text, new RegExp(`\\(${h.saetze - h.behalten} weitere Hinweise wegen der Länge gekürzt`));
+  assert.doesNotMatch(text, /\uFFFD/, 'kein zerschnittenes Zeichen');
+  assert.doesNotThrow(() => new Headers({ 'X-Datev-Warning': h.wert }), 'gültiger Header-Wert (nur ASCII)');
+  // erster Satz allein zu lang: nach Zeichen gekürzt, trotzdem innerhalb der Grenze und dekodierbar
+  const riesig = datevWarnHeader('Ä'.repeat(9000) + ' 😀 Ende. Zweiter Satz.');
+  assert.ok(riesig.wert.length <= WARN_HEADER_MAX);
+  assert.doesNotThrow(() => decodeURIComponent(riesig.wert));
+  assert.equal(riesig.gekuerzt, true);
+  // einzelnes Surrogat am Eingang wird ersetzt (kein URIError)
+  assert.doesNotThrow(() => datevWarnHeader('Text \uD83D ohne Paar.'));
+});
+
+// A-N2 (e): Geldtransit zwischen Kassen wirkte bei verschiedenen DATEV-Konten gar nicht (keine Buchung, nur eine Warnung). Jetzt bucht das _aus-Bein Kasse A Haben an Kasse B.
+const zweiteKasse = async (w, konto) => {
+  const b = await w.kasse({ ...KASSE_ANLEGEN, kuerzel: 'NEB', bezeichnung: 'Nebenkasse', ...(konto ? { datev_konto: konto } : {}) });
+  assert.equal(b.status, 200, JSON.stringify(b.json));
+  return b.json.kasse_id;
+};
+test('A-N2 (e): Geldtransit zwischen Kassen mit verschiedenen DATEV-Konten: das _aus-Bein bucht Kasse 1000 Haben an Nebenkasse 1010, das _ein-Bein keine zweite Zeile, keine Warnung; Storno kehrt um', async () => {
+  const w = await welt();
+  const b = await zweiteKasse(w, '1010');
+  ok200(await w.tag(nur19(w.id, '2026-11-02')));
+  const aus = ok200(await w.bew(bewegung(w.id, '2026-11-03', 'geldtransit_kasse_aus', 5000, { gegenkasse_id: b })));
+  ok200(await w.bew(bewegung(b, '2026-11-03', 'geldtransit_kasse_ein', 5000, { gegenkasse_id: w.id })));
+  const aus2 = ok200(await w.bew(bewegung(w.id, '2026-11-03', 'geldtransit_kasse_aus', 700, { gegenkasse_id: b })));
+  ok200(await w.bew({ aktion: 'stornieren', kasse_id: w.id, bewegung_id: aus2.bewegung_id, grund: 'falsch erfasst' }));
+  const r = await w.exp();
+  assert.equal(r.status, 200, r.text);
+  const z = r.zeilen.filter((x) => /Geldtransit Kasse an Kasse/.test(x[13])).map((x) => [x[0], x[1], x[6], x[7], ohne(x[10])]).sort();
+  assert.deepEqual(z.map((x) => x.slice(0, 4)), [['50,00', 'H', '1000', '1010'], ['7,00', 'H', '1000', '1010'], ['7,00', 'S', '1000', '1010']].sort());
+  assert.ok(z.some((x) => x[4] === aus.kassennummer));
+  const k = nachKonto(r.zeilen.filter((x) => /Geldtransit Kasse an Kasse/.test(x[13])));
+  assert.equal(k['1000'], -5000, 'Kasse A -50,00 (Storno hebt die 7,00 auf)');
+  assert.equal(k['1010'], 5000, 'Nebenkasse +50,00');
+  assert.doesNotMatch(r.warnung, /Geldtransit von einer anderen Kasse/);
+});
+
+test('A-N2 (e): gleiche DATEV-Konten (gemeinsames Standardkonto): keine Zeile und keine Warnung; ein _ein ohne passendes _aus warnt weiter; unbekannte Gegenkasse steht mit Grund in der Warnung', async () => {
+  const w = await welt();
+  const b = await zweiteKasse(w, null);
+  ok200(await w.tag(nur19(w.id, '2026-11-02')));
+  ok200(await w.bew(bewegung(w.id, '2026-11-03', 'geldtransit_kasse_aus', 5000, { gegenkasse_id: b })));
+  ok200(await w.bew(bewegung(b, '2026-11-03', 'geldtransit_kasse_ein', 5000, { gegenkasse_id: w.id })));
+  let r = await w.exp();
+  assert.equal(r.zeilen.filter((x) => /Geldtransit Kasse an Kasse/.test(x[13])).length, 0);
+  assert.doesNotMatch(r.warnung, /Geldtransit von einer anderen Kasse/);
+  // ein _ein ohne passendes _aus
+  ok200(await w.bew(bewegung(b, '2026-11-04', 'geldtransit_kasse_ein', 900, { gegenkasse_id: w.id })));
+  r = await w.exp();
+  assert.match(r.warnung, /1 Kassenbewegung\(en\) „Geldtransit von einer anderen Kasse“ stehen nicht im Stapel/);
+  // unbekannte Gegenkasse (Kasse gelöscht / Altbestand)
+  w.fs.setze(P(`kassenbewegungen/${w.id}_2026-11-05_001`), { kasse_id: w.id, geschaeftstag: '2026-11-05', art: 'geldtransit_kasse_aus', betrag_cent: 100, kassennummer: 'K-THK-2026-0800', gegenkasse_id: 'weg0000000000000000000001' });
+  r = await w.exp();
+  assert.match(r.warnung, /K-THK-2026-0800 \(gegenkasse_unbekannt\)/);
+  assert.equal(kasseGeldtransitGegenbein({ kasse_id: 'b', gegenkasse_id: 'a', geschaeftstag: '2026-11-03', betrag_cent: 5, art: 'geldtransit_kasse_ein' }, [{ art: 'geldtransit_kasse_aus', kasse_id: 'a', gegenkasse_id: 'b', geschaeftstag: '2026-11-03', betrag_cent: 5 }]), true);
+  assert.equal(kasseGeldtransitGegenbein({ kasse_id: 'b', gegenkasse_id: 'a', geschaeftstag: '2026-11-03', betrag_cent: 6 }, [{ art: 'geldtransit_kasse_aus', kasse_id: 'a', gegenkasse_id: 'b', geschaeftstag: '2026-11-03', betrag_cent: 5 }]), false);
 });
 
 // ── 6. Bestandsnutzer unverändert, Jahr, Hinweis ─────────────────────────────────────────────────
@@ -354,10 +670,10 @@ test('Jahr: ein Tag aus 2026 steht nicht im Export 2027', async () => {
   assert.equal(r.status, 404);
 });
 
-test('Hinweis zum Kassenbuch steht in der Warnung (Durchlaufendes, Trinkgeld Mitarbeiter, Bareingang auf Rechnung und Mehrzweck-Einlösung sind nicht im Stapel)', async () => {
+test('Hinweis zum Kassenbuch steht in der Warnung (was im Stapel steht, Voraussetzung der Bareingänge auf Rechnung)', async () => {
   const w = await welt();
   ok200(await w.tag(nur19(w.id, '2026-11-02')));
-  assert.match((await w.exp()).warnung, /Kassenbuch: Im Stapel stehen die Tageseinnahmen.*Nicht enthalten sind durchlaufende Posten, Trinkgeld der Mitarbeiter, Bareingänge auf Rechnungen/);
+  assert.match((await w.exp()).warnung, /Kassenbuch: Im Stapel stehen die Tageseinnahmen.*Bareingänge auf Rechnungen \(Kasse an Bank\), Durchlaufendes und Trinkgeld der Mitarbeiter.*Weicht der Kassenstand in DATEV vom Kassenbuch ab/);
 });
 
 // ── 7. Summenprobe über die ganze Kasse ──────────────────────────────────────────────────────────
@@ -398,7 +714,9 @@ test('kasseBelegPlan: Prüfungen mit Grund (nie raten): Summe, Betrag, Zahlungen
   assert.equal(grund(basis({ betrag: 118.99 })), 'betrag_abweichend');
   assert.equal(grund(basis({}, { zahlungen: [{ kanal: 'bar', betrag_cent: 11800 }] })), 'zahlungen_summe');
   assert.equal(grund(basis({}, { zahlungen: [{ kanal: 'bar', betrag_cent: 11900 }, { kanal: 'paypal', betrag_cent: 0 }] })), 'zahlungen_kanal');
-  assert.equal(grund(basis({}, { zahlungen: [{ kanal: 'bar', betrag_cent: 1900 }, { kanal: 'gutschein_mehrzweck', betrag_cent: 10000 }] })), 'mehrzweck_einloesung');
+  // A-H1: eine Einlösung ist kein Grund mehr, den Beleg wegzulassen (ein Satz: der ganze Betrag ist Einlösung)
+  assert.equal(grund(basis({}, { zahlungen: [{ kanal: 'bar', betrag_cent: 1900 }, { kanal: 'gutschein_mehrzweck', betrag_cent: 10000 }] })), undefined);
+  assert.equal(grund(basis({}, { zahlungen: [{ kanal: 'bar', betrag_cent: 1900 }, { kanal: 'gutschein_mehrzweck', betrag_cent: 9000 }] })), 'zahlungen_summe');
   assert.equal(grund(basis({}, { steuerfall: 'A_OSS' })), 'steuerfall_unbekannt');
   assert.equal(grund(basis({ kassennummer: '' })), 'kassennummer_fehlt');
   assert.equal(grund(basis({ bezahlt: false })), 'zahlung_fehlt');
