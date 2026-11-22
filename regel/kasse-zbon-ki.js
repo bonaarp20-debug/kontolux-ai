@@ -35,7 +35,7 @@ import { heuteBerlin } from './oss-meldung.js';
 export const KASSE_ZBON_PFAD = '/kasse-zbon-lesen';
 export const PFAD = KASSE_ZBON_PFAD;
 export const ZBON_MODELL = 'claude-haiku-5-5';
-export const ZBON_PROMPT_VERSION = 'zbon-2';
+export const ZBON_PROMPT_VERSION = 'zbon-3';
 export const ZBON_MAX_TOKENS = 2048;
 export const ZBON_TIMEOUT_MS = 60000;
 export const ZBON_TAGESLIMIT = 5;
@@ -69,20 +69,23 @@ const EXPORT_TYPEN = ['application/zip', 'application/x-zip-compressed', 'applic
 const EXPORT_HINWEIS = 'Für Exporte deiner Kasse gibt es später einen eigenen Import.';
 
 // ---------------------------------------------------------------------------------------------
-// Schema der Modellausgabe (Structured Outputs). Alle Felder required, additionalProperties false, nullable über ["integer","null"].
+// Schema der Modellausgabe (Structured Outputs). Alle Felder required, additionalProperties false, nullable über anyOf (siehe unten).
 // ---------------------------------------------------------------------------------------------
 const obj = (properties) => ({ type: 'object', properties, required: Object.keys(properties), additionalProperties: false });
 const liste = (items) => ({ type: 'array', items });
 export const DOKUMENTARTEN = Object.freeze(['z_bericht', 'x_bericht', 'kassenbericht', 'kassenbuchseite', 'sonstiges']);
-// Zwei Schreibweisen derselben Struktur (O4-W A-N3): 'standard' (Typ-Arrays ["integer","null"], enum mit null) und 'anyof' (Rückfall mit anyOf, falls die API
-// die Typ-Arrays ablehnt). Welche die API annimmt, klärt nur der echte Eval (node test/kasse-zbon-eval.mjs --echt --schema=anyof). Die Wahl steht in
-// ZBON_SCHEMA_VARIANTE (Standard), im Endpunkt über deps.schema, im Eval über --schema=.
-export const ZBON_SCHEMA_VARIANTE = 'standard';
-export const ZBON_SCHEMA_VARIANTEN = Object.freeze(['standard', 'anyof']);
-function baueSchema(anyof) {
-  const nullbar = (typ) => (anyof ? { anyOf: [{ type: typ }, { type: 'null' }] } : { type: [typ, 'null'] });
+// Nullable nur über anyOf (echter Eval 22.11.: Typ-Arrays mit enum werden von der API abgelehnt, "Enum value 'EUR' does not match declared type"; mehr als 16
+// Union-Parameter ebenfalls, "too many parameters with union types"). Darum höchstens ZBON_UNION_MAX = 12 nullable Felder (Test zählt sie): Beträge in zahlarten,
+// retouren, rabatte und trinkgeld sind NICHT nullable (eine gedruckte, aber unlesbare Zeile weglassen und in unsicher melden), retouren/rabatte haben kein
+// satz_prozent (der Worker braucht es nicht: Korrekturen werden nie vorbefüllt). Die Eval-Option --schema= bleibt, es gibt nur noch 'anyof'.
+export const ZBON_UNION_MAX = 12;
+export const ZBON_SCHEMA_VARIANTE = 'anyof';
+export const ZBON_SCHEMA_VARIANTEN = Object.freeze(['anyof']);
+function baueSchema() {
+  const nullbar = (typ) => ({ anyOf: [{ type: typ }, { type: 'null' }] });
   const INT_N = nullbar('integer'); const NUM_N = nullbar('number'); const STR_N = nullbar('string');
-  const WAEHRUNG = anyof ? { anyOf: [{ type: 'string', enum: ['EUR', 'andere'] }, { type: 'null' }] } : { type: ['string', 'null'], enum: ['EUR', 'andere', null] };
+  const INT = { type: 'integer' };
+  const WAEHRUNG = { anyOf: [{ type: 'string', enum: ['EUR', 'andere'] }, { type: 'null' }] };
   return obj({
     dokumentart: { type: 'string', enum: [...DOKUMENTARTEN] },
     lesbarkeit: { type: 'string', enum: ['gut', 'teilweise', 'schlecht'] },
@@ -92,23 +95,22 @@ function baueSchema(anyof) {
     ausdruck_zeit: STR_N, // JJJJ-MM-TTThh:mm
     waehrung: WAEHRUNG,
     saetze: liste(obj({ satz_prozent: NUM_N, brutto_cent: INT_N, netto_cent: INT_N, steuer_cent: INT_N })),
-    zahlarten: liste(obj({ art: { type: 'string', enum: ['bar', 'karte', 'gutschein', 'sonstig'] }, betrag_cent: INT_N })),
-    retouren: liste(obj({ satz_prozent: NUM_N, betrag_cent: INT_N })),
-    rabatte: liste(obj({ satz_prozent: NUM_N, betrag_cent: INT_N })),
-    trinkgeld: liste(obj({ art: { type: 'string', enum: ['inhaber', 'mitarbeiter', 'unklar'] }, zahlart: { type: 'string', enum: ['bar', 'karte', 'unklar'] }, betrag_cent: INT_N })),
+    zahlarten: liste(obj({ art: { type: 'string', enum: ['bar', 'karte', 'gutschein', 'sonstig'] }, betrag_cent: INT })),
+    retouren: liste(obj({ betrag_cent: INT })),
+    rabatte: liste(obj({ betrag_cent: INT })),
+    trinkgeld: liste(obj({ art: { type: 'string', enum: ['inhaber', 'mitarbeiter', 'unklar'] }, zahlart: { type: 'string', enum: ['bar', 'karte', 'unklar'] }, betrag_cent: INT })),
     gutschein_verkauf_cent: INT_N,
     gutschein_einloesung_cent: INT_N,
     gesamt_brutto_cent: INT_N,
     unsicher: liste({ type: 'string' }),
   });
 }
-export const ZBON_SCHEMA_STANDARD = baueSchema(false);
-export const ZBON_SCHEMA_ANYOF = baueSchema(true);
-export const zbonSchemaFuer = (variante) => (variante === 'anyof' ? ZBON_SCHEMA_ANYOF : variante === 'standard' ? ZBON_SCHEMA_STANDARD : zbonSchemaFuer(ZBON_SCHEMA_VARIANTE));
-export const ZBON_SCHEMA = zbonSchemaFuer(ZBON_SCHEMA_VARIANTE);
+export const ZBON_SCHEMA = baueSchema();
+export const ZBON_SCHEMA_ANYOF = ZBON_SCHEMA;
+export const zbonSchemaFuer = () => ZBON_SCHEMA;
 
 // ---------------------------------------------------------------------------------------------
-// System-Prompt (zbon-2). Höchstens etwa 1.200 Token (Test: Methode prompt-messung.mjs, Zeichen / 3,5). Beispiele nur in Textform, synthetisch.
+// System-Prompt (zbon-3). Höchstens etwa 1.200 Token (Test: Methode prompt-messung.mjs, Zeichen / 3,5). Beispiele nur in Textform, synthetisch.
 // ---------------------------------------------------------------------------------------------
 const PROMPT = [
   'Du liest den Tagesabschluss (Z-Bericht) einer Ladenkasse ab und gibst nur Werte aus, die gedruckt auf dem Dokument stehen.',
@@ -117,6 +119,7 @@ const PROMPT = [
   '- Beträge in Cent als ganze Zahl, ohne Vorzeichen (Retouren, Rabatte und Trinkgeld als positiver Betrag). Steuersatz in Prozent, so wie er auf dem Bon steht.',
   '- Bar und Karte nur aus den Zahlarten-Summen des Bons, nie aus den Steuersatz-Zeilen ableiten.',
   '- saetze[].brutto_cent ist der Umsatz je Steuersatz laut MwSt-Aufstellung des Bons, so wie gedruckt. Weist der Bon ihn NACH Storno, Retoure und Rabatt aus, ist es dieser Betrag: nichts abziehen, nichts hinzurechnen.',
+  '- Zeilen in zahlarten, retouren, rabatte und trinkgeld nur mit lesbarem Betrag ausgeben. Eine gedruckte, aber unlesbare Zeile weglassen und den Feldpfad (zum Beispiel zahlarten) in unsicher melden.',
   '- retouren, rabatte und trinkgeld nur ausgeben, wenn sie als eigene Zeile gedruckt stehen, nie aus Umsatz oder Zahlarten ableiten.',
   '- Gutscheine: nur gedruckte Beträge ausgeben (Verkauf, Einlösung), nie als Einzweck oder Mehrzweck einordnen.',
   '- X-Bericht oder Zwischenbericht: dokumentart x_bericht. Einzelner Kassenbon, Rechnung oder anderes Dokument: sonstiges.',
