@@ -72,10 +72,11 @@ const DATEI_SCHLUESSEL = ['name', 'type', 'base64'];
 const KASSE_ID = /^k[a-z0-9]{8}$/;
 const Z_NUMMER = /^[A-Za-z0-9\-/]{1,20}$/;
 // G2-Fix N-2: gedruckte Z-Nummern stehen oft als „#123“, „Nr. 123“, „No. 0412“ oder „№ 7“ da. Vor der Prüfung werden nur Leerraum am Rand und dieses eine Präfix entfernt;
-// die Prüfung selbst bleibt Z_NUMMER (dieselbe Form wie gespeicherte Z-Nummern, nicht aufgeweicht). „Nr“/„No“ nur vor Punkt, Doppelpunkt, Leerraum oder Ziffer.
+// die Prüfung selbst bleibt Z_NUMMER (dieselbe Form wie gespeicherte Z-Nummern, nicht aufgeweicht). „Nr“/„No“ nur vor Punkt, Doppelpunkt oder Leerraum:
+// I1-Fix N-4: nicht direkt vor einer Ziffer, sonst würde „NO5“ zu „5“ gekürzt (Buchstaben ohne Trenner gehören zur Nummer).
 export function zNummerNormiert(s) {
   if (typeof s !== 'string') return '';
-  return s.trim().replace(/^(?:#|№|(?:nr|no)(?=[.:\s\d])\.?:?)\s*/i, '').trim();
+  return s.trim().replace(/^(?:#|№|(?:nr|no)(?=[.:\s])\.?:?)\s*/i, '').trim();
 }
 const BODY_MAX_ZEICHEN = Math.ceil(ZBON_DATEI_MAX_BYTES * 4 / 3) + 4096;
 const EXPORT_TYPEN = ['application/zip', 'application/x-zip-compressed', 'application/gzip', 'application/x-gzip', 'application/x-tar', 'application/x-compressed-tar', 'application/xml', 'text/xml', 'application/octet-stream'];

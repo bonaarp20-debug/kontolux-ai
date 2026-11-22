@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { PDFDocument, PDFName } from 'pdf-lib';
 import {
   regelKasseZbonLesen, regelKasseZbon, pruefeZbonVorschlag, pruefeZbonDatei, zbonKiAnfrage, zbonSystemPrompt, reserviereKasseZbon, ZBON_SCHEMA,
-  ZBON_SCHEMA_VARIANTE, ZBON_UNION_MAX, ZBON_PROMPT_VERSION, ZBON_MODELL, ZBON_TEXT_MAX_BYTES, ZBON_EINGABE_TOKEN_MAX, zbonEingabeTokens, ZBON_TAGESLIMIT, KASSE_ZBON_PFAD, limitPfad,
+  ZBON_SCHEMA_VARIANTE, ZBON_UNION_MAX, ZBON_PROMPT_VERSION, ZBON_MODELL, ZBON_TEXT_MAX_BYTES, ZBON_EINGABE_TOKEN_MAX, zbonEingabeTokens, ZBON_TAGESLIMIT, KASSE_ZBON_PFAD, limitPfad, zNummerNormiert,
 } from '../regel/kasse-zbon-ki.js';
 import { kassenSteuerJeSatz } from '../steuerkern/kasse.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
@@ -789,7 +789,10 @@ test('G2-Fix N-2: Z-Nummer als „#123“, „Nr. 123“, „No. 0412“, „№
     assert.equal(e.sperre, null, roh); assert.equal(e.vorschlag.z_nummer, soll, roh); assert.equal(e.vorschlag.zbon_gesamt_cent, 8500, roh);
   }
   // nicht aufgeweicht: Leerzeichen in der Nummer, Sonderzeichen, nur Präfix, Wort ohne Ziffer, Präfix ohne Trenner bleiben ungültig: neutraler Text
-  assert.equal(einSatz('NoA1').vorschlag.z_nummer, 'NoA1', 'Präfix nur vor Trenner oder Ziffer');
+  assert.equal(einSatz('NoA1').vorschlag.z_nummer, 'NoA1', 'Präfix nur vor Trenner');
+  // I1-Fix N-4: Buchstaben ohne Trenner gehören zur Nummer („NO5“ ist nicht „5“), nur „Nr.“/„No.“/„Nr “/„Nr:“, „#“ und „№“ sind Präfixe
+  for (const roh of ['NO5', 'no1234', 'Nr123', 'NR0412']) assert.equal(einSatz(roh).vorschlag.z_nummer, roh, `${roh}: nicht gekürzt`);
+  assert.equal(zNummerNormiert('NO5'), 'NO5'); assert.equal(zNummerNormiert('No. 5'), '5'); assert.equal(zNummerNormiert('#5'), '5');
   for (const roh of ['Z 12/3', '12#3', '#', 'Nr.', 'Kasse', '<b>12</b>']) {
     const e = einSatz(roh);
     assert.equal(e.sperre, 'SPERRE_OHNE_ZNUMMER', roh);
