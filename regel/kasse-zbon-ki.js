@@ -70,6 +70,12 @@ const SCHLUESSEL = ['userId', 'token', 'anfrage_id', 'kasse_id', 'geschaeftstag_
 const DATEI_SCHLUESSEL = ['name', 'type', 'base64'];
 const KASSE_ID = /^k[a-z0-9]{8}$/;
 const Z_NUMMER = /^[A-Za-z0-9\-/]{1,20}$/;
+// G2-Fix N-2: gedruckte Z-Nummern stehen oft als „#123“, „Nr. 123“, „No. 0412“ oder „№ 7“ da. Vor der Prüfung werden nur Leerraum am Rand und dieses eine Präfix entfernt;
+// die Prüfung selbst bleibt Z_NUMMER (dieselbe Form wie gespeicherte Z-Nummern, nicht aufgeweicht). „Nr“/„No“ nur vor Punkt, Doppelpunkt, Leerraum oder Ziffer.
+export function zNummerNormiert(s) {
+  if (typeof s !== 'string') return '';
+  return s.trim().replace(/^(?:#|№|(?:nr|no)(?=[.:\s\d])\.?:?)\s*/i, '').trim();
+}
 const BODY_MAX_ZEICHEN = Math.ceil(ZBON_DATEI_MAX_BYTES * 4 / 3) + 4096;
 const EXPORT_TYPEN = ['application/zip', 'application/x-zip-compressed', 'application/gzip', 'application/x-gzip', 'application/x-tar', 'application/x-compressed-tar', 'application/xml', 'text/xml', 'application/octet-stream'];
 const EXPORT_HINWEIS = 'Für Exporte deiner Kasse gibt es später einen eigenen Import.';
@@ -165,6 +171,7 @@ const PRUEF_TEXTE = Object.freeze({
   K12_LESBARKEIT: 'Der Bon ist nur teilweise lesbar. Vergleiche jeden Wert genau mit deinem Bon.',
   SPERRE_X_BERICHT: 'Das ist ein Zwischenbericht (X). Für den Tagesabschluss brauchst du den Z-Bericht.',
   SPERRE_EINZELBON: 'Das sieht aus wie ein einzelner Kassenbon. Im Kassenbuch überträgst du nur den Tagesabschluss deiner Kasse.',
+  SPERRE_OHNE_ZNUMMER: 'Auf dem Bon ist keine Z-Nummer lesbar und es gibt nur eine Summenzeile. Bitte trag die Werte selbst ein.', // G2-Fix N-2: neutral, kein Einzelbon-Vorwurf
   SPERRE_WAEHRUNG: 'Der Bon ist nicht in Euro. Das Kassenbuch rechnet nur in Euro. Trag die Werte selbst ein.',
   SPERRE_LESBARKEIT: 'Der Bon ist nicht gut lesbar. Bitte trag die Werte selbst ein.',
 });
@@ -232,10 +239,11 @@ export function pruefeZbonVorschlag(roh, ctx = {}) {
   // Kopf
   let zNummer = null;
   if (r.z_nummer !== null && r.z_nummer !== undefined) {
-    const s = typeof r.z_nummer === 'string' ? r.z_nummer : '';
-    const sauber = zeichenBereinigen(s);
+    const roh = typeof r.z_nummer === 'string' ? r.z_nummer : '';
+    const sauber = zeichenBereinigen(roh);
+    const s = zNummerNormiert(roh); // G2-Fix N-2
     // mindestens eine Ziffer: ein reines Wort (zum Beispiel ein Name) ist keine Z-Nummer
-    if (sauber === s && Z_NUMMER.test(s) && /\d/.test(s)) zNummer = s;
+    if (sauber === roh && Z_NUMMER.test(s) && /\d/.test(s)) zNummer = s;
     else mark('z_nummer');
   } else mark('z_nummer');
   let tag = null;
@@ -403,7 +411,8 @@ export function pruefeZbonVorschlag(roh, ctx = {}) {
   if (lesbarkeit === 'schlecht' && nullAnteil > 0.5) return sperreErgebnis(r, dokumentart, 'SPERRE_LESBARKEIT');
   // Schutz vor Einzelbon (Grenze 3, Eval Fall 8): unabhängig von der Klassifikation des Modells. Ohne gültige Z-Nummer und mit höchstens einer Satzzeile
   // ist es kein Tagesabschluss (der hat Z-Nummer oder mehrere Summen): kein Vorschlag. Im Zweifel lieber von Hand eintragen.
-  if (!zNummer && saetzeRoh.length <= 1) return sperreErgebnis(r, 'sonstiges', 'SPERRE_EINZELBON');
+  // G2-Fix N-2: eigener, neutraler Text (ein echter Z-Bericht mit einem Satz und unlesbarer Nummer ist kein Einzelbon); die Sperre selbst bleibt.
+  if (!zNummer && saetzeRoh.length <= 1) return sperreErgebnis(r, 'sonstiges', 'SPERRE_OHNE_ZNUMMER');
   if (lesbarkeit !== 'gut') pruefungen.push({ code: 'K12_LESBARKEIT', stufe: 'hinweis', felder: [] });
 
   // Eigene Unsicher-Angaben des Modells: nur als zusätzliche Markierung (nie als Wert); nur bekannte Feldpfade werden abgebildet

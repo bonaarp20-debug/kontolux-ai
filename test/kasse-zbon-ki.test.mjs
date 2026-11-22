@@ -737,11 +737,12 @@ test('Schema: Endpunkt reicht deps.schema an die Anfrage weiter', async () => {
 });
 
 test('Eval Fall 8: Einzelbon, den das Modell als kassenbericht einstuft, wird deterministisch abgefangen (kein Vorschlag); echter Z-Bericht mit einem Satz bleibt', () => {
-  const festerText = 'Das sieht aus wie ein einzelner Kassenbon. Im Kassenbuch überträgst du nur den Tagesabschluss deiner Kasse.';
+  // G2-Fix N-2: die Sperre bleibt, der Text ist neutral (keine Z-Nummer, eine Summenzeile), kein Einzelbon-Vorwurf
+  const festerText = 'Auf dem Bon ist keine Z-Nummer lesbar und es gibt nur eine Summenzeile. Bitte trag die Werte selbst ein.';
   for (const art of ['kassenbericht', 'z_bericht', 'kassenbuchseite']) {
     for (const saetze of [[], [{ satz_prozent: null, brutto_cent: 350, netto_cent: null, steuer_cent: null }]]) {
       const e = pr({ dokumentart: art, z_nummer: null, saetze, zahlarten: [{ art: 'bar', betrag_cent: 500 }], gesamt_brutto_cent: 350 });
-      assert.equal(e.sperre, 'SPERRE_EINZELBON', `${art}/${saetze.length}`); assert.equal(e.dokumentart, 'sonstiges');
+      assert.equal(e.sperre, 'SPERRE_OHNE_ZNUMMER', `${art}/${saetze.length}`); assert.equal(e.dokumentart, 'sonstiges');
       assert.deepEqual(e.hinweise, [festerText]); assert.deepEqual(e.markiert, []); assert.deepEqual(e.vorschlag.umsaetze_je_satz, []);
     }
   }
@@ -779,4 +780,23 @@ test('Delta C-M1: Text in Form-XObjects zählt zur Token-Schätzung (dasselbe XO
   await abgelehnt(u, d(await pdfMitForm(1, 40 * 1024)), 400, 'ZBON_ZU_GROSS');
   // kleines XObject (Logo, Kopfzeile) bleibt erlaubt
   assert.equal((await umgebung().rufe(d(await pdfMitForm(2, 200)))).status, 200);
+});
+
+test('G2-Fix N-2: Z-Nummer als „#123“, „Nr. 123“, „No. 0412“, „№ 7“ wird vor der Prüfung normiert (Z-Bericht mit einem Satz bleibt vorbefüllt); die Form gespeicherter Z-Nummern bleibt streng', () => {
+  const einSatz = (z) => pr({ z_nummer: z, saetze: [{ satz_prozent: 19, brutto_cent: 8500, netto_cent: null, steuer_cent: null }], zahlarten: [{ art: 'bar', betrag_cent: 8500 }], gesamt_brutto_cent: 8500 });
+  for (const [roh, soll] of [['#123', '123'], ['Nr. 123', '123'], ['Nr.123', '123'], ['nr 123', '123'], ['No. 0412', '0412'], ['№ 7', '7'], ['  Z-17 ', 'Z-17'], ['# 12/3', '12/3'], ['Nr: 5', '5']]) {
+    const e = einSatz(roh);
+    assert.equal(e.sperre, null, roh); assert.equal(e.vorschlag.z_nummer, soll, roh); assert.equal(e.vorschlag.zbon_gesamt_cent, 8500, roh);
+  }
+  // nicht aufgeweicht: Leerzeichen in der Nummer, Sonderzeichen, nur Präfix, Wort ohne Ziffer, Präfix ohne Trenner bleiben ungültig: neutraler Text
+  assert.equal(einSatz('NoA1').vorschlag.z_nummer, 'NoA1', 'Präfix nur vor Trenner oder Ziffer');
+  for (const roh of ['Z 12/3', '12#3', '#', 'Nr.', 'Kasse', '<b>12</b>']) {
+    const e = einSatz(roh);
+    assert.equal(e.sperre, 'SPERRE_OHNE_ZNUMMER', roh);
+    assert.ok(!e.hinweise.join(' ').includes('einzelner Kassenbon'), `${roh}: kein Einzelbon-Vorwurf`);
+  }
+  // mehrere Sätze ohne gültige Nummer: Vorschlag, z_nummer unsicher
+  const m = pr({ z_nummer: 'Z 12/3' }); assert.equal(m.sperre, null); assert.equal(m.vorschlag.z_nummer, null); assert.ok(m.unsicher.includes('z_nummer'));
+  // vom Modell als sonstiges eingestuft: weiter der Einzelbon-Text
+  assert.equal(pr({ dokumentart: 'sonstiges' }).sperre, 'SPERRE_EINZELBON');
 });
