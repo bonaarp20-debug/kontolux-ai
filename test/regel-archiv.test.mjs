@@ -100,7 +100,7 @@ test('Export gesperrter Konten ist vollständig: jede Sammlung aus ARCHIV_SAMMLU
   // Prüfer-Zugang zeigt die Festschreibungen (Nachweis), ohne die interne Sperrliste
   assert.match(quelle, /firestoreListAll\(`\$\{base\}\/festschreibung`, adminToken\)\.catch\(\(\) => \[\]\)/);
   // KASSE-P1b: dazu das Kassenbuch (kassen, kassentage mit allen Fassungen, kassenbewegungen, ...) aus kassenPrueferDaten
-  assert.match(quelle, /JSON\.stringify\(\{ dokumente, monatsabschluesse, sammelbelege, festschreibungen, \.\.\.kasse \}\)/);
+  assert.match(quelle, /prueferLinksErsetzen\(\{ dokumente, monatsabschluesse, sammelbelege, festschreibungen, \.\.\.kasse \}/); // N5: Ausgabe läuft durch die Link-Ersetzung
   assert.match(quelle, /const kasse = await kassenPrueferDaten\(uid, adminToken,/);
 });
 
