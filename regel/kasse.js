@@ -613,9 +613,11 @@ async function ruhetage(c, aktion) {
 // bleibt. F1-Fix B-4: Eine Wiederholung derselben anfrage_id nach Erfolg (Netzabbruch) findet keinen Tagesplatz mehr; steht unter den letzten Audit-Einträgen
 // kassentag_ruhetag_aufgehoben für diesen Tag mit dieser anfrage_id, antwortet der Worker 200 mit schon_aufgehoben (nichts geschrieben, kein zweiter Audit-Eintrag).
 // G1-Fix N-1: Das gilt auch, wenn der Tag inzwischen wieder einen Platz hat (neu als Ruhetag angelegt oder abgeschlossen): eine verspätete Wiederholung wirkt nur
-// auf den Ruhetag, den sie aufgehoben hat (details.ruhetag_anfrage_id), nie ein zweites Mal auf einen neuen.
+// auf den Ruhetag, den sie aufgehoben hat (details.ruhetag_anfrage_id), nie ein zweites Mal auf einen neuen. G1-Fix N-2: Rückblick 20 Einträge; ist die
+// anfrage_id dort nicht zu finden und fehlt der Platz, bleibt es bei 404 KASSENTAG_UNBEKANNT mit hinweis (die Oberfläche zeigt „schon erledigt?“).
 // ---------------------------------------------------------------------------------------------
-export const AUFHEBEN_AUDIT_RUECKBLICK = 5; // so viele letzte Audit-Einträge prüft die Wiederholung (ein batchGet)
+export const AUFHEBEN_AUDIT_RUECKBLICK = 20; // so viele letzte Audit-Einträge prüft die Wiederholung (ein batchGet)
+const AUFHEBEN_HINWEIS = 'Schon erledigt? Der Ruhetag ist vielleicht schon aufgehoben.';
 async function ruhetagAufheben(c) {
   const { fs, uid, body, cors, zeit, heute } = c;
   const f = pruefeRuhetage(body, 'ruhetag', { heute });
@@ -632,7 +634,7 @@ async function ruhetagAufheben(c) {
     const tagDok = docs.get(P.kassentag(uid, tagId));
     // Wiederholung derselben anfrage_id nach Erfolg (B-4), auch wenn der Tag inzwischen wieder belegt ist (N-1): nichts schreiben
     if (await schonAufgehoben(fs, uid, docs.get(kopfPfad(uid)), tagId, body.anfrage_id)) return { antwort: antwort({ ok: true, idempotent: true, schon_aufgehoben: true, kassentag_id: tagId }, 200, cors) };
-    if (!tagDok || !istObjekt(tagDok.daten)) return { antwort: fehlerAntwort(404, 'KASSENTAG_UNBEKANNT', cors, { kassentag_id: tagId }) };
+    if (!tagDok || !istObjekt(tagDok.daten)) return { antwort: fehlerAntwort(404, 'KASSENTAG_UNBEKANNT', cors, { kassentag_id: tagId, hinweis: AUFHEBEN_HINWEIS }) };
     if (tagDok.daten.status !== 'ruhetag') return { antwort: fehlerAntwort(409, 'KEIN_RUHETAG', cors, { kassentag_id: tagId, status: tagDok.daten.status ?? null }) };
     const zeiger = zeigerAus(kasse.letzter_abschluss);
     if (zeiger && tag < zeiger.tag) return { antwort: fehlerAntwort(409, 'SPAETERE_TAGE', cors, { letzter_tag: zeiger.tag }) };

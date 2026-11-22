@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as K from '../steuerkern/index.js';
-import { regelKasse, KASSE_PFADE, KASSEN_MAX, aufbewahrungBis } from '../regel/kasse.js';
+import { regelKasse, KASSE_PFADE, KASSEN_MAX, aufbewahrungBis, AUFHEBEN_AUDIT_RUECKBLICK } from '../regel/kasse.js';
 import { AUDIT_AKTIONEN, kettepruefen } from '../regel/audit.js';
 import { AGB_MINDESTFASSUNG_KASSE, FEATURES_KASSE, featureAktiv, configBereinigen } from '../regel/gemeinsam.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
@@ -373,6 +373,27 @@ test('G1-Fix N-1: verspätete Wiederholung von ruhetag_aufheben, nachdem derselb
   const nachAbschluss = await u.tagRufe(body);
   assert.deepEqual([nachAbschluss.status, nachAbschluss.json.schon_aufgehoben], [200, true]);
   assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-04`)).status, 'abgeschlossen');
+});
+
+test('G1-Fix N-2: Wiederholung von ruhetag_aufheben erkennt die anfrage_id unter den letzten 20 Audit-Einträgen (auch nach 10 Aktionen dazwischen); darüber 404 KASSENTAG_UNBEKANNT mit hinweis „schon erledigt?“', async () => {
+  assert.equal(AUFHEBEN_AUDIT_RUECKBLICK, 20);
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-02'))).status, 200);
+  assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-04' })).status, 200);
+  const body = { aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04', anfrage_id: 'aufheben-n2-0001' };
+  assert.equal((await u.tagRufe(body)).status, 200);
+  // 10 Bewegungen (je ein Audit-Eintrag) dazwischen: mit dem alten Rückblick (5) wäre das 404
+  for (let i = 0; i < 10; i += 1) assert.equal((await u.bewRufe(bewegung(id, '2026-11-04', 'geldtransit_bank_ein', 100))).status, 200);
+  const r = await u.tagRufe(body);
+  assert.deepEqual([r.status, r.json.schon_aufgehoben], [200, true], JSON.stringify(r.json));
+  // 9 weitere: der Eintrag ist der 20. von hinten, noch erkannt; einer mehr: 404 mit hinweis
+  for (let i = 0; i < 9; i += 1) assert.equal((await u.bewRufe(bewegung(id, '2026-11-04', 'geldtransit_bank_ein', 100))).status, 200);
+  assert.equal((await u.tagRufe(body)).json.schon_aufgehoben, true);
+  assert.equal((await u.bewRufe(bewegung(id, '2026-11-04', 'geldtransit_bank_ein', 100))).status, 200);
+  const alt = await u.tagRufe(body);
+  assert.deepEqual([alt.status, alt.json.fehler[0].code, alt.json.kassentag_id], [404, 'KASSENTAG_UNBEKANNT', `${id}_2026-11-04`]);
+  assert.match(alt.json.hinweis, /^Schon erledigt\?/);
 });
 
 // ---------------------------------------------------------------------------------------------
