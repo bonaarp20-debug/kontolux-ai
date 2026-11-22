@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import { PDFDocument, PDFName } from 'pdf-lib';
 import {
   regelKasseZbonLesen, regelKasseZbon, pruefeZbonVorschlag, pruefeZbonDatei, zbonKiAnfrage, zbonSystemPrompt, reserviereKasseZbon, ZBON_SCHEMA,
@@ -857,4 +858,31 @@ test('G2-Fix N-3: Kachelmuster (/PatternType 1), Type3-Glyphen (/CharProcs, auch
     assert.equal(klein.ok, true, name);
     assert.ok(klein.token >= 2000 + 2 * 2500 + 200, `${name}: Strom zählt mit (${klein.token})`);
   }
+});
+
+test('M1-Fix G: volle Isolat-Obergrenze beim PDF-Laden: 503 ZBON_ISOLAT_VOLL (kein „Datei zu groß“), Logzeile ohne Kundendaten, kein Zähler, kein KI-Aufruf', async () => {
+  const u = umgebung();
+  const r = await abgelehnt(u, {}, 503, 'ZBON_ISOLAT_VOLL', { ladePdf: async () => ({ zuGross: true, isolatVoll: true }) });
+  assert.doesNotMatch(JSON.stringify(r.json), /zu groß/i);
+  assert.match(JSON.stringify(r.json), /noch einmal versuchen/);
+  assert.ok(u.logs.some((z) => z.includes('Isolat-Obergrenze')), u.logs.join('|'));
+  assert.ok(u.logs.every((z) => !z.includes('bon.pdf') && !z.includes(UID)), 'keine Kundendaten im Log');
+  // eine wirklich zu große Datei behält den alten Text
+  await abgelehnt(umgebung(), {}, 400, 'ZBON_ZU_GROSS', { ladePdf: async () => ({ zuGross: true }) });
+  // Text- und Bilddateien laden kein PDF: unberührt
+  assert.equal((await umgebung().rufe({ datei: { name: 'b.txt', type: 'text/plain', base64: b64('Z-BERICHT\nGesamt 10,00') } }, { ladePdf: async () => ({ zuGross: true, isolatVoll: true }) })).status, 200);
+});
+
+test('M1-Fix G: echte Kette: Isolat per begrenztem Laden gefüllt, danach liefert pruefeZbonDatei für ein kleines PDF ZBON_ISOLAT_VOLL statt ZBON_ZU_GROSS', async () => {
+  const code = `import { ladePdfBegrenzt, pdfIsolatStand } from './regel/pdf-sicher.js'; import { pruefeZbonDatei } from './regel/kasse-zbon-ki.js'; import { PDFDocument } from 'pdf-lib';
+    console.warn = () => {};
+    const K = '%PDF-1.7\\n1 0 obj\\n<< /Type /Catalog /Pages 2 0 R >>\\nendobj\\n2 0 obj\\n<< /Type /Pages /Kids [] /Count 0 >>\\nendobj\\n';
+    const datei = (x) => new Uint8Array(Buffer.from(K + '3 0 obj\\n' + x + '\\nendobj\\ntrailer\\n<< /Root 1 0 R >>\\n%%EOF\\n'));
+    for (let r = 0; r < 4; r += 1) { let s = '['; for (let i = 0; i < 49000; i += 1) s += (r * 1000000 + i) + ' 0 R '; await ladePdfBegrenzt(datei(s + ']')); }
+    const d = await PDFDocument.create(); d.addPage([200, 200]); const base64 = Buffer.from(await d.save()).toString('base64');
+    const e = await pruefeZbonDatei({ name: 'bon.pdf', type: 'application/pdf', base64 });
+    console.log(JSON.stringify({ voll: pdfIsolatStand().voll, status: e.status, code: e.code, ok: e.ok }));`;
+  const p = spawnSync(process.execPath, ['--max-old-space-size=256', '--input-type=module', '-e', code], { cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8', timeout: 120000 });
+  assert.equal(p.status, 0, (p.stderr || '').slice(0, 500));
+  assert.deepEqual(JSON.parse(p.stdout.trim()), { voll: true, status: 503, code: 'ZBON_ISOLAT_VOLL', ok: false });
 });

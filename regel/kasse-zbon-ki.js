@@ -58,6 +58,7 @@ export const ZBON_PDF_INHALT_MAX_ROH = 32 * 1024; // Seiteninhalt (komprimiert) 
 export const ZBON_PDF_STROM_MAX = PDF_STROM_MAX; // 4 MB (regel/pdf-sicher.js)
 export const ZBON_PDF_ENTPACKT_MAX = PDF_ENTPACKT_MAX; // 16 MB
 export const ZBON_PDF_XREF_EINTRAEGE_MAX = PDF_XREF_EINTRAEGE_MAX; // XRef-Strom: Einträge ohne Bytes (/W [0 0 0], großes /Size) wären eine Schleife ohne Entpacken
+export const ZBON_ISOLAT_VOLL_TEXT = 'Das Lesen von PDF-Dateien ist gerade nicht möglich. Bitte gleich noch einmal versuchen oder die Werte selbst eintragen.';
 export const ZBON_ZU_GROSS_TEXT = 'Die Datei ist zu groß zum Lesen. Verkleinere die Datei (weniger Seiten, kürzerer Text) oder trag die Werte selbst ein.';
 export const ZBON_ERLAUBTE_TYPEN = Object.freeze(['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'text/plain', 'text/csv']);
 // Entscheidung: obere Grenze je Betrag 1.000.000 EUR in Cent (strenger als BELEG_MAX_BETRAG = 10.000.000 EUR in worker.js; ein Tagesabschluss
@@ -493,9 +494,10 @@ export function zbonEingabeTokens(art, { bytes, seiten, inhaltBytes } = {}) {
 // G2-Fix M-2: begrenztes Entpacken und Laden. Der Ladeweg liegt seit dem E-Rechnung-Hotfix gemeinsam in regel/pdf-sicher.js (auch detectAndParseERechnung);
 // hier nur die bisherigen Namen. zbonStromLaenge: entpackte Länge, höchstens ZBON_PDF_STROM_MAX je Strom und budget.rest je Datei, Filterketten abgelehnt.
 export const zbonStromLaenge = (st, budget) => stromLaengeBegrenzt(st, budget, { stromMax: ZBON_PDF_STROM_MAX });
-// Ergebnis { pdf } oder { zuGross: true }; wie bisher gilt auch ein nicht entpackbarer Objekt-/XRef-Strom als zu groß (fester Text, keine KI-Anfrage).
+// Ergebnis { pdf } oder { zuGross: true } (bei voller Isolat-Obergrenze zusätzlich isolatVoll: true); wie bisher gilt auch ein nicht entpackbarer Objekt-/XRef-Strom als zu groß (fester Text, keine KI-Anfrage).
 export async function ladeZbonPdf(bytes, budget) {
   const r = await ladePdfBegrenzt(bytes, { budget, ignoreEncryption: true, updateMetadata: false });
+  if (r.isolatVoll) return { zuGross: true, isolatVoll: true }; // M1-Fix G: nicht die Datei ist zu groß, sondern die Obergrenze des Isolats ist voll
   if (r.zuGross || r.stromFehler) return { zuGross: true };
   return { pdf: r.pdf };
 }
@@ -544,7 +546,7 @@ function pdfInhaltBytes(pdf, budget) { // geschätzte Textebene: Seiteninhalte p
 }
 
 // Ergebnis { ok: true, art, type, bytes, text?, sha256, token } oder { ok: false, status, code, hinweis? }
-export async function pruefeZbonDatei(datei, { validateDatei } = {}) {
+export async function pruefeZbonDatei(datei, { validateDatei, ladePdf } = {}) {
   const FORMAT = (extra = {}) => ({ ok: false, status: 400, code: 'FORMAT', feld: 'datei', ...extra });
   if (!istObjekt(datei) || typeof datei.base64 !== 'string' || !datei.base64) return FORMAT();
   const type = String(datei.type || '').toLowerCase();
@@ -570,7 +572,8 @@ export async function pruefeZbonDatei(datei, { validateDatei } = {}) {
     let pdf; let seiten;
     const budget = { rest: ZBON_PDF_ENTPACKT_MAX }; // G2-Fix M-2: gilt für Laden und Zählen zusammen
     try {
-      const geladen = await ladeZbonPdf(bytes, budget);
+      const geladen = await (typeof ladePdf === 'function' ? ladePdf : ladeZbonPdf)(bytes, budget);
+      if (geladen.isolatVoll) return { ok: false, status: 503, code: 'ZBON_ISOLAT_VOLL', hinweis: ZBON_ISOLAT_VOLL_TEXT, isolatVoll: true }; // kein „zu groß“, kein Zähler, kein KI-Aufruf
       if (geladen.zuGross) return ZU_GROSS(); // Entpack-Grenze oder Filterkette beim Laden: fester Text, keine KI-Anfrage
       pdf = geladen.pdf; seiten = pdf.getPageCount();
     } catch { return FORMAT(); }
@@ -729,7 +732,8 @@ export async function regelKasseZbonLesen(body, env, cors = {}, deps = {}) {
     const status = statusDes(profilDok.daten, body.geschaeftstag_dialog);
     if (status === null) return fehler(403, 'PROFIL_FEHLT', cors);
     // 8. Datei (Typ, Größe, Text, PDF-Seiten)
-    const datei = await pruefeZbonDatei(body.datei, { validateDatei: deps.validateDatei });
+    const datei = await pruefeZbonDatei(body.datei, { validateDatei: deps.validateDatei, ladePdf: deps.ladePdf });
+    if (!datei.ok && datei.isolatVoll) { try { (typeof deps.log === 'function' ? deps.log : console.warn)('[kasse-zbon] PDF nicht gelesen: Isolat-Obergrenze (kein Zähler, kein KI-Aufruf)'); } catch { /* Logfehler ändern nichts */ } }
     if (!datei.ok) return fehler(datei.status, datei.code, cors, { ...(datei.feld ? { feld: datei.feld } : {}), ...(datei.hinweis ? { hinweis: datei.hinweis } : {}), ...(datei.seiten_max ? { seiten_max: datei.seiten_max } : {}) });
     // Voraussetzungen für den Aufruf (vor dem Zähler, damit kein Zähler ohne Aufrufmöglichkeit verbraucht wird)
     const apiKey = env && typeof env.ANTHROPIC_API_KEY === 'string' ? env.ANTHROPIC_API_KEY : '';
