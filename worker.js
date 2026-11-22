@@ -16,6 +16,7 @@ import { regelKlaerungBeleg } from './regel/klaerung-beleg.js'; // KX-VD
 import { regelZaehler, ZAEHLER_PFADE } from './regel/zaehler.js'; // KX-RB (BP-19)
 import { regelAdminFeatures } from './regel/admin-features.js';
 import { regelOssMeldung } from './regel/oss-meldung.js'; // WORKER-C (Release C, BP-29)
+import { regelKasse, KASSE_PFADE } from './regel/kasse.js'; // KASSE-P1b: Kassenbuch (Feature kasse, Standard aus)
 import { regelEzbKurs } from './regel/ezb-kurs.js'; // WORKER-C (Release C, BP-29)
 import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // KX-WC2 (Release C, BP-30 DATEV-Teil)
 import { rechnungsnrDuplikat, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c)
@@ -418,6 +419,9 @@ const UID_LIMITS = {
   // WORKER-C (Release C): OSS-Abgabe je Quartal selten; Kursvorschlag je Währung und Quartal (Cache im KV)
   '/oss-meldung':                    { limit: 20, windowMs: 10 * 60 * 1000 },
   '/ezb-kurs':                       { limit: 30, windowMs: 10 * 60 * 1000 },
+  // KASSE-P1b (Baukonzept 2.3): Tagesabschluss je Kasse und Tag, Stammdaten selten
+  '/kassentag':                      { limit: 60, windowMs: 10 * 60 * 1000 },
+  '/kasse':                          { limit: 30, windowMs: 10 * 60 * 1000 },
   // G6-M5: kostenpflichtige Datei-Aufrufe je Nutzer (zusätzlich zum atomaren Monatskontingent)
   '/image':                          { limit: 30, windowMs: 10 * 60 * 1000 },
   '/document':                       { limit: 300, windowMs: 10 * 60 * 1000 },
@@ -617,6 +621,7 @@ export default {
       const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/stripe-gebuehren', '/usage', '/abo', '/konto-archivieren', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/auszug-rueckmeldung', '/pruefer-zugang', '/freigabe-status', '/steuerprofil', '/festschreibung', '/entsperren', '/migration', '/agb-zustimmung'];
       protectedPaths.push(...ZAEHLER_PFADE); // KX-RB
       protectedPaths.push('/oss-meldung', '/ezb-kurs'); // WORKER-C
+      protectedPaths.push(...KASSE_PFADE); // KASSE-P1b
 
       if (protectedPaths.includes(url.pathname)) {
         try {
@@ -655,6 +660,7 @@ export default {
           const emailVerifiedRequiredPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/steuerprofil', '/festschreibung', '/entsperren', '/migration', '/agb-zustimmung'];
           emailVerifiedRequiredPaths.push(...ZAEHLER_PFADE); // KX-RB
           emailVerifiedRequiredPaths.push('/oss-meldung', '/ezb-kurs'); // WORKER-C
+          emailVerifiedRequiredPaths.push(...KASSE_PFADE); // KASSE-P1b
           if (emailVerifiedRequiredPaths.includes(url.pathname) && !verified.emailVerified) {
             const errorCors = getCORS(origin);
             return new Response(JSON.stringify({ error: 'E-Mail nicht verifiziert', code: 'email-not-verified' }), {
@@ -760,6 +766,8 @@ export default {
       // WORKER-C (Release C, BP-29): Abgabe-Schnappschuss OSS (nur Worker schreibt users/{uid}/oss_meldung) und EZB-Kursvorschlag; beide Feature oss
       if (url.pathname === '/oss-meldung') return regelOssMeldung(body, env, cors, regelAbhaengigkeiten(env));
       if (url.pathname === '/ezb-kurs') return regelEzbKurs(body, env, cors, { ...regelAbhaengigkeiten(env), kv: env.PROFIL_KV });
+      // KASSE-P1b (Baukonzept 2.3): Kassenbuch; nur der Worker schreibt users/{uid}/kassen*, Feature kasse (Standard aus: 503)
+      if (KASSE_PFADE.includes(url.pathname)) return regelKasse(url.pathname, body, env, cors, regelAbhaengigkeiten(env));
       if (url.pathname === '/admin/features') return regelAdminFeatures(request, authHeader, env, cors, regelAbhaengigkeiten(env));
       // Bewusst NICHT in protectedPaths: ein Betriebsprüfer hat keinen Firebase-Login, der
       // Zugriffsnachweis ist der Besitz des Tokens selbst (siehe handlePrueferDaten unten).

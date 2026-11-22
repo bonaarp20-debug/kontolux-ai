@@ -67,6 +67,12 @@ export function fakeFirestore() {
             const neu = [...vorhanden];
             for (const v of tr.appendMissingElements.values || []) if (!neu.some((x) => gleich(x, v))) neu.push(v);
             fields[tr.fieldPath] = { arrayValue: { values: neu } };
+          } else if (tr.increment) { // KASSE-P1b: increment (integerValue oder doubleValue), Feld fehlt = 0
+            const alt0 = fields[tr.fieldPath];
+            const basis = alt0 ? Number(alt0.integerValue ?? alt0.doubleValue ?? 0) : 0;
+            const zu = Number(tr.increment.integerValue ?? tr.increment.doubleValue);
+            const summe = Math.round((basis + zu) * 1e6) / 1e6;
+            fields[tr.fieldPath] = Number.isSafeInteger(summe) && tr.increment.integerValue !== undefined && (!alt0 || alt0.integerValue !== undefined) ? { integerValue: String(summe) } : { doubleValue: summe };
           } else if (tr.removeAllFromArray) {
             fields[tr.fieldPath] = { arrayValue: { values: vorhanden.filter((x) => !(tr.removeAllFromArray.values || []).some((v) => gleich(x, v))) } };
           }
@@ -101,6 +107,11 @@ export function fakeFirestore() {
       } else treffer = [...docs.keys()].filter((p) => p.startsWith(praefix) && !p.slice(praefix.length).includes('/')).sort();
       const filter = !sq.where ? [] : sq.where.fieldFilter ? [sq.where.fieldFilter] : ((sq.where.compositeFilter && sq.where.compositeFilter.filters) || []).map((x) => x.fieldFilter).filter(Boolean); // REST-G3: UND-Filter
       for (const ff of filter) {
+        if (ff.field.fieldPath === '__name__') { // KASSE-P1b: ID-Bereich (Listen je Kasse und Tag ohne Index)
+          const ref = pfadVon(ff.value.referenceValue);
+          treffer = treffer.filter((p) => (ff.op === 'GREATER_THAN_OR_EQUAL' ? p >= ref : ff.op === 'LESS_THAN_OR_EQUAL' ? p <= ref : ff.op === 'GREATER_THAN' ? p > ref : ff.op === 'LESS_THAN' ? p < ref : ff.op === 'EQUAL' ? p === ref : false));
+          continue;
+        }
         treffer = treffer.filter((p) => {
           // KERN-C3: verschachtelte Feldpfade (a.b.c) über mapValue, wie Firestore; ein flacher Schlüssel gleichen Namens hat Vorrang (ältere Tests)
           const felder = docs.get(p).fields;
@@ -119,9 +130,11 @@ export function fakeFirestore() {
         const wert = (p) => docs.get(p).fields[fp]?.stringValue ?? '';
         treffer = [...treffer].sort((a, b) => (wert(a) < wert(b) ? -richtung : wert(a) > wert(b) ? richtung : 0));
       }
+      const absteigend = Array.isArray(sq.orderBy) && sq.orderBy[0] && sq.orderBy[0].field && sq.orderBy[0].field.fieldPath === '__name__' && sq.orderBy[0].direction === 'DESCENDING';
+      if (absteigend) treffer = [...treffer].reverse(); // KASSE-P1b
       if (sq.startAt) {
         const ab = pfadVon(sq.startAt.values[0].referenceValue);
-        treffer = treffer.filter((p) => (sq.startAt.before ? p >= ab : p > ab));
+        treffer = treffer.filter((p) => (absteigend ? (sq.startAt.before ? p <= ab : p < ab) : (sq.startAt.before ? p >= ab : p > ab)));
       }
       if (sq.limit) treffer = treffer.slice(0, sq.limit);
       const t = zeit();

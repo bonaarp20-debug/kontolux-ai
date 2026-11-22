@@ -54,7 +54,8 @@ export const FEATURE_WERTE = ['aus', 'an'];
 export const FEATURE_NAME_MUSTER = /^[a-z][a-z0-9_]{0,39}$/;
 export const FEATURES_MAX = 40;
 // Diese Funktionen hängen am Kern und gehen bei kern_max 'aus' mit aus
-const KERN_ABHAENGIG = ['migration', 'festschreibung'];
+// KASSE-P1b: auch das Kassenbuch (Tagesabschluss-Belege sind reine Kern-Belege v2, ohne Kern gäbe es keine Wirkung)
+const KERN_ABHAENGIG = ['migration', 'festschreibung', 'kasse'];
 // Standard ohne lesbare Konfiguration: Schreibwege auf Belege und Perioden bleiben aus (tot geschaltet bis zur Freigabe,
 // migration-rollout.md 6.1 Schritt 3). Das Steuerprofil ist eine Nutzerangabe ohne Belegwirkung und bleibt an.
 const FEATURE_STANDARD = { steuerprofil: true, migration: false, festschreibung: false };
@@ -162,6 +163,15 @@ export function featureAktiv(config, name) {
   if (!(name in config.features)) return standard;
   return config.features[name] === 'an';
 }
+
+// KASSE-P1b (Baukonzept 08 2.12 M25, 2.10 Schritt 3): Feature-Namen des Kassenbuchs. Im Worker gilt jeder fehlende Name als aus (featureAktiv, nicht in
+// FEATURE_STANDARD); in der App (Lader) gilt ein fehlender Name als an: das Drehbuch setzt beide Namen vor dem App-Deploy ausdrücklich auf 'aus'.
+// 'kasse' hängt am Kern (KERN_ABHAENGIG: kern_max 'aus' schaltet das Kassenbuch mit ab). Die Liste schaltet nichts; sie dient Drehbuch und Paritätstest.
+export const FEATURES_KASSE = Object.freeze(['kasse', 'kasse_ki']);
+// KASSE-P1b (M15): Mindestfassung der Nutzungsbedingungen für das Kassenbuch (Zustimmungsnachweis users/{uid}/agb_zustimmung, wie OSS). PLATZHALTER bis P6:
+// die Fassung mit den Kassenbuch-Texten legt P6 fest, dann dieselbe Fassung im Lader (App, P3) und im Vorprüfungs-Vergleich. Bis dahin hat niemand zugestimmt,
+// das Kassenbuch ist also (zusätzlich zum Schalter) für alle 403 AGB_FEHLT.
+export const AGB_MINDESTFASSUNG_KASSE = '2026-12-14-1';
 
 // E-B (Auflage A1 G-KERN-B, KERN-B2): Kern-Optionen (optionen.regeln) aus config/features, dieselbe Abbildung wie die App (Kern-Index
 // optionenAusFeatures, Lader regel/loader.js kernOptionen). Eingabe: das bereinigte Dokument (configBereinigen) oder null; fehlend, 'aus',

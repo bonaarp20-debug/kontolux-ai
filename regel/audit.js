@@ -15,7 +15,10 @@ export const AUDIT_AKTIONEN = ['steuerprofil_anlegen', 'steuerprofil_eintrag', '
   // E1 (Zuruf BP-14): Sammelklärung unklarer migrierter Belege (regel/migration.js aktion 'klaerung')
   'migration_klaerung',
   // WORKER-C (Release C, BP-29): Abgabe-Schnappschuss eines OSS-Quartals (regel/oss-meldung.js), details ohne Beträge
-  'oss_abgabe'];
+  'oss_abgabe',
+  // KASSE-P1b (Baukonzept 2.12 M13): Kassenbuch, details nur mit Zählern und IDs, keine Beträge
+  'kasse_anlegen', 'kasse_aendern', 'kasse_system_wechseln', 'kassentag_abschluss', 'kassentag_storno', 'kassentag_ruhetag', 'kassentag_ruhetage',
+  'kassentag_aehnlich_trotzdem', 'kassenbewegung', 'kassenbewegung_storno', 'kassenmeldung'];
 
 export function kopfPfad(uid) {
   return `users/${uid}/audit_v2/_kopf`;

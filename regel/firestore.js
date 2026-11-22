@@ -36,8 +36,15 @@ export class BudgetFehler extends Error {
 // ---------------------------------------------------------------------------------------------
 // Werte kodieren/dekodieren (Firestore-REST-Format)
 // ---------------------------------------------------------------------------------------------
+// KASSE-P1b: echter Firestore-Zeitstempel (timestampValue). Die App liest createdAt mit .toDate(); ein Text würde dort scheitern.
+export class Zeitstempel {
+  constructor(iso) { this.iso = String(iso); }
+}
+export const zeitstempel = (iso) => new Zeitstempel(iso);
+
 export function kodiereWert(v) {
   if (v === null) return { nullValue: null };
+  if (v instanceof Zeitstempel) return { timestampValue: v.iso };
   if (typeof v === 'boolean') return { booleanValue: v };
   if (typeof v === 'number') {
     if (!Number.isFinite(v)) throw new TypeError('Zahl nicht endlich');
@@ -111,6 +118,17 @@ export const schreibe = {
   // Nur die genannten Felder setzen (fehlende Felder aus 'felder' werden gelöscht, wenn sie in 'maske' stehen)
   aendern(pfad, felder, maske, vorbedingung = null) {
     const w = { update: { name: vollerName(pfad), fields: kodiereFelder(felder) }, updateMask: { fieldPaths: maske.map(feldPfad) } };
+    if (vorbedingung) w.currentDocument = vorbedingung;
+    return w;
+  },
+  // KASSE-P1b: atomares Hochzählen (wie buchTagesBewegung): Felder in 'felder' werden mit 'maske' gesetzt, 'inkremente' ({ feld: Zahl }, auch negativ)
+  // per increment-Transform addiert (legt Dokument und Feld bei Bedarf an). Ganze Zahlen als integerValue, sonst doubleValue (Euro-Beträge).
+  erhoehen(pfad, felder, maske, inkremente, vorbedingung = null) {
+    const w = {
+      update: { name: vollerName(pfad), fields: kodiereFelder(felder) },
+      updateMask: { fieldPaths: maske.map(feldPfad) },
+      updateTransforms: Object.entries(inkremente).map(([f, n]) => ({ fieldPath: feldPfad(f), increment: Number.isSafeInteger(n) ? { integerValue: String(n) } : { doubleValue: n } })),
+    };
     if (vorbedingung) w.currentDocument = vorbedingung;
     return w;
   },
