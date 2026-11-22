@@ -380,10 +380,10 @@ test('K2: Zahlarten gegen Gesamt (Gutschein-Einlösung, Trinkgeld in Zahlarten),
   assert.equal(stufe(w, 'K2_ZAHLARTEN_GESAMT'), 'warnung'); assert.equal(w.pruefungen.find((p) => p.code === 'K2_ZAHLARTEN_GESAMT').differenz_cent, 100);
   // Einlösung: Zahlarten (Geld) = Gesamt - Einlösung
   const g = pr({ gutschein_einloesung_cent: 1000, zahlarten: [{ art: 'bar', betrag_cent: 14050 }, { art: 'karte', betrag_cent: 5000 }] });
-  assert.equal(stufe(g, 'K2_ZAHLARTEN_GESAMT'), 'ok'); assert.equal(g.vorschlag.vorab_versteuert_cent, 1000);
-  assert.ok(g.markiert.includes('vorab_versteuert_cent'), 'Einlösung nur als markierter Vorschlag');
+  assert.equal(stufe(g, 'K2_ZAHLARTEN_GESAMT'), 'ok'); assert.equal(g.vorschlag.vorab_versteuert_cent, null, 'Gutschein nie vorbefüllt (O4-W A-M1)');
+  assert.ok(g.unsicher.includes('vorab_versteuert_cent'), 'Einlösung nur als unsicher markiert, nie als Wert');
   const g2 = pr({ gutschein_einloesung_cent: null, zahlarten: [{ art: 'bar', betrag_cent: 14050 }, { art: 'karte', betrag_cent: 5000 }, { art: 'gutschein', betrag_cent: 1000 }] });
-  assert.equal(stufe(g2, 'K2_ZAHLARTEN_GESAMT'), 'ok'); assert.equal(g2.vorschlag.vorab_versteuert_cent, 1000);
+  assert.equal(stufe(g2, 'K2_ZAHLARTEN_GESAMT'), 'ok'); assert.equal(g2.vorschlag.vorab_versteuert_cent, null);
   // Trinkgeld steckt in den Zahlarten
   const t = pr({ trinkgeld: [{ art: 'inhaber', zahlart: 'karte', betrag_cent: 200 }], zahlarten: [{ art: 'bar', betrag_cent: 15050 }, { art: 'karte', betrag_cent: 5200 }] });
   assert.equal(stufe(t, 'K2_ZAHLARTEN_GESAMT'), 'ok');
@@ -605,4 +605,22 @@ test('A-H1: Retouren/Rabatte nie vorbefüllt (kein Doppelabzug): Kern-Umsatz = S
   assert.deepEqual(ku.vorschlag.korrekturen, []); assert.ok(ku.unsicher.includes('korrekturen'));
   // Prompt legt Satzumsatz NACH Abzug fest
   assert.match(zbonSystemPrompt(), /NACH Storno, Retoure und Rabatt/);
+});
+
+test('A-M1: Gutscheine werden nie als Einzweck/vorab versteuert vorbefüllt (Steuerurteil, Grenze 4): leer, unsicher, fester Hinweis', () => {
+  const festerText = 'Gutscheinverkauf bitte selbst einordnen: Einzweck oder Mehrzweck. Verkauf und Einlösung trägst du selbst ein.';
+  const v = pr({ gutschein_verkauf_cent: 2500, zahlarten: [{ art: 'bar', betrag_cent: 17550 }, { art: 'karte', betrag_cent: 5000 }], gesamt_brutto_cent: 20050 });
+  assert.equal(v.vorschlag.gutschein_einzweck_verkauf, null);
+  assert.equal(v.vorschlag.vorab_versteuert_cent, null);
+  assert.ok(v.unsicher.includes('gutschein_einzweck_verkauf') && v.unsicher.includes('vorab_versteuert_cent'));
+  assert.ok(!v.markiert.includes('gutschein_einzweck_verkauf') && !v.markiert.includes('vorab_versteuert_cent'), 'kein Wert, den man bestätigen könnte');
+  assert.equal(stufe(v, 'K15_GUTSCHEIN_SELBST'), 'hinweis'); assert.ok(v.hinweise.includes(festerText));
+  const e = pr({ gutschein_einloesung_cent: 1000, zahlarten: [{ art: 'bar', betrag_cent: 14050 }, { art: 'karte', betrag_cent: 5000 }] });
+  assert.equal(e.vorschlag.vorab_versteuert_cent, null); assert.ok(e.hinweise.includes(festerText));
+  const z = pr({ zahlarten: [{ art: 'bar', betrag_cent: 14050 }, { art: 'karte', betrag_cent: 5000 }, { art: 'gutschein', betrag_cent: 1000 }] });
+  assert.equal(z.vorschlag.vorab_versteuert_cent, null); assert.ok(z.hinweise.includes(festerText));
+  // ohne Gutschein: kein Hinweis, kein Leerfeld-Alarm
+  const o = pr({}); assert.equal(stufe(o, 'K15_GUTSCHEIN_SELBST'), undefined); assert.ok(!o.unsicher.includes('vorab_versteuert_cent'));
+  // ungültiger Betrag: nie repariert, K2 nicht prüfbar
+  const k = pr({ gutschein_einloesung_cent: -5 }); assert.equal(k.vorschlag.vorab_versteuert_cent, null); assert.equal(stufe(k, 'K2_ZAHLARTEN_GESAMT'), 'hinweis');
 });

@@ -128,6 +128,7 @@ const PRUEF_TEXTE = Object.freeze({
   K10_SATZ_FEHLT: 'Auf dem Bon steht kein Steuersatz. Trag die Beträge je Steuersatz selbst ein.',
   K11_DOPPELTER_SATZ: 'Ein Steuersatz steht mehrfach auf dem Bon. Prüfe, ob die Zeilen zusammengehören.',
   K14_KORREKTUR_LEER: 'Retouren/Rabatte: bitte nur eintragen, wenn der Satzumsatz oben vor dem Abzug steht.',
+  K15_GUTSCHEIN_SELBST: 'Gutscheinverkauf bitte selbst einordnen: Einzweck oder Mehrzweck. Verkauf und Einlösung trägst du selbst ein.',
   K12_LESBARKEIT: 'Der Bon ist nur teilweise lesbar. Vergleiche jeden Wert genau mit deinem Bon.',
   SPERRE_X_BERICHT: 'Das ist ein Zwischenbericht (X). Für den Tagesabschluss brauchst du den Z-Bericht.',
   SPERRE_EINZELBON: 'Das sieht aus wie ein einzelner Kassenbon. Im Kassenbuch überträgst du nur den Tagesabschluss deiner Kasse.',
@@ -305,10 +306,17 @@ export function pruefeZbonVorschlag(roh, ctx = {}) {
   for (const k of tgBad) { const [a, z] = k.split('|'); tg[a][z] = null; }
   if (tgGesamt > ZBON_MAX_CENT) tgGesamtOk = false;
 
-  // Gutscheine
-  const gutscheinVerkauf = r.gutschein_verkauf_cent === null || r.gutschein_verkauf_cent === undefined ? null : cent(r.gutschein_verkauf_cent, 'gutschein_einzweck_verkauf');
-  let einloesung = r.gutschein_einloesung_cent === null || r.gutschein_einloesung_cent === undefined ? null : cent(r.gutschein_einloesung_cent, 'vorab_versteuert_cent');
-  if (einloesung === null && zahlen.gutschein !== null && !unsicher.has('vorab_versteuert_cent')) einloesung = zahlen.gutschein;
+  // Gutscheine: Einzweck oder Mehrzweck ist ein Steuerurteil (§ 3 Abs. 13-15 UStG, Grenze 4 aus 2.14, O4-W A-M1): die Felder
+  // gutschein_einzweck_verkauf und vorab_versteuert_cent werden NIE vorbefüllt. Die gelesenen Beträge dienen nur der Kontrollsumme K2.
+  const gutscheinVerkauf = r.gutschein_verkauf_cent === null || r.gutschein_verkauf_cent === undefined ? null : cent(r.gutschein_verkauf_cent);
+  let einloesung = r.gutschein_einloesung_cent === null || r.gutschein_einloesung_cent === undefined ? null : cent(r.gutschein_einloesung_cent);
+  if (einloesung === null && r.gutschein_einloesung_cent == null && zahlen.gutschein !== null) einloesung = zahlen.gutschein;
+  const gutscheinKaputt = (r.gutschein_verkauf_cent != null && gutscheinVerkauf === null) || (r.gutschein_einloesung_cent != null && einloesung === null); // ungültiger Betrag: K2 nicht prüfbar, nie repariert
+  const vorhanden = (v) => v !== null && v !== undefined && v !== 0;
+  if (vorhanden(r.gutschein_verkauf_cent) || vorhanden(r.gutschein_einloesung_cent) || zahlRoh.some((z) => z.art === 'gutschein' && z.betrag_cent !== 0)) {
+    mark('gutschein_einzweck_verkauf', 'vorab_versteuert_cent');
+    pruefungen.push({ code: 'K15_GUTSCHEIN_SELBST', stufe: 'hinweis', felder: ['gutschein_einzweck_verkauf', 'vorab_versteuert_cent'] });
+  }
 
   // Kontrollsummen
   const saetzeAlleBrutto = saetze.length > 0 && saetze.every(bruttoOk);
@@ -321,7 +329,7 @@ export function pruefeZbonVorschlag(roh, ctx = {}) {
   } else pruefungen.push({ code: 'K1_SAETZE_GESAMT', stufe: 'hinweis', felder: ['umsaetze_je_satz', 'zbon_gesamt_cent'] }); // nicht prüfbar
   const geldSumme = [zahlen.bar, zahlen.karte, zahlen.sonstig];
   const zahlenAnwesend = geldSumme.some((x) => x !== null) && zahlUngueltig.size === 0 && zahlRoh.length > 0;
-  if (gesamt !== null && zahlenAnwesend && (einloesung !== null || zahlen.gutschein === null)) {
+  if (gesamt !== null && zahlenAnwesend && !gutscheinKaputt && (einloesung !== null || zahlen.gutschein === null)) {
     const geld = geldSumme.reduce((a, x) => a + (x || 0), 0);
     const soll = gesamt - (einloesung || 0);
     const abw = geld - soll;
@@ -360,12 +368,12 @@ export function pruefeZbonVorschlag(roh, ctx = {}) {
     korrekturen,
     trinkgeld_inhaber: { bar_cent: tg.inhaber.bar, unbar_cent: tg.inhaber.karte },
     trinkgeld_mitarbeiter_bar_cent: tg.mitarbeiter.bar, trinkgeld_mitarbeiter_unbar_cent: tg.mitarbeiter.karte,
-    gutschein_einzweck_verkauf: gutscheinVerkauf, vorab_versteuert_cent: einloesung, zbon_gesamt_cent: gesamt,
+    gutschein_einzweck_verkauf: null, vorab_versteuert_cent: null, zbon_gesamt_cent: gesamt,
   };
   const markiert = []; blaetter(vorschlag, '', markiert);
   // Hinweise: nur feste Texte, Warnungen zuerst, höchstens 3
   const texte = [];
-  const FEST = ['K14_KORREKTUR_LEER']; // Pflichthinweise zu bewusst leeren Feldern kommen vor den übrigen Hinweisen
+  const FEST = ['K14_KORREKTUR_LEER', 'K15_GUTSCHEIN_SELBST']; // Pflichthinweise zu bewusst leeren Feldern kommen vor den übrigen Hinweisen
   const reihe = [...pruefungen.filter((p) => p.stufe === 'warnung'), ...pruefungen.filter((p) => p.stufe === 'hinweis' && FEST.includes(p.code)), ...pruefungen.filter((p) => p.stufe === 'hinweis' && !FEST.includes(p.code))];
   for (const p of reihe) {
     let t = PRUEF_TEXTE[p.code];
