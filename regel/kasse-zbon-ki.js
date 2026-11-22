@@ -34,7 +34,7 @@ import { heuteBerlin } from './oss-meldung.js';
 export const KASSE_ZBON_PFAD = '/kasse-zbon-lesen';
 export const PFAD = KASSE_ZBON_PFAD;
 export const ZBON_MODELL = 'claude-haiku-5-5';
-export const ZBON_PROMPT_VERSION = 'zbon-1';
+export const ZBON_PROMPT_VERSION = 'zbon-2';
 export const ZBON_MAX_TOKENS = 2048;
 export const ZBON_TIMEOUT_MS = 60000;
 export const ZBON_TAGESLIMIT = 5;
@@ -87,7 +87,7 @@ export const ZBON_SCHEMA = obj({
 });
 
 // ---------------------------------------------------------------------------------------------
-// System-Prompt (zbon-1). Höchstens etwa 1.200 Token (Test: Methode prompt-messung.mjs, Zeichen / 3,5). Beispiele nur in Textform, synthetisch.
+// System-Prompt (zbon-2). Höchstens etwa 1.200 Token (Test: Methode prompt-messung.mjs, Zeichen / 3,5). Beispiele nur in Textform, synthetisch.
 // ---------------------------------------------------------------------------------------------
 const PROMPT = [
   'Du liest den Tagesabschluss (Z-Bericht) einer Ladenkasse ab und gibst nur Werte aus, die gedruckt auf dem Dokument stehen.',
@@ -95,6 +95,9 @@ const PROMPT = [
   '- Nichts schätzen, nichts ausrechnen, nichts ergänzen. Was fehlt oder unleserlich ist: null, und der Feldpfad kommt in "unsicher".',
   '- Beträge in Cent als ganze Zahl, ohne Vorzeichen (Retouren, Rabatte und Trinkgeld als positiver Betrag). Steuersatz in Prozent, so wie er auf dem Bon steht.',
   '- Bar und Karte nur aus den Zahlarten-Summen des Bons, nie aus den Steuersatz-Zeilen ableiten.',
+  '- saetze[].brutto_cent ist der Umsatz je Steuersatz laut MwSt-Aufstellung des Bons, so wie gedruckt. Weist der Bon ihn NACH Storno, Retoure und Rabatt aus, ist es dieser Betrag: nichts abziehen, nichts hinzurechnen.',
+  '- retouren, rabatte und trinkgeld nur ausgeben, wenn sie als eigene Zeile gedruckt stehen, nie aus Umsatz oder Zahlarten ableiten.',
+  '- Gutscheine: nur gedruckte Beträge ausgeben (Verkauf, Einlösung), nie als Einzweck oder Mehrzweck einordnen.',
   '- X-Bericht oder Zwischenbericht: dokumentart x_bericht. Einzelner Kassenbon, Rechnung oder anderes Dokument: sonstiges.',
   '- Mehrere Abschlüsse auf einem Dokument: mehrere_abschluesse true, nur den ersten ausgeben.',
   '- Namen von Personen (Bediener, Kassierer) nie ausgeben.',
@@ -124,6 +127,7 @@ const PRUEF_TEXTE = Object.freeze({
   K7_MEHRERE: 'Der Bon enthält mehrere Abschlüsse. Übernommen ist nur der erste. Trag die übrigen dazu ein.',
   K10_SATZ_FEHLT: 'Auf dem Bon steht kein Steuersatz. Trag die Beträge je Steuersatz selbst ein.',
   K11_DOPPELTER_SATZ: 'Ein Steuersatz steht mehrfach auf dem Bon. Prüfe, ob die Zeilen zusammengehören.',
+  K14_KORREKTUR_LEER: 'Retouren/Rabatte: bitte nur eintragen, wenn der Satzumsatz oben vor dem Abzug steht.',
   K12_LESBARKEIT: 'Der Bon ist nur teilweise lesbar. Vergleiche jeden Wert genau mit deinem Bon.',
   SPERRE_X_BERICHT: 'Das ist ein Zwischenbericht (X). Für den Tagesabschluss brauchst du den Z-Bericht.',
   SPERRE_EINZELBON: 'Das sieht aus wie ein einzelner Kassenbon. Im Kassenbuch überträgst du nur den Tagesabschluss deiner Kasse.',
@@ -274,20 +278,11 @@ export function pruefeZbonVorschlag(roh, ctx = {}) {
   }
   for (const a of zahlUngueltig) zahlen[a] = null; // ein ungültiger Eintrag macht die ganze Summe der Zahlart unbrauchbar
 
-  // Retouren und Rabatte -> korrekturen
+  // Retouren und Rabatte: NICHT vorbefüllen (O4-W A-H1). Der Satzumsatz auf dem Bon steht in der Regel schon nach dem Abzug; der Kern zieht
+  // Korrekturen nochmals ab (Doppelabzug, USt zu niedrig). Feld bleibt leer, ist markiert, fester Hinweis.
+  const hatKorrektur = ['retouren', 'rabatte'].some((n) => r[n] !== undefined && r[n] !== null && (!Array.isArray(r[n]) || r[n].length > 0));
+  if (hatKorrektur) { mark('korrekturen'); pruefungen.push({ code: 'K14_KORREKTUR_LEER', stufe: 'hinweis', felder: ['korrekturen'] }); }
   const korrekturen = [];
-  for (const [name, art] of [['retouren', 'retoure'], ['rabatte', 'rabatt']]) {
-    const l = listeVon(r[name], 'korrekturen');
-    for (const k of l) {
-      const i = korrekturen.length;
-      const s = satzWert(k.satz_prozent);
-      const steuerfall = ku ? 'A_KU' : (STEUERFALL_JE_SATZ[s] || null);
-      if (!ku && !steuerfall) mark(`korrekturen[${i}].steuerfall`);
-      const betrag = cent(k.betrag_cent, `korrekturen[${i}].betrag_cent`);
-      korrekturen.push({ art, steuerfall, satz_prozent: ku ? null : s, betrag_cent: betrag });
-    }
-  }
-  if (korrekturen.length > ZBON_LISTE_MAX) { korrekturen.length = 0; mark('korrekturen'); }
 
   // Trinkgeld
   const tg = { inhaber: { bar: null, karte: null }, mitarbeiter: { bar: null, karte: null } };
@@ -370,7 +365,8 @@ export function pruefeZbonVorschlag(roh, ctx = {}) {
   const markiert = []; blaetter(vorschlag, '', markiert);
   // Hinweise: nur feste Texte, Warnungen zuerst, höchstens 3
   const texte = [];
-  const reihe = [...pruefungen.filter((p) => p.stufe === 'warnung'), ...pruefungen.filter((p) => p.stufe === 'hinweis')];
+  const FEST = ['K14_KORREKTUR_LEER']; // Pflichthinweise zu bewusst leeren Feldern kommen vor den übrigen Hinweisen
+  const reihe = [...pruefungen.filter((p) => p.stufe === 'warnung'), ...pruefungen.filter((p) => p.stufe === 'hinweis' && FEST.includes(p.code)), ...pruefungen.filter((p) => p.stufe === 'hinweis' && !FEST.includes(p.code))];
   for (const p of reihe) {
     let t = PRUEF_TEXTE[p.code];
     if (p.code === 'K4_DATUM') t = `Bon vom ${p.bon_tag.slice(8, 10)}.${p.bon_tag.slice(5, 7)}., Dialog ${p.dialog_tag.slice(8, 10)}.${p.dialog_tag.slice(5, 7)}.`;
