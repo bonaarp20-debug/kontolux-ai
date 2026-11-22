@@ -4368,16 +4368,49 @@ function prueferLinksErsetzen(wert, uid) {
 // Zugangsnachweis des Prüfers (für /pruefer-daten und /pruefer-datei gleich): Token-Hash trifft einen aktiven, nicht abgelaufenen Zugang; die UID kommt nur aus
 // dem Dokumentpfad des Zugangs. Ergebnis { uid, felder } oder null; Infrastrukturfehler werfen.
 async function prueferZugangPruefen(token, env) {
+  const tokenHash = await sha256Hex(token);
   const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
-  const match = await prueferZugangSuchen(adminToken, 'token_hash', await sha256Hex(token));
-  if (!match) return null;
-  const felder = match.document?.fields || {};
-  const ablaufIso = firestoreValue(felder.ablauf);
-  const ablaufMs = ablaufIso ? new Date(ablaufIso).getTime() : NaN;
-  if (firestoreValue(felder.aktiv) !== true || !Number.isFinite(ablaufMs) || ablaufMs <= Date.now()) return null;
-  const m = /\/documents\/users\/([^/]+)\/profil\/prueferZugang$/.exec(match.document?.name || '');
-  if (!m) return null;
-  return { uid: m[1], felder, adminToken };
+  const match = await prueferZugangSuchen(adminToken, 'token_hash', tokenHash);
+  const zugang = (() => {
+    if (!match) return null;
+    const felder = match.document?.fields || {};
+    const ablaufIso = firestoreValue(felder.ablauf);
+    const ablaufMs = ablaufIso ? new Date(ablaufIso).getTime() : NaN;
+    if (firestoreValue(felder.aktiv) !== true || !Number.isFinite(ablaufMs) || ablaufMs <= Date.now()) return null;
+    const m = /\/documents\/users\/([^/]+)\/profil\/prueferZugang$/.exec(match.document?.name || '');
+    return m ? { uid: m[1], felder, adminToken } : null;
+  })();
+  if (zugang) prueferZugangMerken(tokenHash); else prueferZugangVergessen(tokenHash);
+  return zugang;
+}
+
+// I1-Fix N-5: Begrenzung von POST /pruefer-datei. Jeder Aufruf kostet vor der Antwort eine Firestore-Abfrage (collectionGroup über profil), auch mit falschem Token.
+// Bewusst kein Zähler in GLOBALE_LIMITS: der schreibt bei jedem Aufruf ins KV (Free-Plan 1.000 Schreibvorgänge am Tag, dasselbe KV trägt Profile und andere Grenzen),
+// und jeder legitime Klick eines Prüfers würde mitzählen. Stattdessen im Speicher des Isolats (Muster checkRateLimit, wie ROUTEN_LIMITS und UID_LIMITS):
+//   1. je IP: ROUTEN_LIMITS['/pruefer-datei'] (120 je 10 min), davor das allgemeine 20 je 10 s;
+//   2. je Prüfer-Zugang (Schlüssel: Hash des Tokens, nur für Tokens, die in diesem Isolat schon als gültig bestätigt wurden): 300 je 10 min;
+//   3. Fehlversuche je Isolat: nach 200 abgelehnten Tokens in 10 min fragt der Worker für unbekannte Tokens nicht mehr bei Firestore nach (429), bis das Fenster abläuft.
+//      Bereits bestätigte Zugänge (auch über /pruefer-daten beim Laden der Seite) laufen weiter; die Prüfung selbst (aktiv, Ablauf) geschieht trotzdem bei jedem Aufruf.
+// Schlüssel sind nie der Token selbst, nur sein SHA-256. Die Prüfer-Route hat keine Firebase-Anmeldung, UID_LIMITS greift dort nicht (verifiedUid fehlt).
+const PRUEFER_DATEI_JE_ZUGANG = { limit: 300, windowMs: 10 * 60 * 1000 };
+const PRUEFER_DATEI_FEHLVERSUCHE = { limit: 200, windowMs: 10 * 60 * 1000 };
+const PRUEFER_FEHL_SCHLUESSEL = '/pruefer-datei|fehlversuche';
+const prueferZugangBestaetigt = new Map(); // Token-Hash -> gültig bis (ms); nur Merker gegen die Fehlversuchssperre, ersetzt keine Prüfung
+function prueferZugangMerken(hash) {
+  prueferZugangBestaetigt.delete(hash);
+  prueferZugangBestaetigt.set(hash, Date.now() + PRUEFER_DATEI_JE_ZUGANG.windowMs);
+  while (prueferZugangBestaetigt.size > 1000) prueferZugangBestaetigt.delete(prueferZugangBestaetigt.keys().next().value);
+}
+function prueferZugangVergessen(hash) { prueferZugangBestaetigt.delete(hash); }
+function prueferZugangBekannt(hash) {
+  const bis = prueferZugangBestaetigt.get(hash);
+  if (bis && bis > Date.now()) return true;
+  if (bis) prueferZugangBestaetigt.delete(hash);
+  return false;
+}
+function prueferFehlversucheErschoepft() {
+  const e = rateLimitMap.get(PRUEFER_FEHL_SCHLUESSEL); // nur lesen, nicht zählen
+  return !!e && Date.now() - e.start <= PRUEFER_DATEI_FEHLVERSUCHE.windowMs && e.count >= PRUEFER_DATEI_FEHLVERSUCHE.limit;
 }
 const prueferBearer = (authHeader) => String(authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '').trim();
 
@@ -4390,9 +4423,19 @@ async function handlePrueferDatei(body, env, cors, authHeader) {
   const token = prueferBearer(authHeader);
   const pfad = body && typeof body.pfad === 'string' ? body.pfad : '';
   if (!token || token.length < 16 || token.length > 64 || !pfad || pfad.length > 400) return fehler(400, 'invalid');
+  // I1-Fix N-5: je Zugang und Fehlversuche je Isolat (siehe PRUEFER_DATEI_JE_ZUGANG), vor der Firestore-Abfrage
+  const tokenHash = await sha256Hex(token);
+  const zugangSchluessel = `/pruefer-datei|zugang|${tokenHash}`;
+  const bekannt = prueferZugangBekannt(tokenHash);
+  if (bekannt ? !checkRateLimit(zugangSchluessel, PRUEFER_DATEI_JE_ZUGANG.limit, PRUEFER_DATEI_JE_ZUGANG.windowMs) : prueferFehlversucheErschoepft()) return fehler(429, 'zu_viele');
   try {
     const zugang = await prueferZugangPruefen(token, env);
-    if (!zugang || !prueferDateiPfadOk(zugang.uid, pfad)) return fehler(404, 'invalid');
+    if (!zugang) {
+      checkRateLimit(PRUEFER_FEHL_SCHLUESSEL, PRUEFER_DATEI_FEHLVERSUCHE.limit, PRUEFER_DATEI_FEHLVERSUCHE.windowMs);
+      return fehler(404, 'invalid');
+    }
+    if (!bekannt && !checkRateLimit(zugangSchluessel, PRUEFER_DATEI_JE_ZUGANG.limit, PRUEFER_DATEI_JE_ZUGANG.windowMs)) return fehler(429, 'zu_viele');
+    if (!prueferDateiPfadOk(zugang.uid, pfad)) return fehler(404, 'invalid');
     const storageToken = await getGoogleAccessToken(env, STORAGE_SCOPE);
     let res = null; let infraFehler = false;
     for (const bucket of STORAGE_BUCKETS) {
