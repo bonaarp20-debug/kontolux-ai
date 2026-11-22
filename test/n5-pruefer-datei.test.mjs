@@ -12,6 +12,7 @@ const BUCKET = 'https://firebasestorage.googleapis.com/v0/b/kontolux-ai/o/';
 const TOKEN = 'n'.repeat(32);
 const PFAD_KASSE = `users/${UID}/kasse/k1/2026-11-02/1700_zbon.pdf`;
 const PFAD_BELEG = `users/${UID}/belege/1700_rechnung.pdf`;
+const PFAD_UPLOAD = `users/${UID}/uploads/1700_chat-erechnung.pdf`;
 const dl = (pfad) => `${BUCKET}${encodeURIComponent(pfad)}?alt=media&token=GEHEIMES-TOKEN-123`;
 const J = (o, st = 200) => new Response(JSON.stringify(o), { status: st, headers: { 'Content-Type': 'application/json' } });
 
@@ -19,6 +20,7 @@ function aufbau({ zugang = true, ablauf = Date.now() + 86400000, dateien = { [PF
   const fs = fakeFirestore();
   if (zugang) fs.setze(`users/${UID}/profil/prueferZugang`, { token_hash: createHash('sha256').update(TOKEN).digest('hex'), aktiv: zugang === true, ablauf: new Date(ablauf).toISOString() });
   fs.setze(`users/${UID}/dokumente/d1`, { name: 'Beleg', typ: 'rechnung_eingehend', storage_url: dl(PFAD_BELEG), xml_storage_url: dl(`users/${UID}/rechnungen/x.xml`), url: dl(`users/${FREMD}/belege/geheim.pdf`) });
+  fs.setze(`users/${UID}/dokumente/d2`, { name: 'E-Rechnung aus dem Chat', typ: 'rechnung_eingehend', storage_url: dl(PFAD_UPLOAD), url: dl(PFAD_UPLOAD) });
   fs.setze(`users/${UID}/kassen/k1`, { bezeichnung: 'Theke' });
   fs.setze(`users/${UID}/kassentage/k1_2026-11-02`, { kasse_id: 'k1', geschaeftstag: '2026-11-02', status: 'abgeschlossen', fassung_aktiv: 1 });
   fs.setze(`users/${UID}/kassentage/k1_2026-11-02/fassungen/1`, { n: 1, anhaenge: [{ pfad: PFAD_KASSE, url: dl(PFAD_KASSE) }, { pfad: `users/${FREMD}/kasse/k1/2026-11-02/x.pdf`, url: dl(`users/${FREMD}/kasse/k1/2026-11-02/x.pdf`) }] });
@@ -41,8 +43,9 @@ function aufbau({ zugang = true, ablauf = Date.now() + 86400000, dateien = { [PF
   const konsole = console.error; console.error = (...a) => log.konsole.push(a.join(' '));
   return { fs, log, zurueck: () => { globalThis.fetch = original; console.error = konsole; } };
 }
-const sig = (env, uid, pfad, exp) => createHmac('sha256', createHash('sha256').update('pruefer-datei|' + env.TOKEN_ENCRYPTION_KEY).digest()).update(`${uid}\n${pfad}\n${exp}`).digest('hex');
-const linkFuer = (env, pfad, { uid = UID, exp = Date.now() + 600000, s } = {}) => `/pruefer-datei?u=${uid}&p=${encodeURIComponent(pfad)}&exp=${exp}&sig=${s ?? sig(env, uid, pfad, exp)}`;
+const GEN = createHash('sha256').update(TOKEN).digest('hex').slice(0, 16); // Zugangs-Generation: Anfang des token_hash
+const sig = (env, uid, pfad, exp, g = GEN) => createHmac('sha256', createHash('sha256').update('pruefer-datei|' + env.TOKEN_ENCRYPTION_KEY).digest()).update(`${uid}\n${pfad}\n${exp}\n${g}`).digest('hex');
+const linkFuer = (env, pfad, { uid = UID, exp = Date.now() + 600000, s } = {}) => `/pruefer-datei?u=${uid}&p=${encodeURIComponent(pfad)}&exp=${exp}&g=${GEN}&sig=${s ?? sig(env, uid, pfad, exp)}`;
 const holeDaten = async (env, ip = '198.51.100.1') => anfrage(env, { path: '/pruefer-daten', body: { token: TOKEN }, ip });
 const get = (env, pfadUndQuery, ip = '198.51.100.2') => anfrage(env, { method: 'GET', path: pfadUndQuery, ip });
 
@@ -118,11 +121,11 @@ test('N5: abgelaufen, manipuliert, fremder Nutzer, fremder Pfad: 401 ohne Dateiz
       abgelaufen: linkFuer(env, PFAD_KASSE, { exp: Date.now() - 1000 }),
       'Signatur verändert': linkFuer(env, PFAD_KASSE, { s: 'f'.repeat(64) }),
       'Signatur fehlt': `/pruefer-datei?u=${UID}&p=${encodeURIComponent(PFAD_KASSE)}&exp=${Date.now() + 60000}`,
-      'Pfad getauscht (Signatur eines anderen Pfads)': `/pruefer-datei?u=${UID}&p=${encodeURIComponent(PFAD_BELEG)}&exp=${Date.now() + 600000}&sig=${sig(env, UID, PFAD_KASSE, Date.now() + 600000)}`,
-      'ablauf verlängert': (() => { const e = Date.now() - 5000; return `/pruefer-datei?u=${UID}&p=${encodeURIComponent(PFAD_KASSE)}&exp=${e + 9e6}&sig=${sig(env, UID, PFAD_KASSE, e)}`; })(),
-      'anderer Nutzer, Signatur des Nutzers': `/pruefer-datei?u=${FREMD}&p=${encodeURIComponent(PFAD_KASSE)}&exp=${Date.now() + 600000}&sig=${sig(env, UID, PFAD_KASSE, Date.now() + 600000)}`,
+      'Pfad getauscht (Signatur eines anderen Pfads)': `/pruefer-datei?u=${UID}&p=${encodeURIComponent(PFAD_BELEG)}&exp=${Date.now() + 600000}&g=${GEN}&sig=${sig(env, UID, PFAD_KASSE, Date.now() + 600000)}`,
+      'ablauf verlängert': (() => { const e = Date.now() - 5000; return `/pruefer-datei?u=${UID}&p=${encodeURIComponent(PFAD_KASSE)}&exp=${e + 9e6}&g=${GEN}&sig=${sig(env, UID, PFAD_KASSE, e)}`; })(),
+      'anderer Nutzer, Signatur des Nutzers': `/pruefer-datei?u=${FREMD}&p=${encodeURIComponent(PFAD_KASSE)}&exp=${Date.now() + 600000}&g=${GEN}&sig=${sig(env, UID, PFAD_KASSE, Date.now() + 600000)}`,
       'fremder Pfad, gültig signiert für fremden Nutzer ohne Zugang': linkFuer(env, fremdPfad, { uid: FREMD }),
-      'Pfad unter eigener UID, aber anderer Nutzer in u': `/pruefer-datei?u=${FREMD}&p=${encodeURIComponent(PFAD_KASSE)}&exp=${Date.now() + 600000}&sig=${sig(env, FREMD, PFAD_KASSE, Date.now() + 600000)}`,
+      'Pfad unter eigener UID, aber anderer Nutzer in u': `/pruefer-datei?u=${FREMD}&p=${encodeURIComponent(PFAD_KASSE)}&exp=${Date.now() + 600000}&g=${GEN}&sig=${sig(env, FREMD, PFAD_KASSE, Date.now() + 600000)}`,
     };
     for (const [name, pfad] of Object.entries(faelle)) {
       const r = await get(env, pfad, '198.51.100.9');
@@ -148,7 +151,7 @@ test('N5: Pfad-Traversal und Bereiche außerhalb der erlaubten Ordner: selbst mi
       assert.equal(r.status, 401, p);
     }
     // rohe, nicht passend kodierte Traversal-Schreibweisen in der Adresse
-    for (const roh of [`u=${UID}&p=users/${UID}/kasse/%2e%2e/%2e%2e/x&exp=${Date.now() + 60000}&sig=${'a'.repeat(64)}`, `u=${UID}&p=..%2f..%2fetc&exp=${Date.now() + 60000}&sig=${'a'.repeat(64)}`]) {
+    for (const roh of [`u=${UID}&p=users/${UID}/kasse/%2e%2e/%2e%2e/x&exp=${Date.now() + 60000}&g=${GEN}&sig=${'a'.repeat(64)}`, `u=${UID}&p=..%2f..%2fetc&exp=${Date.now() + 60000}&g=${GEN}&sig=${'a'.repeat(64)}`]) {
       assert.equal((await get(env, `/pruefer-datei?${roh}`, '198.51.100.10')).status, 401);
     }
     assert.equal(a.log.storage.length, 0);
@@ -254,4 +257,47 @@ test('N5 Erneuerung: ohne Secret kein Link; Logs ohne Token; Rate-Limit greift; 
   const { readFileSync, existsSync } = await import('node:fs');
   const appDatei = new URL('../../Kontolux/index.html', import.meta.url);
   if (existsSync(appDatei)) assert.match(readFileSync(appDatei, 'utf8'), /\/pruefer-datei-link/); // App-Repo daneben, wie beim Paritätswächter
+});
+
+test('F2-Fix A-H1: Chat-Uploads (users/{uid}/uploads/…) erhalten in den Prüfer-Daten einen Kurzlink (storage_url und url), ohne token=; Erneuerung und Abruf gehen', async () => {
+  const a = aufbau({ dateien: { [PFAD_UPLOAD]: { typ: 'application/pdf', inhalt: 'CHAT-BELEG' } } }); const env = await erzeugeTestEnv();
+  try {
+    const text = await (await holeDaten(env, '198.51.100.40')).text();
+    assert.ok(!/token=/i.test(text) && !text.includes('firebasestorage.googleapis.com'));
+    const d2 = JSON.parse(text).dokumente.find(d => d.name === 'E-Rechnung aus dem Chat');
+    for (const feld of ['storage_url', 'url']) {
+      assert.ok(typeof d2[feld] === 'string' && d2[feld].startsWith('https://'), `${feld} ist ein Kurzlink`);
+      assert.equal(new URL(d2[feld]).searchParams.get('p'), PFAD_UPLOAD);
+    }
+    assert.equal(prueferDateiPfadOk(UID, PFAD_UPLOAD), true);
+    assert.equal(prueferDateiPfadOk(UID, `users/${UID}/angebote/x.pdf`), false);
+    assert.equal(prueferDateiPfadOk(UID, `users/${UID}/uploads`), false);
+    const u = new URL(d2.storage_url);
+    const r = await get(env, u.pathname + u.search, '198.51.100.41');
+    assert.equal(r.status, 200);
+    assert.equal(await r.text(), 'CHAT-BELEG');
+  } finally { a.zurueck(); }
+  const { readFileSync, existsSync } = await import('node:fs');
+  const appDatei = new URL('../../Kontolux/index.html', import.meta.url);
+  if (existsSync(appDatei)) assert.match(readFileSync(appDatei, 'utf8'), /safeHref\(d\.storage_url \|\| d\.url\)/, 'Prüfer-Seite zeigt storage_url || url');
+});
+
+test('F2-Fix N5-b: Link ist an die Zugangs-Generation gebunden: nach Widerruf und neuer Erteilung (neuer Token) enden alte Links, neue funktionieren', async () => {
+  const a = aufbau(); const env = await erzeugeTestEnv();
+  try {
+    const text = await (await holeDaten(env, '198.51.100.60')).text();
+    const alt = new URL(JSON.parse(text).dokumente[0].storage_url);
+    assert.equal(alt.searchParams.get('g'), GEN);
+    assert.equal((await get(env, alt.pathname + alt.search, '198.51.100.61')).status, 200);
+    // Widerruf, dann neue Erteilung: neuer Token, neuer token_hash, aktiv wieder true
+    a.fs.setze(`users/${UID}/profil/prueferZugang`, { token_hash: createHash('sha256').update('z'.repeat(32)).digest('hex'), aktiv: true, ablauf: new Date(Date.now() + 86400000).toISOString() });
+    assert.equal((await get(env, alt.pathname + alt.search, '198.51.100.62')).status, 403, 'alter Link endet mit der Generation');
+    // g gefälscht auf die neue Generation: Signatur passt nicht
+    const neuGen = createHash('sha256').update('z'.repeat(32)).digest('hex').slice(0, 16);
+    const q = new URLSearchParams(alt.search); q.set('g', neuGen);
+    assert.equal((await get(env, alt.pathname + '?' + q, '198.51.100.63')).status, 401);
+    // ohne g: ungültig
+    q.delete('g');
+    assert.equal((await get(env, alt.pathname + '?' + q, '198.51.100.64')).status, 401);
+  } finally { a.zurueck(); }
 });
