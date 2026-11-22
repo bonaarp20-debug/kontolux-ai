@@ -1915,3 +1915,62 @@ test('O6 M2 (Baukonzept 2.11 Nr. 2): ein irrtümlich bestätigter Ruhetag nach d
   // Bewegungen am Ruhetag bleiben gesperrt (der Abschluss ist der Weg, nicht die Bewegung)
   assert.equal((await u.bewRufe(bewegung(id, '2026-11-04', 'geldtransit_bank_ein', 100))).json.status, 'ruhetag');
 });
+
+test('O6 M3: Festschreibung, die zwischen Lesen und Commit startet (Commit scheitert, Wiederholung): Abschluss, Storno, Ausgabe und Ausgaben-Storno lesen die Sperrliste neu und antworten 409 MONAT_FESTGESCHRIEBEN, nichts geschrieben', async () => {
+  const tag = '2026-11-02';
+  // löst beim ersten Commit, der den Namensteil schreibt, einen Konflikt (Zähler) UND eine startende Festschreibung des EÜR-Monats aus
+  const rennen = (u, id, teil) => {
+    let n = 0;
+    u.fs.haken.vorCommit = async (writes, api) => {
+      if (n === 0 && writes.some((w) => String(w.update && w.update.name).includes(teil))) {
+        n += 1;
+        api.setze(P(`zaehler/K_${id}_2026`), { letzte: 7 });
+        api.setze(P('festschreibung/euer-2026-11'), { status: 'sperre_laeuft' });
+      }
+    };
+    return () => n;
+  };
+  // 1 Abschluss
+  const a = umgebung();
+  const aid_ = await a.legeKasseAn();
+  const na = rennen(a, aid_, '/kassentage/');
+  const ra = await a.tagRufe(abschluss(aid_, tag));
+  assert.equal(na(), 1);
+  assert.equal(ra.status, 409, JSON.stringify(ra.json));
+  assert.equal(ra.json.fehler[0].code, 'MONAT_FESTGESCHRIEBEN');
+  assert.deepEqual(a.fs.pfade(P('kassentage/')), []);
+  assert.deepEqual(a.fs.pfade(P('dokumente/')), []);
+  // 2 Storno
+  const s = umgebung();
+  const sid = await s.legeKasseAn();
+  assert.equal((await s.tagRufe(abschluss(sid, tag))).status, 200);
+  const ns = rennen(s, sid, '/kassentage/');
+  const rs = await s.tagRufe(stornoBody(sid, tag));
+  assert.equal(ns(), 1);
+  assert.equal(rs.status, 409, JSON.stringify(rs.json));
+  assert.equal(rs.json.fehler[0].code, 'MONAT_FESTGESCHRIEBEN');
+  assert.equal(s.fs.lies(P(`kassentage/${sid}_${tag}`)).status, 'abgeschlossen');
+  assert.equal(s.fs.lies(P(`dokumente/kasse_${sid}_${tag}_f1_storno`)), null);
+  // 3 Ausgabe
+  const b = umgebung();
+  const bid = await b.legeKasseAn();
+  const nb = rennen(b, bid, '/kassenbewegungen/');
+  const rb = await b.bewRufe(bewegung(bid, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG() }));
+  assert.equal(nb(), 1);
+  assert.equal(rb.status, 409, JSON.stringify(rb.json));
+  assert.equal(rb.json.fehler[0].code, 'MONAT_FESTGESCHRIEBEN');
+  assert.deepEqual(b.fs.pfade(P('kassenbewegungen/')), []);
+  assert.deepEqual(b.fs.pfade(P('dokumente/')), []);
+  // 4 Storno einer Ausgabe
+  const c = umgebung();
+  const cid = await c.legeKasseAn();
+  const orig = await c.bewRufe(bewegung(cid, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG() }));
+  assert.equal(orig.status, 200, JSON.stringify(orig.json));
+  const nc = rennen(c, cid, '/kassenbewegungen/');
+  const rc = await c.bewRufe(stornoBew(cid, orig.json.bewegung_id));
+  assert.equal(nc(), 1);
+  assert.equal(rc.status, 409, JSON.stringify(rc.json));
+  assert.equal(rc.json.fehler[0].code, 'MONAT_FESTGESCHRIEBEN');
+  assert.equal(c.fs.lies(P(`dokumente/${orig.json.beleg_id}`)).storniert, undefined);
+  assert.deepEqual(c.fs.pfade(P('kassenbewegungen/')).length, 1);
+});

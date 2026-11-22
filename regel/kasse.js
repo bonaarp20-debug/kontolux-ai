@@ -35,6 +35,8 @@ const FORMAT_GRUPPE = ['FORMAT', 'STEUERFALL_UNZULAESSIG', 'KU_MEHRERE_SAETZE', 
 const KERN_STATUS = { ANHANG_ODER_BESTAETIGUNG: [422, 'ANHANG_FEHLT'], TAGESSALDO_NEGATIV: [422], BESTAND_NEGATIV: [422], DATENQUELLE_SUMUP: [422], KARTE_UEBER_INTEGRATION: [422],
   KU_GRENZE_AM_TAG: [409], BESTAND_NICHT_BESTAETIGT: [400], NACHERFASSUNG_OHNE_GRUND: [400] };
 const idVon = (d) => String(d.pfad).split('/').pop();
+// Gesperrte Perioden (Festschreibung läuft oder festgeschrieben). Wird in JEDEM Versuch einer Wiederholung neu gelesen (O6 M3): startet zwischen Lesen und Commit eine Festschreibung, scheitert der Commit am Audit-Kopf und der nächste Versuch muss die neue Liste sehen.
+const festPeriodenLesen = async (fs, uid) => (await listeAlle(fs, P.festschreibungen(uid))).dokumente.filter((d) => SPERRENDE.includes(d.daten && d.daten.status)).map(idVon);
 const kassennamen = (k) => (typeof k.bezeichnung === 'string' ? k.bezeichnung : 'Kasse');
 const datumDe = (tag) => `${tag.slice(8, 10)}.${tag.slice(5, 7)}.${tag.slice(0, 4)}`;
 
@@ -342,8 +344,6 @@ async function abschliessen(c) {
   const tagId = Steuerkern.kassentagId(kasseId, tag);
   const jahr = tag.slice(0, 4);
   const kernOptionen = await kernOptionenFuerKontoLaden(uid, config, { fs, streng: true });
-  const fest = await listeAlle(fs, P.festschreibungen(uid));
-  const festPerioden = fest.dokumente.filter((d) => SPERRENDE.includes(d.daten && d.daten.status)).map(idVon);
   const memo = {};
 
   return mitWiederholung(fs, async () => {
@@ -423,6 +423,7 @@ async function abschliessen(c) {
     if (bauFehler) return { antwort: fehlerAntwort(422, 'BELEG_UNGUELTIG', cors, { codes: bauFehler.fehler.filter((x) => /^[A-Za-z0-9_]{1,64}$/.test(x)).slice(0, 10) }) };
 
     // Festschreibung (Kap. 6 Nr. 21): EÜR-Monat festgeschrieben -> 409; nur ein USt-Zeitraum -> speichern mit nach_festschreibung
+    const festPerioden = await festPeriodenLesen(fs, uid);
     const perioden = [...new Set(belege.flatMap((b) => wirkPerioden(b.beleg, profil, kernOptionen)))].sort();
     const gesperrt = perioden.filter((p) => festPerioden.includes(p));
     if (gesperrt.some((p) => p.startsWith('euer-'))) return { antwort: fehlerAntwort(409, 'MONAT_FESTGESCHRIEBEN', cors, { perioden: gesperrt }) };
@@ -544,8 +545,6 @@ async function stornieren(c) {
   const tagId = Steuerkern.kassentagId(kasseId, tag);
   const jahr = tag.slice(0, 4);
   const kernOptionen = await kernOptionenFuerKontoLaden(uid, config, { fs, streng: true });
-  const fest = await listeAlle(fs, P.festschreibungen(uid));
-  const festPerioden = fest.dokumente.filter((d) => SPERRENDE.includes(d.daten && d.daten.status)).map(idVon);
 
   return mitWiederholung(fs, async () => {
     const docs = await fs.batchGet([P.kasse(uid, kasseId), P.kassentag(uid, tagId), P.zaehler(uid, kasseId, jahr), P.tagesdaten(uid, tag), kopfPfad(uid)]);
@@ -592,6 +591,7 @@ async function stornieren(c) {
       if (origDok.daten.gebuchter_tag) einnahmenCent += Math.abs(origDok.daten.steuer.summe.brutto_cent);
     }
     // Festschreibung (Nr. 21): EÜR-Monat des Geschäftstags festgeschrieben -> 409; nur ein USt-Zeitraum -> speichern mit nach_festschreibung
+    const festPerioden = await festPeriodenLesen(fs, uid);
     const perioden = [...new Set(storni.flatMap((x) => x.perioden))].sort();
     const gesperrt = perioden.filter((p) => festPerioden.includes(p));
     if (gesperrt.some((p) => p.startsWith('euer-'))) return { antwort: fehlerAntwort(409, 'MONAT_FESTGESCHRIEBEN', cors, { perioden: gesperrt }) };
@@ -657,11 +657,9 @@ async function bewegungAnlegen(c) {
   const tagId = Steuerkern.kassentagId(kasseId, tag);
   const jahr = tag.slice(0, 4);
   let kernOptionen = null;
-  let festPerioden = [];
   if (w.art === 'ausgabe') {
     if (typeof deps.kassenAusgabeBeleg !== 'function') return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
     kernOptionen = await kernOptionenFuerKontoLaden(uid, config, { fs, streng: true });
-    festPerioden = (await listeAlle(fs, P.festschreibungen(uid))).dokumente.filter((d) => SPERRENDE.includes(d.daten && d.daten.status)).map(idVon);
   }
   return mitWiederholung(fs, async () => {
     const docs = await fs.batchGet([P.kasse(uid, kasseId), P.kassentag(uid, tagId), P.zaehler(uid, kasseId, jahr), kopfPfad(uid), ...(w.gegenkasse_id ? [P.kasse(uid, w.gegenkasse_id)] : [])]);
@@ -690,6 +688,7 @@ async function bewegungAnlegen(c) {
     let belegAntwort = null;
     if (w.art === 'ausgabe') {
       belegId = `kasse_${bewegungId}_beleg`;
+      const festPerioden = await festPeriodenLesen(fs, uid);
       const a = await deps.kassenAusgabeBeleg(w.beleg, { fs, uid, profil, kernOptionen, festPerioden, heute, zeit, tag, belegId, kasseId, bewegungId, nummer, text: w.text });
       if (a.fehler) return { antwort: formFehler(a.fehler, cors) };
       if (a.ablehnen) {
@@ -742,7 +741,6 @@ async function bewegungStornieren(c) {
   const tagId = Steuerkern.kassentagId(kasseId, tag);
   const jahr = tag.slice(0, 4);
   const kernOptionen = await kernOptionenFuerKontoLaden(uid, config, { fs, streng: true });
-  const festPerioden = (await listeAlle(fs, P.festschreibungen(uid))).dokumente.filter((d) => SPERRENDE.includes(d.daten && d.daten.status)).map(idVon);
   return mitWiederholung(fs, async () => {
     const docs = await fs.batchGet([P.kasse(uid, kasseId), P.kassentag(uid, tagId), P.zaehler(uid, kasseId, jahr), kopfPfad(uid), P.bewegung(uid, origId)]);
     const kasseDok = docs.get(P.kasse(uid, kasseId));
@@ -778,6 +776,7 @@ async function bewegungStornieren(c) {
       const bd = refs.get(P.beleg(uid, orig.beleg_id));
       if (!bd || !istObjekt(bd.daten)) throw new Error('Ausgabebeleg der Bewegung fehlt');
       if (bd.daten.storniert === true) return { antwort: fehlerAntwort(409, 'BEWEGUNG_STORNIERT', cors, { bewegung_id: origId }) };
+      const festPerioden = await festPeriodenLesen(fs, uid);
       const kb = Steuerkern.belegFuerKern({ ...bd.daten, id: orig.beleg_id }, profil).beleg;
       const perioden = kb ? wirkPerioden(kb, profil, kernOptionen) : [];
       gesperrt = perioden.filter((p) => festPerioden.includes(p));
