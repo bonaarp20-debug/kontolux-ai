@@ -157,7 +157,13 @@ const verwendet = { SKR03: new Set(Object.values(app).map(e => e.SKR03)), SKR04:
 for (const skr of ['SKR03', 'SKR04']) pruefe(`${skr}: kein reserviertes/gelöschtes Konto im Mapping`, reserviert[skr].every(k => !verwendet[skr].has(k)));
 
 // ── Wächter Kassenbuch (SB-4, sb-antworten.md 22.11.2026, Kontenrahmen 2026 SKR03 11174 / SKR04 11175 im Wortlaut gelesen): nur Konten, die der Code tatsächlich benutzt.
-// Ändert jemand eine Nummer im Code oder in der Doku, wird dieser Test rot; geprüft wird jede Nummer mit ihrer belegten Bezeichnung.
+// Was rot wird (J1-Fix N-c, vorher stand hier fälschlich „auch bei Doku-Änderung“):
+//  a) eine Nummer im Code (Kassenzweig, KU-Konto, Mapping) weicht von KASSE_BELEGT ab;
+//  b) Nummer und Bezeichnung aus KASSE_BELEGT (und Bankgebühren 4970/6855 aus DATEV_2026) stehen nicht genau so in der Kontentabelle von
+//     ../Kontolux/docs/kassenbuch/sb-antworten.md (SB-4, die im Wortlaut gelesene Quelle); die Tabellen in dieser Datei sind von dort abgeschrieben;
+//  c) ein Kontenpaar „SKR03/SKR04“ in den Hilfetexten stand-kasse.md 7a fehlt in dieser Kontentabelle (oder seine genannte Bezeichnung weicht ab).
+// 8519/4569 (Provision Lotto/Post) nutzt der Code nicht (nur ein optionaler Export-Hinweis in 7a): geprüft wird es nur über c), nicht gegen den Code.
+// Die DATEV-PDFs selbst liest der Test nicht.
 import { KU_KONTO as KU_K } from './regel/datev-export-regeln.js';
 const KASSE_BELEGT = {
   SKR03: { kasse: ['1000', 'Kasse'], transit: ['1360', 'Geldtransit'], durchlauf: ['1590', 'Durchlaufende Posten'], erloese: ['8200', 'Erlöse'], erloese0: ['8290', 'Erlöse 0 % USt'], ku: ['8192', 'U AM Steuerfreie Erlöse Kleinunternehmer nach § 19 Abs. 1 UStG'], fehlbetrag: ['4900', 'Sonstige betriebliche Aufwendungen'] },
@@ -172,5 +178,27 @@ for (const skr of ['SKR03', 'SKR04']) {
   // Kein Konto „Kassendifferenz“ im Kontenrahmen 2026; die aus Ratgebern bekannten 2370/6972 sind falsch und dürfen nirgends als Kassenkonto stehen
   pruefe(`${skr}: keine Tabelle enthält ein Konto „Kassendifferenz“ und 2370/6972 sind nicht im Einsatz`, !Object.values(WEITERE[skr]).some(v => /Kassendifferenz/i.test(v)) && !Object.values(imCode).some(v => v === '2370' || v === '6972') && !Object.values(app).some(e => e[skr] === '2370' || e[skr] === '6972'));
 }
+// b) und c): Kontentabelle aus sb-antworten.md (Zeilen „| Zweck | SKR03 | SKR04 | Bezeichnung | … |“ des Blocks mit „Gebühr Kartenanbieter“)
+const sbText = readFileSync(new URL('../Kontolux/docs/kassenbuch/sb-antworten.md', import.meta.url), 'utf8').split('\n');
+const sbStart = sbText.findIndex(z => z.startsWith('| Gebühr Kartenanbieter |'));
+let sbVon = sbStart, sbBis = sbStart;
+while (sbVon > 0 && sbText[sbVon - 1].startsWith('|')) sbVon--;
+while (sbBis + 1 < sbText.length && sbText[sbBis + 1].startsWith('|')) sbBis++;
+const ohneMarke = (t) => String(t).replace(/^(U AM|U AV|F|R)\s+/, '').trim();
+const sbZeilen = sbStart < 0 ? [] : sbText.slice(sbVon, sbBis + 1).map(z => z.split('|').slice(1, -1).map(x => x.trim())).filter(c => c.length >= 4)
+  .map(c => ({ skr03: c[1].match(/\d{4}/g) || [], skr04: c[2].match(/\d{4}/g) || [], bez: ohneMarke(c[3]) }));
+pruefe('sb-antworten.md: Kontentabelle SB-4 gefunden und gelesen', sbZeilen.length >= 10, `${sbZeilen.length} Zeilen`);
+const sbHat = (n03, n04, bez) => sbZeilen.some(z => z.skr03.includes(n03) && z.skr04.includes(n04) && (bez === null || z.bez === ohneMarke(bez)));
+for (const name of Object.keys(KASSE_BELEGT.SKR03)) {
+  const [n03, b03] = KASSE_BELEGT.SKR03[name], [n04, b04] = KASSE_BELEGT.SKR04[name];
+  pruefe(`Kassenbuch-Konto ${name} ${n03}/${n04} (${ohneMarke(b03)}) steht so in sb-antworten.md`, ohneMarke(b03) === ohneMarke(b04) && sbHat(n03, n04, b03));
+}
+const [bank03, bank04] = DATEV_2026['Bankgebühren'];
+pruefe(`Gebühr Kartenanbieter ${bank03[0]}/${bank04[0]} (${bank03[1]}) steht so in sb-antworten.md`, bank03[1] === bank04[1] && sbHat(bank03[0], bank04[0], bank03[1]));
+const standText = readFileSync(new URL('../Kontolux/docs/kassenbuch/stand-kasse.md', import.meta.url), 'utf8');
+const abschnitt7a = standText.slice(standText.indexOf('## 7a.'), standText.indexOf('## 8.'));
+const paare7a = [...abschnitt7a.matchAll(/(\d{4})\/(\d{4})(?:\s*„([^“]+)“)?/g)];
+pruefe('stand-kasse.md 7a: Kontenpaare gefunden', paare7a.length >= 3, `${paare7a.length}`);
+for (const m of paare7a) pruefe(`stand-kasse.md 7a: ${m[1]}/${m[2]}${m[3] ? ` „${m[3]}“` : ''} steht in sb-antworten.md`, sbHat(m[1], m[2], m[3] ?? null));
 console.log(`\n${ok} bestanden, ${fehler} fehlgeschlagen`);
 process.exit(fehler ? 1 : 0);
