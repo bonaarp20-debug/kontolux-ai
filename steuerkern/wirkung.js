@@ -1355,6 +1355,11 @@ function ausgangWirkungen(s, profil, ctx, out, opt) {
       gruppen.forEach((g, gi) => { if (je[gi].netto_cent !== 0 || je[gi].ust_cent !== 0) ustW(g, 'minderung', z.datum, 0 - je[gi].netto_cent, 0 - je[gi].ust_cent, 'R-KOR-02', z.id); });
     });
   }
+  // O2-Fix K-N3 (ABWEICHUNGEN 5.40): Mehrzweck-Einlösung am Kassentag mit mehreren Sätzen. Der Beleg kennt den Satz des Gutscheins nicht (eine Zahlung
+  // kanal gutschein_mehrzweck); die Geldzahlungen werden anteilig auf alle Sätze verteilt, die Aufteilung EÜR Kz 112/140 ist dann eine Näherung (Summe,
+  // Gewinn und Voranmeldung stimmen). Nur Hinweis an den EÜR-Zeilen, keine Zahl.
+  if (s.beleg_art === 'tagesabschluss' && zahlungen.some((z) => z.kanal === KANAL_MEHRZWECK) && zahlungen.some((z) => z.kanal !== KANAL_MEHRZWECK)
+    && gruppen.filter((g) => g.netto_cent !== 0 || g.ust_cent !== 0).length > 1 && !ctx.hinweise.includes('HN_KASSE_MEHRZWECK_SAETZE')) ctx.hinweise.push('HN_KASSE_MEHRZWECK_SAETZE');
   // EÜR: Zufluss je Zahlung (R-ZP-20), unabhängig von Soll und Ist
   zahlungen.forEach((z, zi) => {
     if (z.kanal === KANAL_MEHRZWECK && s.beleg_art === 'tagesabschluss') return; // KERN-26 (SB-3), O2 N2 nur am Kassenbeleg: Einlösung eines Mehrzweck-Gutscheins: Umsatzsteuer ja, aber kein Zufluss (stand beim Verkauf in Kz 103)
@@ -1983,6 +1988,13 @@ function versAnteilKorrektur(gk, os) {
   }
 }
 
+// O2-Fix K-N1: Eingangsbeleg mit Versicherungsposition (Umsatzsteuerbetrag ohne abziehbare Vorsteuer) UND einer anderen Position mit Umsatzsteuer
+function versGemischterBeleg(os) {
+  if (!istObjekt(os) || os.richtung !== 'eingang' || !Array.isArray(os.positionen)) return false;
+  const mitUst = os.positionen.filter((p) => istObjekt(p) && istCent(p.ust_cent) && p.ust_cent > 0);
+  return mitUst.some((p) => versicherungPosition(os, p)) && mitUst.some((p) => !versicherungPosition(os, p));
+}
+
 function rueckzahlungVon(s) {
   const rzRoh = istObjekt(s.rueckzahlung) ? s.rueckzahlung : null;
   return rzRoh !== null && istDatum(rzRoh.datum) && istCent(rzRoh.betrag_cent) && rzRoh.betrag_cent > 0 ? rzRoh : null;
@@ -2216,6 +2228,10 @@ function korrekturWirkungen(s, profil, ctx, opt, out, beleg) {
   const vorher = opt.vorherKorrekturen instanceof Map && opt.vorherKorrekturen.has(beleg) ? opt.vorherKorrekturen.get(beleg) : { brutto: 0, anzahl: 0 };
   const plan = korrekturPlan(s, orig, vorher);
   const gruppen = plan.gruppen;
+  // O2-Fix K-N1 (ABWEICHUNGEN 5.39): Teilkorrektur auf einen gemischten Versicherungsbeleg. Die Korrektur kennt keine Position (Korrekturdialog ohne Kategorie
+  // und ohne Positionsbezug), versAnteilKorrektur verteilt sie anteilig; betrifft sie nur eine Position, stimmt Kz 66 nicht genau. Nur Hinweis, keine Zahl
+  // (gesetzt am Ende, nur bei eigener Wirkung: keine zusätzliche Hinweis-Zeile für eine vor der Leistung verrechnete Korrektur).
+  const versAnteilHinweis = eingang && s.beleg_art !== 'storno' && orig && versGemischterBeleg(orig.steuer);
   const origId = orig && typeof orig.id === 'string' ? orig.id : bezug;
   const origPer = istObjekt(opt.originalPerioden) && typeof opt.originalPerioden.get === 'function' ? opt.originalPerioden.get(origId) : null;
   // Warnung bei Storno und Rückabwicklung; Preisnachlass, Skonto und Bonus sind gewöhnliche Minderungen (T-S2-012)
@@ -2264,6 +2280,7 @@ function korrekturWirkungen(s, profil, ctx, opt, out, beleg) {
     out.push(mk(ctx, { welt: 'euer', periode: String(jahrVon(rz.datum)), datum_wirk: rz.datum, kz: null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-25', hinweis_detail: 'gutschrift_erhalten_rueckzahlung' }));
   }
   if (eingang) anlagegutKorrekturEuer(s, profil, ctx, opt, out, orig, rz);
+  if (versAnteilHinweis && out.length && !ctx.hinweise.includes('HN_KORREKTUR_VERSICHERUNG_ANTEILIG')) ctx.hinweise.push('HN_KORREKTUR_VERSICHERUNG_ANTEILIG'); // O2-Fix K-N1, F4 hängt ihn an alle Wirkungen
 }
 
 // KERN-E (G-KD-6): Korrektur (Storno, Gutschrift, Preisnachlass) auf ein Original, dessen Anschaffungskosten der Anlagegut-Weg als GWG (Kz 132) oder
