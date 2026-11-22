@@ -78,7 +78,8 @@ async function pdfLibZugferd({ useObjectStreams, seiten = 3 }) {
   return Buffer.from(await doc.save({ useObjectStreams }));
 }
 const ALT = (b) => PDFDocument.load(b, { ignoreEncryption: true, throwOnInvalidObject: false });
-const objektBild = (pdf) => [...pdf.context.enumerateIndirectObjects()].map(([r, o]) => `${r.toString()} ${o.constructor.name} ${o instanceof PDFRawStream ? o.contents.length : o.toString()}`).sort().join('\n');
+// /ModDate setzt updateMetadata beim Laden auf die aktuelle Sekunde: ausgeblendet, sonst schlägt der Vergleich an einer Sekundengrenze fehl
+const objektBild = (pdf) => [...pdf.context.enumerateIndirectObjects()].map(([r, o]) => `${r.toString()} ${o.constructor.name} ${o instanceof PDFRawStream ? o.contents.length : o.toString()}`).sort().join('\n').replace(/\/ModDate \(D:\d+Z\)/g, '/ModDate (D:…)');
 
 test('Hotfix E-Rechnung: normale ZUGFeRD-PDFs laden wie mit PDFDocument.load (gleiche Objekte, Seiten, eingebettete XML) und werden erkannt', async () => {
   const faelle = {
