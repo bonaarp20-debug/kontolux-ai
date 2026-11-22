@@ -57,6 +57,7 @@ export const ZBON_ERLAUBTE_TYPEN = Object.freeze(['application/pdf', 'image/jpeg
 export const ZBON_MAX_CENT = 100000000;
 export const ZBON_STRING_MAX = 20;
 export const ZBON_LISTE_MAX = 6;
+export const ZBON_ZAHLARTEN_MAX = 20; // echte Bons nennen oft mehr als 6 Zahlarten: die ab der 7. gehen gebündelt nach sonstig (O4-W A-N2)
 export const ZBON_PFAD_MAX = 40; // Feldpfade im Modellfeld unsicher (zum Beispiel saetze[1].brutto_cent)
 export const ZBON_DATUM_MIN = '2020-01-01';
 const SCHLUESSEL = ['userId', 'token', 'anfrage_id', 'kasse_id', 'geschaeftstag_dialog', 'datei'];
@@ -136,6 +137,7 @@ const PRUEF_TEXTE = Object.freeze({
   K7_MEHRERE: 'Der Bon enthält mehrere Abschlüsse. Übernommen ist nur der erste. Trag die übrigen dazu ein.',
   K10_SATZ_FEHLT: 'Auf dem Bon steht kein Steuersatz. Trag die Beträge je Steuersatz selbst ein.',
   K11_DOPPELTER_SATZ: 'Ein Steuersatz steht mehrfach auf dem Bon. Prüfe, ob die Zeilen zusammengehören.',
+  K13_ZAHLARTEN_VIELE: 'Der Bon hat sehr viele Zahlarten. Ab der siebten sind sie unter „Sonstige“ zusammengefasst. Prüfe Bar, Karte und Sonstige am Bon.',
   K14_KORREKTUR_LEER: 'Retouren/Rabatte: bitte nur eintragen, wenn der Satzumsatz oben vor dem Abzug steht.',
   K15_GUTSCHEIN_SELBST: 'Gutscheinverkauf bitte selbst einordnen: Einzweck oder Mehrzweck. Verkauf und Einlösung trägst du selbst ein.',
   K12_LESBARKEIT: 'Der Bon ist nur teilweise lesbar. Vergleiche jeden Wert genau mit deinem Bon.',
@@ -276,16 +278,23 @@ export function pruefeZbonVorschlag(roh, ctx = {}) {
   }
 
   // Zahlarten (Tagessummen)
-  const zahlRoh = listeVon(r.zahlarten, 'zahlarten.bar_cent', 'zahlarten.unbar_cent', 'zahlarten.sonstig_cent');
+  const zahlPfade = ['zahlarten.bar_cent', 'zahlarten.unbar_cent', 'zahlarten.sonstig_cent'];
+  let zahlRoh = [];
+  if (r.zahlarten !== undefined && r.zahlarten !== null) { // bis ZBON_ZAHLARTEN_MAX Einträge; alles andere: Gruppe unbrauchbar
+    if (!Array.isArray(r.zahlarten) || r.zahlarten.length > ZBON_ZAHLARTEN_MAX || !r.zahlarten.every(istObjekt)) mark(...zahlPfade); else zahlRoh = r.zahlarten;
+  }
+  const zahlGebuendelt = zahlRoh.length > ZBON_LISTE_MAX;
+  if (zahlGebuendelt) pruefungen.push({ code: 'K13_ZAHLARTEN_VIELE', stufe: 'hinweis', felder: [...zahlPfade] });
   const zahlen = { bar: null, karte: null, sonstig: null, gutschein: null };
   const zahlGruppe = { bar: 'zahlarten.bar_cent', karte: 'zahlarten.unbar_cent', sonstig: 'zahlarten.sonstig_cent', gutschein: 'vorab_versteuert_cent' };
   const zahlUngueltig = new Set();
-  for (const z of zahlRoh) {
-    if (!Object.hasOwn(zahlen, z.art)) { mark('zahlarten.bar_cent', 'zahlarten.unbar_cent', 'zahlarten.sonstig_cent'); continue; }
-    const c = cent(z.betrag_cent, zahlGruppe[z.art]);
-    if (c === null) { zahlUngueltig.add(z.art); continue; }
-    zahlen[z.art] = (zahlen[z.art] || 0) + c;
-  }
+  zahlRoh.forEach((z, idx) => {
+    const art = idx >= ZBON_LISTE_MAX ? 'sonstig' : z.art; // ab der 7. Zahlart: gebündelt nach sonstig, markiert
+    if (!Object.hasOwn(zahlen, art)) { mark(...zahlPfade); return; }
+    const c = cent(z.betrag_cent, zahlGruppe[art]);
+    if (c === null) { zahlUngueltig.add(art); return; }
+    zahlen[art] = (zahlen[art] || 0) + c;
+  });
   for (const a of zahlUngueltig) zahlen[a] = null; // ein ungültiger Eintrag macht die ganze Summe der Zahlart unbrauchbar
 
   // Retouren und Rabatte: NICHT vorbefüllen (O4-W A-H1). Der Satzumsatz auf dem Bon steht in der Regel schon nach dem Abzug; der Kern zieht
@@ -343,8 +352,12 @@ export function pruefeZbonVorschlag(roh, ctx = {}) {
     const soll = gesamt - (einloesung || 0);
     const abw = geld - soll;
     const mitTrinkgeld = tgGesamtOk && tgGesamt > 0 && abw === tgGesamt; // Trinkgeld steckt in den Zahlarten
+    // Mehrzweck-Gutschein gegen Geld verkauft: das Geld steckt in den Zahlarten, der Verkauf ist nicht im Umsatz. Genau diese Differenz (auch zusammen mit
+    // dem Trinkgeld) ist nur ein Hinweis, keine rote Warnung (O4-W A-N4). Teilmengen des Trinkgelds bleiben Warnung (von einem echten Fehler nicht zu unterscheiden).
+    const mitGutschein = gutscheinVerkauf !== null && gutscheinVerkauf > 0 && (abw === gutscheinVerkauf || (tgGesamtOk && abw === gutscheinVerkauf + tgGesamt));
     pruefungen.push(abw === 0 || mitTrinkgeld
       ? { code: 'K2_ZAHLARTEN_GESAMT', stufe: 'ok', felder: [] }
+      : mitGutschein ? { code: 'K2_ZAHLARTEN_GESAMT', stufe: 'hinweis', felder: ['zahlarten.bar_cent', 'zahlarten.unbar_cent', 'zbon_gesamt_cent'] }
       : { code: 'K2_ZAHLARTEN_GESAMT', stufe: 'warnung', felder: ['zahlarten.bar_cent', 'zahlarten.unbar_cent', 'zahlarten.sonstig_cent', 'zbon_gesamt_cent'], differenz_cent: abw });
   } else pruefungen.push({ code: 'K2_ZAHLARTEN_GESAMT', stufe: 'hinweis', felder: ['zahlarten.bar_cent', 'zahlarten.unbar_cent', 'zbon_gesamt_cent'] });
   // K3: Netto + Steuer = Brutto (+-1 Cent), Steuer ~ Brutto * s / (100 + s) (+-2 Cent)
@@ -382,7 +395,7 @@ export function pruefeZbonVorschlag(roh, ctx = {}) {
   const markiert = []; blaetter(vorschlag, '', markiert);
   // Hinweise: nur feste Texte, Warnungen zuerst, höchstens 3
   const texte = [];
-  const FEST = ['K14_KORREKTUR_LEER', 'K15_GUTSCHEIN_SELBST']; // Pflichthinweise zu bewusst leeren Feldern kommen vor den übrigen Hinweisen
+  const FEST = ['K13_ZAHLARTEN_VIELE', 'K14_KORREKTUR_LEER', 'K15_GUTSCHEIN_SELBST']; // Pflichthinweise zu bewusst leeren Feldern kommen vor den übrigen Hinweisen
   const reihe = [...pruefungen.filter((p) => p.stufe === 'warnung'), ...pruefungen.filter((p) => p.stufe === 'hinweis' && FEST.includes(p.code)), ...pruefungen.filter((p) => p.stufe === 'hinweis' && !FEST.includes(p.code))];
   for (const p of reihe) {
     let t = PRUEF_TEXTE[p.code];
@@ -645,8 +658,11 @@ export async function regelKasseZbonLesen(body, env, cors = {}, deps = {}) {
     let ki;
     try {
       ki = await deps.kiAufruf(uid, zbonKiAnfrage({ datei, base64, besteuerung: status, apiKey, denken: deps.denken === 'low' ? 'low' : 'aus' }));
-    } catch {
-      await gibKasseZbonZurueck(fs, uid, heute); reserviert = false; // Netz- oder Zeitfehler: keine Kosten
+    } catch (e) {
+      // Zeitüberschreitung/Abbruch: Ausgang unklar (die Anfrage kann bei Anthropic laufen und berechnet werden): zählt als Versuch, keine Freigabe.
+      // Nur ein sicherer Fehlschlag (Ausnahme ohne Zeitüberschreitung, kein Ergebnis der Schnittstelle) gibt die Reservierung zurück. O4-W A-N1.
+      const unklar = !!e && (e.name === 'TimeoutError' || e.name === 'AbortError');
+      if (unklar) reserviert = false; else { await gibKasseZbonZurueck(fs, uid, heute); reserviert = false; }
       return fehler(503, 'KI_NICHT_ERREICHBAR', cors);
     }
     if (!ki || !ki.ok) {

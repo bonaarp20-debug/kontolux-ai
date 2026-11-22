@@ -302,10 +302,13 @@ test('Paralleler Wettlauf: der Zähler überschreitet das Tageslimit nie (update
   assert.equal(u.zaehler() <= 5, true);
 });
 
-test('API-Fehler geben die Reservierung zurück (Ausnahme, HTTP 500, 429, Zeitüberschreitung); Sperre des Upload-Kontingents ebenso', async () => {
+test('API-Fehler geben die Reservierung zurück (Ausnahme, HTTP 500, 429; nicht bei Zeitüberschreitung); Sperre des Upload-Kontingents ebenso', async () => {
   const wirft = umgebung({ ki: () => { throw new Error('Netz'); } }); let r = await wirft.rufe();
   assert.equal(r.status, 503); assert.equal(code(r), 'KI_NICHT_ERREICHBAR'); assert.equal(wirft.zaehler(), 0);
-  const zeit = umgebung({ ki: () => { const e = new Error('t'); e.name = 'TimeoutError'; throw e; } }); r = await zeit.rufe(); assert.equal(r.status, 503); assert.equal(zeit.zaehler(), 0);
+  for (const name of ['TimeoutError', 'AbortError']) { // O4-W A-N1: Ausgang unklar, Kosten möglich: zählt als Versuch, keine Freigabe
+    const zeit = umgebung({ ki: () => { const e = new Error('t'); e.name = name; throw e; } }); r = await zeit.rufe();
+    assert.equal(r.status, 503); assert.equal(code(r), 'KI_NICHT_ERREICHBAR'); assert.equal(zeit.zaehler(), 1, `${name}: nicht freigeben`);
+  }
   for (const status of [500, 429, 400, 529]) {
     const u = umgebung({ ki: () => new Response('{"error":"x"}', { status }) }); r = await u.rufe();
     assert.equal(r.status, 503, String(status)); assert.equal(u.zaehler(), 0, `Freigabe bei ${status}`);
@@ -654,4 +657,26 @@ test('A-M2: Eingabe-Token gedeckelt (Text höchstens 32 KB, PDF-Textebene und Se
   const dat = await pruefeZbonDatei({ type: 'text/plain', base64: b64('Z-BERICHT 1\nUmsatz 19% 10,00\n') });
   assert.equal(dat.ok, true); assert.ok(dat.token > 0 && dat.token <= ZBON_EINGABE_TOKEN_MAX);
   assert.equal((await pruefeZbonDatei({ type: 'text/plain', base64: b64('a'.repeat(32 * 1024 + 1)) })).code, 'ZBON_ZU_GROSS');
+});
+
+test('A-N2: mehr als 6 Zahlarten: ab der 7. gebündelt nach sonstig (markiert, Hinweis), nicht die ganze Gruppe verwerfen; über 20: Gruppe unbrauchbar', () => {
+  const mehr = pr({ zahlarten: [{ art: 'bar', betrag_cent: 10050 }, { art: 'karte', betrag_cent: 4000 }, { art: 'karte', betrag_cent: 500 }, { art: 'karte', betrag_cent: 300 }, { art: 'sonstig', betrag_cent: 200 }, { art: 'karte', betrag_cent: 1 },
+    { art: 'sonstig', betrag_cent: 2 }, { art: 'bar', betrag_cent: 3000 }, { art: 'karte', betrag_cent: 1997 }] });
+  assert.deepEqual(mehr.vorschlag.zahlarten, { bar_cent: 10050, unbar_cent: 4801, sonstig_cent: 200 + 2 + 3000 + 1997 });
+  assert.ok(mehr.markiert.includes('zahlarten.sonstig_cent'));
+  assert.equal(stufe(mehr, 'K13_ZAHLARTEN_VIELE'), 'hinweis'); assert.ok(mehr.hinweise.some((h) => /viele Zahlarten/.test(h)));
+  assert.equal(stufe(mehr, 'K2_ZAHLARTEN_GESAMT'), 'ok', 'Summe bleibt prüfbar');
+  assert.equal(stufe(pr({}), 'K13_ZAHLARTEN_VIELE'), undefined);
+  const zuViele = pr({ zahlarten: Array.from({ length: 21 }, () => ({ art: 'bar', betrag_cent: 1 })) });
+  assert.deepEqual(zuViele.vorschlag.zahlarten, { bar_cent: null, unbar_cent: null, sonstig_cent: null }); assert.ok(zuViele.unsicher.includes('zahlarten.bar_cent'));
+});
+
+test('A-N4: K2 Mehrzweck-Gutschein gegen Bargeld verkauft ist nur ein Hinweis; eine andere Differenz bleibt Warnung', () => {
+  const zahl = (bar) => [{ art: 'bar', betrag_cent: bar }, { art: 'karte', betrag_cent: 5000 }];
+  const g = pr({ gutschein_verkauf_cent: 2500, zahlarten: zahl(17550) });
+  assert.equal(stufe(g, 'K2_ZAHLARTEN_GESAMT'), 'hinweis');
+  assert.equal(stufe(pr({ gutschein_verkauf_cent: 2500, zahlarten: zahl(17600) }), 'K2_ZAHLARTEN_GESAMT'), 'warnung', 'andere Differenz: weiter Warnung');
+  assert.equal(stufe(pr({ zahlarten: zahl(17550) }), 'K2_ZAHLARTEN_GESAMT'), 'warnung', 'ohne Gutscheinverkauf: Warnung');
+  const gt = pr({ gutschein_verkauf_cent: 2500, trinkgeld: [{ art: 'inhaber', zahlart: 'bar', betrag_cent: 200 }], zahlarten: zahl(17750) });
+  assert.equal(stufe(gt, 'K2_ZAHLARTEN_GESAMT'), 'hinweis');
 });
