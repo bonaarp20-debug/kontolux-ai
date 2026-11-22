@@ -1,6 +1,6 @@
 // regel/kasse.js (KASSE-P1b, Baukonzept docs/kassenbuch/08-baukonzept.md 2.3 und 2.11 C, Vertrag docs/kassenbuch/stand-kasse.md): Worker-Endpunkte des Kassenbuchs.
 //   POST /kasse        { aktion: 'anlegen' | 'aendern' | 'system_wechseln', ... }
-//   POST /kassentag    { aktion: 'abschliessen' | 'ruhetag' | 'ruhetage', ... }   ('stornieren' Teilschritt 3)
+//   POST /kassentag    { aktion: 'abschliessen' | 'ruhetag' | 'ruhetage' | 'stornieren', ... }
 //   POST /kassenbewegung                                                           (Teilschritt 4)
 // Alle Kassen-Sammlungen schreibt nur der Worker (Firestore-Regeln: Eigentümer liest). UID nur aus dem Token (setzt der Router).
 // Prüfreihenfolge: grundpruefung (anfrage_id, Größe) -> UID -> Feature kasse (503) -> Steuerprofil bestätigt (403 PROFIL_FEHLT) -> AGB-Mindestfassung
@@ -18,7 +18,7 @@ import { auditKette, kopfPfad } from './audit.js';
 import { profilBereit, wirkPerioden, nachFestschreibungAntwort, festPruefungMarkieren } from './schreibweg-v2.js';
 import { legacyHash } from './drift.js';
 import { heuteBerlin } from './oss-meldung.js';
-import { KASSE_PFADE, FEATURE, aufbewahrungBis, pruefeKasse, pruefeKassentag, pruefeRuhetage, kernFassung, stammKombination } from './kasse-form.js';
+import { KASSE_PFADE, FEATURE, aufbewahrungBis, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, kernFassung, stammKombination } from './kasse-form.js';
 import { P, kasseIdAus, kassennummer, letzterAbgeschlossenerTag, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern } from './kasse-daten.js';
 
 export { KASSE_PFADE, FEATURE, aufbewahrungBis, pruefeKasse, pruefeKassentag };
@@ -28,7 +28,7 @@ export const WIEDERHOLUNGEN_MAX = 3; // Wiederholungen bei gleichzeitiger Änder
 const BODY_MAX_ZEICHEN = 30000;
 const VERLAUF_MAX = 200;
 const SPERRENDE = ['festgeschrieben', 'sperre_laeuft'];
-const AKTIONEN = { '/kasse': ['anlegen', 'aendern', 'system_wechseln'], '/kassentag': ['abschliessen', 'ruhetag', 'ruhetage'] };
+const AKTIONEN = { '/kasse': ['anlegen', 'aendern', 'system_wechseln'], '/kassentag': ['abschliessen', 'ruhetag', 'ruhetage', 'stornieren'] };
 // Abbildung der Kern-Prüfcodes auf HTTP (stand-kasse.md 5): FORMAT-Gruppe 400 mit code FORMAT (kern_code nennt den Kern-Code), die übrigen gleichnamig
 const FORMAT_GRUPPE = ['FORMAT', 'STEUERFALL_UNZULAESSIG', 'KU_MEHRERE_SAETZE', 'DIFFERENZ_OHNE_GRUND', 'ZBON_SUMME_ABWEICHUNG', 'RETROGRAD_DIFFERENZ'];
 const KERN_STATUS = { ANHANG_ODER_BESTAETIGUNG: [422, 'ANHANG_FEHLT'], TAGESSALDO_NEGATIV: [422], BESTAND_NEGATIV: [422], DATENQUELLE_SUMUP: [422], KARTE_UEBER_INTEGRATION: [422],
@@ -97,6 +97,7 @@ export async function regelKasse(pfad, body, env, cors = {}, deps = {}) {
     if (pfad === '/kasse') return await kasseAktion(c, aktion);
     if (pfad === '/kassentag') {
       if (aktion === 'abschliessen') return await abschliessen(c);
+      if (aktion === 'stornieren') return await stornieren(c);
       return await ruhetage(c, aktion);
     }
     return fehlerAntwort(404, 'PFAD_UNBEKANNT', cors);
@@ -301,14 +302,14 @@ function belegBauen(eingabe, { profil, heute, zeit, kasse, kasseId, tagId, n, nu
 }
 
 // Fertiges Dokument. steuer.migration.legacy_hash wird zuletzt über das fertige Dokument berechnet (driftStatus 'ok').
-function dokumentAus(beleg, { zeit, kasse, kasseId, tagId, n, nummer, anhaenge, tag, einnahme, kern = Steuerkern.KERN_VERSION, name = null }) {
+function dokumentAus(beleg, { zeit, kasse, kasseId, tagId, n, nummer, anhaenge, tag, einnahme, kern = Steuerkern.KERN_VERSION, storno = false }) {
   const steuer = { ...beleg.steuer, herkunft: { ...(istObjekt(beleg.steuer.herkunft) ? beleg.steuer.herkunft : {}), weg: 'kasse', kern_version: kern } };
   const lf = Steuerkern.legacyFelder({ schema_version: 2, id: beleg.id, steuer });
   const alt = Steuerkern.kassenbelegAltfelder(steuer);
   const dok = {
     quelle: 'kasse', kasse_id: kasseId, kassentag_id: tagId, kassen_fassung: n, kassennummer: nummer,
-    typ: lf.typ, name: name || `Tagesabschluss ${kassennamen(kasse)} ${datumDe(tag)}`, absender: kassennamen(kasse),
-    datum: tag, bezahlt: true, bezahlt_am: tag,
+    typ: lf.typ, name: `${storno ? 'Storno Tagesabschluss' : 'Tagesabschluss'} ${kassennamen(kasse)} ${datumDe(tag)}`, absender: kassennamen(kasse),
+    datum: tag, bezahlt: !storno, bezahlt_am: storno ? null : tag, // ein Storno trägt keine Zahlung (negative Zahlungen kennt der Kern nicht, stand-kasse.md 3)
     betrag: alt.betrag, betrag_netto: alt.betrag_netto, mwst_satz: alt.mwst_satz, kx_mwst_text: alt.kx_mwst_text,
     ...(typeof steuer.kategorie === 'string' && steuer.kategorie ? { kategorie: steuer.kategorie } : {}),
     createdAt: zeitstempel(zeit), schema_version: 2, gesperrt: true, gesperrt_durch: ['kasse'],
@@ -505,5 +506,105 @@ async function ruhetage(c, aktion) {
       details: { kasse_id: kasseId, anzahl: tage.length, von: tage[0], bis: tage[tage.length - 1] },
     }], zeit);
     return { writes: [...writes, ...audit.writes], erfolg: () => antwort({ ok: true, tage }, 200, cors) };
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// /kassentag stornieren (Kap. 6 Nr. 22, 2.3 Storno, 2.11 C.5, 2.12 M18, N30): Storno des Tagesabschlusses mit Grund, nur für den jeweils letzten abgeschlossenen Tag
+// (409 SPAETERE_TAGE sonst, ein geänderter Bestand würde alle Folgetage verschieben). Je Beleg der aktiven Fassung (Umsatz, Mehrzweck-Verkauf, Differenz) ein
+// Storno-Beleg: Wirkdatum = Geschäftstag des Originals, korrektur_grund 'rueckabwicklung', Grund als korrektur_notiz, gespiegelte Positionen (Kern
+// kassenStornoEingabe), Wirkung über den Kassen-Storno-Zweig im Kern. Das Original bleibt unverändert (sonst bräche sein legacy_hash). Der Tagesplatz wird
+// 'storniert' (fassung_aktiv null), danach geht abschliessen für denselben Tag wieder (Fassung n+1, höchstens 3). tagesdaten.einnahmen sinkt nie unter 0.
+// Ein Storno liegt im Zeitraum des Geschäftstags, nicht in dem des Stornos: ein festgeschriebener EÜR-Monat gibt 409 MONAT_FESTGESCHRIEBEN (Nr. 21).
+// ---------------------------------------------------------------------------------------------
+async function stornieren(c) {
+  const { fs, uid, body, cors, zeit, heute, profil, config, deps } = c;
+  const f = pruefeStorno(body, { heute });
+  if (f.fehler) return formFehler(f.fehler, cors);
+  const { kasse_id: kasseId, geschaeftstag: tag, grund } = f.wert;
+  const tagId = Steuerkern.kassentagId(kasseId, tag);
+  const jahr = tag.slice(0, 4);
+  const kernOptionen = await kernOptionenFuerKontoLaden(uid, config, { fs, streng: true });
+  const fest = await listeAlle(fs, P.festschreibungen(uid));
+  const festPerioden = fest.dokumente.filter((d) => SPERRENDE.includes(d.daten && d.daten.status)).map(idVon);
+
+  return mitWiederholung(fs, async () => {
+    const docs = await fs.batchGet([P.kasse(uid, kasseId), P.kassentag(uid, tagId), P.zaehler(uid, kasseId, jahr), P.tagesdaten(uid, tag), kopfPfad(uid)]);
+    const kasseDok = docs.get(P.kasse(uid, kasseId));
+    if (!kasseDok || !istObjekt(kasseDok.daten)) return { antwort: fehlerAntwort(404, 'KASSE_UNBEKANNT', cors) };
+    const kasse = kasseDok.daten;
+    const tagDok = docs.get(P.kassentag(uid, tagId));
+    if (!tagDok || !istObjekt(tagDok.daten)) return { antwort: fehlerAntwort(404, 'KASSENTAG_UNBEKANNT', cors, { kassentag_id: tagId }) };
+    const tagAlt = tagDok.daten;
+    const kurzListe = Array.isArray(tagAlt.fassungen_kurz) ? tagAlt.fassungen_kurz.filter(istObjekt) : [];
+    // Wiederholung derselben Anfrage (Netzabbruch): der Storno steht schon unter dieser anfrage_id
+    const gleiche = kurzListe.find((x) => x.storno_anfrage_id === body.anfrage_id);
+    if (gleiche) return { antwort: antwort({ ok: true, idempotent: true, kassentag_id: tagId, fassung: gleiche.n, storno_beleg_id: gleiche.storno_beleg_id ?? null }, 200, cors) };
+    if (tagAlt.status !== 'abgeschlossen' || !Number.isSafeInteger(tagAlt.fassung_aktiv)) return { antwort: fehlerAntwort(409, 'KEIN_ABSCHLUSS', cors, { kassentag_id: tagId, status: tagAlt.status ?? null }) };
+    const letzter = await letzterAbgeschlossenerTag(fs, uid, kasseId);
+    if (letzter && letzter.daten.geschaeftstag !== tag) return { antwort: fehlerAntwort(409, 'SPAETERE_TAGE', cors, { letzter_tag: letzter.daten.geschaeftstag }) };
+    const n = tagAlt.fassung_aktiv;
+    const kurz = kurzListe.find((x) => x.n === n);
+    if (!kurz) throw new Error('Tagesplatz ohne Kurzeintrag der aktiven Fassung');
+    // Originalbelege der aktiven Fassung lesen (Umsatz, Mehrzweck-Verkauf, Differenz); sumup_integration hat evtl. keinen Umsatzbeleg
+    const originale = [['storno', kurz.beleg_id], ['storno_gm', kurz.mehrzweck_beleg_id], [kurz.differenz_beleg_id && kurz.differenz_beleg_id.endsWith('_dm') ? 'storno_dm' : 'storno_dp', kurz.differenz_beleg_id]].filter(([, id]) => typeof id === 'string' && id);
+    const belegDocs = originale.length ? await fs.batchGet(originale.map(([, id]) => P.beleg(uid, id))) : new Map();
+    const nummerZaehler = Number.isSafeInteger(docs.get(P.zaehler(uid, kasseId, jahr))?.daten?.letzte) ? docs.get(P.zaehler(uid, kasseId, jahr)).daten.letzte : 0;
+    const nummerNeu = nummerZaehler + 1;
+    const nr = kassennummer(kasse.kuerzel, jahr, nummerNeu);
+    const storni = [];
+    let einnahmenCent = 0;
+    for (const [zusatz, origId] of originale) {
+      const origDok = belegDocs.get(P.beleg(uid, origId));
+      if (!origDok || !istObjekt(origDok.daten) || !istObjekt(origDok.daten.steuer)) throw new Error('Originalbeleg des Kassentags fehlt');
+      let steuer;
+      try {
+        steuer = Steuerkern.kassenStornoEingabe(origDok.daten.steuer, { grund, geschaeftstag: tag, original_id: origId, erfasst_am: heute, kern_version: Steuerkern.KERN_VERSION });
+      } catch (e) { return { antwort: fehlerAntwort(422, 'BELEG_UNGUELTIG', cors, { grund: String(e && e.message ? e.message : e).slice(0, 80) }) }; }
+      const stornoId = Steuerkern.kassenBelegId(tagId, n, zusatz);
+      const kandidat = { schema_version: 2, id: stornoId, steuer };
+      const v = Steuerkern.validiereBeleg(kandidat, { modus: 'streng', stichtag: heute });
+      const blocker = ((v && v.blocker) || []).map((x) => x && x.code).filter((x) => typeof x === 'string');
+      if (blocker.length) return { antwort: fehlerAntwort(422, 'BELEG_UNGUELTIG', cors, { codes: blocker.filter((x) => /^[A-Za-z0-9_]{1,64}$/.test(x)).slice(0, 10) }) };
+      // Wirkung im Zeitraum des Originals (wirkdatum = Geschäftstag): dessen Perioden gelten auch für den Storno
+      const origBeleg = Steuerkern.belegFuerKern({ ...origDok.daten, id: origId }, profil).beleg;
+      const perioden = origBeleg ? wirkPerioden(origBeleg, profil, kernOptionen) : [];
+      storni.push({ zusatz, id: stornoId, origId, kandidat, perioden, brutto: Math.abs(origDok.daten.steuer.summe.brutto_cent), einnahme: Boolean(origDok.daten.gebuchter_tag) });
+      if (origDok.daten.gebuchter_tag) einnahmenCent += Math.abs(origDok.daten.steuer.summe.brutto_cent);
+    }
+    // Festschreibung (Nr. 21): EÜR-Monat des Geschäftstags festgeschrieben -> 409; nur ein USt-Zeitraum -> speichern mit nach_festschreibung
+    const perioden = [...new Set(storni.flatMap((x) => x.perioden))].sort();
+    const gesperrt = perioden.filter((p) => festPerioden.includes(p));
+    if (gesperrt.some((p) => p.startsWith('euer-'))) return { antwort: fehlerAntwort(409, 'MONAT_FESTGESCHRIEBEN', cors, { perioden: gesperrt }) };
+    const nachFest = gesperrt.length ? { nach_festschreibung: { perioden: gesperrt, erkannt_am: zeit } } : {};
+    const ts = zeitstempel(zeit);
+    const stornoDocs = storni.map((x) => ({ id: x.id, dok: { ...dokumentAus(x.kandidat, { zeit, kasse, kasseId, tagId, n, nummer: nr, anhaenge: null, tag, einnahme: false, storno: true }), ...nachFest } }));
+    const kurzNeu = { ...kurz, storniert_am: ts, storno_grund: grund, storno_beleg_id: storni.length ? storni[0].id : null, storno_kassennummer: nr, storno_anfrage_id: body.anfrage_id };
+    const tagNeu = {
+      ...tagAlt, status: 'storniert', fassung_aktiv: null, fassungen_kurz: kurzListe.map((x) => (x.n === n ? kurzNeu : x)),
+      soll_endbestand_cent: null, gezaehlt_cent: null, differenz_cent: null,
+    };
+    const writes = [
+      schreibe.setzen(P.kassentag(uid, tagId), tagNeu, { updateTime: tagDok.updateTime }),
+      schreibe.setzen(P.zaehler(uid, kasseId, jahr), { letzte: nummerNeu, aktualisiert_am: ts }, docs.get(P.zaehler(uid, kasseId, jahr)) ? { updateTime: docs.get(P.zaehler(uid, kasseId, jahr)).updateTime } : { exists: false }),
+      ...stornoDocs.map((x) => schreibe.anlegen(P.beleg(uid, x.id), x.dok)),
+    ];
+    // tagesdaten: Einnahmen des Geschäftstags zurücknehmen, nie unter 0 (N30). Vorbedingung updateTime: eine gleichzeitige Buchung führt zur Wiederholung
+    const tdDok = docs.get(P.tagesdaten(uid, tag));
+    const aktuell = tdDok && istObjekt(tdDok.daten) && Number.isFinite(tdDok.daten.einnahmen) ? Math.round(tdDok.daten.einnahmen * 100) : 0;
+    const abziehen = Math.min(einnahmenCent, Math.max(0, aktuell));
+    if (abziehen > 0) writes.push(schreibe.erhoehen(P.tagesdaten(uid, tag), { datum: tag }, ['datum'], { einnahmen: 0 - abziehen / 100 }, { updateTime: tdDok.updateTime }));
+    const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{
+      aktion: 'kassentag_storno', ziel: `kassentage/${tagId}`, vorher: tagAlt, nachher: tagNeu,
+      details: { kasse_id: kasseId, kassentag_id: tagId, fassung: n, belege: storni.length, nach_festschreibung: gesperrt.length > 0 },
+    }], zeit);
+    writes.push(...audit.writes);
+    return {
+      writes,
+      erfolg: async () => {
+        if (gesperrt.length) await festPruefungMarkieren({ uid, token: await deps.adminToken(), fetchFn: deps.fetchFn, perioden: gesperrt, zeit });
+        return antwort({ ok: true, kassentag_id: tagId, fassung: n, storno_kassennummer: nr, storno_beleg_id: kurzNeu.storno_beleg_id, storno_beleg_ids: storni.map((x) => x.id), ...nachFestschreibungAntwort({ nach_festschreibung: gesperrt }) }, 200, cors);
+      },
+    };
   });
 }

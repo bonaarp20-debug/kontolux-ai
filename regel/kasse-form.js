@@ -223,6 +223,18 @@ export function pruefeRuhetage(body, aktion, { heute }) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// /kassentag stornieren: Grund 5 bis 300 Zeichen (Pflicht)
+// ---------------------------------------------------------------------------------------------
+export const STORNIEREN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'geschaeftstag', 'grund']);
+export function pruefeStorno(body, { heute }) {
+  if (!istObjekt(body) || !nurSchluessel(body, STORNIEREN_SCHLUESSEL)) return fehl(istObjekt(body) ? Object.keys(body).find((x) => !STORNIEREN_SCHLUESSEL.includes(x)) || 'body' : 'body');
+  if (typeof body.kasse_id !== 'string' || !KASSE_ID_MUSTER.test(body.kasse_id)) return fehl('kasse_id');
+  if (!geschaeftstagOk(body.geschaeftstag, heute)) return fehl('geschaeftstag');
+  if (typeof body.grund !== 'string' || body.grund.trim().length < 5 || body.grund.trim().length > 300) return fehl('grund');
+  return ok({ kasse_id: body.kasse_id, geschaeftstag: body.geschaeftstag, grund: body.grund.trim() });
+}
+
+// ---------------------------------------------------------------------------------------------
 // /kasse anlegen | aendern | system_wechseln
 // ---------------------------------------------------------------------------------------------
 export const KARTE_INTEGRATIONEN = Object.freeze(['keine', 'sumup']); // karte_ueber_integration (2.11 A): bisher nur SumUp POS ist als Quelle angebunden
