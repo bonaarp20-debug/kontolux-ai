@@ -124,7 +124,8 @@ export async function ladePdfBegrenzt(bytes, { budget = pdfBudget(), ignoreEncry
     const start = this.bytes.offset();
     this.parseIndirectObjectHeader();
     this.skipWhitespaceAndComments();
-    const obj = this.parseObject();
+    // let + obj = null: das Vorab-Ergebnis darf während des eigentlichen Parsens nicht erreichbar bleiben (sonst liegt jedes Objekt doppelt im Speicher)
+    let obj = this.parseObject();
     if (obj instanceof PDFRawStream) {
       const typ = obj.dict.lookup(PDFName.of('Type'));
       if (typ === PDFName.of('ObjStm') || typ === PDFName.of('XRef')) {
@@ -138,6 +139,7 @@ export async function ladePdfBegrenzt(bytes, { budget = pdfBudget(), ignoreEncry
         }
       }
     }
+    obj = null;
     this.bytes.moveTo(start);
     return original.call(this);
   };

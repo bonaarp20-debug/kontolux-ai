@@ -199,3 +199,39 @@ test('Hotfix E-Rechnung: Parser-Aufblähung (Millionen Zahlen, Verweise, lange N
   const frei = await PDFDocument.load(viele, { ignoreEncryption: true });
   assert.equal(frei.context.lookup(frei.context.enumerateIndirectObjects().find(([r]) => r.objectNumber === 3)[0]).size(), 250000);
 });
+
+// ---- Härtung nach Gegenlesung (H-2, N-1, H-1, M-1) ----
+import v8 from 'node:v8';
+import vm from 'node:vm';
+import { spawnSync } from 'node:child_process';
+import { PDFContext } from 'pdf-lib';
+v8.setFlagsFromString('--expose-gc');
+const gc = vm.runInNewContext('gc');
+const KATALOG = '%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n';
+const mitObjekt3 = (inhalt) => new Uint8Array(Buffer.concat([Buffer.from(KATALOG + '3 0 obj\n'), Buffer.isBuffer(inhalt) ? inhalt : Buffer.from(inhalt), Buffer.from('\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n')]));
+// Läuft ein Skript in einem eigenen Prozess mit 128 MB Heap (Näherung an das Worker-Isolat), damit ein OOM den Testprozess nicht sprengt
+function mit128MB(code) {
+  const r = spawnSync(process.execPath, ['--max-old-space-size=128', '--input-type=module', '-e', code], { cwd: new URL('..', import.meta.url).pathname, encoding: 'utf8', timeout: 60000 });
+  return { status: r.status, out: (r.stdout || '').trim(), err: (r.stderr || '').slice(-300) };
+}
+
+test('Härtung H-2: das Vorab-Ergebnis bleibt beim eigentlichen Parsen nicht erreichbar (kein doppelter Speicher), 2 MB Hex-String sprengt 128 MB nicht', async () => {
+  // Live-Heap im Moment der Zuweisung (nach GC) gegen den Speicher des fertigen Objekts: vorher rund 3x (Vorab-Objekt lebte mit), jetzt rund 1x
+  const b = mitObjekt3('[' + Array.from({ length: 60000 }, (_, i) => String(i)).join(' ') + ']');
+  const assign = PDFContext.prototype.assign; let beimZuweisen = 0;
+  gc(); const basis = process.memoryUsage().heapUsed;
+  PDFContext.prototype.assign = function (ref, obj) { if (ref.objectNumber === 3) { gc(); beimZuweisen = process.memoryUsage().heapUsed - basis; } return assign.call(this, ref, obj); };
+  let r;
+  try { r = await ladePdfBegrenzt(b); } finally { PDFContext.prototype.assign = assign; }
+  gc(); const ergebnis = process.memoryUsage().heapUsed - basis;
+  assert.ok(r.pdf && !r.zuGross, 'lädt');
+  assert.ok(ergebnis > 1024 * 1024, `Messung sinnvoll (${ergebnis})`);
+  assert.ok(beimZuweisen < 1.5 * ergebnis, `beim Zuweisen ${(beimZuweisen / 1048576).toFixed(1)} MB, Ergebnis ${(ergebnis / 1048576).toFixed(1)} MB`);
+  // 2 MB Hex-String: main lud ihn, 480fc58 brach mit OOM ab; jetzt kein Absturz (geladen oder an einer Grenze abgelehnt)
+  const p = mit128MB(`import { ladePdfBegrenzt } from './regel/pdf-sicher.js';
+    const k = ${JSON.stringify(KATALOG)};
+    const b = new Uint8Array(Buffer.from(k + '3 0 obj\\n<' + 'a'.repeat(2 * 1024 * 1024) + '>\\nendobj\\ntrailer\\n<< /Root 1 0 R >>\\n%%EOF\\n'));
+    const r = await ladePdfBegrenzt(b); console.log(r.zuGross ? 'zuGross' : (r.pdf ? 'ok' : 'leer'));`);
+  assert.equal(p.status, 0, `Prozess mit 128 MB: ${p.err}`);
+  assert.match(p.out, /^(ok|zuGross)$/);
+});
