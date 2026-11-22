@@ -777,7 +777,8 @@ test('Ruhetag und Ruhetage: ohne Bestandswirkung, ohne Kassennummer und Beleg; D
   assert.deepEqual(u.fs.pfade(P('dokumente/')), []);
   assert.equal(u.fs.lies(P(`zaehler/K_${id}_2026`)), null, 'kein Zähler: Ruhetage tragen keine Kassennummer');
   assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-01' })).json.fehler[0].code, 'KASSENTAG_VORHANDEN');
-  assert.equal((await u.tagRufe(abschluss(id, '2026-11-01'))).json.fehler[0].code, 'KASSENTAG_VORHANDEN', 'ein Ruhetag ist kein offener Tag');
+  // O6 M2: ein Ruhetag nach dem letzten Abschluss ist kein Endzustand: abschliessen hebt ihn auf (eigener Test unten); ein Abschluss-Tag bleibt KASSENTAG_VORHANDEN
+
   assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-10-31' })).json.fehler[0].code, 'VOR_ANFANGSBESTAND');
   u.fs.setze(P(`kassenbewegungen/${id}_2026-11-04_001`), { kasse_id: id, geschaeftstag: '2026-11-04', art: 'einlage', betrag_cent: 100, text: 'x' });
   const mit = await u.tagRufe({ aktion: 'ruhetage', kasse_id: id, tage: ['2026-11-03', '2026-11-04', '2026-11-05'] });
@@ -1883,4 +1884,34 @@ test('O6 M1: Storno-Kassenbelege tragen bezahlt: true und bezahlt_am = Geschäft
     const kz = K.ustvaFuer(w, profil, '2026-11').kennzahlen;
     for (const k of ['81', '86', '81_steuer', '86_steuer']) assert.equal(kz[k] ?? 0, 0, `Kz ${k}`);
   }
+});
+
+test('O6 M2 (Baukonzept 2.11 Nr. 2): ein irrtümlich bestätigter Ruhetag nach dem letzten Abschluss wird mit dem Abschluss aufgehoben (Fassung 1, Audit kassentag_ruhetag_aufgehoben); vor dem letzten Abschluss geht es nur rückwärts über den Storno', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  assert.equal((await u.tagRufe({ aktion: 'ruhetage', kasse_id: id, tage: ['2026-11-02', '2026-11-03', '2026-11-04'] })).status, 200);
+  const tagId = `${id}_2026-11-03`;
+  // der 03.11. hatte doch Umsatz: Abschluss statt Sackgasse (KASSENTAG_VORHANDEN)
+  const a = await u.tagRufe(abschluss(id, '2026-11-03'));
+  assert.equal(a.status, 200, JSON.stringify(a.json));
+  assert.equal(a.json.fassung, 1);
+  assert.equal(a.json.kassennummer, 'K-THK-2026-0001');
+  const t = u.fs.lies(P(`kassentage/${tagId}`));
+  assert.deepEqual([t.status, t.fassung_aktiv, t.anfangsbestand_cent, t.gezaehlt_cent], ['abgeschlossen', 1, 10000, 70700], 'der 02.11. war Ruhetag: Anfangsbestand des Kontos');
+  assert.equal(t.fassungen_kurz.length, 1);
+  const log = u.audit().map((e) => e.aktion);
+  assert.deepEqual(log, ['kasse_anlegen', 'kassentag_ruhetage', 'kassentag_abschluss', 'kassentag_ruhetag_aufgehoben']);
+  assert.equal((await kettepruefen(u.audit())).ok, true);
+  assert.equal(u.audit()[3].details.kassentag_id, tagId);
+  // ein Abschluss-Tag bleibt KASSENTAG_VORHANDEN; der Storno vom 03.11. macht den Platz wieder zu einem normal stornierten (Neuerfassung geht)
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-03'))).json.fehler[0].code, 'KASSENTAG_VORHANDEN');
+  // Der 02.11. (Ruhetag VOR dem letzten Abschluss) lässt sich nicht aufheben: ein geänderter Bestand verschöbe den 03.11.
+  const v = await u.tagRufe(abschluss(id, '2026-11-02'));
+  assert.equal(v.status, 409);
+  assert.deepEqual([v.json.fehler[0].code, v.json.letzter_tag], ['SPAETERE_TAGE', '2026-11-03']);
+  // Weg zurück: Storno des 03.11. (letzter Abschluss), dann der 02.11. und der 04.11. (beide noch Ruhetage) abschließbar
+  assert.equal((await u.tagRufe(stornoBody(id, '2026-11-03'))).status, 200);
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200);
+  // Bewegungen am Ruhetag bleiben gesperrt (der Abschluss ist der Weg, nicht die Bewegung)
+  assert.equal((await u.bewRufe(bewegung(id, '2026-11-04', 'geldtransit_bank_ein', 100))).json.status, 'ruhetag');
 });

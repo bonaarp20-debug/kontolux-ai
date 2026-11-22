@@ -358,7 +358,10 @@ async function abschliessen(c) {
     // Wiederholung derselben Anfrage (Netzabbruch): bestätigen, nie ein zweites Mal schreiben
     const gleiche = tagAlt && Array.isArray(tagAlt.fassungen_kurz) ? tagAlt.fassungen_kurz.find((x) => istObjekt(x) && x.anfrage_id === body.anfrage_id) : null;
     if (gleiche) return { antwort: antwort({ ok: true, idempotent: true, kassentag_id: tagId, fassung: gleiche.n, kassennummer: gleiche.kassennummer, beleg_id: gleiche.beleg_id ?? null }, 200, cors) };
-    if (tagAlt && tagAlt.status !== 'storniert') return { antwort: fehlerAntwort(409, 'KASSENTAG_VORHANDEN', cors, { kassentag_id: tagId }) };
+    // O6 M2 (Baukonzept 2.11 Nr. 2): ein irrtümlich bestätigter Ruhetag ist keine Sackgasse. Liegt er nach dem letzten Abschluss (SPAETERE_TAGE unten), wird er mit
+    // diesem Abschluss aufgehoben (Fassung 1, Audit kassentag_ruhetag_aufgehoben); davor geht es nur über den Storno der späteren Tage rückwärts (Nr. 13).
+    const ruhetagAufheben = Boolean(tagAlt) && tagAlt.status === 'ruhetag';
+    if (tagAlt && tagAlt.status !== 'storniert' && !ruhetagAufheben) return { antwort: fehlerAntwort(409, 'KASSENTAG_VORHANDEN', cors, { kassentag_id: tagId }) };
     const bisher = tagAlt && Array.isArray(tagAlt.fassungen_kurz) ? tagAlt.fassungen_kurz.filter(istObjekt) : [];
     const n = bisher.length + 1;
     if (n > FASSUNGEN_MAX) return { antwort: fehlerAntwort(409, 'FASSUNGEN_MAX', cors, { max: FASSUNGEN_MAX }) };
@@ -468,6 +471,7 @@ async function abschliessen(c) {
     // in JEDEM Commit mit Audit-Eintrag): der zweite scheitert atomar und rechnet neu. Dazu die Zähler-Vorbedingung für die Kassennummer.
     const art = differenz === 0 ? 'keine' : differenz < 0 ? 'fehlbetrag' : 'ueberschuss';
     const eintraege = [{ aktion: 'kassentag_abschluss', ziel: `kassentage/${tagId}`, vorher: tagAlt, nachher: tagNeu, details: { kasse_id: kasseId, kassentag_id: tagId, fassung: n, belege: belege.length, differenz: art, nach_festschreibung: gesperrt.length > 0 } }];
+    if (ruhetagAufheben) eintraege.push({ aktion: 'kassentag_ruhetag_aufgehoben', ziel: `kassentage/${tagId}`, vorher: tagAlt, nachher: tagNeu, details: { kasse_id: kasseId, kassentag_id: tagId, fassung: n } });
     if (aehnlich.length && w.trotzdem) eintraege.push({ aktion: 'kassentag_aehnlich_trotzdem', ziel: `kassentage/${tagId}`, vorher: null, nachher: null, details: { kassentag_id: tagId, fassung: n, anzahl: aehnlich.length } });
     const audit = await auditKette(uid, docs.get(kopfPfad(uid)), eintraege, zeit);
     writes.push(...audit.writes);
