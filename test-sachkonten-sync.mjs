@@ -49,6 +49,8 @@ const DATEV_2026 = {
   'Einnahmen 19%': [['8400', 'Erlöse 19 % USt (Automatik)'], ['4400', 'Erlöse 19 % USt (Automatik)']],
   'Einnahmen 7%': [['8300', 'Erlöse 7 % USt (Automatik)'], ['4300', 'Erlöse 7 % USt (Automatik)']],
   'Einnahmen steuerfrei': [['8200', 'Erlöse'], ['4200', 'Erlöse']],
+  // Kassenbuch P1b-5 (12-steuer-vertiefung 3.4 SB-4, Kontenrahmen 2026 Art.-Nr. 11174/11175): kein eigenes Konto "Kassendifferenz", der Fehlbetrag steht auf dem Konto "Sonstige betriebliche Aufwendungen"
+  'Kassendifferenz (Fehlbetrag)': [['4900', 'Sonstige betriebliche Aufwendungen'], ['6300', 'Sonstige betriebliche Aufwendungen']],
   // OSS-FORM 3: Kontenrahmen 2026 (regel/datev-oss.js, Fußnote 3: BU-Schlüssel 10, EU-Land und Satz über das EU-Fenster)
   'Einnahmen EU-Privatkunden (OSS)': [['8320', 'Erlöse aus im anderen EU-Land steuerpflichtigen Lieferungen, im Inland nicht steuerbar'], ['4320', 'Erlöse aus im anderen EU-Land steuerpflichtigen Lieferungen, im Inland nicht steuerbar']]
 };
@@ -107,6 +109,8 @@ const WEITERE = {
     '0480': 'Geringwertige Wirtschaftsgüter', '4855': 'Sofortabschreibung geringwertiger Wirtschaftsgüter',
     '4654': 'Nicht abzugsfähige Bewirtungskosten', '4650': 'Bewirtungskosten', '4900': 'Sonstige betriebliche Aufwendungen',
     '1800': 'F Privatentnahmen allgemein', '1890': 'F Privateinlagen', '4530': 'Laufende Fahrzeug-Betriebskosten',
+    // Kassenbuch P1b-5 (12-steuer-vertiefung 3.4, Kontenrahmen 2026, Bezeichnung wörtlich)
+    '1000': 'Kasse', '1360': 'Geldtransit', '8200': 'Erlöse', '8400': 'Erlöse 19 % USt (Automatik)',
   },
   SKR04: {
     '5923': 'U AV Sonstige Leistungen eines im anderen EU-Land ansässigen Unternehmers 19 % Vorsteuer und 19 % Umsatzsteuer',
@@ -120,6 +124,7 @@ const WEITERE = {
     '0670': 'Geringwertige Wirtschaftsgüter', '6260': 'Sofortabschreibungen geringwertiger Wirtschaftsgüter',
     '6644': 'Nicht abzugsfähige Bewirtungskosten', '6640': 'Bewirtungskosten', '6300': 'Sonstige betriebliche Aufwendungen',
     '2100': 'F Privatentnahmen allgemein', '2180': 'F Privateinlagen', '6530': 'Laufende Fahrzeug-Betriebskosten',
+    '1600': 'Kasse', '1460': 'Geldtransit', '4200': 'Erlöse', '4400': 'Erlöse 19 % USt (Automatik)',
   },
 };
 for (const skr of ['SKR03', 'SKR04']) {
@@ -128,6 +133,13 @@ for (const skr of ['SKR03', 'SKR04']) {
   pruefe(`${skr}: § 13b-, GWG- und Erlöskonten des Exports stehen im Kontenrahmen 2026 (Tabelle WEITERE)`, benutzt.every(k => WEITERE[skr][k]), benutzt.filter(k => !WEITERE[skr][k]).join(', '));
   pruefe(`${skr}: § 13b-Eingangskonten sind Automatikkonten (AV), Erlöskonten AM`, [rc.eu.rb, rc.eu.ku, rc.drittland.rb, rc.drittland.ku].every(k => /^U AV /.test(WEITERE[skr][k])) && [ra.eu, ra.drittland, ra.inland].every(k => /^U AM /.test(WEITERE[skr][k])));
   pruefe(`${skr}: Kleinunternehmer-Konto 2026 ist AM, das Vorjahreskonto ${KU_KONTO[skr].bis2025} ist im Kontenrahmen 2026 reserviert (nicht in der Tabelle)`, /^U AM /.test(WEITERE[skr][KU_KONTO[skr].ab2026]) && !WEITERE[skr][KU_KONTO[skr].bis2025]);
+}
+// Kassenzweig des Exports (regel/datev-kasse.js): Kassen- und Geldtransitkonto stehen in der Tabelle WEITERE (Kontenrahmen 2026), die Standardwerte sind genau diese Konten
+import { DATEV_KASSE_KONTEN } from './regel/datev-kasse.js';
+for (const skr of ['SKR03', 'SKR04']) {
+  const k = DATEV_KASSE_KONTEN[skr];
+  pruefe(`${skr}: Kassenkonto ${k.kasse} (Kasse) und Geldtransitkonto ${k.transit} (Geldtransit) laut Kontenrahmen 2026`, WEITERE[skr][k.kasse] === 'Kasse' && WEITERE[skr][k.transit] === 'Geldtransit');
+  pruefe(`${skr}: Kassendifferenz (Fehlbetrag) steht auf dem Konto ${app['Kassendifferenz (Fehlbetrag)'][skr]} (Sonstige betriebliche Aufwendungen)`, app['Kassendifferenz (Fehlbetrag)'][skr] === app['Sonstiges'][skr]);
 }
 // Der Export darf die Konten nicht von Hand verdrahten: die Konstanten im Worker stehen in der Tabelle (4654/6644, 1800/1890, 2100/2180, 4900/6300)
 const workerQuelle = readFileSync(new URL('./worker.js', import.meta.url), 'utf8');

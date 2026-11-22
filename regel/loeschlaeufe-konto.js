@@ -87,7 +87,7 @@ export async function kontoLoeschenSchritt(ctx, uid, art, modus) {
   if (!s) s = neuerStand(art, modus, ctx);
   const waechterKonto = (pfad) => { const p = relPfad(pfad); if (!p.startsWith(`users/${uid}/`) || p === ARCHIV_MARKER(uid)) throw new SchutzVerletzt(p); };
   const waechterFeedback = teilLaufWaechter([/^feedback\/[^/]+$/]);
-  const waechterZaehler = teilLaufWaechter([new RegExp(`^nachrichtenlimit/${uid}$`), new RegExp(`^uploadlimit/${uid}_\\d{4}-\\d{2}$`)]);
+  const waechterZaehler = teilLaufWaechter([new RegExp(`^nachrichtenlimit/${uid}$`), new RegExp(`^uploadlimit/${uid}_\\d{4}-\\d{2}$`), new RegExp(`^kassezbonlimit/${uid}_\\d{4}-\\d{2}-\\d{2}$`)]);
   const waechterDatei = (n) => { if (!String(n).startsWith(`users/${uid}/`)) throw new SchutzVerletzt(n); };
   try {
     // Vorbedingung vor jedem Lauf, solange noch nicht im Abschluss (Abschluss entfernt die Markierung selbst)
@@ -125,6 +125,7 @@ export async function kontoLoeschenSchritt(ctx, uid, art, modus) {
         if (modus === 'an') { await ctx.fs.loeschen(`nachrichtenlimit/${uid}`, waechterZaehler); s.zaehler.nachrichtenlimit = 1; }
         else s.zaehler.nachrichtenlimit = (await ctx.fs.holen(`nachrichtenlimit/${uid}`)) ? 1 : 0;
         await uploadlimitLoeschen(ctx, uid, modus, waechterZaehler, s); // NL-F: Upload-Reservierung uploadlimit/{uid}_JJJJ-MM mit löschen (wie nachrichtenlimit)
+        await kassezbonlimitLoeschen(ctx, uid, modus, waechterZaehler, s); // Kassenbuch P1c: Tageszähler Z-Bon lesen
         s.phase = 'storage';
         continue;
       }
@@ -200,7 +201,7 @@ export async function nachlaufSchritt(ctx, uid, modus, archivWert = null) {
   const voll = await kvJson(ctx.kv, STAND(uid));
   if (voll && voll.modus === 'an') return { status: 'gesperrt', grund: 'vollloeschung_laeuft' };
   if (!s) s = { v: 1, modus, phase: 'zaehler', cursor: null, kandidaten: [], zaehler: { nachrichtenlimit: 0, feedback: 0, profil: 0, uploads_gesamt: 0, uploads_verwiesen: 0, uploads_geloescht: 0 }, fehler: 0, gestartet: ctx.jetzt.toISOString() };
-  const wZaehler = teilLaufWaechter([new RegExp(`^nachrichtenlimit/${uid}$`), new RegExp(`^uploadlimit/${uid}_\\d{4}-\\d{2}$`)]);
+  const wZaehler = teilLaufWaechter([new RegExp(`^nachrichtenlimit/${uid}$`), new RegExp(`^uploadlimit/${uid}_\\d{4}-\\d{2}$`), new RegExp(`^kassezbonlimit/${uid}_\\d{4}-\\d{2}-\\d{2}$`)]);
   const wFeedback = teilLaufWaechter([/^feedback\/[^/]+$/]);
   const wProfil = teilLaufWaechter(NACHLAUF_PROFIL.map((d) => new RegExp(`^users/${uid}/profil/${d}$`)));
   const wUpload = (n) => { if (!String(n).startsWith(`users/${uid}/uploads/`) || istAufbewahrungsDatei(n)) throw new SchutzVerletzt(n); };
@@ -219,6 +220,7 @@ export async function nachlaufSchritt(ctx, uid, modus, archivWert = null) {
         if (modus === 'an') { await ctx.fs.loeschen(`nachrichtenlimit/${uid}`, wZaehler); s.zaehler.nachrichtenlimit = 1; }
         else s.zaehler.nachrichtenlimit = (await ctx.fs.holen(`nachrichtenlimit/${uid}`)) ? 1 : 0;
         await uploadlimitLoeschen(ctx, uid, modus, wZaehler, s); // NL-F
+        await kassezbonlimitLoeschen(ctx, uid, modus, wZaehler, s); // Kassenbuch P1c: Tageszähler Z-Bon lesen
         s.phase = 'feedback';
         continue;
       }
@@ -369,6 +371,25 @@ export function uploadlimitSchluessel(uid, jetzt) {
     out.push(`uploadlimit/${uid}_${m.getUTCFullYear()}-${String(m.getUTCMonth() + 1).padStart(2, '0')}`);
   }
   return out;
+}
+// Kassenbuch P1c: Tageszähler „Z-Bon lesen“ (regel/kasse-zbon-ki.js, Dokument kassezbonlimit/{uid}_JJJJ-MM-TT, nur der Berliner Tag des Aufrufs) gehört ebenfalls zum Konto.
+// Tage von vorgestern bis morgen genügen (Zeitzone, Tageswechsel); Löschen eines fehlenden Dokuments ist harmlos.
+export function kassezbonlimitSchluessel(uid, jetzt) {
+  const j = jetzt instanceof Date ? jetzt : new Date();
+  const out = [];
+  for (let d = -2; d <= 1; d++) {
+    const t = new Date(Date.UTC(j.getUTCFullYear(), j.getUTCMonth(), j.getUTCDate() + d));
+    out.push(`kassezbonlimit/${uid}_${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(t.getUTCDate()).padStart(2, '0')}`);
+  }
+  return out;
+}
+async function kassezbonlimitLoeschen(ctx, uid, modus, waechter, s) {
+  let n = 0;
+  for (const pfad of kassezbonlimitSchluessel(uid, ctx.jetzt)) {
+    if (modus === 'an') { await ctx.fs.loeschen(pfad, waechter); n++; }
+    else if (await ctx.fs.holen(pfad)) n++;
+  }
+  s.zaehler.kassezbonlimit = n;
 }
 async function uploadlimitLoeschen(ctx, uid, modus, waechter, s) {
   let n = 0;
