@@ -324,6 +324,33 @@ test('F1-Fix B-1: ruhetag_aufheben vor einem Stammdatenwechsel (…_ab nach dem 
   assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-04'))).status, 200);
 });
 
+test('F1-Fix B-4: Wiederholung von ruhetag_aufheben mit derselben anfrage_id (Netzabbruch) gibt 200 schon_aufgehoben ohne Schreiben und ohne zweiten Audit-Eintrag; andere anfrage_id 404', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-02'))).status, 200);
+  assert.equal((await u.tagRufe({ aktion: 'ruhetage', kasse_id: id, tage: ['2026-11-03', '2026-11-04'] })).status, 200);
+  const body = { aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04', anfrage_id: 'aufheben-0001' };
+  const erst = await u.tagRufe(body);
+  assert.equal(erst.status, 200, JSON.stringify(erst.json));
+  assert.equal(erst.json.schon_aufgehoben, undefined);
+  const n = u.audit().length;
+  const kopf = u.fs.lies(P('audit_v2/_kopf'));
+  const zweit = await u.tagRufe(body);
+  assert.deepEqual([zweit.status, zweit.json.ok, zweit.json.idempotent, zweit.json.schon_aufgehoben, zweit.json.kassentag_id], [200, true, true, true, `${id}_2026-11-04`], JSON.stringify(zweit.json));
+  assert.equal(u.audit().length, n, 'kein zweiter Audit-Eintrag');
+  assert.deepEqual(u.fs.lies(P('audit_v2/_kopf')), kopf);
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-04`)), null);
+  assert.equal((await kettepruefen(u.audit())).ok, true);
+  // auch nach einer weiteren Aktion dazwischen (Bewegung am offenen Tag)
+  assert.equal((await u.bewRufe(bewegung(id, '2026-11-04', 'geldtransit_bank_ein', 500))).status, 200);
+  assert.equal((await u.tagRufe(body)).json.schon_aufgehoben, true);
+  // andere anfrage_id oder anderer Tag: wie bisher 404
+  const x = await u.tagRufe({ ...body, anfrage_id: 'aufheben-0002' });
+  assert.deepEqual([x.status, x.json.fehler[0].code], [404, 'KASSENTAG_UNBEKANNT']);
+  const y = await u.tagRufe({ ...body, geschaeftstag: '2026-11-05' });
+  assert.deepEqual([y.status, y.json.fehler[0].code], [404, 'KASSENTAG_UNBEKANNT']);
+});
+
 test('/kasse aendern: Verlauf höchstens 200, ältere Einträge landen create-only in kassen/{id}/verlauf/{n}', async () => {
   const u = umgebung();
   const id = await u.legeKasseAn();
