@@ -659,14 +659,17 @@ async function ruhetage(c, aktion) {
 // G1-Fix N-1: Das gilt auch, wenn der Tag inzwischen wieder einen Platz hat (neu als Ruhetag angelegt oder abgeschlossen): eine verspätete Wiederholung wirkt nur
 // auf den Ruhetag, den sie aufgehoben hat (details.ruhetag_anfrage_id), nie ein zweites Mal auf einen neuen. G1-Fix N-2: Rückblick 20 Einträge; ist die
 // anfrage_id dort nicht zu finden und fehlt der Platz, bleibt es bei 404 KASSENTAG_UNBEKANNT mit hinweis (die Oberfläche zeigt „schon erledigt?“).
+// J1-Fix N-a: Der Rückblick allein reicht nicht (mehr als 20 Einträge dazwischen). Darum nennt jede Anfrage den Ruhetag, den sie aufheben will
+// (Pflicht ruhetag_anfrage_id = anfrage_id im Tagesplatz des Ruhetags): ein neu angelegter Ruhetag hat eine andere anfrage_id, eine verspätete Wiederholung
+// bekommt 409 RUHETAG_GEAENDERT und ändert nichts, unabhängig vom Audit-Fenster.
 // ---------------------------------------------------------------------------------------------
 export const AUFHEBEN_AUDIT_RUECKBLICK = 20; // so viele letzte Audit-Einträge prüft die Wiederholung (ein batchGet)
 const AUFHEBEN_HINWEIS = 'Schon erledigt? Der Ruhetag ist vielleicht schon aufgehoben.';
 async function ruhetagAufheben(c) {
   const { fs, uid, body, cors, zeit, heute } = c;
-  const f = pruefeRuhetage(body, 'ruhetag', { heute });
+  const f = pruefeRuhetage(body, 'ruhetag_aufheben', { heute });
   if (f.fehler) return formFehler(f.fehler, cors);
-  const { kasse_id: kasseId, tage: [tag] } = f.wert;
+  const { kasse_id: kasseId, tage: [tag], ruhetag_anfrage_id: ruhetagAnfrageId } = f.wert;
   const tagId = Steuerkern.kassentagId(kasseId, tag);
   return mitWiederholung(fs, async () => {
     const docs = await fs.batchGet([P.kasse(uid, kasseId), P.kassentag(uid, tagId), kopfPfad(uid)]);
@@ -680,6 +683,8 @@ async function ruhetagAufheben(c) {
     if (await schonAufgehoben(fs, uid, docs.get(kopfPfad(uid)), tagId, body.anfrage_id)) return { antwort: antwort({ ok: true, idempotent: true, schon_aufgehoben: true, kassentag_id: tagId }, 200, cors) };
     if (!tagDok || !istObjekt(tagDok.daten)) return { antwort: fehlerAntwort(404, 'KASSENTAG_UNBEKANNT', cors, { kassentag_id: tagId, hinweis: AUFHEBEN_HINWEIS }) };
     if (tagDok.daten.status !== 'ruhetag') return { antwort: fehlerAntwort(409, 'KEIN_RUHETAG', cors, { kassentag_id: tagId, status: tagDok.daten.status ?? null }) };
+    // N-a: nur genau der Ruhetag, den die Anfrage meint (nicht ein später neu angelegter)
+    if (tagDok.daten.anfrage_id !== ruhetagAnfrageId) return { antwort: fehlerAntwort(409, 'RUHETAG_GEAENDERT', cors, { kassentag_id: tagId, hinweis: AUFHEBEN_HINWEIS }) };
     const zeiger = zeigerAus(kasse.letzter_abschluss);
     if (zeiger && tag < zeiger.tag) return { antwort: fehlerAntwort(409, 'SPAETERE_TAGE', cors, { letzter_tag: zeiger.tag }) };
     const felder = STAMMDATEN_AB.filter((x) => typeof kasse[x] === 'string' && kasse[x] > tag);

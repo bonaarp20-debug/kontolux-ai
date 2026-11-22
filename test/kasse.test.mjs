@@ -82,6 +82,8 @@ const abschluss = (kasseId, tag, extra = {}) => ({
   ...extra,
 });
 const ohneUmsatz = (kasseId, tag, extra = {}) => abschluss(kasseId, tag, { umsaetze: [], gezaehlt_cent: 10000, ...extra });
+// J1-Fix N-a: ruhetag_aufheben nennt den Ruhetag über seine anfrage_id (aus dem Tagesplatz)
+const rid = (u, kasseId, tag) => u.fs.lies(P(`kassentage/${kasseId}_${tag}`))?.anfrage_id ?? 'ruhetag-fehlt-0000';
 
 // ---------------------------------------------------------------------------------------------
 // Router-Listen, Feature, Zugang
@@ -315,13 +317,13 @@ test('F1-Fix B-1: ruhetag_aufheben vor einem Stammdatenwechsel (…_ab nach dem 
   const w = await u.kasse({ aktion: 'aendern', kasse_id: id, art: 'pc_kasse', art_ab: '2026-11-04' });
   assert.equal(w.status, 200, JSON.stringify(w.json));
   const vorher = u.audit().length;
-  const r = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-03' });
+  const r = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-03', ruhetag_anfrage_id: rid(u, id, '2026-11-03') });
   assert.deepEqual([r.status, r.json.fehler[0].code, r.json.felder, r.json.stammdaten_ab, r.json.kassentag_id], [409, 'STAMMDATEN_WECHSEL_SPAETER', ['art_ab'], '2026-11-04', `${id}_2026-11-03`], JSON.stringify(r.json));
   assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-03`)).status, 'ruhetag');
   assert.equal(u.audit().length, vorher, 'nichts geschrieben');
   // Ruhetag am Tag des Wechsels (art_ab = Tag): Aufheben geht, der Tag lässt sich danach abschließen
   assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-04' })).status, 200);
-  assert.equal((await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04' })).status, 200);
+  assert.equal((await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04', ruhetag_anfrage_id: rid(u, id, '2026-11-04') })).status, 200);
   assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-04'))).status, 200);
 });
 
@@ -330,7 +332,7 @@ test('F1-Fix B-4: Wiederholung von ruhetag_aufheben mit derselben anfrage_id (Ne
   const id = await u.legeKasseAn();
   assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-02'))).status, 200);
   assert.equal((await u.tagRufe({ aktion: 'ruhetage', kasse_id: id, tage: ['2026-11-03', '2026-11-04'] })).status, 200);
-  const body = { aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04', anfrage_id: 'aufheben-0001' };
+  const body = { aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04', anfrage_id: 'aufheben-0001', ruhetag_anfrage_id: rid(u, id, '2026-11-04') };
   const erst = await u.tagRufe(body);
   assert.equal(erst.status, 200, JSON.stringify(erst.json));
   assert.equal(erst.json.schon_aufgehoben, undefined);
@@ -357,7 +359,7 @@ test('G1-Fix N-1: verspätete Wiederholung von ruhetag_aufheben, nachdem derselb
   const id = await u.legeKasseAn();
   assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-02'))).status, 200);
   assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-04', anfrage_id: 'ruhetag-alt-0001' })).status, 200);
-  const body = { aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04', anfrage_id: 'aufheben-n1-0001' };
+  const body = { aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04', anfrage_id: 'aufheben-n1-0001', ruhetag_anfrage_id: 'ruhetag-alt-0001' };
   assert.equal((await u.tagRufe(body)).status, 200);
   assert.equal(u.audit().at(-1).details.ruhetag_anfrage_id, 'ruhetag-alt-0001');
   assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-04', anfrage_id: 'ruhetag-neu-0001' })).status, 200);
@@ -368,7 +370,7 @@ test('G1-Fix N-1: verspätete Wiederholung von ruhetag_aufheben, nachdem derselb
   const platz = u.fs.lies(P(`kassentage/${id}_2026-11-04`));
   assert.deepEqual([platz.status, platz.anfrage_id], ['ruhetag', 'ruhetag-neu-0001'], 'der neue Ruhetag bleibt');
   // ein neuer Aufhebe-Auftrag (andere anfrage_id) wirkt auf den neuen Ruhetag
-  assert.equal((await u.tagRufe({ ...body, anfrage_id: 'aufheben-n1-0002' })).status, 200);
+  assert.equal((await u.tagRufe({ ...body, anfrage_id: 'aufheben-n1-0002', ruhetag_anfrage_id: 'ruhetag-neu-0001' })).status, 200);
   // Tag danach abgeschlossen: die alte Wiederholung bestätigt weiter statt 409 KEIN_RUHETAG, und schreibt nichts
   assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-04'))).status, 200);
   const nachAbschluss = await u.tagRufe(body);
@@ -382,7 +384,7 @@ test('G1-Fix N-2: Wiederholung von ruhetag_aufheben erkennt die anfrage_id unter
   const id = await u.legeKasseAn();
   assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-02'))).status, 200);
   assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-04' })).status, 200);
-  const body = { aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04', anfrage_id: 'aufheben-n2-0001' };
+  const body = { aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04', anfrage_id: 'aufheben-n2-0001', ruhetag_anfrage_id: rid(u, id, '2026-11-04') };
   assert.equal((await u.tagRufe(body)).status, 200);
   // 10 Bewegungen (je ein Audit-Eintrag) dazwischen: mit dem alten Rückblick (5) wäre das 404
   for (let i = 0; i < 10; i += 1) assert.equal((await u.bewRufe(bewegung(id, '2026-11-04', 'geldtransit_bank_ein', 100))).status, 200);
@@ -395,6 +397,35 @@ test('G1-Fix N-2: Wiederholung von ruhetag_aufheben erkennt die anfrage_id unter
   const alt = await u.tagRufe(body);
   assert.deepEqual([alt.status, alt.json.fehler[0].code, alt.json.kassentag_id], [404, 'KASSENTAG_UNBEKANNT', `${id}_2026-11-04`]);
   assert.match(alt.json.hinweis, /^Schon erledigt\?/);
+});
+
+test('J1-Fix N-a: verspätete Wiederholung von ruhetag_aufheben nach mehr als 20 Audit-Einträgen, der Tag ist inzwischen wieder Ruhetag: 409 RUHETAG_GEAENDERT, der neue Ruhetag bleibt, nichts geschrieben; ohne ruhetag_anfrage_id 400', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-02'))).status, 200);
+  assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-04', anfrage_id: 'ruhetag-alt-n-a-01' })).status, 200);
+  const ohne = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04' });
+  assert.deepEqual([ohne.status, ohne.json.fehler[0].code, ohne.json.feld], [400, 'FORMAT', 'ruhetag_anfrage_id'], JSON.stringify(ohne.json));
+  const body = { aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04', anfrage_id: 'aufheben-n-a-0001', ruhetag_anfrage_id: 'ruhetag-alt-n-a-01' };
+  assert.equal((await u.tagRufe(body)).status, 200);
+  // 21 Audit-Einträge dazwischen (Bewegung + Storno je zwei, dann der neue Ruhetag): der Aufhebe-Eintrag liegt außerhalb des Rückblicks
+  for (let i = 0; i < 10; i += 1) {
+    const b = await u.bewRufe(bewegung(id, '2026-11-04', 'geldtransit_bank_ein', 100));
+    assert.equal(b.status, 200, JSON.stringify(b.json));
+    assert.equal((await u.bewRufe({ aktion: 'stornieren', kasse_id: id, bewegung_id: b.json.bewegung_id, grund: 'doppelt erfasst' })).status, 200);
+  }
+  assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-04', anfrage_id: 'ruhetag-neu-n-a-01' })).status, 200);
+  const kopf = u.fs.lies(P('audit_v2/_kopf'));
+  const seqAufheben = u.audit().findIndex((e) => e.aktion === 'kassentag_ruhetag_aufgehoben') + 1;
+  assert.ok(kopf.seq - seqAufheben >= AUFHEBEN_AUDIT_RUECKBLICK, `Abstand ${kopf.seq - seqAufheben}`);
+  const vor = u.fs.log.commits;
+  const spaet = await u.tagRufe(body);
+  assert.deepEqual([spaet.status, spaet.json.fehler[0].code, spaet.json.kassentag_id], [409, 'RUHETAG_GEAENDERT', `${id}_2026-11-04`], JSON.stringify(spaet.json));
+  assert.match(spaet.json.hinweis, /^Schon erledigt\?/);
+  assert.equal(u.fs.log.commits, vor, 'nichts geschrieben');
+  assert.deepEqual(['status', 'anfrage_id'].map((x) => u.fs.lies(P(`kassentage/${id}_2026-11-04`))[x]), ['ruhetag', 'ruhetag-neu-n-a-01'], 'der neue Ruhetag bleibt');
+  // ein Auftrag für den neuen Ruhetag wirkt
+  assert.equal((await u.tagRufe({ ...body, anfrage_id: 'aufheben-n-a-0002', ruhetag_anfrage_id: 'ruhetag-neu-n-a-01' })).status, 200);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -2647,7 +2678,7 @@ test('hyg B-N3: ruhetag_aufheben macht einen irrtümlichen Ruhetag nach dem letz
   assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-02'))).status, 200);
   assert.equal((await u.tagRufe({ aktion: 'ruhetage', kasse_id: id, tage: ['2026-11-03', '2026-11-04'] })).status, 200);
   assert.equal((await u.bewRufe(bewegung(id, '2026-11-04', 'geldtransit_bank_ein', 500))).json.fehler[0].code, 'TAG_ABGESCHLOSSEN');
-  const r = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04' });
+  const r = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04', ruhetag_anfrage_id: rid(u, id, '2026-11-04') });
   assert.equal(r.status, 200, JSON.stringify(r.json));
   assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-04`)), null);
   assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-03`)).status, 'ruhetag', 'nur der genannte Tag');
@@ -2658,11 +2689,11 @@ test('hyg B-N3: ruhetag_aufheben macht einen irrtümlichen Ruhetag nach dem letz
   assert.equal((await u.bewRufe(bewegung(id, '2026-11-04', 'geldtransit_bank_ein', 500))).status, 200);
   assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-04', { gezaehlt_cent: 10500 }))).status, 200);
   // vor dem letzten Abschluss: nur rückwärts über den Storno
-  const s = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-03' });
+  const s = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-03', ruhetag_anfrage_id: rid(u, id, '2026-11-03') });
   assert.deepEqual([s.status, s.json.fehler[0].code, s.json.letzter_tag], [409, 'SPAETERE_TAGE', '2026-11-04']);
-  const k = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04' });
+  const k = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04', ruhetag_anfrage_id: rid(u, id, '2026-11-04') });
   assert.deepEqual([k.status, k.json.fehler[0].code], [409, 'KEIN_RUHETAG']);
-  const x = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-09' });
+  const x = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-09', ruhetag_anfrage_id: 'ruhetag-fehlt-0000' });
   assert.deepEqual([x.status, x.json.fehler[0].code], [404, 'KASSENTAG_UNBEKANNT']);
   const f = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-05', grund: 'x' });
   assert.deepEqual([f.status, f.json.feld], [400, 'grund']);
