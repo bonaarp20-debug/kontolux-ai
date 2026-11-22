@@ -4312,14 +4312,30 @@ const PRUEFER_DATEI_ORDNER = ['kasse', 'belege', 'rechnungen', 'mahnungen', 'sam
 const PRUEFER_DATEI_BASIS = 'https://kontolux-main.jonadrews012.workers.dev';
 const PRUEFER_UID_FORMAT = /^[A-Za-z0-9]{10,40}$/;
 
-// Erlaubter Speicherpfad: users/{uid}/{erlaubter Ordner}/…, ohne Traversal, Prozentzeichen, Backslash, Steuerzeichen, leere oder Punkt-Segmente
+// Erlaubter Speicherpfad: users/{uid}/{erlaubter Ordner}/…, ohne Backslash, Steuerzeichen, leere, „.“- oder „..“-Segmente.
+// G2-Fix M-1: #, %, ? und Leerzeichen sind im Dateinamen erlaubt (Chat-Uploads speichern den rohen Namen, z. B. „1732_Rechnung #1001.pdf“). Der Pfad ist immer der
+// dekodierte Objektname: der Kurzlink kodiert ihn mit encodeURIComponent (searchParams.get dekodiert genau einmal), der Storage-Abruf ebenso; die Signatur läuft über
+// den dekodierten Namen, eine Doppelkodierung entsteht nicht. Gegen eine spätere zweite Dekodierung irgendwo: ein Segment, das nach weiterem Dekodieren zu „.“/„..“
+// wird oder einen Schrägstrich, Backslash oder ein Steuerzeichen enthält (%2e%2e, %2f, %5c, %252e …), wird abgelehnt.
+const prueferSegmentOk = (t) => {
+  if (t === '' || t === '.' || t === '..') return false;
+  let x = t;
+  for (let i = 0; i < 3 && /%[0-9a-f]{2}/i.test(x); i++) {
+    let y;
+    try { y = decodeURIComponent(x); } catch { y = x.replace(/%(2e|2f|5c|00)/gi, (m) => decodeURIComponent(m)); } // „100% Rabatt“ ist kein gültiges Escape: nur die gefährlichen Escapes auflösen
+    if (y === x) break;
+    x = y;
+    if (x === '.' || x === '..' || /[\u0000-\u001f\u007f/\\]/.test(x)) return false;
+  }
+  return true;
+};
 export function prueferDateiPfadOk(uid, pfad) {
   if (typeof uid !== 'string' || !PRUEFER_UID_FORMAT.test(uid) || typeof pfad !== 'string' || pfad.length > 400) return false;
-  if (/[\u0000-\u001f\u007f%\\?#]/.test(pfad) || pfad.includes('..')) return false;
+  if (/[\u0000-\u001f\u007f\\]/.test(pfad)) return false;
   const praefix = `users/${uid}/`;
   if (!pfad.startsWith(praefix)) return false;
   const teile = pfad.slice(praefix.length).split('/');
-  return teile.length >= 2 && PRUEFER_DATEI_ORDNER.includes(teile[0]) && teile.every(t => t !== '' && t !== '.');
+  return teile.length >= 2 && PRUEFER_DATEI_ORDNER.includes(teile[0]) && teile.every(prueferSegmentOk);
 }
 
 // null, wenn das Secret fehlt: dann entstehen keine Links (fail-closed)
