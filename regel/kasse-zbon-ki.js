@@ -71,30 +71,41 @@ const EXPORT_HINWEIS = 'Für Exporte deiner Kasse gibt es später einen eigenen 
 // ---------------------------------------------------------------------------------------------
 // Schema der Modellausgabe (Structured Outputs). Alle Felder required, additionalProperties false, nullable über ["integer","null"].
 // ---------------------------------------------------------------------------------------------
-const INT_N = { type: ['integer', 'null'] };
-const NUM_N = { type: ['number', 'null'] };
-const STR_N = { type: ['string', 'null'] };
 const obj = (properties) => ({ type: 'object', properties, required: Object.keys(properties), additionalProperties: false });
 const liste = (items) => ({ type: 'array', items });
 export const DOKUMENTARTEN = Object.freeze(['z_bericht', 'x_bericht', 'kassenbericht', 'kassenbuchseite', 'sonstiges']);
-export const ZBON_SCHEMA = obj({
-  dokumentart: { type: 'string', enum: [...DOKUMENTARTEN] },
-  lesbarkeit: { type: 'string', enum: ['gut', 'teilweise', 'schlecht'] },
-  mehrere_abschluesse: { type: 'boolean' },
-  z_nummer: STR_N,
-  geschaeftstag: STR_N, // JJJJ-MM-TT
-  ausdruck_zeit: STR_N, // JJJJ-MM-TTThh:mm
-  waehrung: { type: ['string', 'null'], enum: ['EUR', 'andere', null] },
-  saetze: liste(obj({ satz_prozent: NUM_N, brutto_cent: INT_N, netto_cent: INT_N, steuer_cent: INT_N })),
-  zahlarten: liste(obj({ art: { type: 'string', enum: ['bar', 'karte', 'gutschein', 'sonstig'] }, betrag_cent: INT_N })),
-  retouren: liste(obj({ satz_prozent: NUM_N, betrag_cent: INT_N })),
-  rabatte: liste(obj({ satz_prozent: NUM_N, betrag_cent: INT_N })),
-  trinkgeld: liste(obj({ art: { type: 'string', enum: ['inhaber', 'mitarbeiter', 'unklar'] }, zahlart: { type: 'string', enum: ['bar', 'karte', 'unklar'] }, betrag_cent: INT_N })),
-  gutschein_verkauf_cent: INT_N,
-  gutschein_einloesung_cent: INT_N,
-  gesamt_brutto_cent: INT_N,
-  unsicher: liste({ type: 'string' }),
-});
+// Zwei Schreibweisen derselben Struktur (O4-W A-N3): 'standard' (Typ-Arrays ["integer","null"], enum mit null) und 'anyof' (Rückfall mit anyOf, falls die API
+// die Typ-Arrays ablehnt). Welche die API annimmt, klärt nur der echte Eval (node test/kasse-zbon-eval.mjs --echt --schema=anyof). Die Wahl steht in
+// ZBON_SCHEMA_VARIANTE (Standard), im Endpunkt über deps.schema, im Eval über --schema=.
+export const ZBON_SCHEMA_VARIANTE = 'standard';
+export const ZBON_SCHEMA_VARIANTEN = Object.freeze(['standard', 'anyof']);
+function baueSchema(anyof) {
+  const nullbar = (typ) => (anyof ? { anyOf: [{ type: typ }, { type: 'null' }] } : { type: [typ, 'null'] });
+  const INT_N = nullbar('integer'); const NUM_N = nullbar('number'); const STR_N = nullbar('string');
+  const WAEHRUNG = anyof ? { anyOf: [{ type: 'string', enum: ['EUR', 'andere'] }, { type: 'null' }] } : { type: ['string', 'null'], enum: ['EUR', 'andere', null] };
+  return obj({
+    dokumentart: { type: 'string', enum: [...DOKUMENTARTEN] },
+    lesbarkeit: { type: 'string', enum: ['gut', 'teilweise', 'schlecht'] },
+    mehrere_abschluesse: { type: 'boolean' },
+    z_nummer: STR_N,
+    geschaeftstag: STR_N, // JJJJ-MM-TT
+    ausdruck_zeit: STR_N, // JJJJ-MM-TTThh:mm
+    waehrung: WAEHRUNG,
+    saetze: liste(obj({ satz_prozent: NUM_N, brutto_cent: INT_N, netto_cent: INT_N, steuer_cent: INT_N })),
+    zahlarten: liste(obj({ art: { type: 'string', enum: ['bar', 'karte', 'gutschein', 'sonstig'] }, betrag_cent: INT_N })),
+    retouren: liste(obj({ satz_prozent: NUM_N, betrag_cent: INT_N })),
+    rabatte: liste(obj({ satz_prozent: NUM_N, betrag_cent: INT_N })),
+    trinkgeld: liste(obj({ art: { type: 'string', enum: ['inhaber', 'mitarbeiter', 'unklar'] }, zahlart: { type: 'string', enum: ['bar', 'karte', 'unklar'] }, betrag_cent: INT_N })),
+    gutschein_verkauf_cent: INT_N,
+    gutschein_einloesung_cent: INT_N,
+    gesamt_brutto_cent: INT_N,
+    unsicher: liste({ type: 'string' }),
+  });
+}
+export const ZBON_SCHEMA_STANDARD = baueSchema(false);
+export const ZBON_SCHEMA_ANYOF = baueSchema(true);
+export const zbonSchemaFuer = (variante) => (variante === 'anyof' ? ZBON_SCHEMA_ANYOF : variante === 'standard' ? ZBON_SCHEMA_STANDARD : zbonSchemaFuer(ZBON_SCHEMA_VARIANTE));
+export const ZBON_SCHEMA = zbonSchemaFuer(ZBON_SCHEMA_VARIANTE);
 
 // ---------------------------------------------------------------------------------------------
 // System-Prompt (zbon-2). Höchstens etwa 1.200 Token (Test: Methode prompt-messung.mjs, Zeichen / 3,5). Beispiele nur in Textform, synthetisch.
@@ -524,7 +535,7 @@ export async function pruefeZbonDatei(datei, { validateDatei } = {}) {
 // ---------------------------------------------------------------------------------------------
 // Anthropic-Anfrage (kein Streaming, kein Wissens-/Profil-/Verlaufsblock; nur Prompt, Datei, eine Kontextzeile)
 // ---------------------------------------------------------------------------------------------
-export function zbonKiAnfrage({ datei, base64, besteuerung, apiKey, denken = 'aus' }) {
+export function zbonKiAnfrage({ datei, base64, besteuerung, apiKey, denken = 'aus', schema = ZBON_SCHEMA_VARIANTE }) {
   const kontext = `Besteuerung: ${besteuerung === 'Kleinunternehmer' ? 'Kleinunternehmer' : 'Regel'}`;
   const inhalt = [];
   if (datei.art === 'pdf') inhalt.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } });
@@ -536,7 +547,7 @@ export function zbonKiAnfrage({ datei, base64, besteuerung, apiKey, denken = 'au
     max_tokens: ZBON_MAX_TOKENS,
     system: zbonSystemPrompt(),
     messages: [{ role: 'user', content: inhalt }],
-    output_config: { format: { type: 'json_schema', schema: ZBON_SCHEMA }, ...(denken === 'low' ? { effort: 'low' } : {}) },
+    output_config: { format: { type: 'json_schema', schema: zbonSchemaFuer(schema) }, ...(denken === 'low' ? { effort: 'low' } : {}) },
     ...(denken === 'low' ? {} : { thinking: { type: 'disabled' } }),
   };
   return {
@@ -657,7 +668,7 @@ export async function regelKasseZbonLesen(body, env, cors = {}, deps = {}) {
     const base64 = datei.art === 'text' ? '' : body.datei.base64;
     let ki;
     try {
-      ki = await deps.kiAufruf(uid, zbonKiAnfrage({ datei, base64, besteuerung: status, apiKey, denken: deps.denken === 'low' ? 'low' : 'aus' }));
+      ki = await deps.kiAufruf(uid, zbonKiAnfrage({ datei, base64, besteuerung: status, apiKey, denken: deps.denken === 'low' ? 'low' : 'aus', schema: deps.schema }));
     } catch (e) {
       // Zeitüberschreitung/Abbruch: Ausgang unklar (die Anfrage kann bei Anthropic laufen und berechnet werden): zählt als Versuch, keine Freigabe.
       // Nur ein sicherer Fehlschlag (Ausnahme ohne Zeitüberschreitung, kein Ergebnis der Schnittstelle) gibt die Reservierung zurück. O4-W A-N1.

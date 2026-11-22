@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { PDFDocument, PDFName } from 'pdf-lib';
 import {
   regelKasseZbonLesen, regelKasseZbon, pruefeZbonVorschlag, pruefeZbonDatei, zbonKiAnfrage, zbonSystemPrompt, reserviereKasseZbon, ZBON_SCHEMA,
-  ZBON_PROMPT_VERSION, ZBON_MODELL, ZBON_TEXT_MAX_BYTES, ZBON_EINGABE_TOKEN_MAX, zbonEingabeTokens, ZBON_TAGESLIMIT, KASSE_ZBON_PFAD, limitPfad,
+  ZBON_SCHEMA_ANYOF, ZBON_SCHEMA_STANDARD, ZBON_SCHEMA_VARIANTE, zbonSchemaFuer, ZBON_PROMPT_VERSION, ZBON_MODELL, ZBON_TEXT_MAX_BYTES, ZBON_EINGABE_TOKEN_MAX, zbonEingabeTokens, ZBON_TAGESLIMIT, KASSE_ZBON_PFAD, limitPfad,
 } from '../regel/kasse-zbon-ki.js';
 import { kassenSteuerJeSatz } from '../steuerkern/kasse.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
@@ -679,4 +679,39 @@ test('A-N4: K2 Mehrzweck-Gutschein gegen Bargeld verkauft ist nur ein Hinweis; e
   assert.equal(stufe(pr({ zahlarten: zahl(17550) }), 'K2_ZAHLARTEN_GESAMT'), 'warnung', 'ohne Gutscheinverkauf: Warnung');
   const gt = pr({ gutschein_verkauf_cent: 2500, trinkgeld: [{ art: 'inhaber', zahlart: 'bar', betrag_cent: 200 }], zahlarten: zahl(17750) });
   assert.equal(stufe(gt, 'K2_ZAHLARTEN_GESAMT'), 'hinweis');
+});
+
+test('A-N3: Schema-Rückfall mit anyOf (statt Typ-Arrays und enum mit null), wählbar per Option; Standard unverändert', () => {
+  assert.equal(ZBON_SCHEMA_VARIANTE, 'standard'); assert.equal(ZBON_SCHEMA, ZBON_SCHEMA_STANDARD);
+  assert.equal(zbonSchemaFuer('anyof'), ZBON_SCHEMA_ANYOF); assert.equal(zbonSchemaFuer('unbekannt'), ZBON_SCHEMA_STANDARD);
+  const text = JSON.stringify(ZBON_SCHEMA_ANYOF);
+  assert.equal(/"type":\[/.test(text), false, 'keine Typ-Arrays'); assert.equal(/"enum":\[[^\]]*null/.test(text), false, 'kein null im enum');
+  assert.ok(text.includes('"anyOf"'));
+  assert.deepEqual(ZBON_SCHEMA_ANYOF.properties.waehrung, { anyOf: [{ type: 'string', enum: ['EUR', 'andere'] }, { type: 'null' }] });
+  assert.deepEqual(ZBON_SCHEMA_ANYOF.properties.z_nummer, { anyOf: [{ type: 'string' }, { type: 'null' }] });
+  assert.deepEqual(Object.keys(ZBON_SCHEMA_ANYOF.properties), Object.keys(ZBON_SCHEMA_STANDARD.properties));
+  for (const verboten of ['maxLength', 'minLength', 'maxItems', 'minItems', 'minimum', 'maximum', 'pattern']) assert.equal(text.includes(`"${verboten}"`), false, verboten);
+  // dieselben Bon-Ausgaben passen zu beiden Schemas (kleiner Validator für type/anyOf/enum/properties/items)
+  const passt = (sch, w) => {
+    if (sch.anyOf) return sch.anyOf.some((x) => passt(x, w));
+    if (sch.enum && !sch.enum.includes(w)) return false;
+    const typen = sch.type === undefined ? null : [].concat(sch.type);
+    if (typen) {
+      const ist = w === null ? 'null' : Array.isArray(w) ? 'array' : Number.isInteger(w) ? 'integer' : typeof w;
+      if (!(typen.includes(ist) || (ist === 'integer' && typen.includes('number')))) return false;
+    }
+    if (sch.type === 'object') return Object.keys(sch.properties).every((k) => passt(sch.properties[k], w[k])) && Object.keys(w).every((k) => k in sch.properties);
+    if (sch.type === 'array') return w.every((x) => passt(sch.items, x));
+    return true;
+  };
+  const b = BAECKEREI(); b.waehrung = null;
+  for (const sch of [ZBON_SCHEMA_STANDARD, ZBON_SCHEMA_ANYOF]) { assert.equal(passt(sch, BAECKEREI()), true); assert.equal(passt(sch, b), true); assert.equal(passt(sch, { ...BAECKEREI(), waehrung: 'CHF' }), false); }
+  // Anfrage nutzt die gewählte Variante
+  const mk = (schema) => JSON.parse(zbonKiAnfrage({ datei: { art: 'bild', type: 'image/jpeg' }, base64: 'AAAA', besteuerung: 'Regel', apiKey: 'x', schema }).body).output_config.format.schema;
+  assert.deepEqual(mk('anyof'), ZBON_SCHEMA_ANYOF); assert.deepEqual(mk(undefined), ZBON_SCHEMA_STANDARD); assert.deepEqual(mk('standard'), ZBON_SCHEMA_STANDARD);
+});
+
+test('A-N3: Endpunkt reicht deps.schema an die Anfrage weiter', async () => {
+  const u = umgebung({ zusatz: { schema: 'anyof' } }); await u.rufe();
+  assert.deepEqual(u.aufrufe[0].body.output_config.format.schema, ZBON_SCHEMA_ANYOF);
 });

@@ -9,6 +9,8 @@
 //       ANTHROPIC_API_KEY=... node test/kasse-zbon-eval.mjs --echt
 //   Vergleich "Denken aus" gegen "adaptiv, effort low" (Entscheidung laut 2.14, die Messwerte kommen ins Modulkopf und ins Stand-Dokument):
 //       ANTHROPIC_API_KEY=... node test/kasse-zbon-eval.mjs --echt --denken=low
+//   Schema-Rückfall (falls die API die Typ-Arrays/enum mit null ablehnt, HTTP 400): zweite Schreibweise mit anyOf, ohne Codeänderung:
+//       ANTHROPIC_API_KEY=... node test/kasse-zbon-eval.mjs --echt --schema=anyof      (Standard: --schema=standard)
 //   Optionen: --fall=3 (nur ein Fall), --fixtures=/Pfad (anderer Fixture-Ordner), --leise (nur Zusammenfassung)
 //
 // Gemessen wird dieselbe Kette wie im Endpunkt: pruefeZbonDatei, zbonKiAnfrage, zbonAntwortText, pruefeZbonVorschlag. Je Fall werden die Felder der Erwartung
@@ -17,13 +19,15 @@
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve, dirname, join } from 'node:path';
-import { pruefeZbonDatei, zbonKiAnfrage, zbonAntwortText, pruefeZbonVorschlag, zbonKostenCent, ZBON_MODELL, ZBON_PROMPT_VERSION } from '../regel/kasse-zbon-ki.js';
+import { pruefeZbonDatei, zbonKiAnfrage, zbonAntwortText, pruefeZbonVorschlag, zbonKostenCent, ZBON_MODELL, ZBON_PROMPT_VERSION, ZBON_SCHEMA_VARIANTE, ZBON_SCHEMA_VARIANTEN } from '../regel/kasse-zbon-ki.js';
 
 const hier = dirname(fileURLToPath(import.meta.url));
 const arg = (name) => { const a = process.argv.find((x) => x.startsWith(`--${name}=`)); return a ? a.slice(name.length + 3) : null; };
 const echt = process.argv.includes('--echt');
 const leise = process.argv.includes('--leise');
 const denken = arg('denken') === 'low' ? 'low' : 'aus';
+const schema = ZBON_SCHEMA_VARIANTEN.includes(arg('schema')) ? arg('schema') : ZBON_SCHEMA_VARIANTE;
+if (arg('schema') && !ZBON_SCHEMA_VARIANTEN.includes(arg('schema'))) { console.error(`Unbekanntes Schema: ${arg('schema')} (erlaubt: ${ZBON_SCHEMA_VARIANTEN.join(', ')})`); process.exit(2); }
 const nurFall = arg('fall') ? Number(arg('fall')) : null;
 const ordner = resolve(arg('fixtures') || process.env.ZBON_FIXTURES || join(hier, '../../Kontolux/scripts/fixtures/kasse-zbon'));
 const apiKey = process.env.ANTHROPIC_API_KEY || '';
@@ -59,7 +63,7 @@ for (const f of dateien) {
   let rohText = null;
   try {
     if (echt) {
-      const antwort = await anthropic(zbonKiAnfrage({ datei, base64: datei.art === 'text' ? '' : bytes.toString('base64'), besteuerung: x.besteuerung, apiKey, denken }));
+      const antwort = await anthropic(zbonKiAnfrage({ datei, base64: datei.art === 'text' ? '' : bytes.toString('base64'), besteuerung: x.besteuerung, apiKey, denken, schema }));
       aufrufe += 1; r.kostenCent = Number(zbonKostenCent(antwort.usage || {})); kostenCent += r.kostenCent;
       rohText = zbonAntwortText(antwort);
     } else rohText = JSON.stringify(x.modell_ausgabe);
@@ -96,7 +100,7 @@ for (const f of dateien) {
 
 // ---- Ausgabe ----
 const prozent = (t, n) => (n ? `${((t / n) * 100).toFixed(1)} %` : '-');
-console.log(`Eval Z-Bon lesen | Modell ${ZBON_MODELL} | Prompt ${ZBON_PROMPT_VERSION} | Denken ${denken === 'low' ? 'adaptiv effort low' : 'aus'} | ${echt ? 'ECHTER API-Lauf' : 'Trockenlauf (Soll-Ausgabe der Fixtures, keine API)'}`);
+console.log(`Eval Z-Bon lesen | Modell ${ZBON_MODELL} | Prompt ${ZBON_PROMPT_VERSION} | Denken ${denken === 'low' ? 'adaptiv effort low' : 'aus'} | Schema ${schema} | ${echt ? 'ECHTER API-Lauf' : 'Trockenlauf (Soll-Ausgabe der Fixtures, keine API)'}`);
 if (!leise) {
   for (const r of faelle) console.log(`  Fall ${String(r.fall).padStart(2)} ${r.name.padEnd(36)} [${r.gruppe}] ${r.treffer}/${r.felder} ${prozent(r.treffer, r.felder)}${echt ? `  ${r.kostenCent.toFixed(3)} ct` : ''}${r.probleme.length ? '\n      ' + r.probleme.join('\n      ') : ''}`);
 }
