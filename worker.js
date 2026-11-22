@@ -24,6 +24,7 @@ import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // 
 import { rechnungsnrDuplikat, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c)
 import { datevMischsatzGruppen, datevKorrekturGruppen, KORREKTUR_BELEG_ARTEN } from './regel/datev-mischsatz.js'; // Branch datev-mischsatz: Belege mit mehreren Steuersätzen je Satz buchen
 import { dekodiereFelder as datevDekodiereFelder } from './regel/firestore.js';
+import { DATEV_KASSE_KONTEN, kassenKontoWahl, istKasseTagesbeleg, kasseBelegPlan, kasseBewegungBuchung, kasseBewegungOhneBuchung } from './regel/datev-kasse.js'; // Kassenbuch P1b-5: DATEV-Kassenzweig
 import { datevBelegfeldBereinigen, datevFeldGequotet, datevNummerPruefen, datevKontoVierstellig, datevGeldkontoImBereich, datevKuKonto, RC_EINGANG_KONTEN, RC_AUSGANG_KONTEN, datevRcLage, datevUstId, GWG_KONTEN, AFA_KATEGORIE, GWG_KATEGORIE, FA_EST_ART, UST_KATEGORIEN } from './regel/datev-export-regeln.js'; // DATEV-Gesamtcheck 21.11.2026: Belegfeld 1, § 13b, GWG, Konten
 import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen, kiKassenberichtText } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4); Kassen-P0: kiKassenberichtText
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
@@ -1361,8 +1362,15 @@ const SACHKONTO_MAPPING = {
   'Einnahmen steuerfrei':       { SKR03: '8200', SKR04: '4200', euer_zeile: 'Z.12' },
   // OSS-FORM 3: Verkauf an Privatkunden in anderen EU-Ländern (Satz des Kundenlands), gleich wie index.html; der DATEV-Export mit Feature oss nimmt das
   // Konto aus dem Steuerteil (regel/datev-oss.js), dies ist nur der Altpfad
-  'Einnahmen EU-Privatkunden (OSS)': { SKR03: '8320', SKR04: '4320', euer_zeile: 'Z.15' }
+  'Einnahmen EU-Privatkunden (OSS)': { SKR03: '8320', SKR04: '4320', euer_zeile: 'Z.15' },
+  // Kassenbuch P1b-5 (12-steuer-vertiefung 3.4 SB-4, DATEV-Kontenrahmen 2026 Art.-Nr. 11174/11175, geprüft 21.11.2026): ein eigenes Konto "Kassendifferenz" gibt es nicht,
+  // der Kassenfehlbetrag steht auf 4900/6300 "Sonstige betriebliche Aufwendungen" (Konto Konfidenz A, Zuordnung C: der Steuerberater bestätigt die Kontowahl). Z.61 = Kz 183
+  // wie 'Sonstiges'. Nur für den Export des Kassenbuchs; keine Auswahlkategorie (KATEGORIEN_NUR_KASSE) und nicht im KI-Kontenplan. Das Kassenüberschuss-Konto kommt vom
+  // Steuerfall (Erlöskonto 8400/4400 bzw. Kleinunternehmer 8192/4184), nicht aus der Kategorie, deshalb hier kein Eintrag.
+  'Kassendifferenz (Fehlbetrag)': { SKR03: '4900', SKR04: '6300', euer_zeile: 'Z.61' }
 };
+// Kategorien, die nur das Kassenbuch setzt: nicht als Auswahl in Formularen (App) und nicht im Kontenplan der KI.
+const KATEGORIEN_NUR_KASSE = ['Kassendifferenz (Fehlbetrag)'];
 
 function resolveSachkonto(kategorie, skr) {
   const eintrag = SACHKONTO_MAPPING[kategorie];
@@ -1372,6 +1380,7 @@ function resolveSachkonto(kategorie, skr) {
 
 function buildSachkontoTabelleText() {
   return Object.entries(SACHKONTO_MAPPING)
+    .filter(([kategorie]) => !KATEGORIEN_NUR_KASSE.includes(kategorie))
     .map(([kategorie, konten]) => `- ${kategorie}: ${konten.SKR03} (SKR04: ${konten.SKR04})`)
     .join('\n');
 }
@@ -4956,7 +4965,7 @@ async function handleDatevExport(body, env, cors = {}) {
     // Buchungszeilen je Satz-Gruppe (Mischsatz und Rückzahlung). gruppen: [{ satz: '19'|'7'|'keine', brutto_cent }], korrektur: Gegenbuchung (Richtung umgekehrt,
     // Textmarke [Storno]), ku: Kleinunternehmer (Konto ohne Steuer, kein Schlüssel). Bewirtung (70 %): je Gruppe 70/30 (abziehbar / nicht abziehbar) mit dem Schlüssel
     // des Satzes der Gruppe, Rundung wie im Einzelpfad.
-    const bucheGruppen = ({ gruppen, korrektur, ku, istEinnahme, kategorie, importKonto, belegDatum, belegfeld1, textBasis, diverseAdressnummer }) => {
+    const bucheGruppen = ({ gruppen, korrektur, ku, istEinnahme, kategorie, importKonto, belegDatum, belegfeld1, textBasis, diverseAdressnummer, buchungskonto = bankkonto, markeZusatz = '' }) => {
       const skrK = skr === 'SKR04' ? 'SKR04' : 'SKR03';
       const bewirtungKonten = DATEV_BEWIRTUNG_KONTEN[skrK];
       for (const g of gruppen) {
@@ -4974,9 +4983,9 @@ async function handleDatevExport(body, env, cors = {}) {
         }
         const ohneSchl = ku || (alleErloeskonten.has(String(konto)) && !istEinnahme);
         const satzBu = ku ? '' : buSchluesselExport(ohneSchl ? 'keine' : g.satz, false, istEinnahme, konto, skr);
-        const marke = ` ${g.satz === 'keine' ? '0' : g.satz} %${korrektur ? ' [Storno]' : ''}${hinweis}`;
+        const marke = ` ${g.satz === 'keine' ? '0' : g.satz} %${markeZusatz}${korrektur ? ' [Storno]' : ''}${hinweis}`;
         const sh = istEinnahme === !korrektur ? 'S' : 'H';
-        const zeile = (betragCent, kontoZeile, zusatz) => buchungen.push({ betrag: betragCent / 100, sollHaben: sh, konto: bankkonto, gegenkonto: kontoZeile, bu: satzBu, belegDatum, belegfeld1, belegfeld2: '', buchungstext: buchungstextBasisKurz(textBasis, marke + zusatz), diverseAdressnummer });
+        const zeile = (betragCent, kontoZeile, zusatz) => buchungen.push({ betrag: betragCent / 100, sollHaben: sh, konto: buchungskonto, gegenkonto: kontoZeile, bu: satzBu, belegDatum, belegfeld1, belegfeld2: '', buchungstext: buchungstextBasisKurz(textBasis, marke + zusatz), diverseAdressnummer });
         // F1: auch ein importiertes Bewirtungskonto (4650/6640) wird 70/30 gebucht (der Kern rechnet für "Bewirtung (70%)" immer 70/30, der Import fasst das Paar zu einem Beleg zusammen)
         if (!istEinnahme && kategorie === 'Bewirtung (70%)' && String(konto) === bewirtungKonten.abziehbar) {
           const abz = Math.floor((2 * g.brutto_cent * 70 + 100) / 200);
@@ -4988,7 +4997,53 @@ async function handleDatevExport(body, env, cors = {}) {
       }
     };
 
+    // ── Kassenbuch P1b-5: DATEV-Kassenzweig (regel/datev-kasse.js). Greift nur bei quelle 'kasse' (Belege), zahlweg 'kasse' (Privatvorgänge) und den Kassenbewegungen
+    // Geldtransit Bank; alle anderen Belege laufen unverändert. Bar gegen das Kassenkonto (Profil datev_kassenkonto, je Kasse datev_konto, Standard SKR03 1000 / SKR04 1600),
+    // Karte gegen das Geldtransitkonto (datev_geldtransitkonto, Standard 1360 / 1460), Belegfeld 1 = Kassennummer. Kontenquellen: 12-steuer-vertiefung 3.4.
+    const hatKasseDok = dokDocs.some((d) => firestoreValue((d.fields || {}).quelle) === 'kasse');
+    const kasseStandard = DATEV_KASSE_KONTEN[skr === 'SKR04' ? 'SKR04' : 'SKR03'];
+    const kasseWahl = kassenKontoWahl(firestoreValue(profilFields.datev_kassenkonto), kasseStandard.kasse);
+    const transitWahl = kassenKontoWahl(firestoreValue(profilFields.datev_geldtransitkonto), kasseStandard.transit);
+    const geldtransitkonto = transitWahl.konto;
+    const kasseOffen = []; // Kassenbelege ohne sichere Buchung (Nummer und Grund in der Warnung)
+    const kasseOhneBewegung = [];
+    const kasseKontoUngueltig = new Set();
+    let kasseMehrzweck = 0; let kasseAusgabeJahr = 0; let kasseBewGebucht = 0; let kassePrivat = 0;
+    let kassenDocs = null; let kassenLesefehler = false;
+    const kassenKonto = async (kasseId) => {
+      if (kassenDocs === null) {
+        kassenDocs = new Map();
+        try { for (const k of await firestoreListAll(`${base}/kassen`, authHeader)) kassenDocs.set(String(k.name || '').split('/').pop(), datevDekodiereFelder(k.fields || {})); } catch (e) { console.error('DATEV-Export Kassen:', e?.message); kassenLesefehler = true; }
+      }
+      const k = kassenDocs.get(String(kasseId || ''));
+      if (k && k.datev_konto) {
+        const w = kassenKontoWahl(k.datev_konto, kasseWahl.konto);
+        if (w.ungueltig) kasseKontoUngueltig.add(String(k.bezeichnung || kasseId));
+        return w.konto;
+      }
+      return kasseWahl.konto;
+    };
+    let kassenBew = null; let bewegungenLesefehler = false;
+    const kassenBewegungen = async () => {
+      if (kassenBew === null) {
+        kassenBew = new Map();
+        try { for (const b of await firestoreListAll(`${base}/kassenbewegungen`, authHeader)) kassenBew.set(String(b.name || '').split('/').pop(), datevDekodiereFelder(b.fields || {})); } catch (e) { console.error('DATEV-Export Kassenbewegungen:', e?.message); bewegungenLesefehler = true; }
+      }
+      return kassenBew;
+    };
+    // Stornierte Kassenausgabe (Eingangsbeleg mit storniert: true): Original bleibt im Stapel, am Tag der Storno-Bewegung folgt die Gegenbuchung (Soll/Haben vertauscht).
+    // Die Zeilen des Belegs entstehen im allgemeinen Pfad; kasseMarke merkt, wo sie in buchungen beginnen (Abschluss am nächsten Beleg bzw. nach der Schleife).
+    const kasseSpiegel = [];
+    let kasseMarke = null;
+    const kasseMarkeAbschliessen = () => {
+      if (!kasseMarke) return;
+      const neu = buchungen.splice(kasseMarke.start);
+      kasseSpiegel.push({ ...kasseMarke, neu });
+      kasseMarke = null;
+    };
+
     for (const doc of dokDocs) {
+      kasseMarkeAbschliessen();
       const fields = doc.fields || {};
       // Soft-gelöschte/stornierte Belege (weicheLoeschung() in index.html setzt deleted:true)
       // dürfen nicht mit exportiert werden — sonst bucht der Steuerberater eine stornierte,
@@ -5005,6 +5060,42 @@ async function handleDatevExport(body, env, cors = {}) {
       }
       if (wirksamGeloescht) wirksamGeloeschtAnzahl++;
       if (firestoreValue(fields.deleted) === true && !wirksamGeloescht) continue;
+      // Kassenbuch P1b-5: Tagesabschluss, Mehrzweck-Verkauf, Kassendifferenz und Kassen-Storno (vor dem allgemeinen Pfad und vor dem Korrekturzweig darunter)
+      if (firestoreValue(fields.quelle) === 'kasse' && firestoreValue(fields.kassentag_id)) {
+        const kd = datevDekodiereFelder(fields);
+        const bezugId = kd.steuer && kd.steuer.bezug ? kd.steuer.bezug.storniert_beleg_id : null;
+        const origDoc = bezugId ? dokById.get(String(bezugId)) : null;
+        const plan = kasseBelegPlan(kd, origDoc ? datevDekodiereFelder(origDoc.fields || {}) : null);
+        const nrKasse = String(kd.kassennummer || docId);
+        if (plan.offen) {
+          const jahrDes = String((kd.steuer && kd.steuer.wirkdatum) || kd.bezahlt_am || kd.datum || '').slice(0, 4);
+          if (jahrDes === String(jahr) || !/^\d{4}$/.test(jahrDes)) kasseOffen.push(`${nrKasse} (${plan.grund})`);
+          continue;
+        }
+        if (plan.datum.slice(0, 4) !== String(jahr)) continue;
+        const datumKasse = new Date(plan.datum + 'T00:00:00');
+        const kasseKto = await kassenKonto(kd.kasse_id);
+        const absenderKasse = String(kd.absender || '').trim();
+        const textKasse = ({ umsatz: 'Tagesabschluss', mehrzweck: 'Mehrzweck-Gutscheine', fehlbetrag: 'Kassendifferenz (Fehlbetrag)', ueberschuss: 'Kassendifferenz (Überschuss)' })[plan.art];
+        for (const k of plan.kanaele) {
+          bucheGruppen({
+            gruppen: k.gruppen, korrektur: plan.korrektur, ku: plan.ku, istEinnahme: plan.einnahme, kategorie: plan.kategorie, belegDatum: datumKasse, belegfeld1: plan.kassennummer,
+            textBasis: `${textKasse} ${absenderKasse}`.trim(), diverseAdressnummer: '', buchungskonto: k.kanal === 'karte' ? geldtransitkonto : kasseKto, markeZusatz: k.kanal === 'karte' ? ' Karte' : ''
+          });
+        }
+        if (plan.art === 'mehrzweck') kasseMehrzweck++;
+        continue;
+      }
+      // Kassenausgabe (Eingangsbeleg aus der Kasse, ohne kassentag_id): allgemeiner Pfad mit Kassenkonto und Kassennummer als Belegfeld 1
+      const istKasseAusgabe = firestoreValue(fields.quelle) === 'kasse';
+      const kasseKonto = istKasseAusgabe ? await kassenKonto(firestoreValue(fields.kasse_id)) : bankkonto;
+      if (istKasseAusgabe && String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || '').slice(0, 4) === String(jahr)) kasseAusgabeJahr++;
+      if (istKasseAusgabe && firestoreValue(fields.storniert) === true && firestoreValue(fields.bewegung_id)) {
+        const bewAlle = await kassenBewegungen();
+        const stornoBew = [...bewAlle.values()].find((b) => b && b.art === 'storno' && b.storno_von === firestoreValue(fields.bewegung_id)) || null;
+        const stornoJahr = stornoBew ? String(stornoBew.geschaeftstag || '').slice(0, 4) : '';
+        kasseMarke = { start: buchungen.length, docId, stornoBew, stornoImJahr: stornoJahr === String(jahr), originalJahr: String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || '').slice(0, 4), nr: String(firestoreValue(fields.kassennummer) || docId) };
+      }
       // B-1 (Gegenlesung 21.11.): Korrekturbelege (Storno, Gutschrift, Preisnachlass) sind nie bezahlt, die Bank-Bewegung steht in steuer.rueckzahlung.
       // Gegenbuchung zum Original (Konto, Kunde, Text vom Original): Datum der Rückzahlung, Betrag der Rückzahlung, je Satz aufgeteilt, Richtung umgekehrt.
       // Nur wenn das Original im Stapel steht (nicht gelöscht, bezahlt, kein OSS). Alle anderen Belege laufen unverändert weiter.
@@ -5094,7 +5185,7 @@ async function handleDatevExport(body, env, cors = {}) {
       }
       if (isNaN(belegDatum.getTime())) belegDatum = new Date();
 
-      if (String(belegDatum.getFullYear()) !== String(jahr)) continue;
+      if (String(belegDatum.getFullYear()) !== String(jahr) && !(kasseMarke && kasseMarke.stornoImJahr)) continue; // stornierte Kassenausgabe aus dem Vorjahr: Gegenbuchung dieses Jahres
 
       if (!bezahlt) { skippedUnpaid++; continue; }
 
@@ -5122,6 +5213,8 @@ async function handleDatevExport(body, env, cors = {}) {
         const idMatch = /^beleg_(?:rechnung|mahnung)_(.+)_\d+$/.exec(doc.name?.split('/').pop() || '');
         if (idMatch) rechnungsnr = idMatch[1];
       }
+      // Kassenbuch P1b-5: Belegfeld 1 einer Kassenausgabe ist die Kassennummer (von der Rechnungsnummern-Sperre ausgenommen)
+      if (istKasseAusgabe && firestoreValue(fields.kassennummer)) rechnungsnr = String(firestoreValue(fields.kassennummer));
       // Belegfeld 1 ist Pflicht (DATEV EXTF) — ohne jede Rechnungsnummer wird ersatzweise
       // das Belegdatum als TTMMJJ eingesetzt, statt das Feld leer zu lassen.
       // Rechnungsnummer ist Pflicht: Ohne Nummer würde das Datum als Belegnummer dienen, und mehrere Belege am
@@ -5175,7 +5268,7 @@ async function handleDatevExport(body, env, cors = {}) {
           bucheGruppen({
             gruppen: ms.gruppen, korrektur: ms.korrektur, ku: false, istEinnahme, kategorie, belegDatum, belegfeld1: rechnungsnr,
             textBasis: (() => { const f = firestoreValue(fields.buchungstext) || ''; const b = istEinnahme ? `Rechnung ${absender}`.trim() : `Beleg ${absender}`.trim(); return f ? `${b} ${f}`.trim() : b; })(),
-            diverseAdressnummer: istEinnahme ? (kundenNummerById[firestoreValue(fields.kunde_id) || ''] || '') : ''
+            diverseAdressnummer: istEinnahme ? (kundenNummerById[firestoreValue(fields.kunde_id) || ''] || '') : '', buchungskonto: kasseKonto
           });
           if (!istEinnahme && kategorie === GWG_KATEGORIE) mischsatzGwg.push(rechnungsnr);
           mischsatzGebucht++;
@@ -5234,7 +5327,7 @@ async function handleDatevExport(body, env, cors = {}) {
       // wie bisher im Stapel, trägt eine Textmarke und steht mit Nummer in der Warnung.
       const skrK = skr === 'SKR04' ? 'SKR04' : 'SKR03';
       let ohneBuErzwingen = false;
-      let konto1 = bankkonto; // Buchungskonto der Zeile: Bank, bei Pauschalen die Privateinlage
+      let konto1 = kasseKonto; // Buchungskonto der Zeile: Bank (Kassenausgabe: Kassenkonto), bei Pauschalen die Privateinlage
       let rcMarke = '';
       let ustIdSpalte = '';
       if (!importKontoGilt) {
@@ -5290,7 +5383,7 @@ async function handleDatevExport(body, env, cors = {}) {
         ];
         for (const t of teile) {
           if (t.betrag <= 0) continue;
-          buchungen.push({ betrag: t.betrag, sollHaben: 'H', konto: bankkonto, gegenkonto: t.konto, bu, belegDatum, belegfeld1: rechnungsnr, belegfeld2, buchungstext: t.text, diverseAdressnummer });
+          buchungen.push({ betrag: t.betrag, sollHaben: 'H', konto: konto1, gegenkonto: t.konto, bu, belegDatum, belegfeld1: rechnungsnr, belegfeld2, buchungstext: t.text, diverseAdressnummer });
         }
         continue;
       }
@@ -5317,6 +5410,18 @@ async function handleDatevExport(body, env, cors = {}) {
         buchungen.push({ betrag: (cent - vst) / 100, sollHaben: 'S', konto: GWG_KONTEN[skrK].sofort, gegenkonto: GWG_KONTEN[skrK].anlage, bu: '', belegDatum, belegfeld1: rechnungsnr, belegfeld2: '', buchungstext: buchungstextBasisKurz(buchungstextOhneHinweis, ' Sofortabschreibung GWG'), diverseAdressnummer: '' });
         gwgGebucht++;
       }
+    }
+
+    kasseMarkeAbschliessen();
+    // Stornierte Kassenausgaben: Original (nur im Jahr des Belegs) und Gegenbuchung am Tag der Storno-Bewegung (nur in deren Jahr); ohne Storno-Bewegung bleibt das Original
+    // stehen und der Beleg steht in der Warnung (das Datum der Gegenbuchung wird nicht geraten).
+    for (const sp of kasseSpiegel) {
+      const gegen = sp.stornoBew && /^\d{4}-\d{2}-\d{2}$/.test(String(sp.stornoBew.geschaeftstag || '')) && String(sp.stornoBew.kassennummer || '').trim() ? sp.stornoBew : null;
+      if (sp.originalJahr === String(jahr) || !gegen) buchungen.push(...sp.neu);
+      if (!gegen) { if (sp.originalJahr === String(jahr)) kasseOffen.push(`${sp.nr} (storno_ohne_bewegung)`); continue; }
+      if (gegen.geschaeftstag.slice(0, 4) !== String(jahr)) continue;
+      const datumStorno = new Date(gegen.geschaeftstag + 'T00:00:00');
+      for (const b of sp.neu) buchungen.push({ ...b, sollHaben: b.sollHaben === 'S' ? 'H' : 'S', belegDatum: datumStorno, belegfeld1: String(gegen.kassennummer).trim(), buchungstext: buchungstextBasisKurz(b.buchungstext, ' [Storno]') });
     }
 
     if (ohneRechnungsnr.length) {
@@ -5379,8 +5484,39 @@ async function handleDatevExport(body, env, cors = {}) {
       const f = pDoc.fields || {};
       const v = { art: firestoreValue(f.art), datum: firestoreValue(f.datum), betrag: firestoreValue(f.betrag), notiz: firestoreValue(f.notiz), storniert: firestoreValue(f.storniert) === true };
       if (String(v.datum || '').slice(0, 4) !== String(jahr)) continue;
-      const b = privatvorgangBuchung(v, skr, bankkonto);
-      if (b) buchungen.push(b);
+      // Kassenbuch P1b-5: Privatvorgang aus der Kasse (zahlweg 'kasse') läuft gegen das Kassenkonto statt gegen die Bank
+      const ausKasse = firestoreValue(f.zahlweg) === 'kasse';
+      const b = privatvorgangBuchung(v, skr, ausKasse ? await kassenKonto(firestoreValue(f.kasse_id)) : bankkonto);
+      if (b) { buchungen.push(b); if (ausKasse) kassePrivat++; }
+    }
+
+    // Kassenbuch P1b-5: Kassenbewegungen Geldtransit Bank (Kassenkonto an bzw. von Geldtransitkonto). Gelesen nur, wenn das Konto Kassendaten hat.
+    if (hatKasseDok || kassePrivat > 0) {
+      for (const [bewId, b] of await kassenBewegungen()) {
+        const bu = kasseBewegungBuchung(b);
+        const jahrBew = String((b && b.geschaeftstag) || '').slice(0, 4);
+        if (bu === null) { if (kasseBewegungOhneBuchung(b) && jahrBew === String(jahr)) kasseOhneBewegung.push(String((b && b.kassennummer) || bewId)); continue; }
+        if (bu.offen) { if (jahrBew === String(jahr)) kasseOffen.push(`${(b && b.kassennummer) || bewId} (${bu.grund})`); continue; }
+        if (jahrBew !== String(jahr)) continue;
+        buchungen.push({ betrag: bu.betrag_cent / 100, sollHaben: bu.sollHaben, konto: await kassenKonto(bu.kasse_id), gegenkonto: geldtransitkonto, bu: '', belegDatum: new Date(bu.datum + 'T00:00:00'), belegfeld1: bu.kassennummer, belegfeld2: '', buchungstext: buchungstextBasisKurz(bu.text, bu.storno ? ' [Storno]' : ''), diverseAdressnummer: '' });
+        kasseBewGebucht++;
+      }
+    }
+    if (hatKasseDok || kassePrivat > 0) {
+      const kasseZeilen = kasseAusgabeJahr + kasseBewGebucht + kassePrivat + buchungen.filter((x) => /^K-/.test(String(x.belegfeld1))).length;
+      if (kasseOffen.length) warnen(`${kasseOffen.length} Beleg(e) und Bewegung(en) aus dem Kassenbuch stehen NICHT im Stapel (Grund in Klammern): ${nummern(kasseOffen)}. Bitte nenne sie deinem Steuerberater, er bucht sie von Hand.`);
+      if (kasseMehrzweck > 0) warnen(`${kasseMehrzweck} Verkauf/Verkäufe von Mehrzweck-Gutscheinen aus dem Kassenbuch stehen auf ${erloeskontoExport('keine', false, skr)} (Erlöse, ohne Umsatzsteuer). Diese Kontowahl muss dein Steuerberater bestätigen.`);
+      if (kasseOhneBewegung.length) warnen(`${kasseOhneBewegung.length} Kassenbewegung(en) (Geldtransit zwischen Kassen, Auszahlung Trinkgeld an Mitarbeiter) stehen nicht im Stapel, weil die Gegenseite fehlt: ${nummern(kasseOhneBewegung)}. Bitte beim Steuerberater von Hand buchen.`);
+      if (kasseZeilen > 0) {
+        if (kasseWahl.ungueltig) warnen(`Das Kassenkonto in den Einstellungen ist keine vierstellige Kontonummer. Es wurde das Standardkonto ${kasseStandard.kasse} verwendet. Bitte korrigieren.`);
+        if (transitWahl.ungueltig) warnen(`Das Geldtransitkonto in den Einstellungen ist keine vierstellige Kontonummer. Es wurde das Standardkonto ${kasseStandard.transit} verwendet. Bitte korrigieren.`);
+        if (kasseKontoUngueltig.size) warnen(`Das DATEV-Konto der Kasse „${[...kasseKontoUngueltig].slice(0, 3).join('“, „')}“ ist keine vierstellige Kontonummer, es wurde ${kasseWahl.konto} verwendet.`);
+        const skrKasse = skr === 'SKR04' ? 'SKR04' : 'SKR03';
+        if (!datevGeldkontoImBereich(kasseWahl.konto, skrKasse) || !datevGeldkontoImBereich(geldtransitkonto, skrKasse)) warnen(`Kassenkonto ${kasseWahl.konto} oder Geldtransitkonto ${geldtransitkonto} liegt nicht im üblichen Bereich für Kasse oder Geldtransit im ${skr === 'SKR04' ? 'SKR04' : 'SKR03'}. Bitte prüfen.`);
+        if (kassenLesefehler) warnen('Die Kassen konnten nicht gelesen werden: DATEV-Konten einzelner Kassen wurden nicht berücksichtigt (Standard-Kassenkonto verwendet). Bitte den Export gleich noch einmal starten.');
+        if (bewegungenLesefehler) warnen('Die Kassenbewegungen konnten nicht gelesen werden: Geldtransit und Stornos von Kassenausgaben fehlen im Stapel. Bitte den Export gleich noch einmal starten.');
+        warnen('Kassenbuch: Im Stapel stehen die Tageseinnahmen (bar gegen das Kassenkonto, Karte gegen das Geldtransitkonto), Ausgaben, Privatvorgänge, Kassendifferenzen und der Geldtransit zur Bank. Nicht enthalten sind durchlaufende Posten, Trinkgeld der Mitarbeiter, Bareingänge auf Rechnungen und Einlösungen von Mehrzweck-Gutscheinen: der Kassenstand in DATEV kann deshalb vom Kassenbuch abweichen.');
+      }
     }
 
     buchungen.sort((a, b) => a.belegDatum - b.belegDatum);
@@ -5388,7 +5524,7 @@ async function handleDatevExport(body, env, cors = {}) {
     if (buchungen.length === 0) {
       return new Response(JSON.stringify({
         error: 'Keine buchbaren Belege gefunden',
-        details: `Für ${jahr} wurden keine als bezahlt markierten Belege mit Betrag gefunden.${skippedUnpaid ? ` (${skippedUnpaid} unbezahlte Belege wurden übersprungen.)` : ''}`
+        details: `Für ${jahr} wurden keine als bezahlt markierten Belege mit Betrag gefunden.${skippedUnpaid ? ` (${skippedUnpaid} unbezahlte Belege wurden übersprungen.)` : ''}${kasseOffen.length ? ` Aus dem Kassenbuch konnten ${kasseOffen.length} Beleg(e) nicht gebucht werden (Grund in Klammern): ${nummern(kasseOffen)}.` : ''}`
       }), {
         status: 404,
         headers: { ...cors, 'Content-Type': 'application/json' }
