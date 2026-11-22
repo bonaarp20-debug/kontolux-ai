@@ -788,7 +788,7 @@ export default {
       // Zugriffsnachweis ist der Besitz des Tokens selbst (siehe handlePrueferDaten unten).
       if (url.pathname === '/pruefer-daten') return handlePrueferDaten(body, env, cors, authHeader);
       // H1-Fix: Datei des Prüferzugangs per POST (Token im Header, Pfad im Körper, nichts in der Adresse); gleicher Zugangsnachweis wie /pruefer-daten
-      if (url.pathname === '/pruefer-datei') return handlePrueferDatei(body, env, cors, authHeader);
+      if (url.pathname === '/pruefer-datei') return handlePrueferDatei(body, env, cors, authHeader, clientIP);
       if (url.pathname === '/freigabe-status') {
         return new Response(JSON.stringify({ status: (await freigabeStatus(verifiedUid, env)) || 'frei' }), {
           status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
@@ -4389,16 +4389,24 @@ async function prueferZugangPruefen(token, env) {
 // und jeder legitime Klick eines Prüfers würde mitzählen. Stattdessen im Speicher des Isolats (Muster checkRateLimit, wie ROUTEN_LIMITS und UID_LIMITS):
 //   1. je IP: ROUTEN_LIMITS['/pruefer-datei'] (120 je 10 min), davor das allgemeine 20 je 10 s;
 //   2. je Prüfer-Zugang (Schlüssel: Hash des Tokens, nur für Tokens, die in diesem Isolat schon als gültig bestätigt wurden): 300 je 10 min;
-//   3. Fehlversuche je Isolat: nach 200 abgelehnten Tokens in 10 min fragt der Worker für unbekannte Tokens nicht mehr bei Firestore nach (429), bis das Fenster abläuft.
-//      Bereits bestätigte Zugänge (auch über /pruefer-daten beim Laden der Seite) laufen weiter; die Prüfung selbst (aktiv, Ablauf) geschieht trotzdem bei jedem Aufruf.
+//   3. K1-Fix M-2 (Gegenlesung E): Fehlversuche JE QUELLE (IP) statt je Isolat. Vorher sperrten 200 erfundene Tokens in 10 min (zwei IPs genügten) jeden Prüfer, dessen
+//      Zugang im Isolat nicht bestätigt war. Jetzt: nach 10 abgelehnten Tokens in 10 min fragt der Worker für unbekannte Tokens DIESER IP nicht mehr bei Firestore nach
+//      (429 bitte_neu_oeffnen: das erneute Öffnen des Prüfer-Links bestätigt den Zugang über /pruefer-daten). Andere Quellen bleiben frei: ein Angreifer sperrt nur sich.
+//      Über alle Quellen gibt es keine Sperre mehr, nur eine Drosselung: ab 200 Fehlversuchen je Isolat in 10 min wartet jede Abfrage eines unbekannten Tokens
+//      PRUEFER_FEHL_ISOLAT.verzoegerungMs, bevor sie Firestore fragt (verlangsamt, sperrt nie). Brute-Force bleibt aussichtslos (Token 192 Bit, 32 Zeichen Base64Url);
+//      die Kosten begrenzen die Grenzen je IP, wie bei /pruefer-daten (dieselbe Abfrage, nur je IP begrenzt).
+//      Bereits bestätigte Zugänge (auch über /pruefer-daten beim Laden der Seite) laufen weiter, der Merker gilt 2 Stunden ab dem letzten Erfolg (Lesezeit einer Prüfung);
+//      die Prüfung selbst (aktiv, Ablauf) geschieht trotzdem bei jedem Aufruf.
 // Schlüssel sind nie der Token selbst, nur sein SHA-256. Die Prüfer-Route hat keine Firebase-Anmeldung, UID_LIMITS greift dort nicht (verifiedUid fehlt).
 const PRUEFER_DATEI_JE_ZUGANG = { limit: 300, windowMs: 10 * 60 * 1000 };
-const PRUEFER_DATEI_FEHLVERSUCHE = { limit: 200, windowMs: 10 * 60 * 1000 };
+const PRUEFER_FEHL_JE_QUELLE = { limit: 10, windowMs: 10 * 60 * 1000 };
+const PRUEFER_FEHL_ISOLAT = { schwelle: 200, windowMs: 10 * 60 * 1000, verzoegerungMs: 500 };
 const PRUEFER_FEHL_SCHLUESSEL = '/pruefer-datei|fehlversuche';
-const prueferZugangBestaetigt = new Map(); // Token-Hash -> gültig bis (ms); nur Merker gegen die Fehlversuchssperre, ersetzt keine Prüfung
+const PRUEFER_MERKER_MS = 2 * 60 * 60 * 1000;
+const prueferZugangBestaetigt = new Map(); // Token-Hash -> gültig bis (ms); nur Merker gegen die Fehlversuchsgrenze, ersetzt keine Prüfung
 function prueferZugangMerken(hash) {
   prueferZugangBestaetigt.delete(hash);
-  prueferZugangBestaetigt.set(hash, Date.now() + PRUEFER_DATEI_JE_ZUGANG.windowMs);
+  prueferZugangBestaetigt.set(hash, Date.now() + PRUEFER_MERKER_MS);
   while (prueferZugangBestaetigt.size > 1000) prueferZugangBestaetigt.delete(prueferZugangBestaetigt.keys().next().value);
 }
 function prueferZugangVergessen(hash) { prueferZugangBestaetigt.delete(hash); }
@@ -4408,17 +4416,19 @@ function prueferZugangBekannt(hash) {
   if (bis) prueferZugangBestaetigt.delete(hash);
   return false;
 }
-function prueferFehlversucheErschoepft() {
-  const e = rateLimitMap.get(PRUEFER_FEHL_SCHLUESSEL); // nur lesen, nicht zählen
-  return !!e && Date.now() - e.start <= PRUEFER_DATEI_FEHLVERSUCHE.windowMs && e.count >= PRUEFER_DATEI_FEHLVERSUCHE.limit;
+// Zähler nur lesen, nicht zählen (Muster checkRateLimit)
+function prueferZaehlerVoll(schluessel, limit, windowMs) {
+  const e = rateLimitMap.get(schluessel);
+  return !!e && Date.now() - e.start <= windowMs && e.count >= limit;
 }
+const prueferQuelleSchluessel = (quelle) => `/pruefer-datei|fehl-quelle|${String(quelle || 'unknown').slice(0, 64)}`;
 const prueferBearer = (authHeader) => String(authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '').trim();
 
 // POST /pruefer-datei { pfad } mit Authorization: Bearer {Prüfer-Token}. Antwort: die Datei selbst. Nur PDF und Rasterbilder mit ihrem Typ (die Seite zeigt sie),
 // alles andere als application/octet-stream zum Herunterladen; nosniff, kein Cache. Fehler ohne Hinweis auf den Grund: 400 (Form), 404 (Token, Zugang, Pfad),
 // 404 nicht_gefunden (Datei fehlt), 502 (Speicher). Bewusst nicht in protectedPaths: Prüfer haben keinen Firebase-Login, der Nachweis ist der Token.
 const PRUEFER_DATEI_INLINE = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp'];
-async function handlePrueferDatei(body, env, cors, authHeader) {
+async function handlePrueferDatei(body, env, cors, authHeader, quelle = 'unknown') {
   const fehler = (status, code) => new Response(JSON.stringify({ error: code }), { status, headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
   const token = prueferBearer(authHeader);
   const pfad = body && typeof body.pfad === 'string' ? body.pfad : '';
@@ -4427,11 +4437,16 @@ async function handlePrueferDatei(body, env, cors, authHeader) {
   const tokenHash = await sha256Hex(token);
   const zugangSchluessel = `/pruefer-datei|zugang|${tokenHash}`;
   const bekannt = prueferZugangBekannt(tokenHash);
-  if (bekannt ? !checkRateLimit(zugangSchluessel, PRUEFER_DATEI_JE_ZUGANG.limit, PRUEFER_DATEI_JE_ZUGANG.windowMs) : prueferFehlversucheErschoepft()) return fehler(429, 'zu_viele');
+  const quelleSchluessel = prueferQuelleSchluessel(quelle);
+  if (bekannt && !checkRateLimit(zugangSchluessel, PRUEFER_DATEI_JE_ZUGANG.limit, PRUEFER_DATEI_JE_ZUGANG.windowMs)) return fehler(429, 'zu_viele');
+  // K1-Fix M-2: unbekannte Tokens nur je Quelle sperren (nie für alle), über alle Quellen nur drosseln
+  if (!bekannt && prueferZaehlerVoll(quelleSchluessel, PRUEFER_FEHL_JE_QUELLE.limit, PRUEFER_FEHL_JE_QUELLE.windowMs)) return fehler(429, 'bitte_neu_oeffnen');
+  if (!bekannt && prueferZaehlerVoll(PRUEFER_FEHL_SCHLUESSEL, PRUEFER_FEHL_ISOLAT.schwelle, PRUEFER_FEHL_ISOLAT.windowMs)) await new Promise((r) => setTimeout(r, PRUEFER_FEHL_ISOLAT.verzoegerungMs));
   try {
     const zugang = await prueferZugangPruefen(token, env);
     if (!zugang) {
-      checkRateLimit(PRUEFER_FEHL_SCHLUESSEL, PRUEFER_DATEI_FEHLVERSUCHE.limit, PRUEFER_DATEI_FEHLVERSUCHE.windowMs);
+      checkRateLimit(quelleSchluessel, PRUEFER_FEHL_JE_QUELLE.limit, PRUEFER_FEHL_JE_QUELLE.windowMs);
+      checkRateLimit(PRUEFER_FEHL_SCHLUESSEL, PRUEFER_FEHL_ISOLAT.schwelle, PRUEFER_FEHL_ISOLAT.windowMs);
       return fehler(404, 'invalid');
     }
     if (!bekannt && !checkRateLimit(zugangSchluessel, PRUEFER_DATEI_JE_ZUGANG.limit, PRUEFER_DATEI_JE_ZUGANG.windowMs)) return fehler(429, 'zu_viele');
