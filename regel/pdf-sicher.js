@@ -6,10 +6,10 @@
 // ByteStream.fromPDFRawStream). Eine Filterkette [/FlateDecode /FlateDecode] macht aus 474 Byte 200 MB; ein XRef-Strom mit /W [0 0 0] und großem /Size
 // ist eine Schleife ganz ohne Entpacken. Im Worker (128 MB) bricht das Isolat ab, auch für gleichzeitige Anfragen anderer Nutzer.
 //
-// Lösung: ladePdfBegrenzt lädt mit denselben Parser-Optionen wie PDFDocument.load, liest aber vor jedem indirekten Objekt dasselbe Objekt ohne Entpacken
-// (parseObject entpackt nichts und verändert den Kontext nicht). Ist es ein Objekt- oder XRef-Strom, wird er zuerst gezählt und begrenzt entpackt
-// (höchstens PDF_STROM_MAX je Strom, PDF_ENTPACKT_MAX je Datei; Filterketten und unbekannte Filterangaben abgelehnt; XRef-Einträge geprüft). Erst danach
-// entpackt pdf-lib ihn selbst. Normale PDFs laden dadurch genau wie vorher.
+// Lösung: ladePdfBegrenzt lädt mit denselben Parser-Optionen wie PDFDocument.load. Das Objekt der obersten Ebene eines indirekten Objekts wird nach dem
+// Parsen (parseObject entpackt nichts) und vor der Rückgabe an pdf-lib geprüft: Ist es ein Objekt- oder XRef-Strom, wird er zuerst gezählt und begrenzt
+// entpackt (höchstens PDF_STROM_MAX je Strom, PDF_ENTPACKT_MAX je Datei; Filterketten und unbekannte Filterangaben abgelehnt; XRef-Einträge geprüft). Erst
+// danach entpackt pdf-lib ihn selbst. Jedes Objekt wird nur einmal geparst und gezählt; normale PDFs laden dadurch genau wie vorher.
 import { PDFDocument, PDFArray, PDFName, PDFNumber, PDFRawStream, PDFParser, PDFNull, PDFBool, PDFRef, decodePDFRawStream } from 'pdf-lib';
 
 export const PDF_STROM_MAX = 4 * 1024 * 1024;
@@ -80,6 +80,19 @@ export function xrefStromOk(st, laenge) {
 // Der Eingriff in pdf-lib wirkt nur auf Kontexte mit Zähler; jeder andere Gebrauch von pdf-lib bleibt unverändert.
 const ZAEHLER = Symbol('pdfSicherZaehler');
 const ueber = (z) => z.objekte < 0 || z.namen < 0 || z.verweise < 0;
+// Objekt- oder XRef-Strom der obersten Ebene: vor dem Entpacken durch pdf-lib begrenzt entpacken und prüfen. Wirft PdfZuGross (Grenze) oder den Fehler
+// des Dekodierers; pdf-lib fängt beides (throwOnInvalidObject false) und legt ein ungültiges Objekt an, ohne zu entpacken.
+function stromPruefen(st, z) {
+  const typ = st.dict.lookup(PDFName.of('Type'));
+  if (typ !== PDFName.of('ObjStm') && typ !== PDFName.of('XRef')) return;
+  try {
+    const laenge = stromLaengeBegrenzt(st, z.budget);
+    if (typ === PDFName.of('XRef') && !xrefStromOk(st, laenge)) throw new PdfZuGross('XRef');
+  } catch (e) {
+    if (e instanceof PdfZuGross) z.zuGross = true; else z.stromFehler = true;
+    throw e;
+  }
+}
 let parserBegrenzt = false;
 function parserBegrenzen() {
   if (parserBegrenzt) return;
@@ -91,10 +104,13 @@ function parserBegrenzen() {
     const z = this.context && this.context[ZAEHLER];
     if (!z) return objekt.call(this);
     if (ueber(z)) throw new PdfZuGross('zu viele Objekte');
+    // Das erste parseObject nach dem Kopf eines indirekten Objekts (z.oben, gesetzt in ladePdfBegrenzt) ist das Objekt, das pdf-lib danach entpackt
+    const oben = z.oben; z.oben = false;
     const o = objekt.call(this);
     if (o === PDFNull || o instanceof PDFBool) z.objekte -= 1 / 16;
     else if (o instanceof PDFRef) z.verweise -= 1;
     else if (!(o instanceof PDFName)) z.objekte -= 1; // Namen zählt parseName
+    if (oben && o instanceof PDFRawStream) stromPruefen(o, z);
     return o;
   };
   proto.parseName = function begrenzterName() {
@@ -114,38 +130,19 @@ function parserBegrenzen() {
 export async function ladePdfBegrenzt(bytes, { budget = pdfBudget(), ignoreEncryption = true, updateMetadata = false } = {}) {
   parserBegrenzen();
   const parser = PDFParser.forBytesWithOptions(bytes, 100, false, false);
-  const zaehler = { objekte: PDF_OBJEKTE_MAX, namen: PDF_NAMEN_ZEICHEN_MAX, verweise: PDF_VERWEISE_MAX };
+  const zaehler = { objekte: PDF_OBJEKTE_MAX, namen: PDF_NAMEN_ZEICHEN_MAX, verweise: PDF_VERWEISE_MAX, budget, oben: false, zuGross: false, stromFehler: false };
   parser.context[ZAEHLER] = zaehler;
   const original = parser.parseIndirectObject;
-  let zuGross = false; let stromFehler = false;
-  parser.parseIndirectObject = async function vorabGeprueft() {
+  parser.parseIndirectObject = async function begrenzt() {
     // Nach einer Überschreitung nicht weiterlesen (sonst legt pdf-lib für jedes weitere Objekt ein ungültiges an und protokolliert es): ans Ende springen
-    if (zuGross || ueber(zaehler)) { this.bytes.moveTo(this.bytes.length); return undefined; }
-    const start = this.bytes.offset();
-    this.parseIndirectObjectHeader();
-    this.skipWhitespaceAndComments();
-    // let + obj = null: das Vorab-Ergebnis darf während des eigentlichen Parsens nicht erreichbar bleiben (sonst liegt jedes Objekt doppelt im Speicher)
-    let obj = this.parseObject();
-    if (obj instanceof PDFRawStream) {
-      const typ = obj.dict.lookup(PDFName.of('Type'));
-      if (typ === PDFName.of('ObjStm') || typ === PDFName.of('XRef')) {
-        try {
-          const laenge = stromLaengeBegrenzt(obj, budget);
-          if (typ === PDFName.of('XRef') && !xrefStromOk(obj, laenge)) throw new PdfZuGross('XRef');
-        } catch (e) {
-          // pdf-lib fängt den Fehler (throwOnInvalidObject false) und legt ein ungültiges Objekt an, ohne zu entpacken
-          if (e instanceof PdfZuGross) zuGross = true; else stromFehler = true;
-          throw e;
-        }
-      }
-    }
-    obj = null;
-    this.bytes.moveTo(start);
-    return original.call(this);
+    if (zaehler.zuGross || ueber(zaehler)) { this.bytes.moveTo(this.bytes.length); return undefined; }
+    // Der synchrone Teil von parseIndirectObject liest Kopf und Objekt; danach gilt die Markierung nicht mehr
+    zaehler.oben = true;
+    try { return original.call(this); } finally { zaehler.oben = false; }
   };
   let context;
-  try { context = await parser.parseDocument(); } catch (e) { if (ueber(zaehler)) return { zuGross: true, stromFehler }; throw e; } finally { delete parser.context[ZAEHLER]; }
+  try { context = await parser.parseDocument(); } catch (e) { if (zaehler.zuGross || ueber(zaehler)) return { zuGross: true, stromFehler: zaehler.stromFehler }; throw e; } finally { delete parser.context[ZAEHLER]; }
   // Über der Grenze: pdf-lib fängt den Fehler je Objekt ab und liest weiter (jedes weitere Objekt bricht sofort ab); das Ergebnis ist dann zu groß
-  if (zuGross || ueber(zaehler)) return { zuGross: true, stromFehler };
-  return { pdf: new PDFDocument(context, ignoreEncryption, updateMetadata), stromFehler };
+  if (zaehler.zuGross || ueber(zaehler)) return { zuGross: true, stromFehler: zaehler.stromFehler };
+  return { pdf: new PDFDocument(context, ignoreEncryption, updateMetadata), stromFehler: zaehler.stromFehler };
 }

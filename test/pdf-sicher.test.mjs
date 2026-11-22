@@ -235,3 +235,16 @@ test('Härtung H-2: das Vorab-Ergebnis bleibt beim eigentlichen Parsen nicht err
   assert.equal(p.status, 0, `Prozess mit 128 MB: ${p.err}`);
   assert.match(p.out, /^(ok|zuGross)$/);
 });
+
+test('Härtung N-1: jedes Objekt wird nur einmal geparst und gezählt (150.000 Zahlen laden, 250.000 bleiben über der Grenze)', async () => {
+  // vorher zählte der Vorabblick jedes Objekt der obersten Ebene doppelt (wirksame Grenze rund 100.000; 3000 Seiten ohne Objektstrom nicht erkannt)
+  const zahlen = (n) => mitObjekt3('[' + '1 '.repeat(n) + ']');
+  const r = await ladePdfBegrenzt(zahlen(150000));
+  assert.ok(r.pdf && !r.zuGross, '150.000 Zahlen unter der Grenze von 200.000');
+  assert.equal(r.pdf.context.lookup(r.pdf.context.enumerateIndirectObjects().find(([ref]) => ref.objectNumber === 3)[0]).size(), 150000);
+  assert.equal((await ladePdfBegrenzt(zahlen(250000))).zuGross, true, '250.000 Zahlen über der Grenze');
+  // Objekt- und XRef-Ströme werden weiter vor pdf-lib geprüft (auch ohne Vorabblick): Bombe als Objekt der obersten Ebene
+  const bombe = zlib.deflateSync(zlib.deflateSync(Buffer.alloc(8 * 1024 * 1024)));
+  const datei = Buffer.concat([Buffer.from(KATALOG + `3 0 obj\n<< /Type /ObjStm /N 1 /First 0 /Filter [/FlateDecode /FlateDecode] /Length ${bombe.length} >>\nstream\n`), bombe, Buffer.from('\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n')]);
+  assert.equal((await ladePdfBegrenzt(new Uint8Array(datei))).zuGross, true);
+});
