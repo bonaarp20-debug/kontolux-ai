@@ -3,6 +3,7 @@
 import { vollerName, erzeugeSchicht, dekodiereFelder } from './firestore.js';
 import { sha256Hex, listeAlle } from './gemeinsam.js';
 import { untersammlungLesen } from './archiv.js';
+import * as Steuerkern from '../steuerkern/index.js';
 
 export const P = {
   profil: (uid) => `users/${uid}/steuerprofil/aktuell`,
@@ -93,6 +94,76 @@ export function zeigerAus(wert) {
 export function zeigerPasst(zeiger, tagDaten) {
   return istObjektRoh(tagDaten) && tagDaten.status === 'abgeschlossen' && tagDaten.geschaeftstag === zeiger.tag && tagDaten.fassung_aktiv === zeiger.fassung
     && tagDaten.gezaehlt_cent === zeiger.gezaehlt_cent;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Stammdaten-Historie (J1-Fix M-1/N-e, o-final-c-gegenlesung): kassen/{id}.stammdaten_verlauf = { art, grundaufzeichnung, datenquelle, karte_ueber_integration }
+// mit je einer Liste [{ wert, ab, am }], aufsteigend und streng steigend nach ab. Ein Eintrag gilt von ab bis zum Tag vor dem nächsten. Ein neuer Wechsel (ab) ersetzt
+// alle Einträge desselben Felds mit ab >= ab (er gilt von ab an für alle Tage danach; das ist auch der Wert, der in der Kasse steht). Den vollständigen Weg aller
+// Beschlüsse zeigen Audit-Kette (vorher/nachher) und verlauf; diese Liste dient der Rechnung: Wert eines Felds am Geschäftstag = letzter Eintrag mit ab <= Tag.
+// anlegen schreibt die Startwerte mit ab = anfangsbestand_am, aendern und system_wechseln hängen an. Ohne gültige Liste rät niemand (Aufrufer fail-closed).
+// ---------------------------------------------------------------------------------------------
+export const STAMM_FELDER = Object.freeze(['art', 'grundaufzeichnung', 'datenquelle', 'karte_ueber_integration']);
+export const STAMM_KARTE_WERTE = Object.freeze(['keine', 'sumup']); // wie kasse-form KARTE_INTEGRATIONEN
+export const STAMMDATEN_VERLAUF_MAX = 200; // Einträge je Feld (ein Wechsel geht höchstens einmal je Tag: reicht für Jahre)
+const STAMM_WERTE = {
+  art: Steuerkern.KASSEN_ARTEN, grundaufzeichnung: Steuerkern.KASSEN_GRUNDAUFZEICHNUNGEN, datenquelle: Steuerkern.KASSEN_DATENQUELLEN, karte_ueber_integration: STAMM_KARTE_WERTE,
+};
+// Wert der Kasse und sein Gültigkeitsbeginn (karte_ueber_integration ohne Angabe = 'keine' wie bisher)
+const kasseWert = (kasse, feld) => (feld === 'karte_ueber_integration' ? (kasse.karte_ueber_integration || 'keine') : kasse[feld]);
+
+// Liste der Kasse lesen und prüfen. null = Kasse ohne Historie (vor J1, nur Testkonten). Unlesbar oder im Widerspruch zur Kasse (letzter Eintrag ≠ Wert der Kasse,
+// bei den drei datierten Feldern auch ab ≠ …_ab): KasseLesefehler 503 STAMMDATEN_VERLAUF_UNGUELTIG, nie eine geratene Rechnung.
+export function stammVerlaufAus(kasse) {
+  const v = kasse ? kasse.stammdaten_verlauf : undefined;
+  if (v === undefined || v === null) return null;
+  const kaputt = () => new KasseLesefehler('STAMMDATEN_VERLAUF_UNGUELTIG', 'Kasse: Stammdaten-Historie unlesbar oder im Widerspruch zur Kasse');
+  if (!istObjektRoh(v)) throw kaputt();
+  const aus = {};
+  for (const feld of STAMM_FELDER) {
+    const liste = v[feld];
+    if (!Array.isArray(liste) || !liste.length || liste.length > STAMMDATEN_VERLAUF_MAX) throw kaputt();
+    let vorAb = '';
+    for (const e of liste) {
+      if (!istObjektRoh(e) || !STAMM_WERTE[feld].includes(e.wert) || typeof e.ab !== 'string' || !DATUM.test(e.ab) || e.ab <= vorAb) throw kaputt();
+      vorAb = e.ab;
+    }
+    const letzter = liste[liste.length - 1];
+    if (letzter.wert !== kasseWert(kasse, feld)) throw kaputt();
+    if (feld !== 'karte_ueber_integration' && letzter.ab !== kasse[`${feld}_ab`]) throw kaputt();
+    aus[feld] = liste.map((e) => ({ wert: e.wert, ab: e.ab, am: e.am ?? null }));
+  }
+  return aus;
+}
+
+// Wert jedes Felds am Geschäftstag: { werte: { feld: wert }, fehlend: [feld] } (fehlend = kein Eintrag mit ab <= tag)
+export function stammAm(verlauf, tag) {
+  const werte = {};
+  const fehlend = [];
+  for (const feld of STAMM_FELDER) {
+    const treffer = verlauf[feld].filter((e) => e.ab <= tag);
+    if (treffer.length) werte[feld] = treffer[treffer.length - 1].wert; else fehlend.push(feld);
+  }
+  return { werte, fehlend };
+}
+
+// Neuer Wechsel: Einträge mit ab >= ab fallen weg (der neue gilt ab ab für alle späteren Tage), der neue kommt ans Ende
+export function stammVerlaufMit(verlauf, feld, wert, ab, am) {
+  return { ...verlauf, [feld]: [...verlauf[feld].filter((e) => e.ab < ab), { wert, ab, am }] };
+}
+
+// Startliste für eine Kasse ohne Historie (anlegen: alle ab = anfangsbestand_am). Für eine Kasse vor J1 nur, was sicher bekannt ist: der Wert der Kasse ab seinem
+// …_ab; karte_ueber_integration ab dem Anfangsbestand nur, wenn der Verlauf keinen Wechsel dieses Felds nennt (sonst ab kartenAbSonst, z. B. nächster freier Tag).
+// Tage davor haben dann keinen Wert (fehlend: 409, nichts geraten).
+export function stammVerlaufStart(kasse, { kartenAbSonst = null } = {}) {
+  const aus = {};
+  for (const feld of ['art', 'grundaufzeichnung', 'datenquelle']) aus[feld] = [{ wert: kasse[feld], ab: kasse[`${feld}_ab`] || kasse.anfangsbestand_am, am: null }];
+  const inline = Array.isArray(kasse.verlauf) ? kasse.verlauf : [];
+  const karteGeaendert = (Number.isSafeInteger(kasse.verlauf_ausgelagert) && kasse.verlauf_ausgelagert > 0)
+    || inline.some((e) => istObjektRoh(e) && Array.isArray(e.felder) && e.felder.includes('karte_ueber_integration'));
+  const karteAb = typeof kasse.karte_ueber_integration_ab === 'string' ? kasse.karte_ueber_integration_ab : karteGeaendert ? kartenAbSonst : kasse.anfangsbestand_am;
+  aus.karte_ueber_integration = [{ wert: kasseWert(kasse, 'karte_ueber_integration'), ab: karteAb, am: null }];
+  return aus;
 }
 
 // Bewegungen eines Tages (aufsteigend nach ID {kasseId}_{tag}_{NNN}); höchstens 300 (mehr gäbe es nur durch Missbrauch: dann fail-closed)

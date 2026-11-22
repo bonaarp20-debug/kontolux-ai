@@ -208,14 +208,18 @@ export function kernFassung(w) {
 // /kassentag ruhetag | ruhetage
 // ---------------------------------------------------------------------------------------------
 export const RUHETAG_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'geschaeftstag']);
+// ruhetag_aufheben (J1-Fix N-a): Pflicht ruhetag_anfrage_id = anfrage_id des Ruhetags, der aufgehoben werden soll (steht im Tagesplatz, den der Eigentümer liest)
+export const RUHETAG_AUFHEBEN_SCHLUESSEL = Object.freeze([...RUHETAG_SCHLUESSEL, 'ruhetag_anfrage_id']);
+const RUHETAG_ANFRAGE_ID_MUSTER = /^[A-Za-z0-9_-]{8,64}$/; // wie ANFRAGE_ID_MUSTER (gemeinsam.js)
 export const RUHETAGE_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'tage']);
 export function pruefeRuhetage(body, aktion, { heute }) {
-  const erlaubt = aktion === 'ruhetage' ? RUHETAGE_SCHLUESSEL : RUHETAG_SCHLUESSEL;
+  const erlaubt = aktion === 'ruhetage' ? RUHETAGE_SCHLUESSEL : aktion === 'ruhetag_aufheben' ? RUHETAG_AUFHEBEN_SCHLUESSEL : RUHETAG_SCHLUESSEL;
   if (!istObjekt(body) || !nurSchluessel(body, erlaubt)) return fehl(istObjekt(body) ? Object.keys(body).find((x) => !erlaubt.includes(x)) || 'body' : 'body');
   if (typeof body.kasse_id !== 'string' || !KASSE_ID_MUSTER.test(body.kasse_id)) return fehl('kasse_id');
-  if (aktion === 'ruhetag') {
+  if (aktion === 'ruhetag' || aktion === 'ruhetag_aufheben') {
     if (!geschaeftstagOk(body.geschaeftstag, heute)) return fehl('geschaeftstag');
-    return ok({ kasse_id: body.kasse_id, tage: [body.geschaeftstag] });
+    if (aktion === 'ruhetag_aufheben' && !RUHETAG_ANFRAGE_ID_MUSTER.test(String(body.ruhetag_anfrage_id || ''))) return fehl('ruhetag_anfrage_id');
+    return ok({ kasse_id: body.kasse_id, tage: [body.geschaeftstag], ...(aktion === 'ruhetag_aufheben' ? { ruhetag_anfrage_id: body.ruhetag_anfrage_id } : {}) });
   }
   const t = body.tage;
   if (!Array.isArray(t) || t.length < 1 || t.length > TAGE_MAX || !t.every((x) => geschaeftstagOk(x, heute)) || new Set(t).size !== t.length) return fehl('tage');
