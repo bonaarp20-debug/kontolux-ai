@@ -313,7 +313,10 @@ function dokumentAus(beleg, { zeit, kasse, kasseId, tagId, n, nummer, anhaenge, 
   const dok = {
     quelle: 'kasse', kasse_id: kasseId, kassentag_id: tagId, kassen_fassung: n, kassennummer: nummer,
     typ: lf.typ, name: `${storno ? 'Storno Tagesabschluss' : 'Tagesabschluss'} ${kassennamen(kasse)} ${datumDe(tag)}`, absender: kassennamen(kasse),
-    datum: tag, bezahlt: !storno, bezahlt_am: storno ? null : tag, // ein Storno trägt keine Zahlung (negative Zahlungen kennt der Kern nicht, stand-kasse.md 3)
+    // bezahlt und bezahlt_am stehen auch beim Storno gesetzt (O6 M1): die Rules erlauben dem Client an gesperrten Belegen bezahlt false -> true und bezahlt_am; ein
+    // Storno mit bezahlt: false würde so verändert, sein Drift-Status wäre veraltet und der Kern rechnete die Altfelder (EÜR zeigte den Umsatz trotz Storno wieder).
+    // Mit bezahlt: true (schon im Hash) bleibt für den Client nichts umzustellen. Das Feld ist ein Altfeld; die Wirkung des Stornos kommt aus steuer (Kern -26).
+    datum: tag, bezahlt: true, bezahlt_am: tag,
     betrag: alt.betrag, betrag_netto: alt.betrag_netto, mwst_satz: alt.mwst_satz, kx_mwst_text: alt.kx_mwst_text,
     ...(typeof steuer.kategorie === 'string' && steuer.kategorie ? { kategorie: steuer.kategorie } : {}),
     createdAt: zeitstempel(zeit), schema_version: 2, gesperrt: true, gesperrt_durch: ['kasse'],

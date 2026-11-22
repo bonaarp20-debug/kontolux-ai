@@ -1081,7 +1081,8 @@ test('Storno: Tagesplatz storniert (fassung_aktiv null), Storno-Belege je Origin
   assert.deepEqual(u.fs.roheFelder(P(`kassentage/${tagId}/fassungen/1`)), orig.f1);
   // Storno-Beleg
   const sd = u.fs.lies(P(`dokumente/kasse_${tagId}_f1_storno`));
-  assert.deepEqual([sd.typ, sd.quelle, sd.gesperrt, sd.gesperrt_durch, sd.kassennummer, sd.kassen_fassung, sd.bezahlt, sd.datum, sd.schema_version], ['storno', 'kasse', true, ['kasse'], 'K-THK-2026-0002', 1, false, tag, 2]);
+  assert.deepEqual([sd.typ, sd.quelle, sd.gesperrt, sd.gesperrt_durch, sd.kassennummer, sd.kassen_fassung, sd.bezahlt, sd.datum, sd.schema_version], ['storno', 'kasse', true, ['kasse'], 'K-THK-2026-0002', 1, true, tag, 2]);
+  assert.equal(sd.bezahlt_am, tag, 'O6 M1: bezahlt/bezahlt_am gesetzt, der Client kann sie nach den Rules nicht mehr von false auf true stellen');
   assert.deepEqual([sd.steuer.beleg_art, sd.steuer.korrektur_grund, sd.steuer.wirkdatum, sd.steuer.korrektur_notiz, sd.steuer.bezug.storniert_beleg_id], ['storno', 'rueckabwicklung', tag, 'Z-Bon falsch abgetippt', `kasse_${tagId}_f1`]);
   assert.deepEqual(sd.steuer.positionen.map((p) => [p.satz_bp, p.netto_cent, p.ust_cent]), [[1900, -67227, -12773], [700, -10000, -700]], 'genau gespiegelt (19 %: 800,00 brutto, 7 %: 107,00)');
   assert.equal(K.driftStatus({ ...sd, id: `kasse_${tagId}_f1_storno` }), 'ok');
@@ -1860,4 +1861,26 @@ test('O6 H2: mehr Tagesplätze ohne Treffer als lesbar (1000): fail-closed 503 K
   assert.equal(u.fs.log.commits, vor);
   const s = await u.tagRufe(stornoBody(id, '2026-11-02'));
   assert.equal(s.status, 503, 'auch der Storno fragt den letzten Abschluss: lieber blockieren als die Kette aushebeln');
+});
+
+test('O6 M1: Storno-Kassenbelege tragen bezahlt: true und bezahlt_am = Geschäftstag (im Hash); eine Client-Änderung „bezahlt“ ist nach den Rules unmöglich, der Drift-Status bleibt ok, der Storno wirkt (Regel und Ist-Versteuerung)', async () => {
+  for (const profil of [REGEL, profilVon('regel', { art: 'ist' })]) {
+    const u = umgebung({ profil });
+    const id = await u.legeKasseAn();
+    const tag = '2026-11-02';
+    assert.equal((await u.tagRufe(abschluss(id, tag, { gezaehlt_cent: 70500, differenz_grund: 'Wechselgeld falsch' }))).status, 200);
+    assert.equal((await u.tagRufe(stornoBody(id, tag))).status, 200);
+    const ids = [`kasse_${id}_${tag}_f1`, `kasse_${id}_${tag}_f1_dm`, `kasse_${id}_${tag}_f1_storno`, `kasse_${id}_${tag}_f1_storno_dm`];
+    for (const bid of ids.slice(2)) {
+      const sd = u.fs.lies(P(`dokumente/${bid}`));
+      assert.deepEqual([sd.bezahlt, sd.bezahlt_am], [true, tag], bid);
+      assert.equal(K.driftStatus({ ...sd, id: bid }), 'ok', bid);
+      // die einzige Änderung, die die Rules am gesperrten Beleg zulassen (bezahlt false -> true, bezahlt_am): hier schon true, also nichts zu ändern; das Dokument bleibt byte-gleich
+      assert.equal(K.driftStatus({ ...sd, id: bid, bezahlt: true, bezahlt_am: sd.bezahlt_am }), 'ok');
+    }
+    const w = kernSumme(ids, u, profil);
+    assert.deepEqual(K.euerFuer(w, profil, 2026).zeilen.filter((z) => z.betrag_cent !== 0), [], 'EÜR insgesamt 0');
+    const kz = K.ustvaFuer(w, profil, '2026-11').kennzahlen;
+    for (const k of ['81', '86', '81_steuer', '86_steuer']) assert.equal(kz[k] ?? 0, 0, `Kz ${k}`);
+  }
 });
