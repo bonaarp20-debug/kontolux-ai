@@ -1,6 +1,6 @@
 // regel/kasse.js (KASSE-P1b, Baukonzept docs/kassenbuch/08-baukonzept.md 2.3 und 2.11 C, Vertrag docs/kassenbuch/stand-kasse.md): Worker-Endpunkte des Kassenbuchs.
 //   POST /kasse        { aktion: 'anlegen' | 'aendern' | 'system_wechseln', ... }
-//   POST /kassentag    { aktion: 'abschliessen' | 'ruhetag' | 'ruhetage' | 'stornieren', ... }
+//   POST /kassentag    { aktion: 'abschliessen' | 'ruhetag' | 'ruhetage' | 'stornieren' | 'ruhetag_aufheben', ... }
 //   POST /kassenbewegung { aktion: 'anlegen' | 'stornieren', ... }
 // Alle Kassen-Sammlungen schreibt nur der Worker (Firestore-Regeln: Eigentümer liest). UID nur aus dem Token (setzt der Router).
 // Prüfreihenfolge: grundpruefung (anfrage_id, Größe) -> UID -> Feature kasse (503) -> Steuerprofil bestätigt (403 PROFIL_FEHLT) -> AGB-Mindestfassung
@@ -30,7 +30,7 @@ export const WIEDERHOLUNGEN_MAX = 3; // Wiederholungen bei gleichzeitiger Änder
 const BODY_MAX_ZEICHEN = 30000;
 const VERLAUF_MAX = 200;
 const SPERRENDE = ['festgeschrieben', 'sperre_laeuft'];
-const AKTIONEN = { '/kasse': ['anlegen', 'aendern', 'system_wechseln'], '/kassentag': ['abschliessen', 'ruhetag', 'ruhetage', 'stornieren'], '/kassenbewegung': ['anlegen', 'stornieren'] };
+const AKTIONEN = { '/kasse': ['anlegen', 'aendern', 'system_wechseln'], '/kassentag': ['abschliessen', 'ruhetag', 'ruhetage', 'stornieren', 'ruhetag_aufheben'], '/kassenbewegung': ['anlegen', 'stornieren'] };
 // Abbildung der Kern-Prüfcodes auf HTTP (stand-kasse.md 5): FORMAT-Gruppe 400 mit code FORMAT (kern_code nennt den Kern-Code), die übrigen gleichnamig
 const FORMAT_GRUPPE = ['FORMAT', 'STEUERFALL_UNZULAESSIG', 'KU_MEHRERE_SAETZE', 'DIFFERENZ_OHNE_GRUND', 'ZBON_SUMME_ABWEICHUNG', 'RETROGRAD_DIFFERENZ'];
 const KERN_STATUS = { ANHANG_ODER_BESTAETIGUNG: [422, 'ANHANG_FEHLT'], TAGESSALDO_NEGATIV: [422], BESTAND_NEGATIV: [422], DATENQUELLE_SUMUP: [422], KARTE_UEBER_INTEGRATION: [422],
@@ -102,6 +102,7 @@ export async function regelKasse(pfad, body, env, cors = {}, deps = {}) {
     if (pfad === '/kassentag') {
       if (aktion === 'abschliessen') return await abschliessen(c);
       if (aktion === 'stornieren') return await stornieren(c);
+      if (aktion === 'ruhetag_aufheben') return await ruhetagAufheben(c);
       return await ruhetage(c, aktion);
     }
     if (pfad === '/kassenbewegung') return aktion === 'anlegen' ? await bewegungAnlegen(c) : await bewegungStornieren(c);
@@ -579,6 +580,37 @@ async function ruhetage(c, aktion) {
       details: { kasse_id: kasseId, anzahl: tage.length, von: tage[0], bis: tage[tage.length - 1] },
     }], zeit);
     return { writes: [...writes, ...audit.writes], erfolg: () => antwort({ ok: true, tage }, 200, cors) };
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// /kassentag ruhetag_aufheben (B-N3, ergänzt O6 M2): ein irrtümlich bestätigter Ruhetag NACH dem letzten Abschluss wird wieder ein offener Tag (Tagesplatz entfernt,
+// Vorbedingung updateTime), damit eine Bewegung erfasst oder der Tag normal abgeschlossen werden kann, ohne Storno-Spur. Ein Ruhetag hat keine Bestandswirkung, keine
+// Kassennummer und keinen Beleg; der Nachweis bleibt in der Audit-Kette (kassentag_ruhetag_aufgehoben mit vorher). Vor dem letzten Abschluss: 409 SPAETERE_TAGE
+// (Weg rückwärts über den Storno, Nr. 13). Eine Wiederholung nach Erfolg findet keinen Tagesplatz mehr (404, nichts geschrieben).
+// ---------------------------------------------------------------------------------------------
+async function ruhetagAufheben(c) {
+  const { fs, uid, body, cors, zeit, heute } = c;
+  const f = pruefeRuhetage(body, 'ruhetag', { heute });
+  if (f.fehler) return formFehler(f.fehler, cors);
+  const { kasse_id: kasseId, tage: [tag] } = f.wert;
+  const tagId = Steuerkern.kassentagId(kasseId, tag);
+  return mitWiederholung(fs, async () => {
+    const docs = await fs.batchGet([P.kasse(uid, kasseId), P.kassentag(uid, tagId), kopfPfad(uid)]);
+    const kasseDok = docs.get(P.kasse(uid, kasseId));
+    if (!kasseDok || !istObjekt(kasseDok.daten)) return { antwort: fehlerAntwort(404, 'KASSE_UNBEKANNT', cors) };
+    const kasse = kasseDok.daten;
+    if (kasse.kassenbuch === false) return { antwort: fehlerAntwort(422, 'KASSE_OHNE_KASSENBUCH', cors) };
+    if (kasse.aktiv === false) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors) };
+    const tagDok = docs.get(P.kassentag(uid, tagId));
+    if (!tagDok || !istObjekt(tagDok.daten)) return { antwort: fehlerAntwort(404, 'KASSENTAG_UNBEKANNT', cors, { kassentag_id: tagId }) };
+    if (tagDok.daten.status !== 'ruhetag') return { antwort: fehlerAntwort(409, 'KEIN_RUHETAG', cors, { kassentag_id: tagId, status: tagDok.daten.status ?? null }) };
+    const zeiger = zeigerAus(kasse.letzter_abschluss);
+    if (zeiger && tag < zeiger.tag) return { antwort: fehlerAntwort(409, 'SPAETERE_TAGE', cors, { letzter_tag: zeiger.tag }) };
+    const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{
+      aktion: 'kassentag_ruhetag_aufgehoben', ziel: `kassentage/${tagId}`, vorher: tagDok.daten, nachher: null, details: { kasse_id: kasseId, kassentag_id: tagId, weg: 'aufheben' },
+    }], zeit);
+    return { writes: [schreibe.loeschen(P.kassentag(uid, tagId), { updateTime: tagDok.updateTime }), ...audit.writes], erfolg: () => antwort({ ok: true, kassentag_id: tagId }, 200, cors) };
   });
 }
 

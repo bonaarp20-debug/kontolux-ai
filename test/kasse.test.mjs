@@ -2231,3 +2231,30 @@ test('hyg B-N1: mehr als 300 Bewegungen in der Lücke oder im Ruhetag-Bereich er
   const c = await v.tagRufe({ aktion: 'ruhetage', kasse_id: vid, tage: ['2026-11-02', '2026-11-03'] });
   assert.deepEqual([c.status, c.json.fehler[0].code, c.json.geschaeftstag], [409, 'RUHETAG_MIT_BEWEGUNG', '2026-11-02'], JSON.stringify(c.json));
 });
+
+test('hyg B-N3: ruhetag_aufheben macht einen irrtümlichen Ruhetag nach dem letzten Abschluss wieder offen (Bewegung möglich, Audit mit vorher, Kette ok); vor dem letzten Abschluss 409 SPAETERE_TAGE, kein Ruhetag 409 KEIN_RUHETAG, unbekannt 404', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-02'))).status, 200);
+  assert.equal((await u.tagRufe({ aktion: 'ruhetage', kasse_id: id, tage: ['2026-11-03', '2026-11-04'] })).status, 200);
+  assert.equal((await u.bewRufe(bewegung(id, '2026-11-04', 'geldtransit_bank_ein', 500))).json.fehler[0].code, 'TAG_ABGESCHLOSSEN');
+  const r = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-04`)), null);
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-03`)).status, 'ruhetag', 'nur der genannte Tag');
+  const e = u.audit().find((x) => x.aktion === 'kassentag_ruhetag_aufgehoben');
+  assert.ok(e && e.details.weg === 'aufheben', JSON.stringify(u.audit().map((x) => x.aktion)));
+  assert.equal((await kettepruefen(u.audit())).ok, true);
+  // jetzt offen: Bewegung geht, Abschluss mit ihr
+  assert.equal((await u.bewRufe(bewegung(id, '2026-11-04', 'geldtransit_bank_ein', 500))).status, 200);
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-04', { gezaehlt_cent: 10500 }))).status, 200);
+  // vor dem letzten Abschluss: nur rückwärts über den Storno
+  const s = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-03' });
+  assert.deepEqual([s.status, s.json.fehler[0].code, s.json.letzter_tag], [409, 'SPAETERE_TAGE', '2026-11-04']);
+  const k = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04' });
+  assert.deepEqual([k.status, k.json.fehler[0].code], [409, 'KEIN_RUHETAG']);
+  const x = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-09' });
+  assert.deepEqual([x.status, x.json.fehler[0].code], [404, 'KASSENTAG_UNBEKANNT']);
+  const f = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-05', grund: 'x' });
+  assert.deepEqual([f.status, f.json.feld], [400, 'grund']);
+});
