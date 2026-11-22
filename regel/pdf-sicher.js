@@ -51,8 +51,82 @@ export const PDF_NAME_MAX = 4096;
 export const PDF_ZAHL_MAX = 64;
 // Kopfversuche: pdf-lib skipJibberish ruft matchIndirectObjectHeader für jedes druckbare Byte zwischen Objekten auf und verschluckt jeden Fehler.
 // Ohne Grenze lief ein Angriff nach dem Überschreiten der Verweisgrenze byteweise weiter (2,5 MB: 200.000 Verweise im globalen Speicher, 5 s CPU;
-// 7,5 MB OOM). Normale PDFs: ein Versuch je Objekt (siehe Bericht).
+// 7,5 MB OOM). Normale PDFs: höchstens ein Versuch je Objekt (409 PDFs: Versuche <= Zahl der „obj“ aus dem Vorab-Scan). Budget je Datei:
+// PDF_KOPFVERSUCHE_GRUND + 2 je „obj“, höchstens PDF_KOPFVERSUCHE_MAX (je Versuch rund 4 µs: angehängter Datenmüll bis rund 130 KB bleibt erlaubt).
 export const PDF_KOPFVERSUCHE_MAX = 400000;
+export const PDF_KOPFVERSUCHE_GRUND = 50000;
+
+// ---- Vorab-Scan: erste Verteidigung, ein linearer Durchlauf über die Rohbytes vor jedem pdf-lib-Aufruf ----
+// Ohne Allokation proportional zur Eingabe. Übersprungen werden Kommentare, Literal- und Hex-Strings (dort sind lange Ziffernfolgen legitim, z. B. mit
+// Nullen aufgefüllte Signaturen) und Ströme (von „stream“ bis zum nächsten „endstream“; ohne „endstream“ endet der Scan). Abgelehnt wird:
+// Datei über PDF_DATEI_MAX (PARSE_ERECHNUNG nimmt höchstens 14 MiB Base64 an, also rund 10,5 MiB), Zahl (Lauf aus 0-9 + - .) länger als PDF_ZAHL_MAX,
+// mehr „obj“-Schlüsselwörter als PDF_VERWEISE_MAX (jeder Objektkopf legt einen Verweis an; mehr ginge ohnehin über die Verweisgrenze), mehr xref/startxref/trailer//Prev als PDF_XREF_ABSCHNITTE_MAX. Die Eingriffe in pdf-lib bleiben als
+// zweite Verteidigung (der Scan kann durch ein falsches „stream“ … „endstream“ außerhalb eines Stroms getäuscht werden; dann greifen sie).
+export const PDF_DATEI_MAX = 11 * 1024 * 1024;
+export const PDF_XREF_ABSCHNITTE_MAX = 1000;
+const B_STREAM = [0x73, 0x74, 0x72, 0x65, 0x61, 0x6d]; // stream
+const B_ENDSTREAM = [0x65, 0x6e, 0x64, 0x73, 0x74, 0x72, 0x65, 0x61, 0x6d]; // endstream
+const B_OBJ = [0x6f, 0x62, 0x6a]; const B_XREF = [0x78, 0x72, 0x65, 0x66]; const B_STARTXREF = [0x73, 0x74, 0x61, 0x72, 0x74, 0x78, 0x72, 0x65, 0x66];
+const B_TRAILER = [0x74, 0x72, 0x61, 0x69, 0x6c, 0x65, 0x72]; const B_PREV = [0x50, 0x72, 0x65, 0x76];
+const gleich = (b, i, j, w) => { if (j - i !== w.length) return false; for (let k = 0; k < w.length; k += 1) if (b[i + k] !== w[k]) return false; return true; };
+// Anfang des nächsten „endstream“ ab i, -1 wenn keins. merk = { ab, k }: letztes Suchergebnis; da i nur wächst, bleibt der Scan linear
+// (sonst würde jedes „stream“ ohne „endstream“ bis zum Dateiende suchen: quadratisch)
+function endstreamAb(b, i, merk) {
+  if (merk.k === -1 || (merk.k !== null && merk.k >= i)) return merk.k;
+  let gefunden = -1;
+  for (let k = i, bis = b.length - 9; k <= bis; k += 1) {
+    if (b[k] !== 0x65 || b[k + 3] !== 0x73 || b[k + 8] !== 0x6d) continue; // e..s....m: schneller Vorfilter
+    let t = true; for (let m = 1; m < 9; m += 1) if (b[k + m] !== B_ENDSTREAM[m]) { t = false; break; }
+    if (t) { gefunden = k; break; }
+  }
+  merk.k = gefunden;
+  return gefunden;
+}
+export function pdfVorabScan(bytes) {
+  const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const n = b.length;
+  const st = { grund: null, obj: 0, abschnitte: 0, zahlMax: 0, stroeme: 0 };
+  const ab = (g) => { st.grund = g; return st; };
+  if (n > PDF_DATEI_MAX) return ab('Datei zu groß');
+  let i = 0; const merk = { k: null };
+  while (i < n) {
+    const c = b[i];
+    if (c === 0x25) { while (i < n && b[i] !== 10 && b[i] !== 13) i += 1; continue; } // Kommentar
+    if (c === 0x28) { // Literal-String wie pdf-lib: Klammern zählen, Escape mit Backslash
+      let tiefe = 0; let escape = false;
+      for (; i < n; i += 1) {
+        const x = b[i];
+        if (!escape) { if (x === 0x28) tiefe += 1; else if (x === 0x29 && --tiefe === 0) { i += 1; break; } }
+        if (x === 0x5c) escape = !escape; else escape = false;
+      }
+      continue;
+    }
+    if (c === 0x3c) { if (b[i + 1] === 0x3c) { i += 2; continue; } const e = b.indexOf(0x3e, i + 1); i = e === -1 ? n : e + 1; continue; } // Hex-String
+    if (NUMERISCH[c]) {
+      let j = i + 1; while (j < n && NUMERISCH[b[j]]) j += 1;
+      if (j - i > st.zahlMax) st.zahlMax = j - i;
+      if (j - i > PDF_ZAHL_MAX) return ab('Zahl zu lang');
+      i = j; continue;
+    }
+    if (c === 0x2f) { // Name: nur /Prev wird gezählt
+      let j = i + 1; while (j < n && !NAMENSENDE[b[j]]) j += 1;
+      if (gleich(b, i + 1, j, B_PREV) && ++st.abschnitte > PDF_XREF_ABSCHNITTE_MAX) return ab('zu viele XRef-Abschnitte');
+      i = j; continue;
+    }
+    if (NAMENSENDE[c]) { i += 1; continue; }
+    let j = i + 1; while (j < n && !NAMENSENDE[b[j]] && !NUMERISCH[b[j]]) j += 1; // Wort (Schlüsselwort); Ziffern danach prüft der nächste Durchlauf
+    if (gleich(b, i, j, B_STREAM)) {
+      st.stroeme += 1;
+      const e = endstreamAb(b, j, merk);
+      if (e === -1) break; // Rest ist Stromdaten (pdf-lib liest bis endobj/Dateiende); geparst wird er nur über die Eingriffe (zweite Verteidigung)
+      i = e + 9; continue;
+    }
+    if (gleich(b, i, j, B_OBJ)) { if (++st.obj > PDF_VERWEISE_MAX) return ab('zu viele Objekte'); } // jeder Objektkopf ist ein Verweis
+    else if (gleich(b, i, j, B_XREF) || gleich(b, i, j, B_STARTXREF) || gleich(b, i, j, B_TRAILER)) { if (++st.abschnitte > PDF_XREF_ABSCHNITTE_MAX) return ab('zu viele XRef-Abschnitte'); }
+    i = j;
+  }
+  return st;
+}
 
 // Grenze überschritten oder verbotene Form (Filterkette, XRef ohne Bytes je Eintrag …)
 export class PdfZuGross extends Error {}
@@ -293,8 +367,10 @@ function parserBegrenzen() {
 export async function ladePdfBegrenzt(bytes, { budget = pdfBudget(), ignoreEncryption = true, updateMetadata = false } = {}) {
   parserBegrenzen();
   if (isolatVoll()) return { zuGross: true, stromFehler: false, isolatVoll: true };
+  const scan = pdfVorabScan(bytes);
+  if (scan.grund) return { zuGross: true, stromFehler: false, vorabScan: scan.grund };
   const parser = PDFParser.forBytesWithOptions(bytes, 100, false, false);
-  const zaehler = { objekte: PDF_OBJEKTE_MAX, namen: PDF_NAMEN_SPEICHER_MAX, verweise: PDF_VERWEISE_MAX, budget, oben: false, strings: PDF_STRING_ZEICHEN_MAX, kopfVersuche: PDF_KOPFVERSUCHE_MAX, imXref: false, zuGross: false, stromFehler: false };
+  const zaehler = { objekte: PDF_OBJEKTE_MAX, namen: PDF_NAMEN_SPEICHER_MAX, verweise: PDF_VERWEISE_MAX, budget, oben: false, strings: PDF_STRING_ZEICHEN_MAX, kopfVersuche: Math.min(PDF_KOPFVERSUCHE_MAX, PDF_KOPFVERSUCHE_GRUND + 2 * scan.obj), imXref: false, zuGross: false, stromFehler: false };
   parser.context[ZAEHLER] = zaehler;
   const original = parser.parseIndirectObject;
   parser.parseIndirectObject = async function begrenzt() {

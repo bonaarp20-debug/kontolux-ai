@@ -399,8 +399,10 @@ test('Zweite Lesung F-1: Zahlen mit sehr vielen Ziffern (Objekt, Nachkomma, Obje
 test('Zweite Lesung F-2/F-3: nach Überschreiten der Verweisgrenze keine weiteren Verweise über verschluckte Kopfversuche, Ziffernläufe zwischen Objekten linear', async () => {
   const p = mit128MB(`import { ladePdfBegrenzt, pdfIsolatStand } from './regel/pdf-sicher.js';
     console.warn = () => {};
-    let s = '%PDF-1.7\\n'; for (let i = 1; i <= 50001; i += 1) s += i + ' 0 obj null endobj\\n';
-    s += 'x'; for (let k = 0; k < 100000; k += 1) s += (100000 + k) + ' 0 obj ';
+    // knapp unter die Verweisgrenze (Array mit 49.990 Verweisen); die Objektköpfe danach überschreiten sie in skipJibberish. Sie stehen hinter einem
+    // „stream“ ohne „endstream“, den der Vorab-Scan als Stromdaten überspringt: so prüft der Test die zweite Verteidigung in pdf-lib
+    let s = '%PDF-1.7\\n1 0 obj\\n['; for (let i = 1; i <= 49990; i += 1) s += (200000 + i) + ' 0 R '; s += ']\\nendobj\\n';
+    s += 'x stream\\n'; for (let k = 0; k < 100000; k += 1) s += (300000 + k) + ' 0 obj ';
     s += '\\ntrailer\\n<< /Root 1 0 R >>\\n%%EOF\\n';
     const c = process.cpuUsage(); const r = await ladePdfBegrenzt(new Uint8Array(Buffer.from(s))); const d = process.cpuUsage(c);
     const c2 = process.cpuUsage(); const j = await ladePdfBegrenzt(new Uint8Array(Buffer.from('%PDF-1.7\\n1 0 obj\\nnull\\nendobj\\nx' + '1'.repeat(30000) + 'x\\ntrailer\\n<< >>\\n'))); const d2 = process.cpuUsage(c2);
@@ -413,4 +415,73 @@ test('Zweite Lesung F-2/F-3: nach Überschreiten der Verweisgrenze keine weitere
   assert.ok(e.cpuMs < 2000, `CPU ${e.cpuMs} ms`);
   // 30.000 Ziffern zwischen Objekten: main 4,6 s (jede Position las den ganzen Rest neu)
   assert.ok(e.ziffernMs < 300, `Ziffernlauf ${e.ziffernMs} ms`);
+});
+
+test('Vorab-Scan: linear über die Rohbytes vor pdf-lib; lehnt lange Zahlen, zu viele obj/XRef-Abschnitte und zu große Dateien früh ab, überspringt Strings, Kommentare und Ströme', async () => {
+  const { pdfVorabScan, PDF_DATEI_MAX } = await import('../regel/pdf-sicher.js');
+  const scan = (s) => pdfVorabScan(new Uint8Array(Buffer.from(s, 'latin1'))).grund;
+  assert.equal(scan(KATALOG + '3 0 obj\n' + '1'.repeat(65) + '\nendobj\n'), 'Zahl zu lang');
+  assert.equal(scan(KATALOG + '3 0 obj\n' + '-'.repeat(65) + '\nendobj\n'), 'Zahl zu lang');
+  assert.equal(scan(KATALOG + '3 0 obj\n' + '9'.repeat(64) + '\nendobj\n'), null);
+  // legitime lange Ziffernfolgen: Hex-Signatur mit Nullen, Literal-String, Kommentar, unkomprimierter Inhaltsstrom (auch ohne endstream)
+  const legit = KATALOG + `3 0 obj\n<< /Contents <${'0'.repeat(100000)}> /T (${'1'.repeat(5000)} \\) (x) ${'2'.repeat(500)}) >>\nendobj\n%${'3'.repeat(1000)}\n`
+    + `4 0 obj\n<< /Length 9000 >>\nstream\n${'4'.repeat(9000)}\nendstream\nendobj\n5 0 obj\n<< /Length 10 >>\nstream\n${'5'.repeat(3000)}`;
+  assert.equal(scan(legit), null);
+  // mehr als 50.000 „obj“ (endobj zählt nicht; mehr Objektköpfe gingen ohnehin über die Verweisgrenze), mehr als 1000 XRef-Abschnitte, Datei über 11 MiB
+  assert.equal(scan('%PDF-1.7\n' + '1 0 obj null endobj\n'.repeat(50001)), 'zu viele Objekte');
+  assert.equal(scan('%PDF-1.7\n' + '1 0 obj null endobj\n'.repeat(50000)), null);
+  assert.equal(scan(KATALOG + 'startxref\n0\n'.repeat(1001)), 'zu viele XRef-Abschnitte');
+  assert.equal(scan(KATALOG + '<< /Prev 0 >>'.repeat(1001)), 'zu viele XRef-Abschnitte');
+  assert.equal(pdfVorabScan(new Uint8Array(PDF_DATEI_MAX + 1)).grund, 'Datei zu groß');
+  // gleiches Ergebnis über den Ladeweg; ein legitimes PDF mit diesen Strömen und Strings lädt wie PDFDocument.load
+  const r = await ladePdfBegrenzt(new Uint8Array(Buffer.from(legit + '\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n', 'latin1')), { updateMetadata: true });
+  assert.ok(r.pdf && !r.zuGross, 'legitim lädt');
+  // linear auch bei Fluten (vorher je „stream“ ohne „endstream“ eine Suche bis zum Dateiende)
+  for (const [name, s] of Object.entries({ 'stream ohne endstream': 'stream\n'.repeat(400000), 'e-Flut': 'stream\n' + 'e'.repeat(3 * MB), Klammern: '('.repeat(3 * MB), x: 'x'.repeat(3 * MB) })) {
+    const b = new Uint8Array(Buffer.from(KATALOG + s)); const t = process.hrtime.bigint(); pdfVorabScan(b);
+    const ms = Number(process.hrtime.bigint() - t) / 1e6;
+    assert.ok(ms < 100, `${name}: ${ms.toFixed(1)} ms für 3 MB`);
+  }
+});
+
+test('Vorab-Scan: alle Angriffsproben der Gegenlesungen und der Härtung bei 128 MB abgelehnt, mit kleiner CPU und kleinem Heap', async () => {
+  const e = angriffeIm128MB(`{
+    'Objektstrom 64 MB (Kette)': () => { const d = zlib.deflateSync(zlib.deflateSync(Buffer.alloc(64 * MB)), { level: 9 }); return new Uint8Array(Buffer.concat([Buffer.from(K + '4 0 obj\\n<< /Type /ObjStm /N 1 /First 0 /Filter [/FlateDecode /FlateDecode] /Length ' + d.length + ' >>\\nstream\\n'), d, Buffer.from('\\nendstream\\nendobj\\n')])); },
+    'XRef /W [0 0 0]': () => enc(K + '4 0 obj\\n<< /Type /XRef /W [0 0 0] /Size 300000 /Root 1 0 R /Length 0 >>\\nstream\\n\\nendstream\\nendobj\\n'),
+    '4 MB 0 0 0': () => d3('[' + '0 '.repeat(2 * MB) + ']'),
+    'Hex 3 MB': () => d3('<' + 'a'.repeat(3 * MB) + '>'),
+    'Literal 4 MB': () => d3('(' + 'a'.repeat(4 * MB) + ')'),
+    'Name 2 MB': () => d3('/' + 'a'.repeat(2 * MB)),
+    'XRef-Tabelle 4 MB': () => { const n = Math.floor(4 * MB / 6); return enc(K + 'xref\\n7000000 ' + n + '\\n' + '0 0 n '.repeat(n) + '\\ntrailer\\n<< /Root 1 0 R >>\\n'); },
+    'Objektstrom /N 1 Mio.': () => { const k = '1 0 '.repeat(1000000); const z = zlib.deflateSync(Buffer.from(k + '0')); return new Uint8Array(Buffer.concat([Buffer.from(K + '4 0 obj\\n<< /Type /ObjStm /N 1000000 /First ' + k.length + ' /Filter /FlateDecode /Length ' + z.length + ' >>\\nstream\\n'), z, Buffer.from('\\nendstream\\nendobj\\n')])); },
+    'Zahl 6 MB': () => d3('1'.repeat(6 * MB)),
+    'Ziffern zwischen Objekten': () => enc(K + 'x' + '1'.repeat(30000) + 'x\\n'),
+    '250.000 Objekte': () => enc('%PDF-1.7\\n' + Array.from({ length: 250000 }, (_, i) => (i + 1) + ' 0 obj null endobj').join('\\n')),
+    'Verweisleck über Kopfversuche': () => { let s = '%PDF-1.7\\n'; for (let i = 1; i <= 50001; i += 1) s += i + ' 0 obj null endobj\\n'; s += 'x'; for (let k = 0; k < 100000; k += 1) s += (100000 + k) + ' 0 obj '; return enc(s); },
+    'Datenmüll 10 MB': () => enc(K + 'x'.repeat(10 * MB)),
+    'Datei 12 MB': () => enc(K + ' '.repeat(12 * MB)),
+  }`);
+  if (process.env.PDF_MESSWERTE) console.log(JSON.stringify(e));
+  const grenzen = { '250.000 Objekte': 30, 'Zahl 6 MB': 30, 'Datei 12 MB': 5, 'Ziffern zwischen Objekten': 10, 'Verweisleck über Kopfversuche': 30 }; // früh im Vorab-Scan
+  for (const [name, x] of Object.entries(e)) {
+    assert.equal(x.r, 'zuGross', `${name}: ${JSON.stringify(x)}`);
+    assert.ok(x.cpuMs < (grenzen[name] ?? 1500) && x.heapMB < 40, `${name}: ${JSON.stringify(x)}`);
+  }
+});
+
+test('Vorab-Scan Regression: signiertes ZUGFeRD-PDF (inkrementelles Update, /Contents mit Nullen aufgefüllt, /Prev) und unkomprimierter Inhaltsstrom mit Ziffern laden wie PDFDocument.load und werden erkannt', async () => {
+  const basis = await pdfLibZugferd({ useObjectStreams: false });
+  const sigHex = '3082' + 'a1b2c3d4'.repeat(1500) + '0'.repeat(40000); // Signaturcontainer, aufgefüllt mit Nullen (wie Acrobat)
+  const inhalt = 'BT /F1 9 Tf ' + Array.from({ length: 2000 }, (_, i) => `${i}.25 ${i * 3}.5 Td (${i}) Tj`).join(' ') + ' 0'.repeat(10) + ' ET ' + '1234567890'.repeat(20);
+  const off = basis.length;
+  const neu = `\n90 0 obj\n<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 ${off} ${off + 50000} 1000] /Contents <${sigHex}> /M (D:20261122120000+01'00') >>\nendobj\n`
+    + `91 0 obj\n<< /Length ${inhalt.length} >>\nstream\n${inhalt}\nendstream\nendobj\n`;
+  const xrefPos = off + neu.length;
+  const datei = Buffer.concat([basis, Buffer.from(neu + `xref\n90 2\n${String(off + 1).padStart(10, '0')} 00000 n \n${String(off + neu.indexOf('91 0 obj')).padStart(10, '0')} 00000 n \ntrailer\n<< /Size 92 /Root 1 0 R /Prev 0 >>\nstartxref\n${xrefPos}\n%%EOF\n`, 'latin1')]);
+  const { pdfVorabScan } = await import('../regel/pdf-sicher.js');
+  assert.equal(pdfVorabScan(new Uint8Array(datei)).grund, null);
+  const r = await ladePdfBegrenzt(new Uint8Array(datei), { updateMetadata: true });
+  assert.ok(r.pdf && !r.zuGross, 'lädt');
+  assert.equal(objektBild(r.pdf), objektBild(await ALT(datei)));
+  assert.deepEqual(await detectAndParseERechnung(new Uint8Array(datei), 'Rechnung.pdf', 'application/pdf', ''), ERWARTET);
 });
