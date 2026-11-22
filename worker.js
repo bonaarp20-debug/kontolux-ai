@@ -5555,11 +5555,11 @@ async function handleDatevExport(body, env, cors = {}) {
         const fass = td.fassungen.get(`${tagId}|${tag.fassung_aktiv}`);
         if (!fass && tageLesefehler) continue; // eine einzige Warnung unten
         const nrTag = String((fass && fass.kassennummer) || '').trim();
-        const pl = nrTag ? kasseTagesPosten(fass) : { offen: true, grund: fass ? 'kassennummer_fehlt' : 'fassung_fehlt' };
+        const pl = nrTag ? kasseTagesPosten(fass, (await kassenLaden()).get(String(tag.kasse_id || ''))) : { offen: true, grund: fass ? 'kassennummer_fehlt' : 'fassung_fehlt' };
         if (pl.offen) { kasseOffen.push(`${nrTag || tagId} (${pl.grund})`); continue; }
         for (const po of pl.posten) {
           buchungen.push({ betrag: po.betrag_cent / 100, sollHaben: po.sollHaben, konto: po.konto === 'kasse' ? await kassenKonto(tag.kasse_id) : geldtransitkonto,
-            gegenkonto: po.gegen === 'bank' ? bankkonto : KASSE_DURCHLAUF_KONTO[skrK0], bu: '', belegDatum: new Date(tag.geschaeftstag + 'T00:00:00'), belegfeld1: `${nrTag}-Z`, belegfeld2: '',
+            gegenkonto: po.gegen === 'bank' ? bankkonto : po.gegen === 'transit' ? geldtransitkonto : KASSE_DURCHLAUF_KONTO[skrK0], bu: '', belegDatum: new Date(tag.geschaeftstag + 'T00:00:00'), belegfeld1: `${nrTag}-Z`, belegfeld2: '',
             buchungstext: buchungstextBasisKurz(po.text, ''), diverseAdressnummer: '' });
           kasseTagesPostenGebucht++;
         }

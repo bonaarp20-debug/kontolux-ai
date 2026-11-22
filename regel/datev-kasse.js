@@ -215,7 +215,7 @@ export function sumupKasseWahl(kassen, datum) {
   return treffer.length ? { mehrere: true } : null;
 }
 
-// A-M1 (Gegenlesung o-p1c, Baukonzept 2.11 H, 12-steuer 3.4 Nr. 6 und 7): Posten eines Tagesabschlusses, die nicht im Umsatzbeleg stehen, aber den Kassenstand
+// A-M1/A-M2 (Gegenlesung o-p1c, Baukonzept 2.11 H, 12-steuer 3.4 Nr. 6 und 7): Posten eines Tagesabschlusses, die nicht im Umsatzbeleg stehen, aber den Kassenstand
 // und das Geldtransitkonto bewegen. fassung: dekodierte aktive Fassung des Kassentags (dort liegen die Werte, nicht im Kurzeintrag des Tagesplatzes).
 //   Bareingang auf Rechnung: Kasse an Bankkonto (die Rechnung steht im Export als bezahlt auf der Bank; die Gegenbuchung stellt Bank und Kasse richtig).
 //   Durchlaufende Posten und Trinkgeld der Mitarbeiter: bar Kasse, unbar Geldtransit, jeweils an Durchlaufende Posten (1590/1370).
@@ -237,5 +237,16 @@ export function kasseTagesPosten(fassung, kasse = null) {
   ein('durchlaufend_unbar', 'transit', 'durchlauf', dlUnbar, 'Durchlaufende Posten Karte lt. Tagesabschluss');
   ein('trinkgeld_ma_bar', 'kasse', 'durchlauf', tgBar, 'Trinkgeld Mitarbeiter bar lt. Tagesabschluss');
   ein('trinkgeld_ma_unbar', 'transit', 'durchlauf', tgUnbar, 'Trinkgeld Mitarbeiter Karte lt. Tagesabschluss');
+  // A-M2: Barrückgabe für einen Kartenkauf (KANAL_VERRECHNET, Kern kassentagZuBelegEingabe) verrechnet bar mit Karte, der Umsatzbeleg trägt nur die Nettozahlungen. Das Kassenbuch
+  // führt die rohen Kanalsummen: Kasse = rohe Bar-Summe, der Unterschied zum Beleg wandert zwischen Kasse und Geldtransit (Kasse Haben an Geldtransit bei Bar-Rückgabe,
+  // Kasse Soll an Geldtransit bei Karten-Rückerstattung). Kassen mit sumup_integration haben keinen Umsatzbeleg (keine Umsatzzeilen).
+  if (!(ISTOBJEKT(kasse) && kasse.datenquelle === 'sumup_integration')) {
+    let st;
+    try { st = Steuerkern.kassenSteuerJeSatz(fassung); } catch { return offen('fassung_ungueltig'); }
+    let belegBar = 0;
+    if (st.zeilen.some((z) => z.brutto_cent > 0)) belegBar = st.bar_cent < 0 ? 0 : (st.unbar_cent < 0 ? st.bar_cent + st.unbar_cent : st.bar_cent);
+    const d = st.bar_cent - belegBar;
+    if (d !== 0) posten.push({ art: 'kanal_verrechnet', konto: 'kasse', gegen: 'transit', sollHaben: d > 0 ? 'S' : 'H', betrag_cent: Math.abs(d), text: 'Verrechnung Bargeld und Karte lt. Tagesabschluss' });
+  }
   return { posten };
 }

@@ -504,6 +504,39 @@ test('A-M1: ein stornierter Tag hat keine Posten (nur der aktiven Fassung), die 
   assert.equal(kasseTagesPosten(null).grund, 'fassung_fehlt');
 });
 
+// A-M2 (Gegenlesung o-p1c): bei KANAL_VERRECHNET (Bargeld zurück für einen Kartenkauf) trug der Beleg nur die verrechneten Kanäle, Kasse und Geldtransit stimmten nicht, ohne Warnung.
+test('A-M2 (Szenario S2): Umsatz 100,00 bar und 300,00 Karte, Retoure 150,00 bar: Kasse -50,00 und Geldtransit 300,00 wie im Kassenbuch (Umbuchung Geldtransit an Kasse über 50,00), Erlöse 400,00 - 150,00', async () => {
+  const w = await welt();
+  ok200(await w.tag({ aktion: 'abschliessen', kasse_id: w.id, geschaeftstag: '2026-11-02', z_nummern: ['Z-1'], umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 10000, unbar_cent: 30000 }],
+    korrekturen: [{ steuerfall: 'A_INLAND_19', art: 'retoure', bar_cent: 15000, unbar_cent: 0 }], gezaehlt_cent: 10000 + 10000 - 15000, bestand_gezaehlt_bestaetigt: true, grundaufzeichnung_bestaetigt: true }));
+  const r = await w.exp();
+  assert.equal(r.status, 200, r.text);
+  // Beleg: Erlöse 250,00 (400,00 - 150,00) nur als Karte; die Umbuchung stellt Kasse und Geldtransit richtig
+  assert.deepEqual(kurz(r.zeilen, 'K-THK-2026-0001').map((x) => x.slice(0, 4)), [['250,00', 'S', '1360', '8400']]);
+  assert.deepEqual(kurz(r.zeilen, 'K-THK-2026-0001-Z').map((x) => x.slice(0, 4)), [['50,00', 'H', '1000', '1360']]);
+  const k = nachKonto(r.zeilen);
+  assert.equal(k['1000'], -5000, 'Kasse wie im Kassenbuch: 100,00 - 150,00');
+  assert.equal(k['1360'], 30000, 'Geldtransit = echte Kartenabrechnung 300,00');
+  assert.equal(k['8400'], -25000);
+  assert.equal(Object.values(k).reduce((a, b) => a + b, 0), 0);
+  assert.match(r.zeilen.find((x) => ohne(x[10]) === 'K-THK-2026-0001-Z')[13], /Verrechnung Bargeld und Karte lt\. Tagesabschluss/);
+});
+
+test('A-M2: Karten-Rückerstattung bei Barumsätzen (Karte negativ): Kasse Soll an Geldtransit; ohne Verrechnung keine Umbuchung; kasseTagesPosten rein', async () => {
+  const w = await welt();
+  ok200(await w.tag({ aktion: 'abschliessen', kasse_id: w.id, geschaeftstag: '2026-11-02', z_nummern: ['Z-1'], umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 40000, unbar_cent: 0 }],
+    korrekturen: [{ steuerfall: 'A_INLAND_19', art: 'retoure', bar_cent: 0, unbar_cent: 5000 }], gezaehlt_cent: 10000 + 40000, bestand_gezaehlt_bestaetigt: true, grundaufzeichnung_bestaetigt: true }));
+  ok200(await w.tag(nur19(w.id, '2026-11-03', { gezaehlt_cent: 50000 + 50000 })));
+  const r = await w.exp();
+  assert.deepEqual(kurz(r.zeilen, 'K-THK-2026-0001-Z').map((x) => x.slice(0, 4)), [['50,00', 'S', '1000', '1360']]);
+  assert.equal(kurz(r.zeilen, 'K-THK-2026-0001').map((x) => x[0]).join(), '350,00', 'Beleg: bar 350,00 verrechnet');
+  assert.equal(r.zeilen.filter((x) => ohne(x[10]) === 'K-THK-2026-0002-Z').length, 0, 'normaler Tag: keine Umbuchung');
+  const f = (bar, unbar) => ({ umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: bar, unbar_cent: unbar }], korrekturen: [] });
+  assert.deepEqual(kasseTagesPosten(f(100, 200)).posten, []);
+  assert.deepEqual(kasseTagesPosten({ umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 10000, unbar_cent: 30000 }], korrekturen: [{ steuerfall: 'A_INLAND_19', art: 'retoure', bar_cent: 15000, unbar_cent: 0 }] }).posten.map((p) => [p.konto, p.gegen, p.sollHaben, p.betrag_cent]), [['kasse', 'transit', 'H', 5000]]);
+  assert.deepEqual(kasseTagesPosten({ umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 10000, unbar_cent: 30000 }], korrekturen: [{ steuerfall: 'A_INLAND_19', art: 'retoure', bar_cent: 15000, unbar_cent: 0 }] }, { datenquelle: 'sumup_integration' }).posten, []);
+});
+
 // ── 6. Bestandsnutzer unverändert, Jahr, Hinweis ─────────────────────────────────────────────────
 test('Kein Kassenbuch: Konten und Warnung wie bisher (keine Kassenhinweise, Bankkonto), kein Lesezugriff auf Kassen und Bewegungen', async () => {
   const fs = fakeFirestore();
