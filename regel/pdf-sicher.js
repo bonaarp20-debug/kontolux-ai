@@ -20,12 +20,24 @@ export const PDF_XREF_EINTRAEGE_MAX = 100000;
 // (geteilte Einzelobjekte, nur ein Platz im Array) zu 1/16. Gemessen (mit Vorabblick): 18 Seiten ReportLab rund 10.000, 201 Seiten Adobe (8,5 MB) rund 143.000;
 // 400 reale PDFs von 1 bis 201 Seiten laden alle objektgleich wie PDFDocument.load. Über der Grenze höchstens rund 25 MB Speicher statt 480 MB.
 export const PDF_OBJEKTE_MAX = 200000;
-// pdf-lib hält Namen (PDFName.of) und Verweise (PDFRef.of) in globalen Speichern, die nie geleert werden (je Isolat, über Anfragen hinweg).
-export const PDF_NAMEN_ZEICHEN_MAX = 2 * 1024 * 1024;
+// pdf-lib hält Namen (PDFName.of) und Verweise (PDFRef.of) in globalen Speichern, die nie geleert werden (je Isolat, über Anfragen hinweg). Gezählt wird
+// nur, was diese Speicher wachsen lässt (eindeutig, zum ersten Mal gesehen). Namen nach geschätztem Speicher: 2 Byte je Zeichen (Schlüssel und Text,
+// beide flach gespeichert) plus PDF_NAME_GRUNDKOSTEN (gemessen 135 bis 245 Byte je Name samt Zählmenge; ohne Flachmachen 20 bis 30 Byte je Zeichen).
+// Gemessen: 400 reale PDFs höchstens 919 neue Namen mit 7.227 Zeichen (rund 200 KB geschätzt), pdf-lib-Dokument mit 3000 Seiten 3.050 Namen mit
+// 63.034 Zeichen (rund 740 KB); der ganze Korpus nacheinander (wie ein langlebiges Isolat) 2.565 Namen, 8.422 Verweise.
+export const PDF_NAME_GRUNDKOSTEN = 200;
+export const PDF_NAMEN_SPEICHER_MAX = 2 * 1024 * 1024;
 // Neue Verweise je Datei: eindeutig, nur was den globalen Speicher wachsen lässt (je Verweis rund 150 Byte bleibend). Gezählt an PDFRef.of, also auch
 // Einträge der klassischen XRef-Tabelle, XRef-Ströme, Objektköpfe und Objektströme. Gemessen: 400 reale PDFs höchstens 7.224 (201 Seiten),
 // pdf-lib-Dokument mit 3000 Seiten 15.014.
 export const PDF_VERWEISE_MAX = 50000;
+// Obergrenze je Isolat (Summe über alle Anfragen, solange das Isolat lebt): darüber lehnt das begrenzte Laden jedes weitere PDF ab ({ zuGross, isolatVoll }),
+// statt das Isolat für alle Nutzer abstürzen zu lassen. Cloudflare recycelt Isolate (Deploy, Leerlauf, Speicherdruck); erst dann sind die Speicher leer.
+// Normale Nutzung bleibt weit darunter (Korpus oben: 8.422 Verweise, rund 560 KB Namen); ein Angreifer kann mit wenigen Dateien die Grenze erreichen,
+// dann fällt die E-Rechnungs-Erkennung in diesem Isolat auf die normale Erfassung zurück (kein Absturz). Speicher an der Grenze rund 20 MB Verweise
+// (rund 166 Byte je Verweis mit Zählmenge) plus 8 MB Namen.
+export const PDF_ISOLAT_VERWEISE_MAX = 120000;
+export const PDF_ISOLAT_NAMEN_MAX = 8 * 1024 * 1024;
 // Strings und Namen: pdf-lib setzt sie Zeichen für Zeichen zusammen (verkettete Strings, rund 32 Byte je Zeichen, bis zum Ende des Strings im Speicher)
 // und zählt sie als ein Objekt: ohne Grenze OOM ab 2 MB Hex- bzw. 4 MB Literal-String (128 MB). Die Länge wird deshalb vor dem Parsen im Puffer
 // bestimmt. Gemessen an 400 realen PDFs: längster String 3.404 Zeichen, Summe je Datei höchstens 72.181, längster Name 54 Zeichen. Je String 512 KiB
@@ -91,7 +103,7 @@ function xrefEintraege(st, laenge) {
 // Zähler je Dokument: hängt am PDFContext, den PDFParser und PDFObjectStreamParser teilen (gleichzeitige Anfragen im Isolat zählen getrennt).
 // Der Eingriff in pdf-lib wirkt nur auf Kontexte mit Zähler; jeder andere Gebrauch von pdf-lib bleibt unverändert.
 const ZAEHLER = Symbol('pdfSicherZaehler');
-const ueber = (z) => z.objekte < 0 || z.namen < 0 || z.verweise < 0 || z.strings < 0;
+const ueber = (z) => z.objekte < 0 || z.namen < 0 || z.verweise < 0 || z.strings < 0 || isolatVoll();
 // Trennzeichen wie pdf-lib (syntax/Whitespace.js, syntax/Delimiters.js): Ende eines Namens
 const NAMENSENDE = new Uint8Array(256);
 for (const c of [0, 9, 10, 12, 13, 32, 0x28, 0x29, 0x3c, 0x3e, 0x5b, 0x5d, 0x7b, 0x7d, 0x2f, 0x25]) NAMENSENDE[c] = 1;
@@ -119,8 +131,10 @@ function nameLaenge(b, max) {
   while (i < bis && !NAMENSENDE[b.peekAt(i)]) i += 1;
   return i - start - 1;
 }
-// verketteten String in einen flachen umwandeln (V8 ersetzt ihn dabei an Ort und Stelle: 1 statt 32 Byte je Zeichen, gleicher Wert)
-const flach = (t) => { if (typeof t === 'string' && t.length > 12) t.charCodeAt(0); return t; };
+// verketteten String in einen flachen umwandeln (V8 ersetzt ihn dabei an Ort und Stelle: 1 statt 32 Byte je Zeichen, gleicher Wert). Das Ergebnis geht
+// in senke, sonst entfernt der optimierende Compiler den Aufruf (gemessen: ohne senke blieben 20 Byte je Zeichen).
+let senke = 0;
+const flach = (t) => { if (typeof t === 'string' && t.length > 12) senke = (senke + t.charCodeAt(0)) | 0; return t; };
 function zuLang(z, grund) { z.zuGross = true; throw new PdfZuGross(grund); }
 // Globaler Verweis-Speicher von pdf-lib: PDFRef.of legt Verweise auch außerhalb von parseObject an (klassische XRef-Tabelle mit 6 Byte je Eintrag,
 // XRef-Ströme, Objektköpfe, Objektströme). Gezählt wird jeder Verweis, den ein begrenztes Laden zum ersten Mal sieht (gesehenVerweise gilt wie der
@@ -129,6 +143,10 @@ function zuLang(z, grund) { z.zuGross = true; throw new PdfZuGross(grund); }
 // PDFRef.of aufruft, nie einen Fehler sieht.
 let aktiv = null; let tiefe = 0;
 const gesehenVerweise = new Set();
+const gesehenNamen = new Set(); let isolatNamen = 0;
+const isolatVoll = () => gesehenVerweise.size > PDF_ISOLAT_VERWEISE_MAX || isolatNamen > PDF_ISOLAT_NAMEN_MAX;
+// Stand der globalen Speicher, soweit begrenztes Laden sie wachsen ließ (für Protokoll und Tests)
+export const pdfIsolatStand = () => ({ verweise: gesehenVerweise.size, namen: isolatNamen, voll: isolatVoll() });
 function imRahmen(z, fn, ctx, args) {
   aktiv = z; tiefe += 1;
   try { return fn.apply(ctx, args); } finally { tiefe -= 1; }
@@ -158,7 +176,21 @@ function parserBegrenzen() {
   if (typeof proto?.parseObject !== 'function' || typeof proto?.parseName !== 'function') throw new Error('pdf-lib: Parser unbekannt');
   if (typeof PDFRef.of !== 'function') throw new Error('pdf-lib: PDFRef unbekannt');
   if (typeof proto.parseHexString !== 'function' || typeof proto.parseString !== 'function') throw new Error('pdf-lib: Parser unbekannt');
-  const objekt = proto.parseObject; const name = proto.parseName; const refOf = PDFRef.of; const hex = proto.parseHexString; const literal = proto.parseString;
+  if (typeof PDFName.of !== 'function') throw new Error('pdf-lib: PDFName unbekannt');
+  const objekt = proto.parseObject; const name = proto.parseName; const refOf = PDFRef.of; const nameOf = PDFName.of;
+  PDFName.of = function begrenzterNameOf(n) {
+    const z = aktiv;
+    if (!z) return nameOf(n);
+    flach(n); // wird bei neuen Namen Schlüssel im Speicher von pdf-lib
+    const r = nameOf(n);
+    if (!gesehenNamen.has(r)) {
+      gesehenNamen.add(r); flach(r.encodedName);
+      const kosten = 2 * r.encodedName.length + PDF_NAME_GRUNDKOSTEN;
+      z.namen -= kosten; isolatNamen += kosten;
+      if (tiefe > 0 && ueber(z)) throw new PdfZuGross('zu viele Namen');
+    }
+    return r;
+  }; const hex = proto.parseHexString; const literal = proto.parseString;
   const stringBegrenzt = (original, laenge) => function begrenzterString() {
     const z = this.context && this.context[ZAEHLER];
     if (!z) return original.call(this);
@@ -205,7 +237,7 @@ function parserBegrenzen() {
     if (ueber(z)) throw new PdfZuGross('zu viele Objekte');
     if (nameLaenge(this.bytes, PDF_NAME_MAX) > PDF_NAME_MAX) zuLang(z, 'Name zu lang');
     const n = name.call(this);
-    z.objekte -= 1; z.namen -= n.encodedName.length;
+    z.objekte -= 1; // neue Namen zählt PDFName.of
     return n;
   };
   parserBegrenzt = true;
@@ -216,8 +248,9 @@ function parserBegrenzen() {
 // nicht entpackbar; pdf-lib behandelt ihn dann wie bisher (ungültiges Objekt, Laden geht weiter). Andere Ladefehler werfen wie PDFDocument.load.
 export async function ladePdfBegrenzt(bytes, { budget = pdfBudget(), ignoreEncryption = true, updateMetadata = false } = {}) {
   parserBegrenzen();
+  if (isolatVoll()) return { zuGross: true, stromFehler: false, isolatVoll: true };
   const parser = PDFParser.forBytesWithOptions(bytes, 100, false, false);
-  const zaehler = { objekte: PDF_OBJEKTE_MAX, namen: PDF_NAMEN_ZEICHEN_MAX, verweise: PDF_VERWEISE_MAX, budget, oben: false, strings: PDF_STRING_ZEICHEN_MAX, imXref: false, zuGross: false, stromFehler: false };
+  const zaehler = { objekte: PDF_OBJEKTE_MAX, namen: PDF_NAMEN_SPEICHER_MAX, verweise: PDF_VERWEISE_MAX, budget, oben: false, strings: PDF_STRING_ZEICHEN_MAX, imXref: false, zuGross: false, stromFehler: false };
   parser.context[ZAEHLER] = zaehler;
   const original = parser.parseIndirectObject;
   parser.parseIndirectObject = async function begrenzt() {
@@ -232,8 +265,8 @@ export async function ladePdfBegrenzt(bytes, { budget = pdfBudget(), ignoreEncry
   parser.maybeParseCrossRefSection = function begrenzteXref(...a) { zaehler.imXref = true; try { return imRahmen(zaehler, xref, this, a); } finally { zaehler.imXref = false; } };
   parser.parseIndirectObjectHeader = function begrenzterKopf(...a) { return imRahmen(zaehler, kopf, this, a); };
   let context;
-  try { context = await parser.parseDocument(); } catch (e) { if (zaehler.zuGross || ueber(zaehler)) return { zuGross: true, stromFehler: zaehler.stromFehler }; throw e; } finally { delete parser.context[ZAEHLER]; if (aktiv === zaehler) aktiv = null; }
+  try { context = await parser.parseDocument(); } catch (e) { if (zaehler.zuGross || ueber(zaehler)) return { zuGross: true, stromFehler: zaehler.stromFehler, isolatVoll: isolatVoll() }; throw e; } finally { delete parser.context[ZAEHLER]; if (aktiv === zaehler) aktiv = null; }
   // Über der Grenze: pdf-lib fängt den Fehler je Objekt ab und liest weiter (jedes weitere Objekt bricht sofort ab); das Ergebnis ist dann zu groß
-  if (zaehler.zuGross || ueber(zaehler)) return { zuGross: true, stromFehler: zaehler.stromFehler };
+  if (zaehler.zuGross || ueber(zaehler)) return { zuGross: true, stromFehler: zaehler.stromFehler, isolatVoll: isolatVoll() };
   return { pdf: new PDFDocument(context, ignoreEncryption, updateMetadata), stromFehler: zaehler.stromFehler };
 }

@@ -211,8 +211,8 @@ const KATALOG = '%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2
 const mitObjekt3 = (inhalt) => new Uint8Array(Buffer.concat([Buffer.from(KATALOG + '3 0 obj\n'), Buffer.isBuffer(inhalt) ? inhalt : Buffer.from(inhalt), Buffer.from('\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n')]));
 // Läuft ein Skript in einem eigenen Prozess mit 128 MB Heap (Näherung an das Worker-Isolat), damit ein OOM den Testprozess nicht sprengt
 function mit128MB(code) {
-  const r = spawnSync(process.execPath, ['--max-old-space-size=128', '--input-type=module', '-e', code], { cwd: new URL('..', import.meta.url).pathname, encoding: 'utf8', timeout: 60000 });
-  return { status: r.status, out: (r.stdout || '').trim(), err: (r.stderr || '').slice(-300) };
+  const r = spawnSync(process.execPath, ['--max-old-space-size=128', '--expose-gc', '--input-type=module', '-e', code], { cwd: new URL('..', import.meta.url).pathname, encoding: 'utf8', timeout: 60000 });
+  return { status: r.status, out: (r.stdout || '').trim(), err: (r.stderr || '').slice(0, 600) };
 }
 
 test('Härtung H-2: das Vorab-Ergebnis bleibt beim eigentlichen Parsen nicht erreichbar (kein doppelter Speicher), 2 MB Hex-String sprengt 128 MB nicht', async () => {
@@ -253,20 +253,25 @@ const MB = 1024 * 1024;
 const bleibend = async (fn) => { gc(); const v = process.memoryUsage().heapUsed; const r = await fn(); gc(); return { r, mb: (process.memoryUsage().heapUsed - v) / MB }; };
 
 test('Härtung H-1a: Verweise aus klassischer XRef-Tabelle und XRef-Strömen zählen (eindeutig, globaler Speicher von pdf-lib), wiederholte Verweise nicht', async () => {
-  // klassische Tabelle: 6 Byte je Eintrag, je Eintrag ein neuer Verweis im globalen Speicher (vorher ungezählt: 1 MB +26 MB bleibend, 4 MB OOM)
-  const n = Math.floor(MB / 6);
-  const tabelle = new Uint8Array(Buffer.from(KATALOG + `xref\n7000000 ${n}\n` + '0 0 n '.repeat(n) + '\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n'));
-  const t = await bleibend(() => ladePdfBegrenzt(tabelle));
-  assert.equal(t.r.zuGross, true, 'XRef-Tabelle 1 MB');
-  assert.ok(t.mb < 12, `XRef-Tabelle: ${t.mb.toFixed(1)} MB bleibend`);
-  // XRef-Ströme: je Strom unter 100.000 Einträgen, zusammen 180.000 neue Verweise (vorher ungezählt; 150 Ströme: OOM)
-  const d = zlib.deflateSync(Buffer.alloc(60000, 1));
-  const teile = [Buffer.from(KATALOG)];
-  for (let i = 0; i < 3; i += 1) teile.push(Buffer.from(`${10 + i} 0 obj\n<< /Type /XRef /W [1 0 0] /Index [${8000000 + i * 60000} 60000] /Size 9000000 /Root 1 0 R /Filter /FlateDecode /Length ${d.length} >>\nstream\n`), d, Buffer.from('\nendstream\nendobj\n'));
-  teile.push(Buffer.from('trailer\n<< /Root 1 0 R >>\n%%EOF\n'));
-  const s = await bleibend(() => ladePdfBegrenzt(new Uint8Array(Buffer.concat(teile))));
-  assert.equal(s.r.zuGross, true, 'XRef-Ströme');
-  assert.ok(s.mb < 12, `XRef-Ströme: ${s.mb.toFixed(1)} MB bleibend`);
+  // Angriffe in eigenem Prozess (128 MB): sie füllen den globalen Speicher von pdf-lib, der je Isolat bzw. Prozess gilt (Obergrenze siehe H-1c)
+  // klassische Tabelle: 6 Byte je Eintrag, je Eintrag ein neuer Verweis (vorher ungezählt: 1 MB +26 MB bleibend, 4 MB OOM);
+  // XRef-Ströme: je Strom unter 100.000 Einträgen, zusammen 180.000 neue Verweise (vorher ungezählt; 150 Ströme OOM)
+  const p = mit128MB(`import zlib from 'node:zlib'; import { ladePdfBegrenzt } from './regel/pdf-sicher.js';
+    const K = ${JSON.stringify(KATALOG)}; const MB = 1048576; const erg = {};
+    const bleibend = async (name, b) => { gc(); const v = process.memoryUsage().heapUsed; const r = await ladePdfBegrenzt(b); gc(); erg[name] = { zuGross: !!r.zuGross, mb: (process.memoryUsage().heapUsed - v) / MB }; };
+    const n = Math.floor(MB / 6);
+    await bleibend('tabelle', new Uint8Array(Buffer.from(K + 'xref\\n7000000 ' + n + '\\n' + '0 0 n '.repeat(n) + '\\ntrailer\\n<< /Root 1 0 R >>\\n%%EOF\\n')));
+    const d = zlib.deflateSync(Buffer.alloc(60000, 1)); const t = [Buffer.from(K)];
+    for (let i = 0; i < 3; i += 1) t.push(Buffer.from((10 + i) + ' 0 obj\\n<< /Type /XRef /W [1 0 0] /Index [' + (8000000 + i * 60000) + ' 60000] /Size 9000000 /Root 1 0 R /Filter /FlateDecode /Length ' + d.length + ' >>\\nstream\\n'), d, Buffer.from('\\nendstream\\nendobj\\n'));
+    t.push(Buffer.from('trailer\\n<< /Root 1 0 R >>\\n%%EOF\\n'));
+    await bleibend('stroeme', new Uint8Array(Buffer.concat(t)));
+    console.log(JSON.stringify(erg));`);
+  assert.equal(p.status, 0, p.err);
+  const e = JSON.parse(p.out);
+  assert.equal(e.tabelle.zuGross, true, 'XRef-Tabelle 1 MB');
+  assert.ok(e.tabelle.mb < 12, `XRef-Tabelle: ${e.tabelle.mb.toFixed(1)} MB bleibend`);
+  assert.equal(e.stroeme.zuGross, true, 'XRef-Ströme');
+  assert.ok(e.stroeme.mb < 12, `XRef-Ströme: ${e.stroeme.mb.toFixed(1)} MB bleibend`);
   // derselbe Verweis 120.000-mal (kein Wachstum im globalen Speicher): lädt (vorher zählte jeder Verweis, Grenze 100.000)
   const gleich = await ladePdfBegrenzt(mitObjekt3('[' + '1 0 R '.repeat(120000) + ']'));
   assert.ok(gleich.pdf && !gleich.zuGross, 'wiederholter Verweis');
@@ -293,4 +298,38 @@ test('Härtung H-1b: Länge von Hex-/Literal-Strings und Namen vor dem Parsen be
   const neu = await ladePdfBegrenzt(mitObjekt3(knifflig), { updateMetadata: true }); const alt = await ALT(mitObjekt3(knifflig));
   assert.ok(neu.pdf && !neu.zuGross, 'Grenzfälle laden');
   assert.equal(objektBild(neu.pdf), objektBild(alt));
+});
+
+test('Härtung H-1c: Namen zählen eindeutig nach Speicher, Obergrenze je Isolat für die globalen Speicher von pdf-lib (Leck über Anfragen)', async () => {
+  // derselbe Name 150.000-mal (2,25 Mio. Zeichen, kein Wachstum im globalen Speicher): lädt (vorher zählte jedes Vorkommen, Grenze 2 Mio. Zeichen)
+  const gleich = await ladePdfBegrenzt(mitObjekt3('[' + '/abcdefghijklmn '.repeat(150000) + ']'));
+  assert.ok(gleich.pdf && !gleich.zuGross, 'wiederholter Name');
+  // eigener Prozess (128 MB): wiederholte Anfragen mit jeweils neuen Verweisen und Namen. Vorher wuchs der Speicher je Anfrage (Verweise rund 12 MB,
+  // Namen rund 35 MB, OOM nach wenigen Anfragen); jetzt endet das Wachstum an der Obergrenze je Isolat, danach wird jedes PDF abgelehnt
+  const p = mit128MB(`import { ladePdfBegrenzt, pdfIsolatStand } from './regel/pdf-sicher.js'; import { PDFDocument } from 'pdf-lib';
+    const K = ${JSON.stringify(KATALOG)}; const MB = 1048576;
+    const datei = (inhalt) => new Uint8Array(Buffer.from(K + '3 0 obj\\n' + inhalt + '\\nendobj\\ntrailer\\n<< /Root 1 0 R >>\\n%%EOF\\n'));
+    // gleichzeitig: normales PDF mit 300 Seiten (gibt alle 100 Objekte die Kontrolle ab) und eine Angriffsdatei; Zählung bleibt je Datei getrennt
+    const doc = await PDFDocument.create(); for (let i = 0; i < 300; i += 1) doc.addPage();
+    const normal300 = new Uint8Array(await doc.save({ useObjectStreams: false }));
+    let angriff = '['; for (let i = 0; i < 60000; i += 1) angriff += (9000000 + i) + ' 0 R ';
+    const [a, b] = await Promise.all([ladePdfBegrenzt(normal300), ladePdfBegrenzt(datei(angriff + ']'))]);
+    const gleichzeitig = { normalSeiten: a.pdf ? a.pdf.getPageCount() : -1, angriffZuGross: !!b.zuGross };
+    gc(); const v = process.memoryUsage().heapUsed; const erg = [];
+    for (let r = 0; r < 8; r += 1) {
+      let s = '['; for (let i = 0; i < 60000; i += 1) s += (r * 1000000 + i) + ' 0 R ';
+      for (let i = 0; i < 12000; i += 1) s += '/N' + r + 'x' + i + 'abcdefghij ';
+      erg.push((await ladePdfBegrenzt(datei(s + ']'))).zuGross ? 1 : 0);
+    }
+    gc(); const mb = (process.memoryUsage().heapUsed - v) / MB;
+    const normal = await ladePdfBegrenzt(datei('<< /A 1 >>'));
+    console.log(JSON.stringify({ gleichzeitig, erg, mb, stand: pdfIsolatStand(), normal: { zuGross: !!normal.zuGross, isolatVoll: !!normal.isolatVoll } }));`);
+  assert.equal(p.status, 0, p.err);
+  const e = JSON.parse(p.out);
+  assert.deepEqual(e.gleichzeitig, { normalSeiten: 300, angriffZuGross: true }, 'gleichzeitige Anfragen zählen getrennt');
+  assert.deepEqual(e.erg, [1, 1, 1, 1, 1, 1, 1, 1], 'jede Angriffsdatei über der Grenze je Datei');
+  assert.equal(e.stand.voll, true, 'Obergrenze je Isolat erreicht');
+  assert.ok(e.stand.verweise <= 120000 + 50001, `Verweise ${e.stand.verweise}`);
+  assert.ok(e.mb < 45, `bleibend nach 8 Anfragen ${e.mb.toFixed(1)} MB`);
+  assert.deepEqual(e.normal, { zuGross: true, isolatVoll: true }, 'danach wird jedes PDF abgelehnt (keine E-Rechnung, kein Absturz)');
 });
