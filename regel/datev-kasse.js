@@ -41,7 +41,7 @@ export const KASSE_UMSATZ_STEUERFAELLE = Object.freeze(['A_INLAND_19', 'A_INLAND
 // Dazu die Auszahlung des Trinkgelds an Mitarbeiter (Kasse an Durchlaufende Posten) und das _aus-Bein des Geldtransits zwischen Kassen (Kasse an andere Kasse).
 // Das _ein-Bein hat keine eigene Buchung (die Gegenseite steht im _aus-Bein der anderen Kasse); ohne passendes _aus warnt der Export.
 export const BEWEGUNG_GELDTRANSIT_BANK = Object.freeze(['geldtransit_bank_ein', 'geldtransit_bank_aus']);
-export const BEWEGUNG_OHNE_BUCHUNG = Object.freeze(['geldtransit_kasse_ein', 'geldtransit_kasse_aus', 'trinkgeld_ma_auszahlung']);
+export const BEWEGUNG_OHNE_BUCHUNG = Object.freeze(['geldtransit_kasse_ein', 'geldtransit_kasse_aus']);
 
 // Konto aus einem Profilfeld: leer = Standard; vierstellig = verwenden; sonst Standard mit Merker ungueltig (der Export warnt).
 export function kassenKontoWahl(roh, standard) {
@@ -164,19 +164,27 @@ export function kasseBelegPlan(d, original = null, fassungen = null) {
   return { datum: d.bezahlt_am, kassennummer, korrektur: false, einnahme: art !== 'fehlbetrag', kategorie: art === 'fehlbetrag' ? KASSEN_FEHLBETRAG : '', ku: fall === 'A_KU' && art !== 'mehrzweck', art, gutschein_cent: gutschein, kanaele };
 }
 
-// Geldtransit zur Bank (bewegung: dekodiertes Dokument aus kassenbewegungen). Richtung aus Sicht der Kasse: _ein = Geld kommt in die Kasse (Kasse Soll),
-// _aus = Geld verlässt die Kasse (Kasse Haben). Ein Storno der Bewegung bucht am Tag des Stornos die Gegenrichtung (die Original-Bewegung bleibt im Stapel).
-// Rückgabe: null = keine Geldtransit-Buchung | { offen, grund } | { datum, kassennummer, kasse_id, betrag_cent, sollHaben: 'S'|'H', storno, text }
+// Bewegung des Kassenbuchs mit eigener Buchung (bewegung: dekodiertes Dokument aus kassenbewegungen). Richtung aus Sicht der Kasse: _ein = Geld kommt in die Kasse
+// (Kasse Soll), _aus = Geld verlässt die Kasse (Kasse Haben). Ein Storno der Bewegung bucht am Tag des Stornos die Gegenrichtung (die Original-Bewegung bleibt im Stapel).
+// Gegenkonto (gegen): 'transit' = Geldtransit zur Bank, 'durchlauf' = Durchlaufende Posten (Auszahlung Trinkgeld an Mitarbeiter, 12-steuer 3.4 Nr. 6).
+// Rückgabe: null = keine Buchung | { offen, grund } | { datum, kassennummer, kasse_id, betrag_cent, sollHaben: 'S'|'H', storno, text, gegen }
 export function kasseBewegungBuchung(b) {
   if (!ISTOBJEKT(b)) return null;
   const storno = b.art === 'storno';
   const art = storno ? b.storno_art : b.art;
+  if (art === 'trinkgeld_ma_auszahlung') {
+    if (!DATUM.test(String(b.geschaeftstag || '')) || !ISTCENT(b.betrag_cent) || b.betrag_cent <= 0) return offen('bewegung_ungueltig');
+    const nr = typeof b.kassennummer === 'string' ? b.kassennummer.trim() : '';
+    if (!nr) return offen('kassennummer_fehlt');
+    return { datum: b.geschaeftstag, kassennummer: nr, kasse_id: typeof b.kasse_id === 'string' ? b.kasse_id : '', betrag_cent: b.betrag_cent, sollHaben: storno ? 'S' : 'H', storno, gegen: 'durchlauf',
+      text: `Auszahlung Trinkgeld an Mitarbeiter${b.text ? ` ${String(b.text)}` : ''}` };
+  }
   if (!BEWEGUNG_GELDTRANSIT_BANK.includes(art)) return null;
   if (!DATUM.test(String(b.geschaeftstag || '')) || !ISTCENT(b.betrag_cent) || b.betrag_cent <= 0) return offen('bewegung_ungueltig');
   const nr = typeof b.kassennummer === 'string' ? b.kassennummer.trim() : '';
   if (!nr) return offen('kassennummer_fehlt');
   const ein = (art === 'geldtransit_bank_ein') !== storno;
-  return { datum: b.geschaeftstag, kassennummer: nr, kasse_id: typeof b.kasse_id === 'string' ? b.kasse_id : '', betrag_cent: b.betrag_cent, sollHaben: ein ? 'S' : 'H', storno,
+  return { datum: b.geschaeftstag, kassennummer: nr, kasse_id: typeof b.kasse_id === 'string' ? b.kasse_id : '', betrag_cent: b.betrag_cent, sollHaben: ein ? 'S' : 'H', storno, gegen: 'transit',
     text: `${art === 'geldtransit_bank_ein' ? 'Geldtransit Bank an Kasse' : 'Geldtransit Kasse an Bank'}${b.text ? ` ${String(b.text)}` : ''}` };
 }
 
@@ -205,4 +213,29 @@ export function sumupKasseWahl(kassen, datum) {
   }
   if (treffer.length === 1) return { id: treffer[0] };
   return treffer.length ? { mehrere: true } : null;
+}
+
+// A-M1 (Gegenlesung o-p1c, Baukonzept 2.11 H, 12-steuer 3.4 Nr. 6 und 7): Posten eines Tagesabschlusses, die nicht im Umsatzbeleg stehen, aber den Kassenstand
+// und das Geldtransitkonto bewegen. fassung: dekodierte aktive Fassung des Kassentags (dort liegen die Werte, nicht im Kurzeintrag des Tagesplatzes).
+//   Bareingang auf Rechnung: Kasse an Bankkonto (die Rechnung steht im Export als bezahlt auf der Bank; die Gegenbuchung stellt Bank und Kasse richtig).
+//   Durchlaufende Posten und Trinkgeld der Mitarbeiter: bar Kasse, unbar Geldtransit, jeweils an Durchlaufende Posten (1590/1370).
+// Rückgabe: { offen: true, grund } | { posten: [{ art, konto: 'kasse'|'transit', gegen: 'bank'|'durchlauf'|'transit', sollHaben: 'S'|'H', betrag_cent, text }] }
+export function kasseTagesPosten(fassung, kasse = null) {
+  if (!ISTOBJEKT(fassung)) return offen('fassung_fehlt');
+  const c0 = (x) => (x === undefined || x === null ? 0 : x);
+  const werte = [fassung.bareingang_forderungen_cent, fassung.trinkgeld_mitarbeiter_bar_cent, fassung.trinkgeld_mitarbeiter_unbar_cent].map(c0);
+  if (!werte.every((x) => ISTCENT(x) && x >= 0)) return offen('fassung_ungueltig');
+  const [bareingang, tgBar, tgUnbar] = werte;
+  const dl = fassung.durchlaufend === undefined || fassung.durchlaufend === null ? [] : fassung.durchlaufend;
+  if (!Array.isArray(dl) || !dl.every((z) => ISTOBJEKT(z) && ISTCENT(c0(z.bar_cent)) && ISTCENT(c0(z.unbar_cent)) && c0(z.bar_cent) >= 0 && c0(z.unbar_cent) >= 0)) return offen('fassung_ungueltig');
+  const dlBar = dl.reduce((a, z) => a + c0(z.bar_cent), 0);
+  const dlUnbar = dl.reduce((a, z) => a + c0(z.unbar_cent), 0);
+  const posten = [];
+  const ein = (art, konto, gegen, betrag, text) => { if (betrag > 0) posten.push({ art, konto, gegen, sollHaben: 'S', betrag_cent: betrag, text }); };
+  ein('bareingang', 'kasse', 'bank', bareingang, 'Barzahlung auf Rechnung lt. Tagesabschluss');
+  ein('durchlaufend_bar', 'kasse', 'durchlauf', dlBar, 'Durchlaufende Posten bar lt. Tagesabschluss');
+  ein('durchlaufend_unbar', 'transit', 'durchlauf', dlUnbar, 'Durchlaufende Posten Karte lt. Tagesabschluss');
+  ein('trinkgeld_ma_bar', 'kasse', 'durchlauf', tgBar, 'Trinkgeld Mitarbeiter bar lt. Tagesabschluss');
+  ein('trinkgeld_ma_unbar', 'transit', 'durchlauf', tgUnbar, 'Trinkgeld Mitarbeiter Karte lt. Tagesabschluss');
+  return { posten };
 }

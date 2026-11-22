@@ -25,7 +25,7 @@ import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // 
 import { rechnungsnrDuplikat, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c)
 import { datevMischsatzGruppen, datevKorrekturGruppen, KORREKTUR_BELEG_ARTEN } from './regel/datev-mischsatz.js'; // Branch datev-mischsatz: Belege mit mehreren Steuersätzen je Satz buchen
 import { dekodiereFelder as datevDekodiereFelder } from './regel/firestore.js';
-import { DATEV_KASSE_KONTEN, KASSE_DURCHLAUF_KONTO, KASSE_ERLOES_0_KONTO, KASSE_MEHRZWECK_KONTO, kassenKontoWahl, istKasseTagesbeleg, kasseBelegPlan, kasseBewegungBuchung, kasseBewegungOhneBuchung, istSumupBarbeleg, sumupKasseWahl } from './regel/datev-kasse.js'; // Kassenbuch P1b-5: DATEV-Kassenzweig
+import { DATEV_KASSE_KONTEN, KASSE_DURCHLAUF_KONTO, KASSE_ERLOES_0_KONTO, KASSE_MEHRZWECK_KONTO, kassenKontoWahl, istKasseTagesbeleg, kasseBelegPlan, kasseBewegungBuchung, kasseBewegungOhneBuchung, kasseTagesPosten, istSumupBarbeleg, sumupKasseWahl } from './regel/datev-kasse.js'; // Kassenbuch P1b-5: DATEV-Kassenzweig
 import { datevBelegfeldBereinigen, datevFeldGequotet, datevNummerPruefen, datevKontoVierstellig, datevGeldkontoImBereich, datevKuKonto, RC_EINGANG_KONTEN, RC_AUSGANG_KONTEN, datevRcLage, datevUstId, GWG_KONTEN, AFA_KATEGORIE, GWG_KATEGORIE, FA_EST_ART, UST_KATEGORIEN } from './regel/datev-export-regeln.js'; // DATEV-Gesamtcheck 21.11.2026: Belegfeld 1, § 13b, GWG, Konten
 import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen, kiKassenberichtText } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4); Kassen-P0: kiKassenberichtText
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
@@ -5541,12 +5541,32 @@ async function handleDatevExport(body, env, cors = {}) {
         if (bu === null) { if (kasseBewegungOhneBuchung(b) && jahrBew === String(jahr)) kasseOhneBewegung.push(String((b && b.kassennummer) || bewId)); continue; }
         if (bu.offen) { if (jahrBew === String(jahr)) kasseOffen.push(`${(b && b.kassennummer) || bewId} (${bu.grund})`); continue; }
         if (jahrBew !== String(jahr)) continue;
-        buchungen.push({ betrag: bu.betrag_cent / 100, sollHaben: bu.sollHaben, konto: await kassenKonto(bu.kasse_id), gegenkonto: geldtransitkonto, bu: '', belegDatum: new Date(bu.datum + 'T00:00:00'), belegfeld1: bu.kassennummer, belegfeld2: '', buchungstext: buchungstextBasisKurz(bu.text, bu.storno ? ' [Storno]' : ''), diverseAdressnummer: '' });
+        buchungen.push({ betrag: bu.betrag_cent / 100, sollHaben: bu.sollHaben, konto: await kassenKonto(bu.kasse_id), gegenkonto: bu.gegen === 'durchlauf' ? KASSE_DURCHLAUF_KONTO[skrK0] : geldtransitkonto, bu: '', belegDatum: new Date(bu.datum + 'T00:00:00'), belegfeld1: bu.kassennummer, belegfeld2: '', buchungstext: buchungstextBasisKurz(bu.text, bu.storno ? ' [Storno]' : ''), diverseAdressnummer: '' });
         kasseBewGebucht++;
       }
     }
+    // A-M1: Posten eines Tagesabschlusses außerhalb des Umsatzbelegs (Bareingang auf Rechnung, Durchlaufendes, Trinkgeld der Mitarbeiter), aus der aktiven Fassung des Tages.
+    // Ein stornierter Tag (fassung_aktiv null) hat keine Posten; sein Umsatzbeleg wird über den Storno-Spiegel aufgehoben.
+    let kasseTagesPostenGebucht = 0;
+    if (kasseAktiv) {
+      const td = await kassenTageLesen();
+      for (const [tagId, tag] of td.tage) {
+        if (!tag || tag.status !== 'abgeschlossen' || !Number.isSafeInteger(tag.fassung_aktiv) || String(tag.geschaeftstag || '').slice(0, 4) !== String(jahr) || !/^\d{4}-\d{2}-\d{2}$/.test(String(tag.geschaeftstag))) continue;
+        const fass = td.fassungen.get(`${tagId}|${tag.fassung_aktiv}`);
+        if (!fass && tageLesefehler) continue; // eine einzige Warnung unten
+        const nrTag = String((fass && fass.kassennummer) || '').trim();
+        const pl = nrTag ? kasseTagesPosten(fass) : { offen: true, grund: fass ? 'kassennummer_fehlt' : 'fassung_fehlt' };
+        if (pl.offen) { kasseOffen.push(`${nrTag || tagId} (${pl.grund})`); continue; }
+        for (const po of pl.posten) {
+          buchungen.push({ betrag: po.betrag_cent / 100, sollHaben: po.sollHaben, konto: po.konto === 'kasse' ? await kassenKonto(tag.kasse_id) : geldtransitkonto,
+            gegenkonto: po.gegen === 'bank' ? bankkonto : KASSE_DURCHLAUF_KONTO[skrK0], bu: '', belegDatum: new Date(tag.geschaeftstag + 'T00:00:00'), belegfeld1: `${nrTag}-Z`, belegfeld2: '',
+            buchungstext: buchungstextBasisKurz(po.text, ''), diverseAdressnummer: '' });
+          kasseTagesPostenGebucht++;
+        }
+      }
+    }
     if (kasseAktiv || kasseSumupMehrere > 0) {
-      const kasseZeilen = kasseAusgabeJahr + kasseBewGebucht + kassePrivat + kasseSumupBar + buchungen.filter((x) => /^K-/.test(String(x.belegfeld1))).length;
+      const kasseZeilen = kasseAusgabeJahr + kasseBewGebucht + kassePrivat + kasseSumupBar + kasseTagesPostenGebucht + buchungen.filter((x) => /^K-/.test(String(x.belegfeld1))).length;
       if (kasseOffen.length) warnen(`${kasseOffen.length} Beleg(e) und Bewegung(en) aus dem Kassenbuch stehen NICHT im Stapel (Grund in Klammern): ${nummern(kasseOffen)}. Bitte nenne sie deinem Steuerberater, er bucht sie von Hand.`);
       if (kasseEinloesung.length) warnen(`${kasseEinloesung.length} Tagesabschluss/-abschlüsse mit Einlösung von Mehrzweck-Gutscheinen (zusammen ${(kasseEinloesung.reduce((a, x) => a + x.cent, 0) / 100).toFixed(2).replace('.', ',')} €): ${nummern(kasseEinloesung.map((x) => x.nr))}. Bar und Karte stehen voll im Stapel, die Einlösung steht als Umbuchung von ${KASSE_MEHRZWECK_KONTO[skrK0]} auf das Erlöskonto des Satzes (die Umsatzsteuer rechnet das Erlöskonto). Diese Buchung muss dein Steuerberater bestätigen.`);
       if (kasseSumupBar > 0) warnen(`${kasseSumupBar} SumUp-Barzahlung(en) stehen auf dem Kassenkonto der SumUp-Kasse statt auf der Bank (Bareinnahmen der Kasse mit SumUp-Anbindung). SumUp-Rückerstattungen und Rückbuchungen stehen weiter auf der Bank, weil nicht erkennbar ist, ob bar zurückgezahlt wurde: bitte beim Steuerberater prüfen.`);
@@ -5559,9 +5579,10 @@ async function handleDatevExport(body, env, cors = {}) {
         if (kasseKontoUngueltig.size) warnen(`Das DATEV-Konto der Kasse „${[...kasseKontoUngueltig].slice(0, 3).join('“, „')}“ ist keine vierstellige Kontonummer, es wurde ${kasseWahl.konto} verwendet.`);
         const skrKasse = skr === 'SKR04' ? 'SKR04' : 'SKR03';
         if (!datevGeldkontoImBereich(kasseWahl.konto, skrKasse) || !datevGeldkontoImBereich(geldtransitkonto, skrKasse)) warnen(`Kassenkonto ${kasseWahl.konto} oder Geldtransitkonto ${geldtransitkonto} liegt nicht im üblichen Bereich für Kasse oder Geldtransit im ${skr === 'SKR04' ? 'SKR04' : 'SKR03'}. Bitte prüfen.`);
+        if (tageLesefehler) warnen('Die Kassentage konnten nicht gelesen werden: Bareingänge auf Rechnungen, Durchlaufendes, Trinkgeld der Mitarbeiter und die Sätze von Gutschein-Einlösungen fehlen im Stapel. Bitte den Export gleich noch einmal starten.');
         if (kassenLesefehler) warnen('Die Kassen konnten nicht gelesen werden: DATEV-Konten einzelner Kassen wurden nicht berücksichtigt (Standard-Kassenkonto verwendet). Bitte den Export gleich noch einmal starten.');
         if (bewegungenLesefehler) warnen('Die Kassenbewegungen konnten nicht gelesen werden: Geldtransit und Stornos von Kassenausgaben fehlen im Stapel. Bitte den Export gleich noch einmal starten.');
-        warnen('Kassenbuch: Im Stapel stehen die Tageseinnahmen (bar gegen das Kassenkonto, Karte gegen das Geldtransitkonto), Ausgaben, Privatvorgänge, Kassendifferenzen und der Geldtransit zur Bank. Nicht enthalten sind durchlaufende Posten, Trinkgeld der Mitarbeiter, Bareingänge auf Rechnungen und Einlösungen von Mehrzweck-Gutscheinen: der Kassenstand in DATEV kann deshalb vom Kassenbuch abweichen.');
+        warnen('Kassenbuch: Im Stapel stehen die Tageseinnahmen (bar gegen das Kassenkonto, Karte gegen das Geldtransitkonto, Einlösungen von Mehrzweck-Gutscheinen als Umbuchung), Ausgaben, Privatvorgänge, Kassendifferenzen, der Geldtransit zur Bank, Bareingänge auf Rechnungen (Kasse an Bank), Durchlaufendes und Trinkgeld der Mitarbeiter (an Durchlaufende Posten). Bareingänge auf Rechnungen setzen voraus, dass die Rechnung als bezahlt markiert ist (sie steht im Export sonst nicht auf der Bank). Weicht der Kassenstand in DATEV vom Kassenbuch ab, nenne es deinem Steuerberater.');
       }
     }
 

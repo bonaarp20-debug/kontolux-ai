@@ -9,7 +9,7 @@ import { regelKasse } from '../regel/kasse.js';
 import { kassenAusgabeBeleg } from '../regel/kasse-ausgabe.js';
 import { AGB_MINDESTFASSUNG_KASSE } from '../regel/gemeinsam.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
-import { kasseBelegPlan, kasseBewegungBuchung, kassenKontoWahl, DATEV_KASSE_KONTEN, istSumupBarbeleg, sumupKasseWahl } from '../regel/datev-kasse.js';
+import { kasseBelegPlan, kasseBewegungBuchung, kassenKontoWahl, DATEV_KASSE_KONTEN, istSumupBarbeleg, sumupKasseWahl, kasseTagesPosten } from '../regel/datev-kasse.js';
 
 const UID = 'kassenDatevUid000000000001';
 const HEUTE = '2026-11-20';
@@ -266,10 +266,10 @@ test('Geldtransit Bank: _ein = Kasse Soll an Geldtransit, _aus = Kasse Haben; St
   assert.equal(nachKonto(g)['1360'], 4000, 'Original und Storno heben sich auf, übrig bleibt die Auszahlung (Geldtransit Soll)');
 });
 
-test('Geldtransit zwischen Kassen und Trinkgeld-Auszahlung haben keine Buchung (Gegenseite fehlt): Warnung mit Nummer statt stiller Lücke', async () => {
+test('Geldtransit zwischen Kassen (_ein ohne passendes _aus) hat keine Buchung (Gegenseite fehlt): Warnung mit Nummer statt stiller Lücke', async () => {
   const w = await welt();
   ok200(await w.tag(nur19(w.id, '2026-11-02')));
-  w.fs.setze(P(`kassenbewegungen/${w.id}_2026-11-03_001`), { kasse_id: w.id, geschaeftstag: '2026-11-03', art: 'trinkgeld_ma_auszahlung', betrag_cent: 500, text: 'TG', kassennummer: 'K-THK-2026-0900' });
+  w.fs.setze(P(`kassenbewegungen/${w.id}_2026-11-03_001`), { kasse_id: w.id, geschaeftstag: '2026-11-03', art: 'geldtransit_kasse_ein', betrag_cent: 500, text: 'TG', kassennummer: 'K-THK-2026-0900', gegenkasse_id: 'andereKasse000000000000001' });
   const r = await w.exp();
   assert.match(r.warnung, /1 Kassenbewegung\(en\).*K-THK-2026-0900/);
   assert.equal(r.zeilen.some((x) => ohne(x[10]) === 'K-THK-2026-0900'), false);
@@ -442,6 +442,68 @@ test('istSumupBarbeleg und sumupKasseWahl (rein): nur Einnahme-Barbelege der Int
   assert.deepEqual(sumupKasseWahl(kassen, '2026-11-05'), { mehrere: true });
 });
 
+// A-M1 (Gegenlesung o-p1c, Baukonzept 2.11 H/#F35): Bareingang auf Rechnung, Durchlaufendes und Trinkgeld der Mitarbeiter fehlten im Stapel. Die Werte stehen nur in der
+// Fassung (kassentage/{tag}/fassungen/{n}), der Export liest die aktive Fassung. Konten: 1590/1370 Durchlaufende Posten (12-steuer 3.4 Nr. 6), Bareingang Kasse an Bank (Nr. 7).
+const RE_BAR = { typ: 'rechnung_ausgehend', betrag: 500, absender: 'Kunde Meier', rechnungsnr: 'RE-1', bezahlt: true, bezahlt_am: '2026-11-02', datum: '2026-11-02', mwst_satz: '19', kategorie: 'Einnahmen 19%' };
+test('A-M1 (Szenario S3): Bareingang auf Rechnung 500,00 bar: Kasse an Bank, die Kasse wird nicht negativ (20 + 500 - 500), die Bank gleicht die als bezahlt gebuchte Rechnung aus', async () => {
+  const w = await welt();
+  w.fs.setze(P('dokumente/re1'), RE_BAR);
+  ok200(await w.tag({ aktion: 'abschliessen', kasse_id: w.id, geschaeftstag: '2026-11-02', z_nummern: ['Z-1'], umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 2000, unbar_cent: 0 }], bareingang_forderungen_cent: 50000,
+    gezaehlt_cent: 10000 + 2000 + 50000, bestand_gezaehlt_bestaetigt: true, grundaufzeichnung_bestaetigt: true }));
+  ok200(await w.bew(bewegung(w.id, '2026-11-03', 'geldtransit_bank_aus', 50000)));
+  const r = await w.exp();
+  assert.equal(r.status, 200, r.text);
+  const z = kurz(r.zeilen, 'K-THK-2026-0001-Z');
+  assert.deepEqual(z.map((x) => x.slice(0, 4)), [['500,00', 'S', '1000', '1200']]);
+  assert.equal(z[0][5], '0211');
+  assert.match(r.zeilen.find((x) => ohne(x[10]) === 'K-THK-2026-0001-Z')[13], /Barzahlung auf Rechnung lt\. Tagesabschluss/);
+  const k = nachKonto(r.zeilen);
+  assert.equal(k['1000'], 2000 + 50000 - 50000, 'Kasse in DATEV = Kassenbuch (120,00) minus Anfangsbestand 100,00, ohne die Posten wäre sie 20 - 500 = -480');
+  assert.equal(k['1200'], 0, 'Bank: Rechnung als bezahlt (+500) und Richtigstellung (-500) heben sich auf');
+  assert.equal(k['1360'], 50000, 'Geldtransit zur Bank unverändert');
+  assert.equal(Object.values(k).reduce((a, b) => a + b, 0), 0);
+});
+
+test('A-M1: Durchlaufendes (Lotto bar 80,00, Karte 20,00) und Trinkgeld der Mitarbeiter (bar 5,00, Karte 30,00) buchen gegen 1590 (SKR04 1370), die Auszahlung des Trinkgelds Kasse Haben; ein Storno der Auszahlung kehrt um', async () => {
+  for (const [skr, kasse, transit, dl, bank] of [['SKR03', '1000', '1360', '1590', '1200'], ['SKR04', '1600', '1460', '1370', '1800']]) {
+    const w = await welt({ skr });
+    const aus = ok200(await w.bew(bewegung(w.id, '2026-11-02', 'trinkgeld_ma_auszahlung', 3500)));
+    const aus2 = ok200(await w.bew(bewegung(w.id, '2026-11-02', 'trinkgeld_ma_auszahlung', 100)));
+    ok200(await w.bew({ aktion: 'stornieren', kasse_id: w.id, bewegung_id: aus2.bewegung_id, grund: 'falsch erfasst' }));
+    ok200(await w.tag({ aktion: 'abschliessen', kasse_id: w.id, geschaeftstag: '2026-11-02', z_nummern: ['Z-1'], umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 2000, unbar_cent: 30000 }],
+      durchlaufend: [{ art: 'lotto_toto', bar_cent: 8000, unbar_cent: 2000 }], trinkgeld_mitarbeiter_bar_cent: 500, trinkgeld_mitarbeiter_unbar_cent: 3000,
+      gezaehlt_cent: 10000 + 2000 + 8000 + 500 - 3500, bestand_gezaehlt_bestaetigt: true, grundaufzeichnung_bestaetigt: true }));
+    const r = await w.exp();
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(r.zeilen.filter((x) => /lt\. Tagesabschluss/.test(x[13]) && /-Z"?$/.test(x[10])).map((x) => [x[0], x[1], x[6], x[7]]).sort(), [
+      ['20,00', 'S', transit, dl], ['30,00', 'S', transit, dl], ['5,00', 'S', kasse, dl], ['80,00', 'S', kasse, dl]].sort(), skr);
+    const t = r.zeilen.filter((x) => /Auszahlung Trinkgeld/.test(x[13])).map((x) => [x[0], x[1], x[6], x[7]]).sort();
+    assert.deepEqual(t, [['1,00', 'H', kasse, dl], ['1,00', 'S', kasse, dl], ['35,00', 'H', kasse, dl]].sort());
+    const k = nachKonto(r.zeilen);
+    assert.equal(k[dl], -(8000 + 2000 + 500 + 3000 - 3500), 'Durchlaufende Posten (Haben): Eingänge minus Auszahlung');
+    assert.equal(k[kasse], 2000 + 8000 + 500 - 3500, 'Kasse = Kassenbuch ohne Anfangsbestand: 80 + 20 + 5 - 35');
+    assert.equal(Object.values(k).reduce((a, b) => a + b, 0), 0, `${bank}: Soll gleich Haben`);
+    assert.doesNotMatch(r.warnung, /Auszahlung Trinkgeld an Mitarbeiter\) stehen nicht im Stapel/);
+    assert.ok(aus.bewegung_id);
+  }
+});
+
+test('A-M1: ein stornierter Tag hat keine Posten (nur der aktiven Fassung), die neue Fassung bucht ihre eigenen; kasseTagesPosten (rein): leere Werte ergeben keine Zeile, ungültige Werte einen Grund', async () => {
+  const w = await welt();
+  const mit = (extra) => ({ aktion: 'abschliessen', kasse_id: w.id, geschaeftstag: '2026-11-02', z_nummern: ['Z-1'], umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 2000, unbar_cent: 0 }], bareingang_forderungen_cent: 7000,
+    gezaehlt_cent: 10000 + 2000 + 7000, bestand_gezaehlt_bestaetigt: true, grundaufzeichnung_bestaetigt: true, ...extra });
+  ok200(await w.tag(mit({})));
+  ok200(await w.tag({ aktion: 'stornieren', kasse_id: w.id, geschaeftstag: '2026-11-02', grund: 'Fehler beim Erfassen' }));
+  ok200(await w.tag(mit({ bareingang_forderungen_cent: 1000, gezaehlt_cent: 10000 + 2000 + 1000 })));
+  const r = await w.exp();
+  const z = r.zeilen.filter((x) => /Barzahlung auf Rechnung/.test(x[13]));
+  assert.deepEqual(z.map((x) => [ohne(x[10]), x[0], x[1]]), [['K-THK-2026-0003-Z', '10,00', 'S']], 'nur die aktive Fassung 2 (Kassennummer 0003)');
+  assert.deepEqual(kasseTagesPosten({}).posten, []);
+  assert.equal(kasseTagesPosten({ bareingang_forderungen_cent: -1 }).grund, 'fassung_ungueltig');
+  assert.equal(kasseTagesPosten({ durchlaufend: [{ art: 'lotto_toto', bar_cent: 1.5 }] }).grund, 'fassung_ungueltig');
+  assert.equal(kasseTagesPosten(null).grund, 'fassung_fehlt');
+});
+
 // ── 6. Bestandsnutzer unverändert, Jahr, Hinweis ─────────────────────────────────────────────────
 test('Kein Kassenbuch: Konten und Warnung wie bisher (keine Kassenhinweise, Bankkonto), kein Lesezugriff auf Kassen und Bewegungen', async () => {
   const fs = fakeFirestore();
@@ -465,10 +527,10 @@ test('Jahr: ein Tag aus 2026 steht nicht im Export 2027', async () => {
   assert.equal(r.status, 404);
 });
 
-test('Hinweis zum Kassenbuch steht in der Warnung (Durchlaufendes, Trinkgeld Mitarbeiter, Bareingang auf Rechnung und Mehrzweck-Einlösung sind nicht im Stapel)', async () => {
+test('Hinweis zum Kassenbuch steht in der Warnung (was im Stapel steht, Voraussetzung der Bareingänge auf Rechnung)', async () => {
   const w = await welt();
   ok200(await w.tag(nur19(w.id, '2026-11-02')));
-  assert.match((await w.exp()).warnung, /Kassenbuch: Im Stapel stehen die Tageseinnahmen.*Nicht enthalten sind durchlaufende Posten, Trinkgeld der Mitarbeiter, Bareingänge auf Rechnungen/);
+  assert.match((await w.exp()).warnung, /Kassenbuch: Im Stapel stehen die Tageseinnahmen.*Bareingänge auf Rechnungen \(Kasse an Bank\), Durchlaufendes und Trinkgeld der Mitarbeiter.*Weicht der Kassenstand in DATEV vom Kassenbuch ab/);
 });
 
 // ── 7. Summenprobe über die ganze Kasse ──────────────────────────────────────────────────────────
