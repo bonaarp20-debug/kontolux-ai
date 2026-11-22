@@ -1847,21 +1847,130 @@ test('O6 H2: mehr als 120 Ruhetage nach dem letzten Abschluss: der letzte Abschl
   assert.deepEqual([frueher.status, frueher.json.fehler[0].code, frueher.json.letzter_tag], [409, 'SPAETERE_TAGE', '2027-04-04']);
 });
 
-test('O6 H2: mehr Tagesplätze ohne Treffer als lesbar (1000): fail-closed 503 KASSENTAGE_ZU_VIELE statt stillem „kein Abschluss“, nichts geschrieben', async () => {
-  const u = umgebung({ heute: '2030-12-31' });
-  const id = await u.legeKasseAn();
-  assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200);
-  for (let i = 0; i < 1100; i += 1) {
-    const t = K.addiereTage('2026-11-03', i);
+// hyg H2/N4: Zeiger kassen/{id}.letzter_abschluss statt Suche über Tagesplätze
+const ruhetagePlaetze = (u, id, von, n) => {
+  for (let i = 0; i < n; i += 1) {
+    const t = K.addiereTage(von, i);
     u.fs.setze(P(`kassentage/${id}_${t}`), { kasse_id: id, geschaeftstag: t, status: 'ruhetag', fassung_aktiv: null, fassungen_kurz: [] });
   }
-  const vor = u.fs.log.commits;
+};
+test('hyg H2: Zeiger letzter_abschluss: 1100 Ruhetage nach dem letzten Abschluss (früher 503): Abschluss mit gezähltem Bestand; Storno setzt den Zeiger auf den Vorgänger zurück, dann auf null (Anfangsbestand der Kasse); kein Verlaufseintrag', async () => {
+  const u = umgebung({ heute: '2030-12-31' });
+  const id = await u.legeKasseAn();
+  assert.equal(u.fs.lies(P(`kassen/${id}`)).letzter_abschluss, null, 'neue Kasse: Zeiger null');
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200); // gezählt 707,00
+  const k1 = u.fs.lies(P(`kassen/${id}`));
+  assert.deepEqual(k1.letzter_abschluss, { tag: '2026-11-02', fassung: 1, gezaehlt_cent: 70700 });
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-02`)).vorheriger_abschluss, null);
+  ruhetagePlaetze(u, id, '2026-11-03', 1100);
   const r = await u.tagRufe(ohneUmsatz(id, '2030-01-01', { gezaehlt_cent: 70700 }));
-  assert.equal(r.status, 503, JSON.stringify(r.json));
-  assert.equal(r.json.fehler[0].code, 'KASSENTAGE_ZU_VIELE');
-  assert.equal(u.fs.log.commits, vor);
-  const s = await u.tagRufe(stornoBody(id, '2026-11-02'));
-  assert.equal(s.status, 503, 'auch der Storno fragt den letzten Abschluss: lieber blockieren als die Kette aushebeln');
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.differenz_cent, 0);
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2030-01-01`)).anfangsbestand_cent, 70700);
+  assert.deepEqual(u.fs.lies(P(`kassentage/${id}_2030-01-01`)).vorheriger_abschluss, { tag: '2026-11-02', fassung: 1, gezaehlt_cent: 70700 });
+  const k2 = u.fs.lies(P(`kassen/${id}`));
+  assert.deepEqual(k2.letzter_abschluss, { tag: '2030-01-01', fassung: 1, gezaehlt_cent: 70700 });
+  // Zeiger ist kein Stammdatum: Verlauf und geaendert_am bleiben
+  assert.deepEqual([k2.verlauf, k2.geaendert_am], [k1.verlauf, k1.geaendert_am]);
+  assert.deepEqual(u.fs.pfade(P(`kassen/${id}/verlauf/`)), []);
+  // nur der letzte Abschluss ist stornierbar; der Storno setzt den Zeiger auf den Vorgänger (ohne Suche über 1100 Plätze)
+  assert.equal((await u.tagRufe(stornoBody(id, '2026-11-02'))).json.fehler[0].code, 'SPAETERE_TAGE');
+  const s1 = await u.tagRufe(stornoBody(id, '2030-01-01'));
+  assert.equal(s1.status, 200, JSON.stringify(s1.json));
+  assert.deepEqual(u.fs.lies(P(`kassen/${id}`)).letzter_abschluss, { tag: '2026-11-02', fassung: 1, gezaehlt_cent: 70700 });
+  const s2 = await u.tagRufe(stornoBody(id, '2026-11-02'));
+  assert.equal(s2.status, 200, JSON.stringify(s2.json));
+  assert.equal(u.fs.lies(P(`kassen/${id}`)).letzter_abschluss, null);
+  // ohne Abschluss gilt wieder der Anfangsbestand der Kasse (100,00): Neuerfassung des 02.11. als Fassung 2
+  const n2 = await u.tagRufe(abschluss(id, '2026-11-02'));
+  assert.equal(n2.status, 200, JSON.stringify(n2.json));
+  assert.equal(n2.json.fassung, 2);
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-02/fassungen/2`)).anfangsbestand_cent, 10000);
+  assert.deepEqual(u.fs.lies(P(`kassen/${id}`)).letzter_abschluss, { tag: '2026-11-02', fassung: 2, gezaehlt_cent: 70700 });
+  // Bewegung vor dem letzten Abschluss weiter gesperrt (Zeiger), danach offen
+  assert.equal((await u.bewRufe(bewegung(id, '2026-11-01', 'geldtransit_bank_ein', 100))).json.fehler[0].code, 'SPAETERE_TAGE');
+});
+
+test('hyg N4: die Zahl der Firestore-Anfragen eines Abschlusses hängt nicht von Pausen ab (300 Ruhetage kosten keine Anfrage mehr)', async () => {
+  const zaehle = async (pause) => {
+    const u = umgebung({ heute: '2027-12-31' });
+    const id = await u.legeKasseAn();
+    assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200);
+    if (pause) ruhetagePlaetze(u, id, '2026-11-03', pause);
+    const vor = u.fs.log.anfragen;
+    const r = await u.tagRufe(ohneUmsatz(id, K.addiereTage('2026-11-03', pause), { gezaehlt_cent: 70700 }));
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    return u.fs.log.anfragen - vor;
+  };
+  // eine Lücke kostet genau eine Abfrage (O6 H1: Bewegungen in der Lücke), unabhängig von ihrer Länge
+  const kurz = await zaehle(1);
+  assert.equal(await zaehle(300), kurz);
+  assert.equal(await zaehle(0), kurz - 1);
+  assert.ok(kurz <= 20, `Anfragen ${kurz}`);
+});
+
+test('hyg H2: zwei gleichzeitige Abschlüsse desselben Tages: genau einer gewinnt, Zeiger zeigt auf ihn; ein zwischen Lesen und Commit gesetzter Zeiger (Vorbedingung updateTime der Kasse) führt zur Wiederholung und 409 SPAETERE_TAGE, nichts geschrieben', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const [a, b] = await Promise.all([u.tagRufe(abschluss(id, '2026-11-02')), u.tagRufe(abschluss(id, '2026-11-02', { gezaehlt_cent: 70600, differenz_grund: 'Wechselgeld' }))]);
+  const erfolge = [a, b].filter((x) => x.status === 200);
+  assert.equal(erfolge.length, 1, JSON.stringify([a.json, b.json]));
+  const verlierer = [a, b].find((x) => x.status !== 200);
+  assert.equal(verlierer.status, 409);
+  assert.ok(['KASSENTAG_VORHANDEN', 'KONFLIKT'].includes(verlierer.json.fehler[0].code), JSON.stringify(verlierer.json));
+  const tagDaten = u.fs.lies(P(`kassentage/${id}_2026-11-02`));
+  assert.deepEqual(u.fs.lies(P(`kassen/${id}`)).letzter_abschluss, { tag: '2026-11-02', fassung: 1, gezaehlt_cent: tagDaten.gezaehlt_cent });
+  assert.equal(u.fs.lies(P(`zaehler/K_${id}_2026`)).letzte, 1);
+  // Vorbedingung auf der Kasse: zwischen Lesen und Commit setzt ein anderer Vorgang den Zeiger auf den 05.11. (ohne Audit-Kopf zu berühren)
+  const v = umgebung();
+  const vid = await v.legeKasseAn();
+  let einmal = false;
+  v.fs.haken.vorCommit = async (writes, api) => {
+    if (einmal || !writes.some((w) => String(w.update && w.update.name).includes(`/kassentage/${vid}_2026-11-03`))) return;
+    einmal = true;
+    api.setze(P(`kassentage/${vid}_2026-11-05`), { kasse_id: vid, geschaeftstag: '2026-11-05', status: 'abgeschlossen', fassung_aktiv: 1, fassungen_kurz: [{ n: 1 }], gezaehlt_cent: 10000 });
+    api.setze(P(`kassen/${vid}`), { ...api.lies(P(`kassen/${vid}`)), letzter_abschluss: { tag: '2026-11-05', fassung: 1, gezaehlt_cent: 10000 } });
+  };
+  const r = await v.tagRufe(ohneUmsatz(vid, '2026-11-03'));
+  assert.deepEqual([r.status, r.json.fehler && r.json.fehler[0].code, r.json.letzter_tag], [409, 'SPAETERE_TAGE', '2026-11-05'], JSON.stringify(r.json));
+  assert.equal(v.fs.lies(P(`kassentage/${vid}_2026-11-03`)), null);
+  assert.deepEqual(v.fs.lies(P(`kassen/${vid}`)).letzter_abschluss, { tag: '2026-11-05', fassung: 1, gezaehlt_cent: 10000 });
+});
+
+test('hyg H2: Zeiger unlesbar oder passt nicht zum Tagesplatz: fail-closed 503 KASSENZEIGER_UNGUELTIG bei Abschluss, Storno und Bewegung, nichts geschrieben; fehlt er, gilt der Anfangsbestand', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200);
+  const kasse = u.fs.lies(P(`kassen/${id}`));
+  const pruefe = async (zeiger, { bewegung: mitBewegung = true } = {}) => {
+    u.fs.setze(P(`kassen/${id}`), { ...kasse, letzter_abschluss: zeiger });
+    const vor = u.fs.log.commits;
+    const a = await u.tagRufe(ohneUmsatz(id, '2026-11-04', { gezaehlt_cent: 70700 }));
+    assert.deepEqual([a.status, a.json.fehler[0].code], [503, 'KASSENZEIGER_UNGUELTIG'], JSON.stringify(zeiger));
+    const s = await u.tagRufe(stornoBody(id, '2026-11-02'));
+    assert.deepEqual([s.status, s.json.fehler[0].code], [503, 'KASSENZEIGER_UNGUELTIG'], JSON.stringify(zeiger));
+    if (mitBewegung) assert.equal((await u.bewRufe(bewegung(id, '2026-11-04', 'geldtransit_bank_ein', 100))).status, 503);
+    assert.equal(u.fs.log.commits, vor, 'kein Commit');
+  };
+  await pruefe({ tag: 'gestern', fassung: 1, gezaehlt_cent: 70700 });
+  await pruefe({ tag: '2026-11-02', fassung: 1, gezaehlt_cent: -1 });
+  await pruefe('2026-11-02');
+  // gültige Form, aber falscher Bestand oder falsche Fassung: Abschluss und Storno prüfen gegen den Tagesplatz
+  await pruefe({ tag: '2026-11-02', fassung: 1, gezaehlt_cent: 70000 }, { bewegung: false });
+  await pruefe({ tag: '2026-11-02', fassung: 2, gezaehlt_cent: 70700 }, { bewegung: false });
+  // Zeiger auf einen früheren Tag als den abgeschlossenen (Storno) bzw. auf einen Tag ohne Abschluss (Abschluss)
+  await pruefe({ tag: '2026-11-01', fassung: 1, gezaehlt_cent: 70700 }, { bewegung: false });
+  // Storno ohne Zeiger, obwohl der Tag abgeschlossen ist: 503 statt eines Stornos, der die Kette bricht
+  u.fs.setze(P(`kassen/${id}`), { ...kasse, letzter_abschluss: null });
+  assert.equal((await u.tagRufe(stornoBody(id, '2026-11-02'))).json.fehler[0].code, 'KASSENZEIGER_UNGUELTIG');
+  // fehlender Zeiger an einer Kasse ohne Abschluss: Anfangsbestand der Kasse
+  const v = umgebung();
+  const vid = await v.legeKasseAn();
+  const { letzter_abschluss: _weg, ...ohneZeiger } = v.fs.lies(P(`kassen/${vid}`));
+  v.fs.setze(P(`kassen/${vid}`), ohneZeiger);
+  const r = await v.tagRufe(ohneUmsatz(vid, '2026-11-02'));
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(v.fs.lies(P(`kassentage/${vid}_2026-11-02`)).anfangsbestand_cent, 10000);
 });
 
 test('O6 M1: Storno-Kassenbelege tragen bezahlt: true und bezahlt_am = Geschäftstag (im Hash); eine Client-Änderung „bezahlt“ ist nach den Rules unmöglich, der Drift-Status bleibt ok, der Storno wirkt (Regel und Ist-Versteuerung)', async () => {
