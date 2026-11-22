@@ -23,7 +23,8 @@
 // Vision: Fotos verkleinert der Browser auf höchstens 2000 px lange Kante (2.14 Ablauf 2). Der Höchstwert für Haiku 5.5 ist gegen die
 // Vision-Doku (https://docs.claude.com/en/docs/build-with-claude/vision) vor O4 zu prüfen; der Worker lässt Bilder bis 10 MB durch.
 // Structured Outputs: JSON-Schema ohne maxLength/maxItems/minimum/maximum (die API bildet sie nicht ab); der Worker prüft sie (siehe unten).
-import { PDFDocument, PDFArray, PDFDict, PDFName, PDFNumber, PDFRawStream, PDFParser, decodePDFRawStream } from 'pdf-lib';
+import { PDFArray, PDFDict, PDFName, PDFNumber, PDFRawStream } from 'pdf-lib';
+import { ladePdfBegrenzt, stromLaengeBegrenzt, PDF_STROM_MAX, PDF_ENTPACKT_MAX, PDF_XREF_EINTRAEGE_MAX } from './pdf-sicher.js';
 import * as Steuerkern from '../steuerkern/index.js';
 import {
   antwort, fehlerAntwort, featureAusAntwort, grundpruefung, istObjekt, istDatum, nurSchluessel, CONFIG_PFAD, configBereinigen, featureAktiv,
@@ -53,9 +54,9 @@ export const ZBON_PDF_INHALT_MAX_ROH = 32 * 1024; // Seiteninhalt (komprimiert) 
 // G2-Fix M-2 (Entpack-Bombe): jeder Strom, den der Worker oder pdf-lib entpackt (Objekt- und XRef-Ströme beim Laden, Seiteninhalte und XObjects beim Zählen),
 // wird gezählt und begrenzt entpackt: höchstens 4 MB je Strom und 16 MB je Datei, Abbruch beim Überschreiten (der Entpacker selbst stoppt, kein volles Entpacken).
 // Filterketten (mehr als ein Filter) werden abgelehnt: die Rohgrenze schützt nur eine Stufe (474 Byte mit doppeltem FlateDecode = 200 MB).
-export const ZBON_PDF_STROM_MAX = 4 * 1024 * 1024;
-export const ZBON_PDF_ENTPACKT_MAX = 16 * 1024 * 1024;
-export const ZBON_PDF_XREF_EINTRAEGE_MAX = 100000; // XRef-Strom: Einträge ohne Bytes (/W [0 0 0], großes /Size) wären eine Schleife ohne Entpacken
+export const ZBON_PDF_STROM_MAX = PDF_STROM_MAX; // 4 MB (regel/pdf-sicher.js)
+export const ZBON_PDF_ENTPACKT_MAX = PDF_ENTPACKT_MAX; // 16 MB
+export const ZBON_PDF_XREF_EINTRAEGE_MAX = PDF_XREF_EINTRAEGE_MAX; // XRef-Strom: Einträge ohne Bytes (/W [0 0 0], großes /Size) wären eine Schleife ohne Entpacken
 export const ZBON_ZU_GROSS_TEXT = 'Die Datei ist zu groß zum Lesen. Verkleinere die Datei (weniger Seiten, kürzerer Text) oder trag die Werte selbst ein.';
 export const ZBON_ERLAUBTE_TYPEN = Object.freeze(['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'text/plain', 'text/csv']);
 // Entscheidung: obere Grenze je Betrag 1.000.000 EUR in Cent (strenger als BELEG_MAX_BETRAG = 10.000.000 EUR in worker.js; ein Tagesabschluss
@@ -487,78 +488,14 @@ export function zbonEingabeTokens(art, { bytes, seiten, inhaltBytes } = {}) {
   if (art === 'bild') return ZBON_FEST_TOKEN + ZBON_BILD_TOKEN;
   return ZBON_FEST_TOKEN + (seiten || 0) * ZBON_PDF_SEITE_TOKEN + Math.ceil((inhaltBytes === undefined ? Infinity : inhaltBytes) / 2);
 }
-class ZbonPdfZuGross extends Error {}
-// Entpackte Länge eines Stroms, begrenzt (G2-Fix M-2). budget = { rest } gilt für die ganze Datei. Wirft ZbonPdfZuGross bei Filterkette, unbekanntem Filtertyp
-// oder Überschreitung. Begrenzt wird im Entpacker: ensureBuffer der einen Dekodierstufe (pdf-lib DecodeStream; jede Stufe wächst nur darüber) wirft, sobald mehr
-// als die Grenze angefordert wird. Der Puffer bleibt so höchstens bei der Grenze (Zweierpotenz), auch wenn ein einzelner Deflate-Block mehr liefern wollte.
-export function zbonStromLaenge(st, budget) {
-  if (!(st instanceof PDFRawStream)) throw new ZbonPdfZuGross('kein Rohstrom');
-  const filter = st.dict.lookup(PDFName.of('Filter'));
-  if (filter instanceof PDFArray && filter.size() > 1) throw new ZbonPdfZuGross('Filterkette');
-  if (filter !== undefined && !(filter instanceof PDFName) && !(filter instanceof PDFArray)) throw new ZbonPdfZuGross('Filtertyp');
-  const grenze = Math.min(ZBON_PDF_STROM_MAX, budget.rest);
-  let n;
-  if (filter === undefined || (filter instanceof PDFArray && filter.size() === 0)) n = st.contents.length;
-  else {
-    const s = decodePDFRawStream(st);
-    if (typeof s.ensureBuffer !== 'function' || typeof s.readBlock !== 'function') throw new ZbonPdfZuGross('Dekodierer');
-    const original = s.ensureBuffer;
-    s.ensureBuffer = function begrenzt(angefordert) { if (angefordert > grenze) throw new ZbonPdfZuGross('Strom zu groß'); return original.call(this, angefordert); };
-    n = s.decode().length;
-  }
-  if (n > grenze) throw new ZbonPdfZuGross('Strom zu groß');
-  budget.rest -= n;
-  return n;
-}
-// XRef-Strom: /W aus drei kleinen ganzen Zahlen mit mindestens einem Byte je Eintrag, Einträge passen zu den entpackten Bytes und bleiben unter der Grenze
-function zbonXrefOk(st, laenge) {
-  const zahl = (x) => (x instanceof PDFNumber && Number.isSafeInteger(x.asNumber()) && x.asNumber() >= 0 ? x.asNumber() : null);
-  const w = st.dict.lookup(PDFName.of('W'));
-  if (!(w instanceof PDFArray) || w.size() !== 3) return false;
-  const breiten = w.asArray().map((x) => zahl(st.dict.context.lookup(x)));
-  if (breiten.some((b) => b === null || b > 8)) return false;
-  const jeEintrag = breiten[0] + breiten[1] + breiten[2];
-  if (jeEintrag < 1) return false;
-  const index = st.dict.lookup(PDFName.of('Index'));
-  let eintraege = 0;
-  if (index instanceof PDFArray) {
-    if (index.size() % 2 !== 0) return false;
-    for (let i = 1; i < index.size(); i += 2) { const l = zahl(st.dict.context.lookup(index.get(i))); if (l === null || zahl(st.dict.context.lookup(index.get(i - 1))) === null) return false; eintraege += l; }
-  } else {
-    const size = zahl(st.dict.lookup(PDFName.of('Size')));
-    if (size === null) return false;
-    eintraege = size;
-  }
-  return eintraege <= ZBON_PDF_XREF_EINTRAEGE_MAX && eintraege * jeEintrag <= laenge;
-}
-// Lädt das PDF wie PDFDocument.load (dieselben Optionen), prüft aber jeden Objekt- und XRef-Strom vorher mit dem gezählten Entpacker. pdf-lib entpackt diese
-// Ströme beim Laden sonst ohne Grenze (ByteStream.fromPDFRawStream). Der Vorabblick liest dasselbe Objekt an derselben Stelle mit demselben Kontext wie danach
-// pdf-lib (parseObject entpackt nichts, verändert den Kontext nicht), sieht also genau den Strom, den pdf-lib entpacken würde.
-// Ergebnis { pdf } oder { zuGross: true }; andere Fehler werfen (FORMAT beim Aufrufer).
+// G2-Fix M-2: begrenztes Entpacken und Laden. Der Ladeweg liegt seit dem E-Rechnung-Hotfix gemeinsam in regel/pdf-sicher.js (auch detectAndParseERechnung);
+// hier nur die bisherigen Namen. zbonStromLaenge: entpackte Länge, höchstens ZBON_PDF_STROM_MAX je Strom und budget.rest je Datei, Filterketten abgelehnt.
+export const zbonStromLaenge = (st, budget) => stromLaengeBegrenzt(st, budget, { stromMax: ZBON_PDF_STROM_MAX });
+// Ergebnis { pdf } oder { zuGross: true }; wie bisher gilt auch ein nicht entpackbarer Objekt-/XRef-Strom als zu groß (fester Text, keine KI-Anfrage).
 export async function ladeZbonPdf(bytes, budget) {
-  const parser = PDFParser.forBytesWithOptions(bytes, 100, false, false); // wie PDFDocument.load: ParseSpeeds.Slow, throwOnInvalidObject false, capNumbers false
-  const original = parser.parseIndirectObject;
-  let zuGross = false;
-  parser.parseIndirectObject = async function vorabGeprueft() {
-    const start = this.bytes.offset();
-    this.parseIndirectObjectHeader();
-    this.skipWhitespaceAndComments();
-    const obj = this.parseObject();
-    if (obj instanceof PDFRawStream) {
-      const typ = obj.dict.lookup(PDFName.of('Type'));
-      if (typ === PDFName.of('ObjStm') || typ === PDFName.of('XRef')) {
-        try {
-          const laenge = zbonStromLaenge(obj, budget);
-          if (typ === PDFName.of('XRef') && !zbonXrefOk(obj, laenge)) throw new ZbonPdfZuGross('XRef');
-        } catch (e) { zuGross = true; throw e; } // pdf-lib fängt den Fehler und legt ein ungültiges Objekt an (ohne Entpacken); zuGross entscheidet danach
-      }
-    }
-    this.bytes.moveTo(start);
-    return original.call(this);
-  };
-  const context = await parser.parseDocument();
-  if (zuGross) return { zuGross: true };
-  return { pdf: new PDFDocument(context, true, false) }; // wie load mit ignoreEncryption true, updateMetadata false
+  const r = await ladePdfBegrenzt(bytes, { budget, ignoreEncryption: true, updateMetadata: false });
+  if (r.zuGross || r.stromFehler) return { zuGross: true };
+  return { pdf: r.pdf };
 }
 function pdfInhaltBytes(pdf, budget) { // geschätzte Textebene: Seiteninhalte plus Form-XObjects (je Seite einmal gerechnet, auch Annotationen), oder Infinity (zu groß/unlesbar)
   let roh = 0; let seiteSumme = 0; let formSumme = 0;
