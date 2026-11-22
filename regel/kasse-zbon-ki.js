@@ -19,10 +19,11 @@
 // Denken: Standard ist thinking 'disabled' (wie /document, Haiku 5.5). Die Alternative "adaptiv, effort low" ist über deps.denken = 'low'
 // schaltbar. Die Wahl nach Messwerten legt der Eval fest (test/kasse-zbon-eval.mjs); bis dahin gilt 'aus' (schneller, billiger, kein Denken in
 // max_tokens). Messwerte stehen nach dem ersten Eval-Lauf hier und im Stand-Dokument.
+// Kosten: Text höchstens 32 KB, PDF höchstens 5 Seiten, dazu eine Schätzung der Eingabe-Token mit Obergrenze 20.000 (ZBON_ZU_GROSS vor Zähler und Aufruf).
 // Vision: Fotos verkleinert der Browser auf höchstens 2000 px lange Kante (2.14 Ablauf 2). Der Höchstwert für Haiku 5.5 ist gegen die
 // Vision-Doku (https://docs.claude.com/en/docs/build-with-claude/vision) vor O4 zu prüfen; der Worker lässt Bilder bis 10 MB durch.
 // Structured Outputs: JSON-Schema ohne maxLength/maxItems/minimum/maximum (die API bildet sie nicht ab); der Worker prüft sie (siehe unten).
-import { PDFDocument } from 'pdf-lib';
+import { PDFDocument, PDFArray, PDFRawStream, decodePDFRawStream } from 'pdf-lib';
 import * as Steuerkern from '../steuerkern/index.js';
 import {
   antwort, fehlerAntwort, featureAusAntwort, grundpruefung, istObjekt, istDatum, nurSchluessel, CONFIG_PFAD, configBereinigen, featureAktiv,
@@ -41,7 +42,15 @@ export const ZBON_TAGESLIMIT = 5;
 export const ZBON_LIMIT_SAMMLUNG = 'kassezbonlimit';
 export const ZBON_PDF_SEITEN_MAX = 5;
 export const ZBON_DATEI_MAX_BYTES = 10 * 1024 * 1024;
-export const ZBON_TEXT_MAX_BYTES = 200 * 1024;
+export const ZBON_TEXT_MAX_BYTES = 32 * 1024; // O4-W A-M2: ein echter Tagesbericht hat unter 10 KB
+// Eingabe-Token-Obergrenze (O4-W A-M2): darüber ZBON_ZU_GROSS, noch vor Zähler und Aufruf. Schätzung konservativ (der count_tokens-Endpunkt steht dem
+// Worker-Muster nicht zur Verfügung: deps.kiAufruf geht nur an /v1/messages). Preisgrenze der API: ab 100.000 Prompt-Token das Fünffache.
+export const ZBON_EINGABE_TOKEN_MAX = 20000;
+export const ZBON_FEST_TOKEN = 2000;       // System-Prompt (zbon-2, rund 500 bis 700 Token) + Schema + Kontextzeile, aufgerundet
+export const ZBON_BILD_TOKEN = 2000;       // die API verkleinert Bilder auf höchstens etwa 1.600 Token
+export const ZBON_PDF_SEITE_TOKEN = 2500;  // je Seite: Seitenbild plus Rahmen
+export const ZBON_PDF_INHALT_MAX_ROH = 32 * 1024; // Seiteninhalt (komprimiert) darüber: zu groß, ohne ihn zu entpacken (Schutz vor Entpack-Bomben)
+export const ZBON_ZU_GROSS_TEXT = 'Die Datei ist zu groß zum Lesen. Verkleinere die Datei (weniger Seiten, kürzerer Text) oder trag die Werte selbst ein.';
 export const ZBON_ERLAUBTE_TYPEN = Object.freeze(['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'text/plain', 'text/csv']);
 // Entscheidung: obere Grenze je Betrag 1.000.000 EUR in Cent (strenger als BELEG_MAX_BETRAG = 10.000.000 EUR in worker.js; ein Tagesabschluss
 // einer Ladenkasse liegt weit darunter, ein höherer Wert ist fast sicher ein Lesefehler).
@@ -423,7 +432,34 @@ const beginnt = (bytes, ...muster) => muster.some((m) => m.every((b, i) => bytes
 const istExportInhalt = (bytes) => beginnt(bytes, [0x50, 0x4B, 0x03, 0x04], [0x1F, 0x8B]) || (bytes.length > 262 && String.fromCharCode(...bytes.slice(257, 262)) === 'ustar');
 const WEBP = (b) => b.length > 12 && String.fromCharCode(...b.slice(0, 4)) === 'RIFF' && String.fromCharCode(...b.slice(8, 12)) === 'WEBP';
 
-// Ergebnis { ok: true, art, type, bytes, text?, sha256 } oder { ok: false, status, code, hinweis? }
+// Schätzung der Eingabe-Token einer Datei (rein, konservativ): Text 1 Token je 2 Byte; Bild pauschal; PDF je Seite pauschal plus Textebene
+// (entpackte Seiteninhalte, 1 Token je 2 Byte). Unbekanntes (Fehler beim Entpacken) zählt als zu groß.
+export function zbonEingabeTokens(art, { bytes, seiten, inhaltBytes } = {}) {
+  if (art === 'text') return ZBON_FEST_TOKEN + Math.ceil((bytes || 0) / 2);
+  if (art === 'bild') return ZBON_FEST_TOKEN + ZBON_BILD_TOKEN;
+  return ZBON_FEST_TOKEN + (seiten || 0) * ZBON_PDF_SEITE_TOKEN + Math.ceil((inhaltBytes === undefined ? Infinity : inhaltBytes) / 2);
+}
+function pdfInhaltBytes(pdf) { // Summe der entpackten Seiteninhalte oder Infinity (zu groß/unlesbar)
+  let roh = 0; let summe = 0;
+  try {
+    for (const seite of pdf.getPages()) {
+      const c = seite.node.Contents();
+      const strs = c instanceof PDFArray ? c.asArray().map((x) => pdf.context.lookup(x)) : [c];
+      for (const st of strs) {
+        if (!st) continue;
+        if (st instanceof PDFRawStream) {
+          roh += st.contents.length;
+          if (roh > ZBON_PDF_INHALT_MAX_ROH) return Infinity;
+          summe += decodePDFRawStream(st).decode().length;
+        } else if (typeof st.getContentsSize === 'function') summe += st.getContentsSize();
+        else return Infinity;
+      }
+    }
+  } catch { return Infinity; }
+  return summe;
+}
+
+// Ergebnis { ok: true, art, type, bytes, text?, sha256, token } oder { ok: false, status, code, hinweis? }
 export async function pruefeZbonDatei(datei, { validateDatei } = {}) {
   const FORMAT = (extra = {}) => ({ ok: false, status: 400, code: 'FORMAT', feld: 'datei', ...extra });
   if (!istObjekt(datei) || typeof datei.base64 !== 'string' || !datei.base64) return FORMAT();
@@ -438,6 +474,8 @@ export async function pruefeZbonDatei(datei, { validateDatei } = {}) {
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(b64) || b64.length % 4 === 1) return FORMAT();
   const geschaetzt = Math.floor((b64.replace(/=+$/, '').length * 3) / 4);
   if (geschaetzt > ZBON_DATEI_MAX_BYTES) return FORMAT({ code: 'FORMAT', grund: 'zu_gross' });
+  const ZU_GROSS = () => ({ ok: false, status: 400, code: 'ZBON_ZU_GROSS', hinweis: ZBON_ZU_GROSS_TEXT });
+  if ((type === 'text/plain' || type === 'text/csv') && geschaetzt > ZBON_TEXT_MAX_BYTES) return ZU_GROSS();
   let bytes;
   try { bytes = base64ZuBytes(b64); } catch { return FORMAT(); }
   if (!bytes.length) return FORMAT();
@@ -445,13 +483,15 @@ export async function pruefeZbonDatei(datei, { validateDatei } = {}) {
   const sha256 = await sha256Bytes(bytes);
   if (type === 'application/pdf') {
     if (!beginnt(bytes, [0x25, 0x50, 0x44, 0x46, 0x2D])) return FORMAT();
-    let seiten;
-    try { seiten = (await PDFDocument.load(bytes, { ignoreEncryption: true, throwOnInvalidObject: false, updateMetadata: false })).getPageCount(); } catch { return FORMAT(); }
+    let pdf; let seiten;
+    try { pdf = await PDFDocument.load(bytes, { ignoreEncryption: true, throwOnInvalidObject: false, updateMetadata: false }); seiten = pdf.getPageCount(); } catch { return FORMAT(); }
     if (seiten > ZBON_PDF_SEITEN_MAX) return { ok: false, status: 400, code: 'ZBON_ZU_LANG', seiten_max: ZBON_PDF_SEITEN_MAX };
-    return { ok: true, art: 'pdf', type, bytes, sha256 };
+    const token = zbonEingabeTokens('pdf', { seiten, inhaltBytes: pdfInhaltBytes(pdf) });
+    if (token > ZBON_EINGABE_TOKEN_MAX) return ZU_GROSS();
+    return { ok: true, art: 'pdf', type, bytes, sha256, token };
   }
   if (type === 'text/plain' || type === 'text/csv') {
-    if (bytes.length > ZBON_TEXT_MAX_BYTES) return FORMAT({ grund: 'zu_gross' });
+    if (bytes.length > ZBON_TEXT_MAX_BYTES) return ZU_GROSS();
     let text;
     try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { return FORMAT(); }
     text = text.replace(/^﻿/, '');
@@ -459,11 +499,13 @@ export async function pruefeZbonDatei(datei, { validateDatei } = {}) {
     if (/^\s*<(\?xml|!doctype|[a-z])/i.test(text)) return FORMAT({ hinweis: EXPORT_HINWEIS }); // XML und HTML sind Exporte, kein Tagesbericht
     text = text.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u2028\u2029]/g, '');
     if (!text.trim()) return FORMAT();
-    return { ok: true, art: 'text', type, bytes, text, sha256 };
+    const token = zbonEingabeTokens('text', { bytes: bytes.length });
+    if (token > ZBON_EINGABE_TOKEN_MAX) return ZU_GROSS();
+    return { ok: true, art: 'text', type, bytes, text, sha256, token };
   }
   const magisch = type === 'image/jpeg' ? beginnt(bytes, [0xFF, 0xD8, 0xFF]) : type === 'image/png' ? beginnt(bytes, [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) : WEBP(bytes);
   if (!magisch) return FORMAT();
-  return { ok: true, art: 'bild', type, bytes, sha256 };
+  return { ok: true, art: 'bild', type, bytes, sha256, token: zbonEingabeTokens('bild') };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -500,7 +542,9 @@ export function zbonAntwortText(data) {
   return b ? b.text : null;
 }
 
-// Eigene Kostenschätzung (Rückfall, wenn deps.estimateCostCents aus worker.js fehlt; auch vom Eval benutzt): Haiku 5.5, 0,10 / 0,50 $ je MTok, ab 100.000 Prompt-Token das Fünffache
+// Eigene Kostenschätzung (Rückfall, wenn deps.estimateCostCents aus worker.js fehlt; auch vom Eval benutzt): Haiku 5.5, 0,10 / 0,50 $ je MTok, ab 100.000 Prompt-Token das Fünffache.
+// Kostenobergrenze je Lesung (O4-W A-M2): Eingabe höchstens ZBON_EINGABE_TOKEN_MAX = 20.000 Token (geschätzt, vor dem Aufruf) = 0,2 Cent plus Ausgabe höchstens 2.048 Token (0,1 Cent);
+// bei 5 Lesungen je Tag und 31 Tagen also unter 0,5 EUR je Konto und Monat, nie im 5-fachen Preisbereich (über 100.000 Token).
 export function zbonKostenCent(usage) {
   const i = usage.input_tokens || 0; const cw = usage.cache_creation_input_tokens || 0; const cr = usage.cache_read_input_tokens || 0; const o = usage.output_tokens || 0;
   const lang = i + cw + cr > 100000;

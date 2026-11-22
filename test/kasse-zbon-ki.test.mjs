@@ -3,10 +3,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { PDFDocument } from 'pdf-lib';
+import { PDFDocument, PDFName } from 'pdf-lib';
 import {
   regelKasseZbonLesen, regelKasseZbon, pruefeZbonVorschlag, pruefeZbonDatei, zbonKiAnfrage, zbonSystemPrompt, reserviereKasseZbon, ZBON_SCHEMA,
-  ZBON_PROMPT_VERSION, ZBON_MODELL, ZBON_TAGESLIMIT, KASSE_ZBON_PFAD, limitPfad,
+  ZBON_PROMPT_VERSION, ZBON_MODELL, ZBON_TEXT_MAX_BYTES, ZBON_EINGABE_TOKEN_MAX, zbonEingabeTokens, ZBON_TAGESLIMIT, KASSE_ZBON_PFAD, limitPfad,
 } from '../regel/kasse-zbon-ki.js';
 import { kassenSteuerJeSatz } from '../steuerkern/kasse.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
@@ -251,7 +251,7 @@ test('8 Datei: Typ, Größe, Magic Bytes, Text, ZIP/XML mit Hinweis, 6 Seiten ZB
   await abgelehnt(u, d('image/jpeg', '###'), 400, 'FORMAT');
   await abgelehnt(u, d('image/jpeg', ''), 400, 'FORMAT');
   await abgelehnt(u, d('text/plain', Buffer.from([0xFF, 0xFE, 0x41]).toString('base64')), 400, 'FORMAT'); // kein UTF-8
-  await abgelehnt(u, d('text/csv', b64('a'.repeat(200 * 1024 + 1))), 400, 'FORMAT'); // Text über 200 KB
+  await abgelehnt(u, d('text/csv', b64('a'.repeat(32 * 1024 + 1))), 400, 'ZBON_ZU_GROSS'); // Text über 32 KB (O4-W A-M2)
   await abgelehnt(u, d('text/plain', b64('   \n ')), 400, 'FORMAT');
   await abgelehnt(u, d('application/pdf', Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(8 * 1024 * 1024 + 1, 65)]).toString('base64').padEnd(14000000, 'A')), 400, 'BODY_ZU_GROSS');
   const zuLang = await abgelehnt(u, d('application/pdf', await pdfB64(6)), 400, 'ZBON_ZU_LANG'); assert.equal(zuLang.json.seiten_max, 5);
@@ -623,4 +623,35 @@ test('A-M1: Gutscheine werden nie als Einzweck/vorab versteuert vorbefüllt (Ste
   const o = pr({}); assert.equal(stufe(o, 'K15_GUTSCHEIN_SELBST'), undefined); assert.ok(!o.unsicher.includes('vorab_versteuert_cent'));
   // ungültiger Betrag: nie repariert, K2 nicht prüfbar
   const k = pr({ gutschein_einloesung_cent: -5 }); assert.equal(k.vorschlag.vorab_versteuert_cent, null); assert.equal(stufe(k, 'K2_ZAHLARTEN_GESAMT'), 'hinweis');
+});
+
+test('A-M2: Eingabe-Token gedeckelt (Text höchstens 32 KB, PDF-Textebene und Seiten geschätzt, Obergrenze 20.000): ZBON_ZU_GROSS vor Zähler und Aufruf', async () => {
+  assert.equal(ZBON_TEXT_MAX_BYTES, 32 * 1024);
+  const u = umgebung();
+  const d = (type, base64) => ({ datei: { name: 'x', type, base64 } });
+  const r = await abgelehnt(u, d('text/plain', b64('Z-BERICHT\n'.repeat(5000))), 400, 'ZBON_ZU_GROSS'); // 50 KB: vor dem Fix ging das durch
+  assert.match(r.json.hinweis, /Verkleinere die Datei/);
+  // genau 32 KB geht, auch bei der schlechtesten Annahme (1 Token je 2 Byte) unter der Obergrenze
+  const t = await u.rufe(d('text/plain', b64('Z 1,00\n'.repeat(Math.floor(32 * 1024 / 7)))));
+  assert.equal(t.status, 200);
+  assert.ok(zbonEingabeTokens('text', { bytes: ZBON_TEXT_MAX_BYTES }) <= ZBON_EINGABE_TOKEN_MAX);
+  // PDF: Textebene zählt. Ein Seiteninhalt von 40 KB (über der Rohgrenze) und ein 5-Seiten-PDF mit viel Text werden vor dem Aufruf abgelehnt
+  const pdfMitText = async (seiten, zeichenJeSeite) => {
+    const doc = await PDFDocument.create();
+    for (let i = 0; i < seiten; i += 1) {
+      const p = doc.addPage([200, 200]);
+      const inhalt = doc.context.stream(`BT /F1 6 Tf 0 0 Td (${'A'.repeat(zeichenJeSeite)}) Tj ET`);
+      p.node.set(PDFName.of('Contents'), doc.context.register(inhalt));
+    }
+    return Buffer.from(await doc.save()).toString('base64');
+  };
+  const u2 = umgebung();
+  await abgelehnt(u2, d('application/pdf', await pdfMitText(1, 40 * 1024)), 400, 'ZBON_ZU_GROSS');
+  await abgelehnt(u2, d('application/pdf', await pdfMitText(5, 6000)), 400, 'ZBON_ZU_GROSS'); // 5 x 2.500 + 15.000 Token Textebene > 20.000
+  assert.equal((await u.rufe(d('application/pdf', await pdfMitText(2, 3000)))).status, 200); // normaler Tagesbericht: weit darunter
+  assert.equal((await u.rufe(d('application/pdf', await pdfB64(5)))).status, 200);
+  // direkt: die Datei trägt ihre Schätzung
+  const dat = await pruefeZbonDatei({ type: 'text/plain', base64: b64('Z-BERICHT 1\nUmsatz 19% 10,00\n') });
+  assert.equal(dat.ok, true); assert.ok(dat.token > 0 && dat.token <= ZBON_EINGABE_TOKEN_MAX);
+  assert.equal((await pruefeZbonDatei({ type: 'text/plain', base64: b64('a'.repeat(32 * 1024 + 1)) })).code, 'ZBON_ZU_GROSS');
 });
