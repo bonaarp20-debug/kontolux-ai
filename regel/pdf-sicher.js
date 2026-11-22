@@ -17,9 +17,9 @@ export const PDF_ENTPACKT_MAX = 16 * 1024 * 1024;
 export const PDF_XREF_EINTRAEGE_MAX = 100000;
 // Geparste Objekte je Datei: ohne Grenze machen schon 8 MB „0 0 0 …“ in einem Array (unkomprimiert oder aus einem Objektstrom) rund 480 MB Speicher
 // (pdf-lib legt je Zahl ein Objekt mit Text an). Gezählt wird jedes Objekt mit eigenem Speicher (Zahl, Text, Array, Dict, Strom, Dict-Schlüssel), null/true/false
-// (geteilte Einzelobjekte, nur ein Platz im Array) und Verweise zu 1/16. Jedes Objekt wird einmal gezählt. Gemessen (Grenze schrittweise gesenkt): größtes
-// reales PDF (201 Seiten, 8,1 MB) braucht 110.000 bis 130.000, pdf-lib-Dokument mit 3000 Seiten 130.000 bis 150.000; 400 reale PDFs von 1 bis 201 Seiten
-// laden alle objektgleich wie PDFDocument.load. Über der Grenze höchstens rund 25 MB Speicher statt 480 MB.
+// (geteilte Einzelobjekte, nur ein Platz im Array) und Verweise zu 1/16, Dicts zu 2, Ströme nur als indirekte Objekte. Jedes Objekt wird einmal gezählt.
+// Gemessen (Grenze schrittweise gesenkt, Dicts zu 2): größtes reales PDF (201 Seiten, 8,1 MB) unter 130.000, pdf-lib-Dokument mit 3000 Seiten 150.000 bis
+// 170.000; 412 PDFs laden alle objektgleich wie PDFDocument.load. Über der Grenze rund 30 MB Heap-Spitze statt 480 MB (2 Mio. leere Dicts: 29 MB).
 export const PDF_OBJEKTE_MAX = 200000;
 // pdf-lib hält Namen (PDFName.of) und Verweise (PDFRef.of) in globalen Speichern, die nie geleert werden (je Isolat, über Anfragen hinweg). Gezählt wird
 // nur, was diese Speicher wachsen lässt (eindeutig, zum ersten Mal gesehen). Namen nach geschätztem Speicher: 2 Byte je Zeichen (Schlüssel und Text,
@@ -58,7 +58,8 @@ export const PDF_KOPFVERSUCHE_GRUND = 50000;
 
 // ---- Vorab-Scan: erste Verteidigung, ein linearer Durchlauf über die Rohbytes vor jedem pdf-lib-Aufruf ----
 // Ohne Allokation proportional zur Eingabe. Übersprungen werden Kommentare, Literal- und Hex-Strings (dort sind lange Ziffernfolgen legitim, z. B. mit
-// Nullen aufgefüllte Signaturen) und Ströme (von „stream“ bis zum nächsten „endstream“; ohne „endstream“ endet der Scan). Abgelehnt wird:
+// Nullen aufgefüllte Signaturen) und Ströme (wie pdf-lib: bei direktem /Length bis zum dort stehenden „endstream“, sonst bis zum nächsten
+// „endstream“; ohne „endstream“ endet der Scan). Abgelehnt wird:
 // Datei über PDF_DATEI_MAX (PARSE_ERECHNUNG nimmt höchstens 14 MiB Base64 an, also rund 10,5 MiB), Zahl (Lauf aus 0-9 + - .) länger als PDF_ZAHL_MAX,
 // mehr „obj“-Schlüsselwörter als PDF_VERWEISE_MAX (jeder Objektkopf legt einen Verweis an; mehr ginge ohnehin über die Verweisgrenze), mehr xref/startxref/trailer//Prev als PDF_XREF_ABSCHNITTE_MAX. Die Eingriffe in pdf-lib bleiben als
 // zweite Verteidigung (der Scan kann durch ein falsches „stream“ … „endstream“ außerhalb eines Stroms getäuscht werden; dann greifen sie).
@@ -68,6 +69,17 @@ const B_STREAM = [0x73, 0x74, 0x72, 0x65, 0x61, 0x6d]; // stream
 const B_ENDSTREAM = [0x65, 0x6e, 0x64, 0x73, 0x74, 0x72, 0x65, 0x61, 0x6d]; // endstream
 const B_OBJ = [0x6f, 0x62, 0x6a]; const B_XREF = [0x78, 0x72, 0x65, 0x66]; const B_STARTXREF = [0x73, 0x74, 0x61, 0x72, 0x74, 0x78, 0x72, 0x65, 0x66];
 const B_TRAILER = [0x74, 0x72, 0x61, 0x69, 0x6c, 0x65, 0x72]; const B_PREV = [0x50, 0x72, 0x65, 0x76];
+const B_LENGTH = [0x4c, 0x65, 0x6e, 0x67, 0x74, 0x68]; // Length
+// Wert eines direkten /Length ab j (Leerraum, Ziffern); -1 bei Verweis „n g R“ oder keiner Zahl
+function direkteZahl(b, j) {
+  const n = b.length; let k = j; while (k < n && (b[k] === 32 || b[k] === 10 || b[k] === 13 || b[k] === 9 || b[k] === 12 || b[k] === 0)) k += 1;
+  let v = 0; const a = k; while (k < n && k - a < 16 && b[k] >= 0x30 && b[k] <= 0x39) { v = v * 10 + (b[k] - 0x30); k += 1; }
+  if (k === a || (b[k] >= 0x30 && b[k] <= 0x39)) return -1;
+  let m = k; while (m < n && (b[m] === 32 || b[m] === 10 || b[m] === 13)) m += 1;
+  const z = m; while (m < n && b[m] >= 0x30 && b[m] <= 0x39) m += 1;
+  if (m > z) { while (m < n && (b[m] === 32 || b[m] === 10 || b[m] === 13)) m += 1; if (b[m] === 0x52) return -1; } // Verweis
+  return v;
+}
 const gleich = (b, i, j, w) => { if (j - i !== w.length) return false; for (let k = 0; k < w.length; k += 1) if (b[i + k] !== w[k]) return false; return true; };
 // Anfang des nächsten „endstream“ ab i, -1 wenn keins. merk = { ab, k }: letztes Suchergebnis; da i nur wächst, bleibt der Scan linear
 // (sonst würde jedes „stream“ ohne „endstream“ bis zum Dateiende suchen: quadratisch)
@@ -88,7 +100,7 @@ export function pdfVorabScan(bytes) {
   const st = { grund: null, obj: 0, abschnitte: 0, zahlMax: 0, stroeme: 0 };
   const ab = (g) => { st.grund = g; return st; };
   if (n > PDF_DATEI_MAX) return ab('Datei zu groß');
-  let i = 0; const merk = { k: null };
+  let i = 0; const merk = { k: null }; let laenge = -1;
   while (i < n) {
     const c = b[i];
     if (c === 0x25) { while (i < n && b[i] !== 10 && b[i] !== 13) i += 1; continue; } // Kommentar
@@ -108,20 +120,28 @@ export function pdfVorabScan(bytes) {
       if (j - i > PDF_ZAHL_MAX) return ab('Zahl zu lang');
       i = j; continue;
     }
-    if (c === 0x2f) { // Name: nur /Prev wird gezählt
+    if (c === 0x2f) { // Name: /Prev wird gezählt, ein direktes /Length gemerkt (Stromende wie pdf-lib)
       let j = i + 1; while (j < n && !NAMENSENDE[b[j]]) j += 1;
       if (gleich(b, i + 1, j, B_PREV) && ++st.abschnitte > PDF_XREF_ABSCHNITTE_MAX) return ab('zu viele XRef-Abschnitte');
+      if (gleich(b, i + 1, j, B_LENGTH)) laenge = direkteZahl(b, j);
       i = j; continue;
     }
     if (NAMENSENDE[c]) { i += 1; continue; }
     let j = i + 1; while (j < n && !NAMENSENDE[b[j]] && !NUMERISCH[b[j]]) j += 1; // Wort (Schlüsselwort); Ziffern danach prüft der nächste Durchlauf
     if (gleich(b, i, j, B_STREAM)) {
       st.stroeme += 1;
+      // wie pdf-lib parseDictOrStream: direktes /Length und dahinter (nach Leerraum) endstream, sonst nächstes endstream
+      if (laenge >= 0) {
+        let start = j; if (b[start] === 13 && b[start + 1] === 10) start += 2; else if (b[start] === 10 || b[start] === 13) start += 1;
+        let e = start + laenge; while (e < n && LEER[b[e]]) e += 1;
+        laenge = -1;
+        if (e + 9 <= n && gleich(b, e, e + 9, B_ENDSTREAM)) { i = e + 9; continue; }
+      }
       const e = endstreamAb(b, j, merk);
       if (e === -1) break; // Rest ist Stromdaten (pdf-lib liest bis endobj/Dateiende); geparst wird er nur über die Eingriffe (zweite Verteidigung)
       i = e + 9; continue;
     }
-    if (gleich(b, i, j, B_OBJ)) { if (++st.obj > PDF_VERWEISE_MAX) return ab('zu viele Objekte'); } // jeder Objektkopf ist ein Verweis
+    if (gleich(b, i, j, B_OBJ)) { laenge = -1; if (++st.obj > PDF_VERWEISE_MAX) return ab('zu viele Objekte'); } // jeder Objektkopf ist ein Verweis
     else if (gleich(b, i, j, B_XREF) || gleich(b, i, j, B_STARTXREF) || gleich(b, i, j, B_TRAILER)) { if (++st.abschnitte > PDF_XREF_ABSCHNITTE_MAX) return ab('zu viele XRef-Abschnitte'); }
     i = j;
   }

@@ -597,3 +597,19 @@ test('Dritte Lesung G3-3: Leerraum-, Kommentar- und Zufallsläufe im Datenmüll 
   assert.ok(r.pdf && !r.zuGross);
   assert.equal(objektBild(r.pdf), objektBild(await ALT(Buffer.from(datei))));
 });
+
+test('Dritte Lesung G3-4: Vorab-Scan nutzt ein direktes /Length wie pdf-lib (Strominhalt mit eigenem endstream)', async () => {
+  const { pdfVorabScan } = await import('../regel/pdf-sicher.js');
+  // unkomprimierter Strom, der selbst „endstream“ und danach eine lange Ziffernfolge enthält (z. B. eingebettetes PDF ohne Filter)
+  const inhalt = 'q endstream 1 0 obj ' + '7'.repeat(200) + ' Q';
+  const datei = Buffer.from(KATALOG + `3 0 obj\n<< /Length ${inhalt.length} >>\nstream\n${inhalt}\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n`);
+  assert.equal(pdfVorabScan(new Uint8Array(datei)).grund, null, 'vorher: Zahl zu lang (Fehlablehnung)');
+  const r = await ladePdfBegrenzt(new Uint8Array(datei), { updateMetadata: true });
+  assert.ok(r.pdf && !r.zuGross);
+  assert.equal(objektBild(r.pdf), objektBild(await ALT(datei)));
+  // /Length als Verweis oder falsch: wie bisher bis zum nächsten endstream; danach wird weiter geprüft
+  const falsch = KATALOG + '3 0 obj\n<< /Length 999 >>\nstream\nx\nendstream\nendobj\n4 0 obj\n' + '1'.repeat(65) + '\nendobj\n';
+  assert.equal(pdfVorabScan(new Uint8Array(Buffer.from(falsch))).grund, 'Zahl zu lang');
+  const verweis = KATALOG + '3 0 obj\n<< /Length 5 0 R >>\nstream\nx\nendstream\nendobj\n4 0 obj\n' + '1'.repeat(65) + '\nendobj\n';
+  assert.equal(pdfVorabScan(new Uint8Array(Buffer.from(verweis))).grund, 'Zahl zu lang');
+});
