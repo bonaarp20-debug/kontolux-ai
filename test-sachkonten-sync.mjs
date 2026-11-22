@@ -76,7 +76,7 @@ for (const [kat, [k03, k04]] of Object.entries(DATEV_2026)) {
   pruefe(`${kat}: SKR04 ${k04[0]} (${k04[1]})`, app[kat]?.SKR04 === k04[0], `Mapping hat ${app[kat]?.SKR04}`);
 }
 // SKR03-Konten, die gegen die DATEV-Kontenrahmen-PDF (Bau-Paket 2026, Dok. 19606) wörtlich geprüft sind.
-// SKR04 ist hier NICHT geprüft (keine PDF vorliegend).
+// SKR04 siehe SKR04_PDF unten.
 const SKR03_PDF = {
   'Vereinnahmte Umsatzsteuer': ['1776', 'Umsatzsteuer 19 %'],
   'Vorsteuer': ['1576', 'Abziehbare Vorsteuer 19 %'],
@@ -111,7 +111,7 @@ const WEITERE = {
     '1800': 'F Privatentnahmen allgemein', '1890': 'F Privateinlagen', '4530': 'Laufende Fahrzeug-Betriebskosten',
     // Kassenbuch P1b-5 (12-steuer-vertiefung 3.4, Kontenrahmen 2026, Bezeichnung wörtlich)
     '1000': 'Kasse', '1360': 'Geldtransit', '8200': 'Erlöse', '8400': 'Erlöse 19 % USt (Automatik)',
-    // DK-FIX (12-steuer-vertiefung 3.4, Bezeichnung laut dortigem Auszug des Kontenrahmens 2026, Konfidenz A; nicht erneut gegen das PDF geprüft)
+    // DK-FIX (12-steuer-vertiefung 3.4, Bezeichnung wörtlich; am 22.11.2026 gegen Kontenrahmen 2026 SKR03 11174 / SKR04 11175 geprüft, sb-antworten.md SB-4)
     '8290': 'Erlöse 0 % USt', '1590': 'Durchlaufende Posten',
   },
   SKR04: {
@@ -156,5 +156,21 @@ const reserviert = { SKR03: ['1583', '1775', '8195', '8196'], SKR04: ['4185', '4
 const verwendet = { SKR03: new Set(Object.values(app).map(e => e.SKR03)), SKR04: new Set(Object.values(app).map(e => e.SKR04)) };
 for (const skr of ['SKR03', 'SKR04']) pruefe(`${skr}: kein reserviertes/gelöschtes Konto im Mapping`, reserviert[skr].every(k => !verwendet[skr].has(k)));
 
+// ── Wächter Kassenbuch (SB-4, sb-antworten.md 22.11.2026, Kontenrahmen 2026 SKR03 11174 / SKR04 11175 im Wortlaut gelesen): nur Konten, die der Code tatsächlich benutzt.
+// Ändert jemand eine Nummer im Code oder in der Doku, wird dieser Test rot; geprüft wird jede Nummer mit ihrer belegten Bezeichnung.
+import { KU_KONTO as KU_K } from './regel/datev-export-regeln.js';
+const KASSE_BELEGT = {
+  SKR03: { kasse: ['1000', 'Kasse'], transit: ['1360', 'Geldtransit'], durchlauf: ['1590', 'Durchlaufende Posten'], erloese: ['8200', 'Erlöse'], erloese0: ['8290', 'Erlöse 0 % USt'], ku: ['8192', 'U AM Steuerfreie Erlöse Kleinunternehmer nach § 19 Abs. 1 UStG'], fehlbetrag: ['4900', 'Sonstige betriebliche Aufwendungen'] },
+  SKR04: { kasse: ['1600', 'Kasse'], transit: ['1460', 'Geldtransit'], durchlauf: ['1370', 'Durchlaufende Posten'], erloese: ['4200', 'Erlöse'], erloese0: ['4290', 'Erlöse 0 % USt'], ku: ['4184', 'U AM Steuerfreie Erlöse Kleinunternehmer nach § 19 Abs. 1 UStG'], fehlbetrag: ['6300', 'Sonstige betriebliche Aufwendungen'] },
+};
+for (const skr of ['SKR03', 'SKR04']) {
+  const b = KASSE_BELEGT[skr], k = DATEV_KASSE_KONTEN[skr];
+  const imCode = { kasse: k.kasse, transit: k.transit, durchlauf: KASSE_DURCHLAUF_KONTO[skr], erloese: KASSE_MEHRZWECK_KONTO[skr], erloese0: KASSE_ERLOES_0_KONTO[skr], ku: KU_K[skr].ab2026, fehlbetrag: app['Kassendifferenz (Fehlbetrag)'][skr] };
+  for (const [name, [nr, bez]] of Object.entries(b)) {
+    pruefe(`${skr}: Kassenbuch-Konto ${name} im Code = ${nr} (${bez}, Kontenrahmen 2026)`, imCode[name] === nr && WEITERE[skr][nr] === bez, `Code ${imCode[name]}, Tabelle ${WEITERE[skr][nr]}`);
+  }
+  // Kein Konto „Kassendifferenz“ im Kontenrahmen 2026; die aus Ratgebern bekannten 2370/6972 sind falsch und dürfen nirgends als Kassenkonto stehen
+  pruefe(`${skr}: keine Tabelle enthält ein Konto „Kassendifferenz“ und 2370/6972 sind nicht im Einsatz`, !Object.values(WEITERE[skr]).some(v => /Kassendifferenz/i.test(v)) && !Object.values(imCode).some(v => v === '2370' || v === '6972') && !Object.values(app).some(e => e[skr] === '2370' || e[skr] === '6972'));
+}
 console.log(`\n${ok} bestanden, ${fehler} fehlgeschlagen`);
 process.exit(fehler ? 1 : 0);
