@@ -525,6 +525,11 @@ export default {
     }
 
     // Freigabe-Link aus der Betreiber-Mail (GET, signiert, Gültigkeit 14 Tage)
+    // N5: Datei-Abruf des Prüferzugangs (GET, signiert, kurzlebig). Bewusst NICHT in protectedPaths: Prüfer haben keinen Firebase-Login,
+    // der Nachweis ist die Signatur des Links (siehe handlePrueferDatei).
+    if (request.method === 'GET' && url.pathname === '/pruefer-datei') {
+      return handlePrueferDatei(url, env, clientIP);
+    }
     if (request.method === 'GET' && url.pathname === '/freigabe') {
       return freigabeBestaetigen(url, env);
     }
@@ -4289,6 +4294,114 @@ async function prueferZugangSuchen(adminToken, feld, wert) {
   return Array.isArray(rows) ? rows.find(r => r.document?.name) || null : null;
 }
 
+// ── N5: kurzlebige, signierte Datei-Links für den Prüferzugang ──────────────────────────────────────────────
+// Firebase-Download-URLs tragen ein dauerhaftes token: wer sie einmal hat (Prüfer, Weitergabe, Verlauf, Log), liest die Datei ohne Anmeldung für immer.
+// Der Prüferzugang gibt sie deshalb nicht mehr heraus. Stattdessen: GET /pruefer-datei?u=&p=&exp=&sig= (HMAC wie freigabe/abo-abmelden, Schlüssel abgeleitet von
+// TOKEN_ENCRYPTION_KEY mit eigener Domäne, kein neues Secret). Die Signatur bindet UID, Pfad und Ablauf. Der Endpunkt liest die Datei mit dem Dienstkonto.
+const PRUEFER_DATEI_GUELTIG_MS = 15 * 60 * 1000;
+// Nur Ordner, die der Prüfer-Datenbestand kennt; alles andere (logo, chats, uploads …) bleibt gesperrt
+const PRUEFER_DATEI_ORDNER = ['kasse', 'belege', 'rechnungen', 'mahnungen', 'sammelbelege'];
+const PRUEFER_DATEI_BASIS = 'https://kontolux-main.jonadrews012.workers.dev';
+const PRUEFER_UID_FORMAT = /^[A-Za-z0-9]{10,40}$/;
+
+// Erlaubter Speicherpfad: users/{uid}/{erlaubter Ordner}/…, ohne Traversal, Prozentzeichen, Backslash, Steuerzeichen, leere oder Punkt-Segmente
+export function prueferDateiPfadOk(uid, pfad) {
+  if (typeof uid !== 'string' || !PRUEFER_UID_FORMAT.test(uid) || typeof pfad !== 'string' || pfad.length > 400) return false;
+  if (/[\u0000-\u001f\u007f%\\?#]/.test(pfad) || pfad.includes('..')) return false;
+  const praefix = `users/${uid}/`;
+  if (!pfad.startsWith(praefix)) return false;
+  const teile = pfad.slice(praefix.length).split('/');
+  return teile.length >= 2 && PRUEFER_DATEI_ORDNER.includes(teile[0]) && teile.every(t => t !== '' && t !== '.');
+}
+
+// null, wenn das Secret fehlt: dann entstehen keine Links (fail-closed)
+async function prueferDateiSigner(env) {
+  if (!env.TOKEN_ENCRYPTION_KEY) return null;
+  const schluessel = await crypto.subtle.importKey('raw', await crypto.subtle.digest('SHA-256', new TextEncoder().encode('pruefer-datei|' + env.TOKEN_ENCRYPTION_KEY)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return async (uid, pfad, exp) => {
+    const sig = await crypto.subtle.sign('HMAC', schluessel, new TextEncoder().encode(`${uid}\n${pfad}\n${exp}`));
+    return Array.from(new Uint8Array(sig), b => b.toString(16).padStart(2, '0')).join('');
+  };
+}
+
+function storageUrlZuPfad(wert, uid) {
+  for (const bucket of STORAGE_BUCKETS) {
+    const praefix = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/`;
+    if (!wert.startsWith(praefix)) continue;
+    const m = /^[^?#]+/.exec(wert.slice(praefix.length));
+    let pfad = null;
+    try { pfad = m ? decodeURIComponent(m[0]) : null; } catch { pfad = null; }
+    return prueferDateiPfadOk(uid, pfad) ? pfad : null;
+  }
+  return null;
+}
+
+// Ersetzt in der Prüfer-Ausgabe jede Firebase-Download-URL (und die url in { pfad, url }-Anhängen) durch einen signierten Kurzlink oder, wenn der Pfad
+// nicht erlaubt ist oder kein Signierer da ist, durch null. Es bleibt nie eine Token-URL stehen.
+async function prueferLinksErsetzen(wert, uid, signiere) {
+  const exp = Date.now() + PRUEFER_DATEI_GUELTIG_MS;
+  const link = async (pfad) => (pfad && signiere)
+    ? `${PRUEFER_DATEI_BASIS}/pruefer-datei?u=${encodeURIComponent(uid)}&p=${encodeURIComponent(pfad)}&exp=${exp}&sig=${await signiere(uid, pfad, exp)}`
+    : null;
+  const geh = async (v, tiefe) => {
+    if (typeof v === 'string') return /^https?:\/\/(?:[a-z0-9-]+\.)*(?:firebasestorage\.googleapis\.com|storage\.googleapis\.com|firebasestorage\.app)\//i.test(v) ? await link(storageUrlZuPfad(v, uid)) : v;
+    if (v === null || typeof v !== 'object') return v;
+    if (tiefe > 12) return null;
+    if (Array.isArray(v)) { const a = []; for (const x of v) a.push(await geh(x, tiefe + 1)); return a; }
+    const o = {};
+    const istAnhang = typeof v.pfad === 'string' && 'url' in v;
+    for (const [k, x] of Object.entries(v)) {
+      o[k] = (istAnhang && k === 'url') ? await link(prueferDateiPfadOk(uid, v.pfad) ? v.pfad : null) : await geh(x, tiefe + 1);
+    }
+    return o;
+  };
+  return geh(wert, 0);
+}
+
+const PRUEFER_DATEI_INLINE = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+async function handlePrueferDatei(url, env, clientIP) {
+  const antwort = (status, text) => new Response(text, { status, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' } });
+  if (!checkRateLimit(`/pruefer-datei|${clientIP}`, 120, 10 * 60 * 1000)) return antwort(429, 'Zu viele Anfragen.');
+  const uid = url.searchParams.get('u') || '';
+  const pfad = url.searchParams.get('p') || '';
+  const expText = url.searchParams.get('exp') || '';
+  const sig = url.searchParams.get('sig') || '';
+  // Form zuerst, dann Signatur; jede Abweichung gibt dieselbe Antwort (kein Hinweis, was fehlte)
+  if (!PRUEFER_UID_FORMAT.test(uid) || !/^\d{10,16}$/.test(expText) || !/^[0-9a-f]{64}$/.test(sig) || !prueferDateiPfadOk(uid, pfad)) return antwort(401, 'Ungültiger Link.');
+  const signiere = await prueferDateiSigner(env);
+  if (!signiere || !(await istGleichesGeheimnis(sig, await signiere(uid, pfad, expText)))) return antwort(401, 'Ungültiger Link.');
+  if (Number(expText) <= Date.now()) return antwort(401, 'Der Link ist abgelaufen. Bitte die Prüferseite neu laden.');
+  try {
+    // Der Zugang muss noch bestehen: ein widerrufener oder abgelaufener Prüferzugang beendet auch bereits ausgegebene Kurzlinks
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const zRes = await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${uid}/profil/prueferZugang`, { headers: { 'Authorization': `Bearer ${adminToken}` } });
+    if (!zRes.ok) return antwort(zRes.status === 404 ? 403 : 502, zRes.status === 404 ? 'Zugang beendet.' : 'Vorübergehend nicht verfügbar.');
+    const f = (await zRes.json().catch(() => ({}))).fields || {};
+    const ablaufMs = firestoreValue(f.ablauf) ? new Date(firestoreValue(f.ablauf)).getTime() : NaN;
+    if (firestoreValue(f.aktiv) !== true || !Number.isFinite(ablaufMs) || ablaufMs <= Date.now()) return antwort(403, 'Zugang beendet.');
+    const storageToken = await getGoogleAccessToken(env, STORAGE_SCOPE);
+    let res = null; let infraFehler = false;
+    for (const bucket of STORAGE_BUCKETS) {
+      const r = await fetch(`https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodeURIComponent(pfad)}?alt=media`, { headers: { 'Authorization': `Bearer ${storageToken}` } });
+      if (r.ok) { res = r; break; }
+      if (r.status !== 404) infraFehler = true;
+    }
+    if (!res) return antwort(infraFehler ? 502 : 404, infraFehler ? 'Vorübergehend nicht verfügbar.' : 'Datei nicht gefunden.');
+    const typ = String(res.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+    const inline = PRUEFER_DATEI_INLINE.includes(typ);
+    // Nur bekannte, nicht aktive Typen werden im Browser angezeigt; alles andere (HTML, SVG, XML …) wird nur heruntergeladen
+    return new Response(res.body, { status: 200, headers: {
+      'Content-Type': inline ? typ : 'application/octet-stream',
+      'Content-Disposition': inline ? 'inline' : 'attachment',
+      'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store', 'Referrer-Policy': 'no-referrer',
+      ...(inline ? {} : { 'Content-Security-Policy': "default-src 'none'; sandbox" })
+    } });
+  } catch (e) {
+    console.error('Prüfer-Datei Fehler'); // bewusst ohne Meldungstext: nichts mit Pfad oder Adresse ins Protokoll
+    return antwort(502, 'Vorübergehend nicht verfügbar.');
+  }
+}
+
 // Token kommt bevorzugt als "Authorization: Bearer …" (vom Link-Fragment im Client). Das Feld
 // body.token bleibt als Rückfall für bereits ausgelieferte Clients bestehen.
 async function handlePrueferDaten(body, env, cors = {}, authHeader = null) {
@@ -4371,8 +4484,10 @@ async function handlePrueferDaten(body, env, cors = {}, authHeader = null) {
     });
     // KASSE-P1b (2.12 H8): Kassenbuch (alle Fassungen, vollständiger verlauf, Bewegungen); nur Lesen, auch bei ausgeschaltetem Feature (Notaus: Daten bleiben lesbar)
     const kasse = await kassenPrueferDaten(uid, adminToken, (...a) => fetch(...a));
-    return new Response(JSON.stringify({ dokumente, monatsabschluesse, sammelbelege, festschreibungen, ...kasse }), {
-      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+    // N5: keine dauerhaften Download-Token-URLs an den Prüfer: Datei-Adressen werden durch kurzlebige, signierte Worker-Links ersetzt
+    const ausgabe = await prueferLinksErsetzen({ dokumente, monatsabschluesse, sammelbelege, festschreibungen, ...kasse }, uid, await prueferDateiSigner(env));
+    return new Response(JSON.stringify(ausgabe), {
+      status: 200, headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
     });
   } catch (e) {
     console.error('Prüfer-Zugriff Fehler:', e.message);
