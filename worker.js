@@ -4302,8 +4302,11 @@ async function prueferZugangSuchen(adminToken, feld, wert) {
 // Der Prüferzugang gibt sie deshalb nicht mehr heraus. Stattdessen: GET /pruefer-datei?u=&p=&exp=&sig= (HMAC wie freigabe/abo-abmelden, Schlüssel abgeleitet von
 // TOKEN_ENCRYPTION_KEY mit eigener Domäne, kein neues Secret). Die Signatur bindet UID, Pfad und Ablauf. Der Endpunkt liest die Datei mit dem Dienstkonto.
 const PRUEFER_DATEI_GUELTIG_MS = 15 * 60 * 1000;
-// Nur Ordner, die der Prüfer-Datenbestand kennt; alles andere (logo, chats, uploads …) bleibt gesperrt
-const PRUEFER_DATEI_ORDNER = ['kasse', 'belege', 'rechnungen', 'mahnungen', 'sammelbelege'];
+// Nur Ordner, deren Dateien in den Prüfer-Daten vorkommen; alles andere (logo, chats …) bleibt gesperrt.
+// uploads: Chat-Uploads (index.html: users/{uid}/uploads/…); E-Rechnungen aus dem Chat tragen sie als storage_url, Chat-Belege als url (F2-Fix A-H1).
+// angebote bleibt draußen: Angebote liegen in der Sammlung angebote, nicht in den Prüfer-Daten; es gibt dort nichts zu verlinken.
+// Signiert wird ohnehin nur, was in den Prüfer-Daten steht; die Liste begrenzt zusätzlich die Erneuerung per Pfad.
+const PRUEFER_DATEI_ORDNER = ['kasse', 'belege', 'rechnungen', 'mahnungen', 'sammelbelege', 'uploads'];
 const PRUEFER_DATEI_BASIS = 'https://kontolux-main.jonadrews012.workers.dev';
 const PRUEFER_UID_FORMAT = /^[A-Za-z0-9]{10,40}$/;
 

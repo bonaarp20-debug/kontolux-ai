@@ -12,6 +12,7 @@ const BUCKET = 'https://firebasestorage.googleapis.com/v0/b/kontolux-ai/o/';
 const TOKEN = 'n'.repeat(32);
 const PFAD_KASSE = `users/${UID}/kasse/k1/2026-11-02/1700_zbon.pdf`;
 const PFAD_BELEG = `users/${UID}/belege/1700_rechnung.pdf`;
+const PFAD_UPLOAD = `users/${UID}/uploads/1700_chat-erechnung.pdf`;
 const dl = (pfad) => `${BUCKET}${encodeURIComponent(pfad)}?alt=media&token=GEHEIMES-TOKEN-123`;
 const J = (o, st = 200) => new Response(JSON.stringify(o), { status: st, headers: { 'Content-Type': 'application/json' } });
 
@@ -19,6 +20,7 @@ function aufbau({ zugang = true, ablauf = Date.now() + 86400000, dateien = { [PF
   const fs = fakeFirestore();
   if (zugang) fs.setze(`users/${UID}/profil/prueferZugang`, { token_hash: createHash('sha256').update(TOKEN).digest('hex'), aktiv: zugang === true, ablauf: new Date(ablauf).toISOString() });
   fs.setze(`users/${UID}/dokumente/d1`, { name: 'Beleg', typ: 'rechnung_eingehend', storage_url: dl(PFAD_BELEG), xml_storage_url: dl(`users/${UID}/rechnungen/x.xml`), url: dl(`users/${FREMD}/belege/geheim.pdf`) });
+  fs.setze(`users/${UID}/dokumente/d2`, { name: 'E-Rechnung aus dem Chat', typ: 'rechnung_eingehend', storage_url: dl(PFAD_UPLOAD), url: dl(PFAD_UPLOAD) });
   fs.setze(`users/${UID}/kassen/k1`, { bezeichnung: 'Theke' });
   fs.setze(`users/${UID}/kassentage/k1_2026-11-02`, { kasse_id: 'k1', geschaeftstag: '2026-11-02', status: 'abgeschlossen', fassung_aktiv: 1 });
   fs.setze(`users/${UID}/kassentage/k1_2026-11-02/fassungen/1`, { n: 1, anhaenge: [{ pfad: PFAD_KASSE, url: dl(PFAD_KASSE) }, { pfad: `users/${FREMD}/kasse/k1/2026-11-02/x.pdf`, url: dl(`users/${FREMD}/kasse/k1/2026-11-02/x.pdf`) }] });
@@ -254,4 +256,27 @@ test('N5 Erneuerung: ohne Secret kein Link; Logs ohne Token; Rate-Limit greift; 
   const { readFileSync, existsSync } = await import('node:fs');
   const appDatei = new URL('../../Kontolux/index.html', import.meta.url);
   if (existsSync(appDatei)) assert.match(readFileSync(appDatei, 'utf8'), /\/pruefer-datei-link/); // App-Repo daneben, wie beim Paritätswächter
+});
+
+test('F2-Fix A-H1: Chat-Uploads (users/{uid}/uploads/…) erhalten in den Prüfer-Daten einen Kurzlink (storage_url und url), ohne token=; Erneuerung und Abruf gehen', async () => {
+  const a = aufbau({ dateien: { [PFAD_UPLOAD]: { typ: 'application/pdf', inhalt: 'CHAT-BELEG' } } }); const env = await erzeugeTestEnv();
+  try {
+    const text = await (await holeDaten(env, '198.51.100.40')).text();
+    assert.ok(!/token=/i.test(text) && !text.includes('firebasestorage.googleapis.com'));
+    const d2 = JSON.parse(text).dokumente.find(d => d.name === 'E-Rechnung aus dem Chat');
+    for (const feld of ['storage_url', 'url']) {
+      assert.ok(typeof d2[feld] === 'string' && d2[feld].startsWith('https://'), `${feld} ist ein Kurzlink`);
+      assert.equal(new URL(d2[feld]).searchParams.get('p'), PFAD_UPLOAD);
+    }
+    assert.equal(prueferDateiPfadOk(UID, PFAD_UPLOAD), true);
+    assert.equal(prueferDateiPfadOk(UID, `users/${UID}/angebote/x.pdf`), false);
+    assert.equal(prueferDateiPfadOk(UID, `users/${UID}/uploads`), false);
+    const u = new URL(d2.storage_url);
+    const r = await get(env, u.pathname + u.search, '198.51.100.41');
+    assert.equal(r.status, 200);
+    assert.equal(await r.text(), 'CHAT-BELEG');
+  } finally { a.zurueck(); }
+  const { readFileSync, existsSync } = await import('node:fs');
+  const appDatei = new URL('../../Kontolux/index.html', import.meta.url);
+  if (existsSync(appDatei)) assert.match(readFileSync(appDatei, 'utf8'), /safeHref\(d\.storage_url \|\| d\.url\)/, 'Prüfer-Seite zeigt storage_url || url');
 });
