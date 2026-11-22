@@ -1199,11 +1199,16 @@ function schliesseAus(s, profil, ctx, out, grund, extraHinweise) {
 // K3-Fix (K-N3, ABWEICHUNGEN 5.40; § 4 Abs. 3, § 11 Abs. 1 EStG, § 3 Abs. 15 UStG): Tagesabschluss mit Mehrzweck-Einlösung je Satz (Zahlungen kanal
 // gutschein_mehrzweck mit mehrzweck_satz_bp, kasse.js kassentagZuBelegEingabe). Eingenommenes Geld je Satz = Brutto des Satzes minus Einlösung des Satzes
 // (negativ möglich: Barrückgabe in diesem Satz); Steuer daraus je Satz wie bei einem eigenen Barbeleg (ustAusBrutto). Netto und Steuer über alle Sätze
-// werden auf die Geldzahlungen verteilt (Steuer nach Betragsanteil, die letzte Geldzahlung bekommt den Rest: Summen auf den Cent). Ohne Geldzahlung, aber
-// mit Verschiebung zwischen den Sätzen (Geld zusammen 0), trägt die letzte Gutschein-Zahlung das Paar Kz 112/140 (hebt sich auf). Die Voranmeldung bleibt
+// werden auf die Geldzahlungen verteilt (Steuer nach Betragsanteil, die letzte Geldzahlung bekommt den Rest: Summen auf den Cent). Ohne Geldzahlung
+// (Geld zusammen 0) gibt es keine EÜR-Zeile (eine Verschiebung zwischen den Sätzen fällt unter F1-Fix A-1). Die Voranmeldung bleibt
 // bei zahlungsAnteile (Summen je Satz gleich, alle Zahlungen am Geschäftstag). Rückgabe: Map Zahlungsindex -> { netto_cent, ust_cent } (nur Zahlungen mit
 // EÜR-Zufluss) oder null (keine Zuordnung je Satz wie im Bestand, Satz unbekannt, Skonto/Rabatt, Teilleistung, Summe der Geldzahlungen passt nicht zum Geld
 // je Satz): dann gilt die anteilige Verteilung wie bisher.
+// F1-Fix A-1 (K20, Standard „nie negativ ausgeben“, nachrecherche/k4-k20-standardregel.md): Bekäme eine Geldzahlung eine Steuer unter 0 (Kz 140 negativ) oder
+// über ihrem Betrag (Kz 112 negativ), etwa weil Netto oder Steuer über alle Sätze negativ ist (Barrückgabe in einem Satz, bezahlt mit Umsatz in einem anderen),
+// gibt die Funktion MZ_NEGATIV zurück:
+// Rückfall auf die anteilige Verteilung (nie negativ) mit Hinweis HN_KASSE_MEHRZWECK_SAETZE. Summe 112 + 140, Gewinn und Voranmeldung bleiben gleich.
+const MZ_NEGATIV = Symbol('mz_negativ');
 const MZ_SAETZE = Object.freeze(STEUERSAETZE.map((x) => x.bp));
 function kassenMehrzweckGeld(s, gruppen, zahlungen, teil) {
   if (s.beleg_art !== 'tagesabschluss' || teil) return null;
@@ -1227,18 +1232,18 @@ function kassenMehrzweckGeld(s, gruppen, zahlungen, teil) {
   let summe = 0;
   zahlungen.forEach((z, zi) => { if (z.kanal !== KANAL_MEHRZWECK) { geldIdx.push(zi); summe += z.betrag_cent; } });
   if (summe !== netto + ust) return null;
+  // F1-Fix A-1: 0 <= Steuer <= Betrag je Geldzahlung ist gleichwertig mit netto >= 0 und ust >= 0 über alle Sätze (Summen), schließt aber auch Rundungsreste aus.
+  // Ohne Geldzahlung ist netto + ust = 0: keine EÜR-Zeile (eine Verschiebung zwischen den Sätzen wäre ein Paar mit einem negativen Wert).
   const out = new Map();
-  if (!geldIdx.length) {
-    if (netto !== 0 || ust !== 0) out.set(zahlungen.lastIndexOf(mz[mz.length - 1]), { netto_cent: netto, ust_cent: ust });
-    return out;
-  }
   let uAcc = 0;
-  geldIdx.forEach((zi, k) => {
+  for (let k = 0; k < geldIdx.length; k++) {
+    const zi = geldIdx[k];
     const b = zahlungen[zi].betrag_cent;
     const u = k === geldIdx.length - 1 ? ust - uAcc : mulDivRund(b, ust, summe);
+    if (u < 0 || u > b) return MZ_NEGATIV;
     uAcc += u;
     out.set(zi, { netto_cent: b - u, ust_cent: u });
-  });
+  }
   return out;
 }
 
@@ -1402,12 +1407,14 @@ function ausgangWirkungen(s, profil, ctx, out, opt) {
     });
   }
   // K3-Fix (K-N3, ABWEICHUNGEN 5.40): Mehrzweck-Einlösung je Satz zugeordnet (mehrzweck_satz_bp): EÜR aus dem Geld je Satz (kassenMehrzweckGeld)
-  const mzGeld = kassenMehrzweckGeld(s, gruppen, zahlungen, teil);
+  const mzRoh = kassenMehrzweckGeld(s, gruppen, zahlungen, teil);
+  const mzNegativ = mzRoh === MZ_NEGATIV; // F1-Fix A-1: genaue Aufteilung wäre negativ, Rückfall anteilig (K20)
+  const mzGeld = mzNegativ ? null : mzRoh;
   // O2-Fix K-N3: Restfall ohne Zuordnung je Satz (eine Gutschein-Zahlung ohne mehrzweck_satz_bp, von kassentagZuBelegEingabe seit dem K3-Fix nicht mehr
   // erzeugt): die Geldzahlungen werden anteilig auf alle Sätze verteilt, die Aufteilung EÜR Kz 112/140 ist dann eine Näherung (Summe, Gewinn und
   // Voranmeldung stimmen). Nur Hinweis an den EÜR-Zeilen, keine Zahl.
   if (!mzGeld && s.beleg_art === 'tagesabschluss' && zahlungen.some((z) => z.kanal === KANAL_MEHRZWECK) && zahlungen.some((z) => z.kanal !== KANAL_MEHRZWECK)
-    && gruppen.filter((g) => g.netto_cent !== 0 || g.ust_cent !== 0).length > 1 && !ctx.hinweise.includes('HN_KASSE_MEHRZWECK_SAETZE')) ctx.hinweise.push('HN_KASSE_MEHRZWECK_SAETZE');
+    && (mzNegativ || gruppen.filter((g) => g.netto_cent !== 0 || g.ust_cent !== 0).length > 1) && !ctx.hinweise.includes('HN_KASSE_MEHRZWECK_SAETZE')) ctx.hinweise.push('HN_KASSE_MEHRZWECK_SAETZE');
   // EÜR: Zufluss je Zahlung (R-ZP-20), unabhängig von Soll und Ist
   zahlungen.forEach((z, zi) => {
     let nettoS = 0;
