@@ -535,7 +535,15 @@ test('K1-Fix M-1: Historie der Kasse unlesbar: SumUp-Barbeleg bleibt auf der Ban
   const r = await w.exp();
   assert.equal(r.status, 200, r.text);
   assert.deepEqual(kurz(r.zeilen, 'TCBAR1').map((x) => x.slice(0, 4)), [['119,00', 'S', '1200', '8400']]);
-  assert.match(r.warnung, /1 SumUp-Barzahlung\(en\) stehen auf der Bank, nicht auf dem Kassenkonto: für ihren Tag ist die Datenquelle der Kasse nicht eindeutig \(Verlauf der Kassen-Stammdaten fehlt, ist unlesbar oder der Beleg hat kein Datum\)/);
+  assert.match(r.warnung, /1 SumUp-Barzahlung\(en\) stehen auf der Bank, nicht auf dem Kassenkonto: für ihren Tag ist die Datenquelle der Kasse nicht eindeutig \(Verlauf der Kassen-Stammdaten fehlt, ist unlesbar oder der Beleg hat kein gültiges Datum\)/);
+});
+
+test('M1-Fix G (F-4): Beleg mit unvollständigem Datum (nur Jahr) wird als Datenquelle-unbekannt gezählt, mit dem Grund „kein gültiges Datum“', async () => {
+  const w = await welt();
+  w.fs.setze(P('dokumente/s1'), sumupBeleg('TCBAR2', 'Barzahlung', 119, { bezahlt_am: '2026', datum: '2026' }));
+  const r = await w.exp();
+  assert.equal(r.status, 200, r.text);
+  assert.match(r.warnung, /1 SumUp-Barzahlung\(en\) stehen auf der Bank, nicht auf dem Kassenkonto: .*der Beleg hat kein gültiges Datum\)/);
 });
 
 // A-M1 (Gegenlesung o-p1c, Baukonzept 2.11 H/#F35): Bareingang auf Rechnung, Durchlaufendes und Trinkgeld der Mitarbeiter fehlten im Stapel. Die Werte stehen nur in der

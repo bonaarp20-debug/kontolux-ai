@@ -246,6 +246,8 @@ test('L1-Fix F-2: Tag ohne Historien-Eintrag (vor dem Anfangsbestand) -> 409 STA
   const r = await u.rufe({ geschaeftstag_dialog: '2026-10-20' });
   assert.equal(r.status, 409, JSON.stringify(r.json));
   assert.equal(code(r), 'STAMMDATEN_UNBEKANNT');
+  // M1-Fix G (N-2): der Hinweis nennt auch den Fall „Verlauf beginnt später als der Anfangsbestand“ (hier: Anfangsbestand 01.01., Verlauf ab 01.11.)
+  assert.match(JSON.stringify(r.json), /vor dem Beginn ihrer aufgezeichneten Datenquelle/);
   assert.equal(u.aufrufe.length, 0, 'kein KI-Aufruf');
   assert.equal(u.zaehler(), 0, 'kein Zählerverbrauch');
   assert.equal((await umgebung({ kasse }).rufe({ geschaeftstag_dialog: '2026-11-03' })).status, 200, 'Tag mit Eintrag unverändert');
