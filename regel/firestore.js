@@ -8,6 +8,7 @@
 //   await fs.batchGet([pfad, ...])                        -> Map pfad -> { pfad, daten, updateTime } | null   (eine Unteranfrage)
 //   await fs.list('users/u/migration', { pageSize })      -> { dokumente: [...], naechste }
 //   await fs.runQuery('users/u', structuredQuery)         -> [{ pfad, daten, updateTime, roh }]
+//   await fs.runAggregationQuery('users/u', structuredQuery, [{ alias: 'n', count: {} }]) -> { n: Zahl }
 //   await fs.commit(writes)                               -> { updateTimes: [...], commitTime }   (atomar, höchstens 500 Schreibvorgänge)
 //   schreibe.setzen / schreibe.aendern / schreibe.anlegen erzeugen die Schreibvorgänge.
 
@@ -210,6 +211,24 @@ export function erzeugeSchicht({ token, fetchFn, basis = FIRESTORE_BASIS, budget
       if (!res.ok) throw await fehlerAus(res, false);
       const zeilen = await res.json();
       return (Array.isArray(zeilen) ? zeilen : []).filter((z) => z && z.document).map((z) => dokAusRoh(z.document));
+    },
+    // hyg M5: Aggregation (count/sum/avg) über eine Abfrage, EINE Unteranfrage. aggregationen: [{ alias, count: { upTo } } | { alias, sum: { field } } ...].
+    // Ergebnis: { alias: Zahl }. Fehlt ein Alias in der Antwort oder ist der Wert keine Zahl: Fehler (der Aufrufer bleibt fail-closed).
+    // Nur gegen den Emulator oder echtes Firestore prüfbar; die Tests nutzen die Nachbildung in test/regel-fake-firestore.mjs (count).
+    async runAggregationQuery(elternPfad, structuredQuery, aggregationen) {
+      const url = elternPfad ? `${wurzel}/${elternPfad}:runAggregationQuery` : `${wurzel}:runAggregationQuery`;
+      const res = await rufe(url, { method: 'POST', headers: kopf(), body: JSON.stringify({ structuredAggregationQuery: { structuredQuery, aggregations: aggregationen } }) });
+      if (!res.ok) throw await fehlerAus(res, false);
+      const zeilen = await res.json();
+      const felder = (Array.isArray(zeilen) ? zeilen : []).map((z) => z && z.result && z.result.aggregateFields).find(Boolean) || {};
+      const aus = {};
+      for (const { alias } of aggregationen) {
+        const w = felder[alias];
+        const n = w && w.integerValue !== undefined ? Number(w.integerValue) : w && w.doubleValue !== undefined ? Number(w.doubleValue) : NaN;
+        if (!Number.isFinite(n)) throw new FirestoreFehler(res.status, 'AGGREGATION_UNVOLLSTAENDIG');
+        aus[alias] = n;
+      }
+      return aus;
     },
     async commit(writes) {
       if (!Array.isArray(writes) || writes.length === 0) return { updateTimes: [], commitTime: null };

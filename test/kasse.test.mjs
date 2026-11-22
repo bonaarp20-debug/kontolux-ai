@@ -1847,21 +1847,130 @@ test('O6 H2: mehr als 120 Ruhetage nach dem letzten Abschluss: der letzte Abschl
   assert.deepEqual([frueher.status, frueher.json.fehler[0].code, frueher.json.letzter_tag], [409, 'SPAETERE_TAGE', '2027-04-04']);
 });
 
-test('O6 H2: mehr Tagesplätze ohne Treffer als lesbar (1000): fail-closed 503 KASSENTAGE_ZU_VIELE statt stillem „kein Abschluss“, nichts geschrieben', async () => {
-  const u = umgebung({ heute: '2030-12-31' });
-  const id = await u.legeKasseAn();
-  assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200);
-  for (let i = 0; i < 1100; i += 1) {
-    const t = K.addiereTage('2026-11-03', i);
+// hyg H2/N4: Zeiger kassen/{id}.letzter_abschluss statt Suche über Tagesplätze
+const ruhetagePlaetze = (u, id, von, n) => {
+  for (let i = 0; i < n; i += 1) {
+    const t = K.addiereTage(von, i);
     u.fs.setze(P(`kassentage/${id}_${t}`), { kasse_id: id, geschaeftstag: t, status: 'ruhetag', fassung_aktiv: null, fassungen_kurz: [] });
   }
-  const vor = u.fs.log.commits;
+};
+test('hyg H2: Zeiger letzter_abschluss: 1100 Ruhetage nach dem letzten Abschluss (früher 503): Abschluss mit gezähltem Bestand; Storno setzt den Zeiger auf den Vorgänger zurück, dann auf null (Anfangsbestand der Kasse); kein Verlaufseintrag', async () => {
+  const u = umgebung({ heute: '2030-12-31' });
+  const id = await u.legeKasseAn();
+  assert.equal(u.fs.lies(P(`kassen/${id}`)).letzter_abschluss, null, 'neue Kasse: Zeiger null');
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200); // gezählt 707,00
+  const k1 = u.fs.lies(P(`kassen/${id}`));
+  assert.deepEqual(k1.letzter_abschluss, { tag: '2026-11-02', fassung: 1, gezaehlt_cent: 70700 });
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-02`)).vorheriger_abschluss, null);
+  ruhetagePlaetze(u, id, '2026-11-03', 1100);
   const r = await u.tagRufe(ohneUmsatz(id, '2030-01-01', { gezaehlt_cent: 70700 }));
-  assert.equal(r.status, 503, JSON.stringify(r.json));
-  assert.equal(r.json.fehler[0].code, 'KASSENTAGE_ZU_VIELE');
-  assert.equal(u.fs.log.commits, vor);
-  const s = await u.tagRufe(stornoBody(id, '2026-11-02'));
-  assert.equal(s.status, 503, 'auch der Storno fragt den letzten Abschluss: lieber blockieren als die Kette aushebeln');
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.differenz_cent, 0);
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2030-01-01`)).anfangsbestand_cent, 70700);
+  assert.deepEqual(u.fs.lies(P(`kassentage/${id}_2030-01-01`)).vorheriger_abschluss, { tag: '2026-11-02', fassung: 1, gezaehlt_cent: 70700 });
+  const k2 = u.fs.lies(P(`kassen/${id}`));
+  assert.deepEqual(k2.letzter_abschluss, { tag: '2030-01-01', fassung: 1, gezaehlt_cent: 70700 });
+  // Zeiger ist kein Stammdatum: Verlauf und geaendert_am bleiben
+  assert.deepEqual([k2.verlauf, k2.geaendert_am], [k1.verlauf, k1.geaendert_am]);
+  assert.deepEqual(u.fs.pfade(P(`kassen/${id}/verlauf/`)), []);
+  // nur der letzte Abschluss ist stornierbar; der Storno setzt den Zeiger auf den Vorgänger (ohne Suche über 1100 Plätze)
+  assert.equal((await u.tagRufe(stornoBody(id, '2026-11-02'))).json.fehler[0].code, 'SPAETERE_TAGE');
+  const s1 = await u.tagRufe(stornoBody(id, '2030-01-01'));
+  assert.equal(s1.status, 200, JSON.stringify(s1.json));
+  assert.deepEqual(u.fs.lies(P(`kassen/${id}`)).letzter_abschluss, { tag: '2026-11-02', fassung: 1, gezaehlt_cent: 70700 });
+  const s2 = await u.tagRufe(stornoBody(id, '2026-11-02'));
+  assert.equal(s2.status, 200, JSON.stringify(s2.json));
+  assert.equal(u.fs.lies(P(`kassen/${id}`)).letzter_abschluss, null);
+  // ohne Abschluss gilt wieder der Anfangsbestand der Kasse (100,00): Neuerfassung des 02.11. als Fassung 2
+  const n2 = await u.tagRufe(abschluss(id, '2026-11-02'));
+  assert.equal(n2.status, 200, JSON.stringify(n2.json));
+  assert.equal(n2.json.fassung, 2);
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-02/fassungen/2`)).anfangsbestand_cent, 10000);
+  assert.deepEqual(u.fs.lies(P(`kassen/${id}`)).letzter_abschluss, { tag: '2026-11-02', fassung: 2, gezaehlt_cent: 70700 });
+  // Bewegung vor dem letzten Abschluss weiter gesperrt (Zeiger), danach offen
+  assert.equal((await u.bewRufe(bewegung(id, '2026-11-01', 'geldtransit_bank_ein', 100))).json.fehler[0].code, 'SPAETERE_TAGE');
+});
+
+test('hyg N4: die Zahl der Firestore-Anfragen eines Abschlusses hängt nicht von Pausen ab (300 Ruhetage kosten keine Anfrage mehr)', async () => {
+  const zaehle = async (pause) => {
+    const u = umgebung({ heute: '2027-12-31' });
+    const id = await u.legeKasseAn();
+    assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200);
+    if (pause) ruhetagePlaetze(u, id, '2026-11-03', pause);
+    const vor = u.fs.log.anfragen;
+    const r = await u.tagRufe(ohneUmsatz(id, K.addiereTage('2026-11-03', pause), { gezaehlt_cent: 70700 }));
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    return u.fs.log.anfragen - vor;
+  };
+  // eine Lücke kostet genau eine Abfrage (O6 H1: Bewegungen in der Lücke), unabhängig von ihrer Länge
+  const kurz = await zaehle(1);
+  assert.equal(await zaehle(300), kurz);
+  assert.equal(await zaehle(0), kurz - 1);
+  assert.ok(kurz <= 20, `Anfragen ${kurz}`);
+});
+
+test('hyg H2: zwei gleichzeitige Abschlüsse desselben Tages: genau einer gewinnt, Zeiger zeigt auf ihn; ein zwischen Lesen und Commit gesetzter Zeiger (Vorbedingung updateTime der Kasse) führt zur Wiederholung und 409 SPAETERE_TAGE, nichts geschrieben', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const [a, b] = await Promise.all([u.tagRufe(abschluss(id, '2026-11-02')), u.tagRufe(abschluss(id, '2026-11-02', { gezaehlt_cent: 70600, differenz_grund: 'Wechselgeld' }))]);
+  const erfolge = [a, b].filter((x) => x.status === 200);
+  assert.equal(erfolge.length, 1, JSON.stringify([a.json, b.json]));
+  const verlierer = [a, b].find((x) => x.status !== 200);
+  assert.equal(verlierer.status, 409);
+  assert.ok(['KASSENTAG_VORHANDEN', 'KONFLIKT'].includes(verlierer.json.fehler[0].code), JSON.stringify(verlierer.json));
+  const tagDaten = u.fs.lies(P(`kassentage/${id}_2026-11-02`));
+  assert.deepEqual(u.fs.lies(P(`kassen/${id}`)).letzter_abschluss, { tag: '2026-11-02', fassung: 1, gezaehlt_cent: tagDaten.gezaehlt_cent });
+  assert.equal(u.fs.lies(P(`zaehler/K_${id}_2026`)).letzte, 1);
+  // Vorbedingung auf der Kasse: zwischen Lesen und Commit setzt ein anderer Vorgang den Zeiger auf den 05.11. (ohne Audit-Kopf zu berühren)
+  const v = umgebung();
+  const vid = await v.legeKasseAn();
+  let einmal = false;
+  v.fs.haken.vorCommit = async (writes, api) => {
+    if (einmal || !writes.some((w) => String(w.update && w.update.name).includes(`/kassentage/${vid}_2026-11-03`))) return;
+    einmal = true;
+    api.setze(P(`kassentage/${vid}_2026-11-05`), { kasse_id: vid, geschaeftstag: '2026-11-05', status: 'abgeschlossen', fassung_aktiv: 1, fassungen_kurz: [{ n: 1 }], gezaehlt_cent: 10000 });
+    api.setze(P(`kassen/${vid}`), { ...api.lies(P(`kassen/${vid}`)), letzter_abschluss: { tag: '2026-11-05', fassung: 1, gezaehlt_cent: 10000 } });
+  };
+  const r = await v.tagRufe(ohneUmsatz(vid, '2026-11-03'));
+  assert.deepEqual([r.status, r.json.fehler && r.json.fehler[0].code, r.json.letzter_tag], [409, 'SPAETERE_TAGE', '2026-11-05'], JSON.stringify(r.json));
+  assert.equal(v.fs.lies(P(`kassentage/${vid}_2026-11-03`)), null);
+  assert.deepEqual(v.fs.lies(P(`kassen/${vid}`)).letzter_abschluss, { tag: '2026-11-05', fassung: 1, gezaehlt_cent: 10000 });
+});
+
+test('hyg H2: Zeiger unlesbar oder passt nicht zum Tagesplatz: fail-closed 503 KASSENZEIGER_UNGUELTIG bei Abschluss, Storno und Bewegung, nichts geschrieben; fehlt er, gilt der Anfangsbestand', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200);
+  const kasse = u.fs.lies(P(`kassen/${id}`));
+  const pruefe = async (zeiger, { bewegung: mitBewegung = true } = {}) => {
+    u.fs.setze(P(`kassen/${id}`), { ...kasse, letzter_abschluss: zeiger });
+    const vor = u.fs.log.commits;
+    const a = await u.tagRufe(ohneUmsatz(id, '2026-11-04', { gezaehlt_cent: 70700 }));
+    assert.deepEqual([a.status, a.json.fehler[0].code], [503, 'KASSENZEIGER_UNGUELTIG'], JSON.stringify(zeiger));
+    const s = await u.tagRufe(stornoBody(id, '2026-11-02'));
+    assert.deepEqual([s.status, s.json.fehler[0].code], [503, 'KASSENZEIGER_UNGUELTIG'], JSON.stringify(zeiger));
+    if (mitBewegung) assert.equal((await u.bewRufe(bewegung(id, '2026-11-04', 'geldtransit_bank_ein', 100))).status, 503);
+    assert.equal(u.fs.log.commits, vor, 'kein Commit');
+  };
+  await pruefe({ tag: 'gestern', fassung: 1, gezaehlt_cent: 70700 });
+  await pruefe({ tag: '2026-11-02', fassung: 1, gezaehlt_cent: -1 });
+  await pruefe('2026-11-02');
+  // gültige Form, aber falscher Bestand oder falsche Fassung: Abschluss und Storno prüfen gegen den Tagesplatz
+  await pruefe({ tag: '2026-11-02', fassung: 1, gezaehlt_cent: 70000 }, { bewegung: false });
+  await pruefe({ tag: '2026-11-02', fassung: 2, gezaehlt_cent: 70700 }, { bewegung: false });
+  // Zeiger auf einen früheren Tag als den abgeschlossenen (Storno) bzw. auf einen Tag ohne Abschluss (Abschluss)
+  await pruefe({ tag: '2026-11-01', fassung: 1, gezaehlt_cent: 70700 }, { bewegung: false });
+  // Storno ohne Zeiger, obwohl der Tag abgeschlossen ist: 503 statt eines Stornos, der die Kette bricht
+  u.fs.setze(P(`kassen/${id}`), { ...kasse, letzter_abschluss: null });
+  assert.equal((await u.tagRufe(stornoBody(id, '2026-11-02'))).json.fehler[0].code, 'KASSENZEIGER_UNGUELTIG');
+  // fehlender Zeiger an einer Kasse ohne Abschluss: Anfangsbestand der Kasse
+  const v = umgebung();
+  const vid = await v.legeKasseAn();
+  const { letzter_abschluss: _weg, ...ohneZeiger } = v.fs.lies(P(`kassen/${vid}`));
+  v.fs.setze(P(`kassen/${vid}`), ohneZeiger);
+  const r = await v.tagRufe(ohneUmsatz(vid, '2026-11-02'));
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(v.fs.lies(P(`kassentage/${vid}_2026-11-02`)).anfangsbestand_cent, 10000);
 });
 
 test('O6 M1: Storno-Kassenbelege tragen bezahlt: true und bezahlt_am = Geschäftstag (im Hash); eine Client-Änderung „bezahlt“ ist nach den Rules unmöglich, der Drift-Status bleibt ok, der Storno wirkt (Regel und Ist-Versteuerung)', async () => {
@@ -1975,36 +2084,62 @@ test('O6 M3: Festschreibung, die zwischen Lesen und Commit startet (Commit schei
   assert.deepEqual(c.fs.pfade(P('kassenbewegungen/')).length, 1);
 });
 
-test('O6 M5: KU-Summe bei mehr als 2.000 Belegen vor dem Tag wird nicht abgeschnitten (monatsweise gelesen, KU_GRENZE_AM_TAG greift); ein einzelner Monat mit 2.000 Belegen: fail-closed 503 KU_SUMME_ZU_GROSS', async () => {
+test('hyg M5: KU-Summe ohne Abschneiden: alle Belege seitenweise (Cursor datum/Name), count-Aggregation erst bei voller Seite; 2.100 Belege in EINEM Monat (früher 503) ergeben die volle Summe; über 10.000: 503 KU_SUMME_ZU_GROSS; weniger gelesen als gezählt oder Zählung kaputt: fail-closed', async () => {
   const belege = (u, anzahl, monate) => {
     for (let i = 0; i < anzahl; i += 1) {
       const d = `2026-${String(1 + (i % monate)).padStart(2, '0')}-15`;
-      u.fs.setze(P(`dokumente/vor${i}`), { typ: 'rechnung_ausgehend', betrag: 49, betrag_netto: 49, mwst_satz: 'keine', datum: d, bezahlt: true, bezahlt_am: d, absender: 'K', rechnungsnr: `R${i}` });
+      u.fs.setze(P(`dokumente/vor${String(i).padStart(5, '0')}`), { typ: 'rechnung_ausgehend', betrag: 49, betrag_netto: 49, mwst_satz: 'keine', datum: d, bezahlt: true, bezahlt_am: d, absender: 'K', rechnungsnr: `R${i}` });
     }
   };
   const ku = (id, cent) => ({ ...abschluss(id, '2026-11-02'), umsaetze: [{ steuerfall: 'A_KU', bar_cent: cent, unbar_cent: 0 }], gezaehlt_cent: 10000 + cent });
-  // 2.100 mal 49,00 = 102.900,00 über zehn Monate; abgeschnitten auf 2.000 Belege wären es 98.000,00 und 98.000 + 100,00 liegt unter 100.000,00
-  const u = umgebung({ profil: KU });
-  const id = await u.legeKasseAn();
-  belege(u, 2100, 10);
-  const r = await u.tagRufe(ku(id, 10000));
-  assert.equal(r.status, 409, JSON.stringify(r.json));
-  assert.equal(r.json.fehler[0].code, 'KU_GRENZE_AM_TAG');
-  assert.equal(r.json.fehler[0].summe_cent, 10290000 + 10000);
-  assert.deepEqual(u.fs.pfade(P('kassentage/')), []);
-  // unter 2.000 Belegen bleibt es bei der einen Abfrage; 1.999 mal 49,00 = 97.951,00: 100,00 mehr geht
+  // 2.100 mal 49,00 = 102.900,00 in EINEM Monat (früher fail-closed 503) und über zehn Monate: volle Summe, KU_GRENZE_AM_TAG greift
+  for (const monate of [1, 10]) {
+    const u = umgebung({ profil: KU });
+    const id = await u.legeKasseAn();
+    belege(u, 2100, monate);
+    const r = await u.tagRufe(ku(id, 10000));
+    assert.equal(r.status, 409, JSON.stringify(r.json));
+    assert.equal(r.json.fehler[0].code, 'KU_GRENZE_AM_TAG');
+    assert.equal(r.json.fehler[0].summe_cent, 10290000 + 10000);
+    assert.ok(u.fs.log.methoden.includes('runAggregationQuery'));
+    assert.deepEqual(u.fs.pfade(P('kassentage/')), []);
+  }
+  // unter 2.000 Belegen: eine Abfrage, keine Zählung; 1.999 mal 49,00 = 97.951,00: 100,00 mehr geht
   const v = umgebung({ profil: KU });
   const vid = await v.legeKasseAn();
   belege(v, 1999, 10);
   assert.equal((await v.tagRufe(ku(vid, 10000))).status, 200);
-  // ein einzelner Monat mit 2.000 oder mehr Belegen: lieber blockieren als falsch entscheiden
+  assert.ok(!v.fs.log.methoden.includes('runAggregationQuery'));
+  // ein zwischen zwei Seiten verschobenes Datum (Beleg der ersten Seite wandert nach hinten) zählt einmal, nicht doppelt
+  const d = umgebung({ profil: KU });
+  const did = await d.legeKasseAn();
+  belege(d, 2040, 1); // 2.040 mal 49,00 = 99.960,00; doppelt gezählt wären es 100.009,00 und 0,01 mehr läge über der Grenze
+  d.fs.haken.fehler = (url, init) => {
+    if (url.endsWith(':runQuery') && String(init.body).includes('"startAt"') && String(init.body).includes('"datum"')) d.fs.setze(P('dokumente/vor00000'), { ...d.fs.lies(P('dokumente/vor00000')), datum: '2026-10-31' });
+    return null;
+  };
+  const dr = await d.tagRufe(ku(did, 1));
+  assert.equal(dr.status, 200, JSON.stringify(dr.json));
+  d.fs.haken.fehler = null;
+  // über KU_BELEGE_MAX (10.000): 503 KU_SUMME_ZU_GROSS, nichts geschrieben
   const w = umgebung({ profil: KU });
   const wid = await w.legeKasseAn();
-  belege(w, 2100, 1);
+  belege(w, 10001, 10);
   const x = await w.tagRufe(ku(wid, 100));
   assert.equal(x.status, 503, JSON.stringify(x.json));
   assert.equal(x.json.fehler[0].code, 'KU_SUMME_ZU_GROSS');
   assert.deepEqual(w.fs.pfade(P('kassentage/')), []);
+  // Zählung meldet mehr als gelesen (z. B. Beleg zwischendurch weggefallen): 503 KU_SUMME_UNVOLLSTAENDIG; Zählung scheitert: Fehler, nichts geschrieben
+  for (const [antwort, status, code] of [[{ result: { aggregateFields: { n: { integerValue: '2500' } } } }, 503, 'KU_SUMME_UNVOLLSTAENDIG'], [null, 500, null], [{ result: { aggregateFields: {} } }, 500, null]]) {
+    const z = umgebung({ profil: KU });
+    const zid = await z.legeKasseAn();
+    belege(z, 2100, 3);
+    z.fs.haken.fehler = (url) => (url.endsWith(':runAggregationQuery') ? (antwort ? new Response(JSON.stringify([antwort])) : new Response('{}', { status: 500 })) : null);
+    const y = await z.tagRufe(ku(zid, 100));
+    assert.equal(y.status, status, JSON.stringify(y.json));
+    if (code) assert.equal(y.json.fehler[0].code, code);
+    assert.deepEqual(z.fs.pfade(P('kassentage/')), []);
+  }
 });
 
 test('O6 N1: ein vom Client gefälschtes Dokument mit quelle kasse (ohne gesperrt) umgeht die Ähnlichkeitsprüfung nicht; echte Kassenbelege (gesperrt, gesperrt_durch kasse) zählen weiter nicht', async () => {
@@ -2045,4 +2180,81 @@ test('O6 N3: eine vorhandene tagesdaten.beschreibung wird beim Abschluss nicht �
   assert.deepEqual([t.beschreibung, t.einnahmen], ['Marktstand und Ladenverkauf', 912]);
   assert.equal((await u.tagRufe(abschluss(id, '2026-11-03', { gezaehlt_cent: 70700 + 60700 }))).status, 200);
   assert.equal(u.fs.lies(P('tagesdaten/2026-11-03')).beschreibung, 'Tagesabschluss Theke');
+});
+
+test('hyg B-M1: eine falsch datierte und stornierte Bewegung (Original + Storno am selben Tag) hindert weder den Ruhetag noch den Abschluss des Folgetags; eine offene Bewegung weiter schon', async () => {
+  for (const weg of ['ruhetag', 'folgetag']) {
+    const u = umgebung();
+    const id = await u.legeKasseAn();
+    const b = await u.bewRufe(bewegung(id, '2026-11-02', 'entnahme', 2000, { eigenbeleg_pfad: eigen(id, '2026-11-02') }));
+    assert.equal(b.status, 200, JSON.stringify(b.json));
+    // solange offen: beides gesperrt
+    assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-02' })).json.fehler[0].code, 'RUHETAG_MIT_BEWEGUNG');
+    assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-03'))).json.fehler[0].code, 'OFFENE_BEWEGUNGEN_VORTAG');
+    assert.equal((await u.bewRufe(stornoBew(id, b.json.bewegung_id))).status, 200);
+    if (weg === 'ruhetag') {
+      const r = await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-02' });
+      assert.equal(r.status, 200, JSON.stringify(r.json));
+    } else {
+      const r = await u.tagRufe(ohneUmsatz(id, '2026-11-03'));
+      assert.equal(r.status, 200, JSON.stringify(r.json));
+      assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-03`)).anfangsbestand_cent, 10000, 'Paar wirkt nicht auf den Bestand');
+    }
+    // eine zweite, offene Bewegung an einem anderen offenen Tag sperrt weiter
+    const c = await u.bewRufe(bewegung(id, '2026-11-05', 'geldtransit_bank_ein', 500));
+    assert.equal(c.status, 200, JSON.stringify(c.json));
+    assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-06'))).json.fehler[0].code, 'OFFENE_BEWEGUNGEN_VORTAG');
+    assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-05' })).json.fehler[0].code, 'RUHETAG_MIT_BEWEGUNG');
+  }
+});
+
+test('hyg B-N1: mehr als 300 Bewegungen in der Lücke oder im Ruhetag-Bereich ergeben 409/422 mit Tag statt 500; ein nur teilweise gelesener Tag wird nie als offen gemeldet', async () => {
+  const setzeBew = (u, id, tag, n, start = 1) => {
+    for (let i = start; i < start + n; i += 1) u.fs.setze(P(`kassenbewegungen/${id}_${tag}_${String(i).padStart(3, '0')}`), { kasse_id: id, geschaeftstag: tag, art: 'geldtransit_bank_ein', betrag_cent: 1, storno_von: null });
+  };
+  // 310 offene Bewegungen am 02.11.: der Tag ist nur teilweise gelesen, also 422 BEWEGUNGEN_ZU_VIELE mit bis_tag
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  setzeBew(u, id, '2026-11-02', 310);
+  const a = await u.tagRufe(ohneUmsatz(id, '2026-11-03'));
+  assert.deepEqual([a.status, a.json.fehler[0].code, a.json.bis_tag], [422, 'BEWEGUNGEN_ZU_VIELE', '2026-11-02'], JSON.stringify(a.json));
+  const r = await u.tagRufe({ aktion: 'ruhetage', kasse_id: id, tage: ['2026-11-02', '2026-11-03'] });
+  assert.deepEqual([r.status, r.json.fehler[0].code], [422, 'BEWEGUNGEN_ZU_VIELE'], JSON.stringify(r.json));
+  assert.deepEqual(u.fs.pfade(P('kassentage/')), []);
+  // ein vollständig gelesener offener Tag davor wird gemeldet (409 mit tage), der Randtag nicht
+  const v = umgebung();
+  const vid = await v.legeKasseAn();
+  setzeBew(v, vid, '2026-11-02', 1);
+  setzeBew(v, vid, '2026-11-03', 310);
+  const b = await v.tagRufe(ohneUmsatz(vid, '2026-11-04'));
+  assert.deepEqual([b.status, b.json.fehler[0].code, b.json.tage], [409, 'OFFENE_BEWEGUNGEN_VORTAG', ['2026-11-02']], JSON.stringify(b.json));
+  const c = await v.tagRufe({ aktion: 'ruhetage', kasse_id: vid, tage: ['2026-11-02', '2026-11-03'] });
+  assert.deepEqual([c.status, c.json.fehler[0].code, c.json.geschaeftstag], [409, 'RUHETAG_MIT_BEWEGUNG', '2026-11-02'], JSON.stringify(c.json));
+});
+
+test('hyg B-N3: ruhetag_aufheben macht einen irrtümlichen Ruhetag nach dem letzten Abschluss wieder offen (Bewegung möglich, Audit mit vorher, Kette ok); vor dem letzten Abschluss 409 SPAETERE_TAGE, kein Ruhetag 409 KEIN_RUHETAG, unbekannt 404', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-02'))).status, 200);
+  assert.equal((await u.tagRufe({ aktion: 'ruhetage', kasse_id: id, tage: ['2026-11-03', '2026-11-04'] })).status, 200);
+  assert.equal((await u.bewRufe(bewegung(id, '2026-11-04', 'geldtransit_bank_ein', 500))).json.fehler[0].code, 'TAG_ABGESCHLOSSEN');
+  const r = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-04`)), null);
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-03`)).status, 'ruhetag', 'nur der genannte Tag');
+  const e = u.audit().find((x) => x.aktion === 'kassentag_ruhetag_aufgehoben');
+  assert.ok(e && e.details.weg === 'aufheben', JSON.stringify(u.audit().map((x) => x.aktion)));
+  assert.equal((await kettepruefen(u.audit())).ok, true);
+  // jetzt offen: Bewegung geht, Abschluss mit ihr
+  assert.equal((await u.bewRufe(bewegung(id, '2026-11-04', 'geldtransit_bank_ein', 500))).status, 200);
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-04', { gezaehlt_cent: 10500 }))).status, 200);
+  // vor dem letzten Abschluss: nur rückwärts über den Storno
+  const s = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-03' });
+  assert.deepEqual([s.status, s.json.fehler[0].code, s.json.letzter_tag], [409, 'SPAETERE_TAGE', '2026-11-04']);
+  const k = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-04' });
+  assert.deepEqual([k.status, k.json.fehler[0].code], [409, 'KEIN_RUHETAG']);
+  const x = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-09' });
+  assert.deepEqual([x.status, x.json.fehler[0].code], [404, 'KASSENTAG_UNBEKANNT']);
+  const f = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-05', grund: 'x' });
+  assert.deepEqual([f.status, f.json.feld], [400, 'grund']);
 });

@@ -52,8 +52,10 @@ export const TAGESPLAETZE_SEITE = 250;
 export const TAGESPLAETZE_MAX_SEITEN = 4; // zusammen 1000 Tagesplätze (O6 H2: mehr als 120 Ruhetage am Stück, z. B. Winterpause, sind normal)
 
 // Alle Kassentage-Dokumente einer Kasse (Tagesplätze, nicht die Fassungen), absteigend, bis zum ersten Treffer. null NUR, wenn alle Tagesplätze der Kasse gelesen
-// wurden und keiner passt. Reicht das Seitenlimit nicht (mehr als 1000 Tagesplätze ohne Treffer), wirft die Funktion (O6 H2): ein stilles null ließe
-// Anfangsbestand, Chronologie (SPAETERE_TAGE) und die Storno-Kette (nur der letzte Tag) entfallen.
+// wurden und keiner passt. Reicht das Seitenlimit nicht (mehr als 1000 Tagesplätze ohne Treffer), wirft die Funktion (O6 H2, fail-closed).
+// Nur noch für den nächsten freien Tag (/kasse aendern, system_wechseln): dort zählen Abschlüsse UND Ruhetage als Treffer, Pausen kosten also keine
+// Seite; nur eine lange Reihe stornierter Tage am Ende könnte mehr als eine Seite brauchen. Den letzten ABSCHLUSS liest niemand mehr per Suche,
+// dafür gibt es den Zeiger kassen/{id}.letzter_abschluss (hyg H2/N4, siehe zeigerAus).
 async function ruecklaufend(fs, uid, kasseId, passt, { seite = TAGESPLAETZE_SEITE, maxSeiten = TAGESPLAETZE_MAX_SEITEN } = {}) {
   let ab = null;
   for (let i = 0; i < maxSeiten; i += 1) {
@@ -68,9 +70,30 @@ async function ruecklaufend(fs, uid, kasseId, passt, { seite = TAGESPLAETZE_SEIT
 // Letzter Tagesplatz der Kasse mit einem der Stati (z. B. ['abgeschlossen', 'ruhetag'])
 export const letzterTagMit = (fs, uid, kasseId, stati) => ruecklaufend(fs, uid, kasseId, (d) => d && stati.includes(d.status));
 
-// Letzter abgeschlossener Tag der Kasse (Tagesplatz mit status 'abgeschlossen'); stornierte Tage und Ruhetage zählen nicht (Ruhetage haben keine
-// Bestandswirkung, ein stornierter Tag ist wieder offen). null: noch keiner.
-export const letzterAbgeschlossenerTag = (fs, uid, kasseId) => ruecklaufend(fs, uid, kasseId, (d) => d && d.status === 'abgeschlossen' && Number.isSafeInteger(d.fassung_aktiv));
+// ---------------------------------------------------------------------------------------------
+// Zeiger auf den letzten Abschluss (hyg H2/N4): kassen/{id}.letzter_abschluss = { tag, fassung, gezaehlt_cent } | null.
+// Gepflegt NUR vom Worker im selben atomaren Commit wie der Abschluss (setzt ihn auf den neuen Tag) und der Storno (setzt ihn auf den Vorgänger zurück,
+// der im Tagesplatz als vorheriger_abschluss steht), jeweils mit updateTime-Vorbedingung auf dem Kassen-Dokument. Ruhetage ändern den letzten Abschluss
+// nicht und schreiben den Zeiger deshalb nicht. Kein Stammdatum: kein Verlaufseintrag, geaendert_am bleibt.
+// Fehlt das Feld (Kasse ohne Abschluss) oder ist es null: kein Abschluss, es gilt der Anfangsbestand der Kasse. Ist es gesetzt, aber unlesbar: fail-closed
+// (KasseLesefehler, 503 KASSENZEIGER_UNGUELTIG), nie ein stilles „kein Abschluss“ (das ließe Anfangsbestand, SPAETERE_TAGE und die Storno-Kette entfallen).
+// ---------------------------------------------------------------------------------------------
+const DATUM = /^\d{4}-\d{2}-\d{2}$/;
+export function zeigerGueltig(z) {
+  return istObjektRoh(z) && typeof z.tag === 'string' && DATUM.test(z.tag) && Number.isSafeInteger(z.fassung) && z.fassung >= 1
+    && Number.isSafeInteger(z.gezaehlt_cent) && z.gezaehlt_cent >= 0;
+}
+const istObjektRoh = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
+export function zeigerAus(wert) {
+  if (wert === undefined || wert === null) return null;
+  if (!zeigerGueltig(wert)) throw new KasseLesefehler('KASSENZEIGER_UNGUELTIG', 'Kasse: Zeiger auf den letzten Abschluss unlesbar');
+  return { tag: wert.tag, fassung: wert.fassung, gezaehlt_cent: wert.gezaehlt_cent };
+}
+// Der Tagesplatz, auf den der Zeiger zeigt, muss genau dieser Abschluss sein (Tag, aktive Fassung, gezählter Bestand); sonst fail-closed
+export function zeigerPasst(zeiger, tagDaten) {
+  return istObjektRoh(tagDaten) && tagDaten.status === 'abgeschlossen' && tagDaten.geschaeftstag === zeiger.tag && tagDaten.fassung_aktiv === zeiger.fassung
+    && tagDaten.gezaehlt_cent === zeiger.gezaehlt_cent;
+}
 
 // Bewegungen eines Tages (aufsteigend nach ID {kasseId}_{tag}_{NNN}); höchstens 300 (mehr gäbe es nur durch Missbrauch: dann fail-closed)
 export async function bewegungenDesTages(fs, uid, kasseId, tag) {
@@ -79,11 +102,23 @@ export async function bewegungenDesTages(fs, uid, kasseId, tag) {
   return r;
 }
 
-// Bewegungen aller Tage eines Bereichs (Ruhetage-Prüfung), höchstens 300
+// Bewegungen aller Tage eines Bereichs (Lücke vor einem Abschluss, Ruhetage), aufsteigend, höchstens 300. Gibt es mehr, trägt die Liste
+// unvollstaendig: true (B-N1: kein 500 mehr); der Aufrufer entscheidet nur mit dem Gelesenen, wenn das reicht, sonst 422 BEWEGUNGEN_ZU_VIELE.
+export const BEREICH_MAX = 300;
 export async function bewegungenImBereich(fs, uid, kasseId, vonTag, bisTag) {
-  const r = await fs.runQuery(`users/${uid}`, idBereich(uid, 'kassenbewegungen', `${kasseId}_${vonTag}_000`, `${kasseId}_${bisTag}_999`, { limit: 301 }));
-  if (r.length > 300) throw new Error('Kassenbewegungen: mehr als 300 im Bereich');
-  return r;
+  const r = await fs.runQuery(`users/${uid}`, idBereich(uid, 'kassenbewegungen', `${kasseId}_${vonTag}_000`, `${kasseId}_${bisTag}_999`, { limit: BEREICH_MAX + 1 }));
+  const liste = r.slice(0, BEREICH_MAX);
+  liste.unvollstaendig = r.length > BEREICH_MAX;
+  return liste;
+}
+
+// B-M1 (o-p1c-gegenlesung): Ein Bewegungs-Storno liegt immer am Tag des Originals; Original und Storno (storno_von) heben sich auf. Für die Frage
+// „hat dieser Tag Bewegungen?“ (Lücke vor einem Abschluss, O6 H1; Ruhetag) zählen solche Paare nicht, sonst erzwänge eine falsch datierte und stornierte Bewegung
+// einen Schein-Abschluss für einen geschlossenen Tag. Ein Storno ohne sein Original in der Liste zählt weiter (fail-closed). Der Soll-Bestand rechnet beide (Summe 0).
+export function ohneStornoPaare(liste) {
+  const ids = new Set(liste.map(idVon));
+  const aufgehoben = new Set(liste.filter((d) => d.daten && d.daten.art === 'storno' && ids.has(d.daten.storno_von)).map((d) => d.daten.storno_von));
+  return liste.filter((d) => !aufgehoben.has(idVon(d)) && !(d.daten && d.daten.art === 'storno' && aufgehoben.has(d.daten.storno_von)));
 }
 
 // Nur die für kassenSoll nötigen Felder einer Bewegung

@@ -1,25 +1,26 @@
 // regel/kasse.js (KASSE-P1b, Baukonzept docs/kassenbuch/08-baukonzept.md 2.3 und 2.11 C, Vertrag docs/kassenbuch/stand-kasse.md): Worker-Endpunkte des Kassenbuchs.
 //   POST /kasse        { aktion: 'anlegen' | 'aendern' | 'system_wechseln', ... }
-//   POST /kassentag    { aktion: 'abschliessen' | 'ruhetag' | 'ruhetage' | 'stornieren', ... }
+//   POST /kassentag    { aktion: 'abschliessen' | 'ruhetag' | 'ruhetage' | 'stornieren' | 'ruhetag_aufheben', ... }
 //   POST /kassenbewegung { aktion: 'anlegen' | 'stornieren', ... }
 // Alle Kassen-Sammlungen schreibt nur der Worker (Firestore-Regeln: Eigentümer liest). UID nur aus dem Token (setzt der Router).
 // Prüfreihenfolge: grundpruefung (anfrage_id, Größe) -> UID -> Feature kasse (503) -> Steuerprofil bestätigt (403 PROFIL_FEHLT) -> AGB-Mindestfassung
 // (403 AGB_FEHLT) -> aktion bekannt -> Positivliste je aktion (400 FORMAT mit feld) -> Formprüfung -> fachliche Prüfung mit dem Kern (Steuerkern.pruefeKassentag,
 // kassenSoll, validiereBeleg) -> Festschreibung (409 MONAT_FESTGESCHRIEBEN) -> EIN :commit (atomar, alle Vorbedingungen). Keine Beträge in Logs und Audit.
-// Gleichzeitige Änderungen: updateTime-Vorbedingungen auf Tagesplatz, Zähler, Kasse (Stammdaten) und Audit-Kopf (serialisiert alle Kassen-Commits eines Kontos); bei Konflikt höchstens 3 Wiederholungen
+// Letzter Abschluss: Zeiger kassen/{id}.letzter_abschluss (hyg H2/N4, kasse-daten.js zeigerAus), gepflegt im Commit von Abschluss und Storno; keine Suche über Tagesplätze.
+// Gleichzeitige Änderungen: updateTime-Vorbedingungen auf Tagesplatz, Zähler, Kasse (Stammdaten und Zeiger) und Audit-Kopf (serialisiert alle Kassen-Commits eines Kontos); bei Konflikt höchstens 3 Wiederholungen
 // (die ganze Prüfung läuft neu), danach 409 KONFLIKT. Unteranfragen: höchstens etwa 12 je Aufruf (REGEL_UNTERANFRAGEN_MAX = 35).
 import * as Steuerkern from '../steuerkern/index.js';
 import {
   antwort, fehlerAntwort, featureAusAntwort, grundpruefung, istObjekt, CONFIG_PFAD, configBereinigen, featureAktiv, agbFassungenLaden, agbFassungVergleich,
   AGB_MINDESTFASSUNG_KASSE, kernOptionenFuerKontoLaden, jetztIso, schichtFuer, regelFehler, listeAlle,
 } from './gemeinsam.js';
-import { schreibe, zeitstempel, FirestoreFehler } from './firestore.js';
+import { schreibe, zeitstempel, FirestoreFehler, vollerName } from './firestore.js';
 import { auditKette, kopfPfad } from './audit.js';
 import { profilBereit, wirkPerioden, nachFestschreibungAntwort, festPruefungMarkieren } from './schreibweg-v2.js';
 import { legacyHash } from './drift.js';
 import { heuteBerlin } from './oss-meldung.js';
 import { KASSE_PFADE, FEATURE, aufbewahrungBis, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, pruefeBewegung, kernFassung, stammKombination, PRIVAT_ARTEN } from './kasse-form.js';
-import { P, kasseIdAus, kassennummer, letzterAbgeschlossenerTag, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern, KasseLesefehler } from './kasse-daten.js';
+import { P, kasseIdAus, kassennummer, zeigerAus, zeigerPasst, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern, ohneStornoPaare, KasseLesefehler } from './kasse-daten.js';
 
 export { KASSE_PFADE, FEATURE, aufbewahrungBis, pruefeKasse, pruefeKassentag };
 export const BEWEGUNGEN_MAX_JE_TAG = 999;
@@ -29,7 +30,7 @@ export const WIEDERHOLUNGEN_MAX = 3; // Wiederholungen bei gleichzeitiger Änder
 const BODY_MAX_ZEICHEN = 30000;
 const VERLAUF_MAX = 200;
 const SPERRENDE = ['festgeschrieben', 'sperre_laeuft'];
-const AKTIONEN = { '/kasse': ['anlegen', 'aendern', 'system_wechseln'], '/kassentag': ['abschliessen', 'ruhetag', 'ruhetage', 'stornieren'], '/kassenbewegung': ['anlegen', 'stornieren'] };
+const AKTIONEN = { '/kasse': ['anlegen', 'aendern', 'system_wechseln'], '/kassentag': ['abschliessen', 'ruhetag', 'ruhetage', 'stornieren', 'ruhetag_aufheben'], '/kassenbewegung': ['anlegen', 'stornieren'] };
 // Abbildung der Kern-Prüfcodes auf HTTP (stand-kasse.md 5): FORMAT-Gruppe 400 mit code FORMAT (kern_code nennt den Kern-Code), die übrigen gleichnamig
 const FORMAT_GRUPPE = ['FORMAT', 'STEUERFALL_UNZULAESSIG', 'KU_MEHRERE_SAETZE', 'DIFFERENZ_OHNE_GRUND', 'ZBON_SUMME_ABWEICHUNG', 'RETROGRAD_DIFFERENZ'];
 const KERN_STATUS = { ANHANG_ODER_BESTAETIGUNG: [422, 'ANHANG_FEHLT'], TAGESSALDO_NEGATIV: [422], BESTAND_NEGATIV: [422], DATENQUELLE_SUMUP: [422], KARTE_UEBER_INTEGRATION: [422],
@@ -101,12 +102,13 @@ export async function regelKasse(pfad, body, env, cors = {}, deps = {}) {
     if (pfad === '/kassentag') {
       if (aktion === 'abschliessen') return await abschliessen(c);
       if (aktion === 'stornieren') return await stornieren(c);
+      if (aktion === 'ruhetag_aufheben') return await ruhetagAufheben(c);
       return await ruhetage(c, aktion);
     }
     if (pfad === '/kassenbewegung') return aktion === 'anlegen' ? await bewegungAnlegen(c) : await bewegungStornieren(c);
     return fehlerAntwort(404, 'PFAD_UNBEKANNT', cors);
   } catch (e) {
-    // Lesegrenze erreicht (z. B. mehr als 1000 Tagesplätze ohne Abschluss, mehr als 2000 Belege je Monat bei der KU-Summe): fail-closed, nichts geschrieben
+    // Lesegrenze erreicht oder Zeiger unlesbar (KASSENZEIGER_UNGUELTIG, KASSENTAGE_ZU_VIELE beim nächsten freien Tag, KU_SUMME_ZU_GROSS): fail-closed, nichts geschrieben
     if (e instanceof KasseLesefehler) { console.warn(`regel_kasse_lesegrenze ${e.code}`); return fehlerAntwort(503, e.code, cors); }
     return regelFehler(e, 'kasse', cors);
   }
@@ -138,6 +140,7 @@ async function kasseAktion(c, aktion) {
         kassenbuch: w.kassenbuch, bestand_in_kasse_id: w.bestand_in_kasse_id, karte_ueber_integration: w.karte_ueber_integration,
         ruhetage_wochentage: w.ruhetage_wochentage, datev_konto: w.datev_konto, meldepflicht_bestaetigt_am: null,
         aktiv: true, erstellt_am: ts, geaendert_am: ts, verlauf: [],
+        letzter_abschluss: null, // Zeiger auf den letzten Abschluss (hyg H2), kein Stammdatum
       };
       const writes = [schreibe.anlegen(P.kasse(uid, id), kasse)];
       // Anfangsbestand aus einer Privateinlage (2.11 C.3): Privatvorgang gegen die Kasse, OHNE Kassenbewegung (der Bestand steckt schon in anfangsbestand_cent,
@@ -209,7 +212,7 @@ async function kasseAktion(c, aktion) {
           ruhetage_wochentage: [], datev_konto: null, meldepflicht_bestaetigt_am: null,
           ...Object.fromEntries(['software', 'software_version', 'hersteller', 'modell', 'seriennummer'].map((x) => [x, alt[x] ?? null])),
           aktiv: false, ausser_betrieb_am: alterTag, ausser_betrieb_grund: 'systemwechsel', nachfolger_kasse_id: id,
-          erstellt_am: zeitstempel(zeit), geaendert_am: zeitstempel(zeit), verlauf: [],
+          erstellt_am: zeitstempel(zeit), geaendert_am: zeitstempel(zeit), verlauf: [], letzter_abschluss: null,
         },
       };
       for (const [k, v] of Object.entries(w.system)) { neu[k] = v; geaendert.push(k); }
@@ -266,27 +269,38 @@ async function sumupLesen(c, tag) {
 }
 
 // Gesamtumsatz nach § 19 Abs. 2 UStG des Jahres bis einschließlich Vortag (Näherung aus den Belegen mit Belegdatum im Jahr vor dem Tag; Kern grenzenFuerJahr)
-const KU_BELEGE_LIMIT = 2000;
+// hyg M5: Die Summe rechnet der Kern aus den Belegen (Wirkungen, Stornos, Steuerfälle); eine Firestore-Summe über ein Feld (runAggregationQuery sum) gäbe diese
+// Bedeutung nicht wieder, ein mitgeführter Jahreszähler ginge nicht, weil der Client dokumente direkt schreibt. Darum: alle Belege des Zeitraums vollständig lesen,
+// seitenweise mit Cursor (datum, Dokumentname), ohne Abschneiden. Erst wenn die erste Seite voll ist, zählt runAggregationQuery (count) die Treffer: über
+// KU_BELEGE_MAX 503 KU_SUMME_ZU_GROSS (Budget), weniger gelesen als gezählt 503 KU_SUMME_UNVOLLSTAENDIG. Nie eine geschätzte oder abgeschnittene (zu kleine) Summe.
+// Doppelt gelesene Dokumente (Datum zwischen zwei Seiten geändert) zählen einmal.
+export const KU_SEITE = 2000;
+export const KU_BELEGE_MAX = 10000; // 5 Seiten plus eine Zählung; reicht für jede Kleinunternehmerin (Umsatzgrenze), schont das Budget (REGEL_UNTERANFRAGEN_MAX 35)
 async function kuSummeVorTag(c, tag, kernOptionen) {
   const { fs, uid, profil } = c;
   const jahr = Number(tag.slice(0, 4));
-  const lesen = (von, bis) => fs.runQuery(`users/${uid}`, { from: [{ collectionId: 'dokumente' }], where: { compositeFilter: { op: 'AND', filters: [
-    { fieldFilter: { field: { fieldPath: 'datum' }, op: 'GREATER_THAN_OR_EQUAL', value: { stringValue: von } } },
-    { fieldFilter: { field: { fieldPath: 'datum' }, op: 'LESS_THAN', value: { stringValue: bis } } },
-  ] } }, limit: KU_BELEGE_LIMIT });
-  let r = await lesen(`${jahr}-01-01`, tag);
-  // O6 M5: eine volle Antwort kann abgeschnitten sein (zu kleine Summe, KU_GRENZE_AM_TAG griffe zu spät, Umsätze würden als A_KU statt regelbesteuert gebucht):
-  // dann monatsweise lesen; ist auch ein einzelner Monat voll, fail-closed (503), nie eine geschätzte Summe
-  if (r.length >= KU_BELEGE_LIMIT) {
-    r = [];
-    for (let m = 1; m <= Number(tag.slice(5, 7)); m += 1) {
-      const von = `${jahr}-${String(m).padStart(2, '0')}-01`;
-      const naechster = m < 12 ? `${jahr}-${String(m + 1).padStart(2, '0')}-01` : `${jahr + 1}-01-01`;
-      const x = await lesen(von, naechster < tag ? naechster : tag);
-      if (x.length >= KU_BELEGE_LIMIT) throw new KasseLesefehler('KU_SUMME_ZU_GROSS', 'KU-Summe: mehr Belege je Monat als lesbar');
-      r.push(...x);
+  const basis = { from: [{ collectionId: 'dokumente' }], where: { compositeFilter: { op: 'AND', filters: [
+    { fieldFilter: { field: { fieldPath: 'datum' }, op: 'GREATER_THAN_OR_EQUAL', value: { stringValue: `${jahr}-01-01` } } },
+    { fieldFilter: { field: { fieldPath: 'datum' }, op: 'LESS_THAN', value: { stringValue: tag } } },
+  ] } } };
+  const seite = (nach) => fs.runQuery(`users/${uid}`, {
+    ...basis, orderBy: [{ field: { fieldPath: 'datum' }, direction: 'ASCENDING' }, { field: { fieldPath: '__name__' }, direction: 'ASCENDING' }],
+    ...(nach ? { startAt: { values: [{ stringValue: nach.daten.datum }, { referenceValue: vollerName(nach.pfad) }], before: false } } : {}),
+    limit: KU_SEITE,
+  });
+  let x = await seite(null);
+  const gelesen = new Map(x.map((d) => [d.pfad, d]));
+  if (x.length >= KU_SEITE) {
+    const { n } = await fs.runAggregationQuery(`users/${uid}`, basis, [{ alias: 'n', count: { upTo: String(KU_BELEGE_MAX + 1) } }]);
+    if (!Number.isSafeInteger(n) || n > KU_BELEGE_MAX) throw new KasseLesefehler('KU_SUMME_ZU_GROSS', 'KU-Summe: mehr Belege als lesbar');
+    while (x.length >= KU_SEITE) {
+      x = await seite(x[x.length - 1]);
+      for (const d of x) gelesen.set(d.pfad, d);
+      if (gelesen.size > KU_BELEGE_MAX) throw new KasseLesefehler('KU_SUMME_ZU_GROSS', 'KU-Summe: mehr Belege als lesbar');
     }
+    if (gelesen.size < n) throw new KasseLesefehler('KU_SUMME_UNVOLLSTAENDIG', 'KU-Summe: weniger Belege gelesen als gezählt');
   }
+  const r = [...gelesen.values()];
   const belege = Steuerkern.belegeFuerKern(r.map((d) => ({ ...d.daten, id: idVon(d) })), profil, kernOptionen).belege;
   const wirkungen = Steuerkern.alleWirkungen(belege, profil, kernOptionen).filter((x) => !(typeof x.datum_wirk === 'string' && x.datum_wirk >= tag));
   const g = Steuerkern.grenzenFuerJahr(wirkungen, profil, jahr, null, {});
@@ -387,14 +401,23 @@ async function abschliessen(c) {
     if (tag < kasse.anfangsbestand_am) return { antwort: fehlerAntwort(422, 'VOR_ANFANGSBESTAND', cors, { anfangsbestand_am: kasse.anfangsbestand_am }) };
     // Stammdaten gelten ab einem Datum (…_ab): ein Tag davor hätte andere Werte, die nicht gespeichert sind (Wechsel gibt es nur ab dem nächsten freien Tag)
     if (['art_ab', 'grundaufzeichnung_ab', 'datenquelle_ab'].some((x) => typeof kasse[x] === 'string' && kasse[x] > tag)) return { antwort: fehlerAntwort(409, 'STAMMDATEN_WECHSEL_SPAETER', cors) };
-    const letzter = await letzterAbgeschlossenerTag(fs, uid, kasseId);
-    if (letzter && tag <= letzter.daten.geschaeftstag) return { antwort: fehlerAntwort(409, 'SPAETERE_TAGE', cors, { letzter_tag: letzter.daten.geschaeftstag }) };
+    // Letzter Abschluss aus dem Zeiger der Kasse (hyg H2/N4): keine Suche, die Zahl der Unteranfragen hängt nicht von Pausen ab. Der Tagesplatz, auf den er zeigt,
+    // wird gelesen und muss genau dieser Abschluss sein (fail-closed 503 KASSENZEIGER_UNGUELTIG), sein gezählter Bestand ist der Anfangsbestand.
+    const zeiger = zeigerAus(kasse.letzter_abschluss);
+    if (zeiger && tag <= zeiger.tag) return { antwort: fehlerAntwort(409, 'SPAETERE_TAGE', cors, { letzter_tag: zeiger.tag }) };
+    if (zeiger && !zeigerPasst(zeiger, (await fs.get(P.kassentag(uid, Steuerkern.kassentagId(kasseId, zeiger.tag))))?.daten)) throw new KasseLesefehler('KASSENZEIGER_UNGUELTIG', 'Kasse: Zeiger passt nicht zum Tagesplatz');
+    const letzter = zeiger ? { daten: { geschaeftstag: zeiger.tag, gezaehlt_cent: zeiger.gezaehlt_cent } } : null;
     // O6 H1: Bewegungen an einem offenen Tag VOR diesem Tag (nach dem letzten Abschluss) fehlten in der Soll-Rechnung dieses Abschlusses und wären danach gesperrt
-    // (SPAETERE_TAGE): der Nutzer schließt zuerst diese Tage ab (oder storniert die Bewegung).
+    // (SPAETERE_TAGE): der Nutzer schließt zuerst diese Tage ab (oder storniert die Bewegung: Paare aus Original und Storno zählen nicht, B-M1).
     const lueckeVon = letzter ? Steuerkern.addiereTage(letzter.daten.geschaeftstag, 1) : kasse.anfangsbestand_am;
     const lueckeBis = Steuerkern.addiereTage(tag, -1);
     if (lueckeVon <= lueckeBis) {
-      const offen = await bewegungenImBereich(fs, uid, kasseId, lueckeVon, lueckeBis);
+      const gelesen = await bewegungenImBereich(fs, uid, kasseId, lueckeVon, lueckeBis);
+      // B-N1: mehr als 300 Bewegungen in der Lücke: der zuletzt gelesene Tag ist evtl. nur teilweise gelesen (sein Storno-Gegenstück kann fehlen) und zählt nicht;
+      // offene Tage davor sind sicher offen und werden gemeldet; sonst 422 BEWEGUNGEN_ZU_VIELE statt 500
+      const randTag = gelesen.unvollstaendig ? gelesen[gelesen.length - 1].daten.geschaeftstag : null;
+      const offen = ohneStornoPaare(gelesen).filter((d) => !randTag || d.daten.geschaeftstag < randTag);
+      if (!offen.length && gelesen.unvollstaendig) return { antwort: fehlerAntwort(422, 'BEWEGUNGEN_ZU_VIELE', cors, { bis_tag: gelesen[gelesen.length - 1].daten.geschaeftstag }) };
       if (offen.length) return { antwort: fehlerAntwort(409, 'OFFENE_BEWEGUNGEN_VORTAG', cors, { tage: [...new Set(offen.map((d) => d.daten.geschaeftstag))].sort().slice(0, 31) }) };
     }
     const anfangsbestand = letzter ? letzter.daten.gezaehlt_cent : kasse.anfangsbestand_cent;
@@ -464,6 +487,8 @@ async function abschliessen(c) {
     const tagNeu = {
       kasse_id: kasseId, geschaeftstag: tag, status: 'abgeschlossen', fassung_aktiv: n, fassungen_kurz: [...bisher, kurz],
       anfangsbestand_cent: anfangsbestand, soll_endbestand_cent: wert.soll_cent, gezaehlt_cent: w.gezaehlt_cent, differenz_cent: differenz, aufbewahrung_bis: aufbewahrungBis(tag),
+      // Vorgänger für den Storno (hyg H2): der Storno setzt den Zeiger der Kasse auf diesen Wert zurück, ohne Suche
+      vorheriger_abschluss: zeiger,
     };
     const fassung = {
       n, kasse_id: kasseId, geschaeftstag: tag, z_nummern: w.z_nummern, quelle: kasse.datenquelle, quelle_import_id: null, grundaufzeichnung: kasse.grundaufzeichnung, datenquelle: kasse.datenquelle,
@@ -482,6 +507,9 @@ async function abschliessen(c) {
       schreibe.setzen(P.kassentag(uid, tagId), tagNeu, tagDok ? { updateTime: tagDok.updateTime } : { exists: false }),
       schreibe.anlegen(P.fassung(uid, tagId, n), fassung),
       schreibe.setzen(P.zaehler(uid, kasseId, jahr), { letzte: nummerNeu, aktualisiert_am: ts }, docs.get(P.zaehler(uid, kasseId, jahr)) ? { updateTime: docs.get(P.zaehler(uid, kasseId, jahr)).updateTime } : { exists: false }),
+      // Zeiger auf diesen Abschluss (hyg H2): nur das eine Feld, Vorbedingung updateTime der gelesenen Kasse (ein gleichzeitiger Abschluss oder eine Stammdatenänderung
+      // führt zur Wiederholung mit neuem Stand); kein Verlaufseintrag, geaendert_am bleibt
+      schreibe.aendern(P.kasse(uid, kasseId), { letzter_abschluss: { tag, fassung: n, gezaehlt_cent: w.gezaehlt_cent } }, ['letzter_abschluss'], { updateTime: kasseDok.updateTime }),
     ];
     for (const b of belege) writes.push(schreibe.anlegen(P.beleg(uid, b.beleg.id), b.dok));
     // Tagesdaten (wie buchTagesBewegung, aber im selben Commit): Brutto aller Einnahmebelege des Tages am Geschäftstag
@@ -536,8 +564,12 @@ async function ruhetage(c, aktion) {
     }
     if (tage[0] < kasse.anfangsbestand_am) return { antwort: fehlerAntwort(422, 'VOR_ANFANGSBESTAND', cors, { anfangsbestand_am: kasse.anfangsbestand_am }) };
     const bew = await bewegungenImBereich(fs, uid, kasseId, tage[0], tage[tage.length - 1]);
-    const mit = bew.find((d) => tage.includes(d.daten.geschaeftstag));
+    // B-M1: eine stornierte Bewegung (Original und Storno am selben Tag) hindert den Ruhetag nicht
+    const randTag = bew.unvollstaendig ? bew[bew.length - 1].daten.geschaeftstag : null; // B-N1: nur vollständig gelesene Tage entscheiden
+    const mit = ohneStornoPaare(bew).find((d) => tage.includes(d.daten.geschaeftstag) && (!randTag || d.daten.geschaeftstag < randTag));
     if (mit) return { antwort: fehlerAntwort(409, 'RUHETAG_MIT_BEWEGUNG', cors, { geschaeftstag: mit.daten.geschaeftstag }) };
+    // B-N1: mehr als 300 Bewegungen im Bereich und das Gelesene entscheidet nicht: 422 (weniger Tage auf einmal bestätigen), nie 500 und nie ein ungeprüfter Ruhetag
+    if (bew.unvollstaendig) return { antwort: fehlerAntwort(422, 'BEWEGUNGEN_ZU_VIELE', cors, { bis_tag: bew[bew.length - 1].daten.geschaeftstag }) };
     const ts = zeitstempel(zeit);
     const writes = tage.map((t, i) => schreibe.anlegen(P.kassentag(uid, ids[i]), {
       kasse_id: kasseId, geschaeftstag: t, status: 'ruhetag', fassung_aktiv: null, fassungen_kurz: [], anfangsbestand_cent: null, soll_endbestand_cent: null, gezaehlt_cent: null,
@@ -548,6 +580,37 @@ async function ruhetage(c, aktion) {
       details: { kasse_id: kasseId, anzahl: tage.length, von: tage[0], bis: tage[tage.length - 1] },
     }], zeit);
     return { writes: [...writes, ...audit.writes], erfolg: () => antwort({ ok: true, tage }, 200, cors) };
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// /kassentag ruhetag_aufheben (B-N3, ergänzt O6 M2): ein irrtümlich bestätigter Ruhetag NACH dem letzten Abschluss wird wieder ein offener Tag (Tagesplatz entfernt,
+// Vorbedingung updateTime), damit eine Bewegung erfasst oder der Tag normal abgeschlossen werden kann, ohne Storno-Spur. Ein Ruhetag hat keine Bestandswirkung, keine
+// Kassennummer und keinen Beleg; der Nachweis bleibt in der Audit-Kette (kassentag_ruhetag_aufgehoben mit vorher). Vor dem letzten Abschluss: 409 SPAETERE_TAGE
+// (Weg rückwärts über den Storno, Nr. 13). Eine Wiederholung nach Erfolg findet keinen Tagesplatz mehr (404, nichts geschrieben).
+// ---------------------------------------------------------------------------------------------
+async function ruhetagAufheben(c) {
+  const { fs, uid, body, cors, zeit, heute } = c;
+  const f = pruefeRuhetage(body, 'ruhetag', { heute });
+  if (f.fehler) return formFehler(f.fehler, cors);
+  const { kasse_id: kasseId, tage: [tag] } = f.wert;
+  const tagId = Steuerkern.kassentagId(kasseId, tag);
+  return mitWiederholung(fs, async () => {
+    const docs = await fs.batchGet([P.kasse(uid, kasseId), P.kassentag(uid, tagId), kopfPfad(uid)]);
+    const kasseDok = docs.get(P.kasse(uid, kasseId));
+    if (!kasseDok || !istObjekt(kasseDok.daten)) return { antwort: fehlerAntwort(404, 'KASSE_UNBEKANNT', cors) };
+    const kasse = kasseDok.daten;
+    if (kasse.kassenbuch === false) return { antwort: fehlerAntwort(422, 'KASSE_OHNE_KASSENBUCH', cors) };
+    if (kasse.aktiv === false) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors) };
+    const tagDok = docs.get(P.kassentag(uid, tagId));
+    if (!tagDok || !istObjekt(tagDok.daten)) return { antwort: fehlerAntwort(404, 'KASSENTAG_UNBEKANNT', cors, { kassentag_id: tagId }) };
+    if (tagDok.daten.status !== 'ruhetag') return { antwort: fehlerAntwort(409, 'KEIN_RUHETAG', cors, { kassentag_id: tagId, status: tagDok.daten.status ?? null }) };
+    const zeiger = zeigerAus(kasse.letzter_abschluss);
+    if (zeiger && tag < zeiger.tag) return { antwort: fehlerAntwort(409, 'SPAETERE_TAGE', cors, { letzter_tag: zeiger.tag }) };
+    const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{
+      aktion: 'kassentag_ruhetag_aufgehoben', ziel: `kassentage/${tagId}`, vorher: tagDok.daten, nachher: null, details: { kasse_id: kasseId, kassentag_id: tagId, weg: 'aufheben' },
+    }], zeit);
+    return { writes: [schreibe.loeschen(P.kassentag(uid, tagId), { updateTime: tagDok.updateTime }), ...audit.writes], erfolg: () => antwort({ ok: true, kassentag_id: tagId }, 200, cors) };
   });
 }
 
@@ -581,8 +644,13 @@ async function stornieren(c) {
     const gleiche = kurzListe.find((x) => x.storno_anfrage_id === body.anfrage_id);
     if (gleiche) return { antwort: antwort({ ok: true, idempotent: true, kassentag_id: tagId, fassung: gleiche.n, storno_beleg_id: gleiche.storno_beleg_id ?? null }, 200, cors) };
     if (tagAlt.status !== 'abgeschlossen' || !Number.isSafeInteger(tagAlt.fassung_aktiv)) return { antwort: fehlerAntwort(409, 'KEIN_ABSCHLUSS', cors, { kassentag_id: tagId, status: tagAlt.status ?? null }) };
-    const letzter = await letzterAbgeschlossenerTag(fs, uid, kasseId);
-    if (letzter && letzter.daten.geschaeftstag !== tag) return { antwort: fehlerAntwort(409, 'SPAETERE_TAGE', cors, { letzter_tag: letzter.daten.geschaeftstag }) };
+    // Nur der letzte Abschluss ist stornierbar (Zeiger der Kasse, hyg H2). Zeigt er auf einen späteren Tag: SPAETERE_TAGE. Zeigt er nicht genau auf diesen
+    // abgeschlossenen Tag (fehlt, früherer Tag, andere Fassung oder anderer Bestand) oder fehlt der Vorgänger im Tagesplatz: fail-closed 503.
+    const zeiger = zeigerAus(kasse.letzter_abschluss);
+    if (zeiger && zeiger.tag > tag) return { antwort: fehlerAntwort(409, 'SPAETERE_TAGE', cors, { letzter_tag: zeiger.tag }) };
+    if (!zeiger || !zeigerPasst(zeiger, tagAlt) || !('vorheriger_abschluss' in tagAlt)) throw new KasseLesefehler('KASSENZEIGER_UNGUELTIG', 'Kasse: Zeiger passt nicht zum Tagesplatz');
+    const vorgaenger = zeigerAus(tagAlt.vorheriger_abschluss);
+    if (vorgaenger && vorgaenger.tag >= tag) throw new KasseLesefehler('KASSENZEIGER_UNGUELTIG', 'Kassentag: Vorgänger nicht vor dem Tag');
     const n = tagAlt.fassung_aktiv;
     const kurz = kurzListe.find((x) => x.n === n);
     if (!kurz) throw new Error('Tagesplatz ohne Kurzeintrag der aktiven Fassung');
@@ -628,6 +696,8 @@ async function stornieren(c) {
     const writes = [
       schreibe.setzen(P.kassentag(uid, tagId), tagNeu, { updateTime: tagDok.updateTime }),
       schreibe.setzen(P.zaehler(uid, kasseId, jahr), { letzte: nummerNeu, aktualisiert_am: ts }, docs.get(P.zaehler(uid, kasseId, jahr)) ? { updateTime: docs.get(P.zaehler(uid, kasseId, jahr)).updateTime } : { exists: false }),
+      // Zeiger zurück auf den vorherigen Abschluss (oder null: dann gilt wieder der Anfangsbestand der Kasse), im selben Commit (hyg H2)
+      schreibe.aendern(P.kasse(uid, kasseId), { letzter_abschluss: vorgaenger }, ['letzter_abschluss'], { updateTime: kasseDok.updateTime }),
       ...stornoDocs.map((x) => schreibe.anlegen(P.beleg(uid, x.id), x.dok)),
     ];
     // tagesdaten: Einnahmen des Geschäftstags zurücknehmen, nie unter 0 (N30). Vorbedingung updateTime: eine gleichzeitige Buchung führt zur Wiederholung
@@ -657,14 +727,15 @@ async function stornieren(c) {
 // Eine Kassennummer je Bewegung aus dem Zähler der Kasse und des Jahres (lückenlos, zusammen mit Fassungen und Stornos).
 // ---------------------------------------------------------------------------------------------
 async function offenerTag(c, kasseDok, tagDok, tag, tagId) {
-  const { fs, uid, cors } = c;
+  const { cors } = c;
   const kasse = kasseDok.daten;
   if (kasse.kassenbuch === false) return { antwort: fehlerAntwort(422, 'KASSE_OHNE_KASSENBUCH', cors) };
   if (kasse.aktiv === false) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors) };
   if (tagDok && istObjekt(tagDok.daten) && (tagDok.daten.status === 'abgeschlossen' || tagDok.daten.status === 'ruhetag')) return { antwort: fehlerAntwort(409, 'TAG_ABGESCHLOSSEN', cors, { kassentag_id: tagId, status: tagDok.daten.status }) };
   if (tag < kasse.anfangsbestand_am) return { antwort: fehlerAntwort(422, 'VOR_ANFANGSBESTAND', cors, { anfangsbestand_am: kasse.anfangsbestand_am }) };
-  const letzter = await letzterAbgeschlossenerTag(fs, uid, idVon(kasseDok));
-  if (letzter && tag < letzter.daten.geschaeftstag) return { antwort: fehlerAntwort(409, 'SPAETERE_TAGE', cors, { letzter_tag: letzter.daten.geschaeftstag }) };
+  // Zeiger der Kasse (hyg H2): keine Suche. Die Bewegung schreibt die Kasse nicht; einen gleichzeitigen Abschluss fängt der Audit-Kopf (Wiederholung, neu gelesen).
+  const zeiger = zeigerAus(kasse.letzter_abschluss);
+  if (zeiger && tag < zeiger.tag) return { antwort: fehlerAntwort(409, 'SPAETERE_TAGE', cors, { letzter_tag: zeiger.tag }) };
   return null;
 }
 const naechsteNr = (liste) => liste.reduce((m, d) => Math.max(m, Number(String(d.pfad).split('_').pop()) || 0), 0) + 1;
