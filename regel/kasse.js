@@ -20,7 +20,10 @@ import { profilBereit, wirkPerioden, nachFestschreibungAntwort, festPruefungMark
 import { legacyHash } from './drift.js';
 import { heuteBerlin } from './oss-meldung.js';
 import { KASSE_PFADE, FEATURE, aufbewahrungBis, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, pruefeBewegung, kernFassung, stammKombination, PRIVAT_ARTEN } from './kasse-form.js';
-import { P, kasseIdAus, kassennummer, zeigerAus, zeigerPasst, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern, ohneStornoPaare, KasseLesefehler } from './kasse-daten.js';
+import {
+  P, kasseIdAus, kassennummer, zeigerAus, zeigerPasst, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern, ohneStornoPaare, KasseLesefehler,
+  STAMM_FELDER, STAMMDATEN_VERLAUF_MAX, stammVerlaufAus, stammAm, stammVerlaufMit, stammVerlaufStart,
+} from './kasse-daten.js';
 
 export { KASSE_PFADE, FEATURE, aufbewahrungBis, pruefeKasse, pruefeKassentag };
 export const BEWEGUNGEN_MAX_JE_TAG = 999;
@@ -138,11 +141,13 @@ async function kasseAktion(c, aktion) {
         art: w.art, art_ab: w.anfangsbestand_am, grundaufzeichnung: w.grundaufzeichnung, grundaufzeichnung_ab: w.anfangsbestand_am,
         datenquelle: w.datenquelle, datenquelle_ab: w.anfangsbestand_am,
         anfangsbestand_cent: w.anfangsbestand_cent, anfangsbestand_am: w.anfangsbestand_am, anfangsbestand_herkunft: w.anfangsbestand_herkunft,
-        kassenbuch: w.kassenbuch, bestand_in_kasse_id: w.bestand_in_kasse_id, karte_ueber_integration: w.karte_ueber_integration,
+        kassenbuch: w.kassenbuch, bestand_in_kasse_id: w.bestand_in_kasse_id, karte_ueber_integration: w.karte_ueber_integration, karte_ueber_integration_ab: w.anfangsbestand_am,
         ruhetage_wochentage: w.ruhetage_wochentage, datev_konto: w.datev_konto, meldepflicht_bestaetigt_am: null,
         aktiv: true, erstellt_am: ts, geaendert_am: ts, verlauf: [],
         letzter_abschluss: null, // Zeiger auf den letzten Abschluss (hyg H2), kein Stammdatum
       };
+      // Stammdaten-Historie (J1-Fix M-1/N-e): Startwerte ab dem Anfangsbestand
+      kasse.stammdaten_verlauf = Object.fromEntries(STAMM_FELDER.map((x) => [x, [{ wert: kasse[x], ab: w.anfangsbestand_am, am: ts }]]));
       const writes = [schreibe.anlegen(P.kasse(uid, id), kasse)];
       // Anfangsbestand aus einer Privateinlage (2.11 C.3): Privatvorgang gegen die Kasse, OHNE Kassenbewegung (der Bestand steckt schon in anfangsbestand_cent,
       // stand-kasse.md 2 Klarstellung: nie doppelt). Der Eigenbeleg (PDF) entsteht im Browser (P3).
@@ -170,6 +175,12 @@ async function kasseAktion(c, aktion) {
     const neu = {};
     let archiv = null;
     const geaendert = [];
+    // Stammdaten-Historie (J1-Fix M-1/N-e): der Wert eines Felds an einem Tag kommt aus ihr. Eine Kasse vor J1 (ohne Historie) bekommt beim ersten Wechsel
+    // eine Startliste mit dem, was sicher bekannt ist (stammVerlaufStart).
+    let freierTag;
+    const freier = async () => (freierTag === undefined ? (freierTag = await naechsterFreierTag(fs, uid, id, alt)) : freierTag);
+    let sv = stammVerlaufAus(alt);
+    const verlaufHolen = async () => sv || (sv = stammVerlaufStart(alt, { kartenAbSonst: await freier() }));
     // Wechsel von Art, Grundaufzeichnung, Datenquelle: nur ab dem nächsten freien Tag nach dem letzten Tag, nie rückwirkend (Vertrag 2.1 datenquelle_ab)
     const stammWechsel = aktion === 'aendern'
       ? ['art', 'grundaufzeichnung', 'datenquelle'].filter((x) => w.felder[x] !== undefined)
@@ -177,16 +188,27 @@ async function kasseAktion(c, aktion) {
     if (stammWechsel.length || aktion === 'system_wechseln') {
       const ab = aktion === 'aendern' ? w.felder[`${stammWechsel[0]}_ab`] : w.gueltig_ab;
       if (aktion === 'aendern' && stammWechsel.some((x) => w.felder[`${x}_ab`] !== ab)) return { antwort: formFehler({ code: 'FORMAT', feld: `${stammWechsel[0]}_ab` }, cors) };
-      const erwartet = await naechsterFreierTag(fs, uid, id, alt);
+      const erwartet = await freier();
       if (ab !== erwartet) return { antwort: formFehler({ code: 'FORMAT', feld: aktion === 'aendern' ? `${stammWechsel[0]}_ab` : 'gueltig_ab', grund: 'nur_ab_naechstem_freien_tag', erwartet }, cors) };
-      const art = aktion === 'aendern' ? (w.felder.art ?? alt.art) : w.art;
-      const grund = aktion === 'aendern' ? (w.felder.grundaufzeichnung ?? alt.grundaufzeichnung) : w.grundaufzeichnung;
-      const quelle = aktion === 'aendern' ? (w.felder.datenquelle ?? alt.datenquelle) : w.datenquelle;
-      const kombi = stammKombination(art, grund, quelle);
-      if (kombi) return { antwort: formFehler(kombi, cors) };
-      for (const x of ['art', 'grundaufzeichnung', 'datenquelle']) {
-        const wert = x === 'art' ? art : x === 'grundaufzeichnung' ? grund : quelle;
-        if (wert !== alt[x] || aktion === 'system_wechseln') { neu[x] = wert; neu[`${x}_ab`] = ab; geaendert.push(x); }
+      const v0 = await verlaufHolen();
+      // Ein angegebenes Feld wird eingetragen, wenn es am Tag ab anders gilt oder ein späterer Eintrag dieses Felds wegfällt (J1-Fix M-1 Nebenfolge: denselben
+      // Wert nach einem Storno früher setzen ging sonst nicht, die Kasse antwortete „unveraendert“). Nicht angegebene Felder bleiben, wie sie sind.
+      const angegeben = aktion === 'aendern' ? stammWechsel : ['art', 'grundaufzeichnung', 'datenquelle'];
+      for (const x of angegeben) {
+        const wert = aktion === 'aendern' ? w.felder[x] : w[x];
+        const gilt = stammAm(v0, ab).werte[x];
+        if (wert !== gilt || v0[x].some((e) => e.ab > ab) || wert !== alt[x] || aktion === 'system_wechseln') {
+          sv = stammVerlaufMit(sv, x, wert, ab, zeitstempel(zeit));
+          neu[x] = wert; neu[`${x}_ab`] = ab; geaendert.push(x);
+        }
+      }
+      // Plausibilität (2.11 C.6) an JEDEM Tag ab dem Wechsel, an dem sich ein Feld ändert (vorher nur mit den Werten der Kasse geprüft: ein rückwirkender Wechsel
+      // konnte mit einem erst später geltenden Wert einer anderen Spalte durchgehen und am Tag selbst unplausibel sein)
+      const stichtage = [...new Set([ab, ...['art', 'grundaufzeichnung', 'datenquelle'].flatMap((x) => sv[x].map((e) => e.ab).filter((d) => d > ab))])].sort();
+      for (const d of stichtage) {
+        const { werte } = stammAm(sv, d);
+        const kombi = stammKombination(werte.art, werte.grundaufzeichnung, werte.datenquelle);
+        if (kombi) return { antwort: formFehler(d === ab ? kombi : { ...kombi, am: d }, cors) };
       }
     }
     if (aktion === 'aendern') {
@@ -194,6 +216,17 @@ async function kasseAktion(c, aktion) {
       if (w.felder.bestand_in_kasse_id && alt.kassenbuch !== false) return { antwort: formFehler({ code: 'FORMAT', feld: 'bestand_in_kasse_id', grund: 'nur_ohne_kassenbuch' }, cors) };
       for (const [k, v] of Object.entries(w.felder)) {
         if (['art', 'art_ab', 'grundaufzeichnung', 'grundaufzeichnung_ab', 'datenquelle', 'datenquelle_ab'].includes(k)) continue;
+        if (k === 'karte_ueber_integration') {
+          // J1-Fix N-e: gilt wie die anderen Stammdaten ab dem nächsten freien Tag (karte_ueber_integration_ab, Eintrag in der Historie), nicht rückwirkend für
+          // stornierte Tage davor: deren Neuerfassung prüft die Kartenbeträge mit dem Wert, der am Tag galt
+          const ab = await freier();
+          const v0 = await verlaufHolen();
+          if (v !== (alt.karte_ueber_integration || 'keine') || stammAm(v0, ab).werte.karte_ueber_integration !== v || v0.karte_ueber_integration.some((e) => e.ab > ab)) {
+            sv = stammVerlaufMit(sv, k, v, ab, zeitstempel(zeit));
+            neu[k] = v; neu.karte_ueber_integration_ab = ab; geaendert.push(k);
+          }
+          continue;
+        }
         if (JSON.stringify(alt[k] ?? null) !== JSON.stringify(v)) { neu[k] = v; geaendert.push(k); }
       }
       if (neu.bestand_in_kasse_id) {
@@ -219,6 +252,10 @@ async function kasseAktion(c, aktion) {
       for (const [k, v] of Object.entries(w.system)) { neu[k] = v; geaendert.push(k); }
       neu.meldestatus = 'aenderung_offen';
       geaendert.push('meldestatus');
+    }
+    if (geaendert.some((x) => STAMM_FELDER.includes(x))) {
+      if (STAMM_FELDER.some((x) => sv[x].length > STAMMDATEN_VERLAUF_MAX)) return { antwort: fehlerAntwort(422, 'STAMMDATEN_VERLAUF_VOLL', cors, { max: STAMMDATEN_VERLAUF_MAX }) };
+      neu.stammdaten_verlauf = sv;
     }
     const ts = zeitstempel(zeit);
     const verlauf = Array.isArray(alt.verlauf) ? [...alt.verlauf] : [];
@@ -400,24 +437,30 @@ async function abschliessen(c) {
     const n = bisher.length + 1;
     if (n > FASSUNGEN_MAX) return { antwort: fehlerAntwort(409, 'FASSUNGEN_MAX', cors, { max: FASSUNGEN_MAX }) };
     if (tag < kasse.anfangsbestand_am) return { antwort: fehlerAntwort(422, 'VOR_ANFANGSBESTAND', cors, { anfangsbestand_am: kasse.anfangsbestand_am }) };
-    // Stammdaten gelten ab einem Datum (…_ab, Wechsel nur ab dem nächsten freien Tag). Für einen Tag davor gelten andere Werte. G1-Fix H-1: Hat der Tag eine
-    // stornierte Fassung (Neuerfassung nach Storno), stehen diese Werte in ihr (grundaufzeichnung, datenquelle; art erst ab G1): die Neuerfassung rechnet mit
-    // den Stammdaten der letzten Fassung und vermerkt stammdaten_aus_fassung. Sonst (Tag ohne stornierte Fassung, z. B. eine Lücke) bleibt es bei 409:
-    // abgeschlossene Tage bleiben unveränderlich, nur der Ersatz eines stornierten Tages ist erlaubt. Fassungs-Obergrenze und alle Prüfungen gelten weiter.
+    // Stammdaten gelten ab einem Datum (…_ab, Wechsel nur ab dem nächsten freien Tag). Für einen Tag vor einem Wechsel ist nur der Ersatz eines stornierten
+    // Tages erlaubt (G1-Fix H-1; Tag ohne stornierte Fassung, z. B. eine Lücke: 409, abgeschlossene Tage bleiben unveränderlich, Fassungs-Obergrenze gilt).
+    // J1-Fix M-1/N-e: Die Werte am Geschäftstag kommen FELD FÜR FELD aus der Stammdaten-Historie der Kasse (stammdaten_verlauf), nicht mehr aus der alten Fassung:
+    // die zeigt nur den Stand ihrer Erfassung, ein Wechsel während des Stornos (rückwirkend bis zu diesem Tag, auch mehrere Wechsel desselben Felds) ginge verloren.
+    // Gibt die Historie für ein Feld keinen Wert her (Kasse vor J1): 409 mit grund, nichts geraten. Historie unlesbar/widersprüchlich: 503.
     const stammSpaeter = STAMMDATEN_AB.filter((x) => typeof kasse[x] === 'string' && kasse[x] > tag);
-    let stamm = { art: kasse.art, grundaufzeichnung: kasse.grundaufzeichnung, datenquelle: kasse.datenquelle };
-    let stammAusFassung = null;
+    const sperre = (grund, felder = stammSpaeter) => ({ antwort: fehlerAntwort(409, 'STAMMDATEN_WECHSEL_SPAETER', cors, { kassentag_id: tagId, felder, stammdaten_ab: stammSpaeter.length ? stammSpaeter.map((x) => kasse[x]).sort()[0] : null, ...(grund ? { grund } : {}) }) });
     if (stammSpaeter.length) {
-      const sperre = (grund) => ({ antwort: fehlerAntwort(409, 'STAMMDATEN_WECHSEL_SPAETER', cors, { kassentag_id: tagId, felder: stammSpaeter, stammdaten_ab: stammSpaeter.map((x) => kasse[x]).sort()[0], ...(grund ? { grund } : {}) }) });
       const vorN = bisher.length ? bisher[bisher.length - 1].n : null;
       if (!tagAlt || tagAlt.status !== 'storniert' || vorN !== n - 1) return sperre(null);
-      const vor = (await fs.get(P.fassung(uid, tagId, vorN)))?.daten;
-      // fail-closed: fehlen der Fassung die Stammdaten (oder sind sie unbekannt), wird nichts geraten
-      if (!istObjekt(vor) || !Steuerkern.KASSEN_GRUNDAUFZEICHNUNGEN.includes(vor.grundaufzeichnung) || !Steuerkern.KASSEN_DATENQUELLEN.includes(vor.datenquelle)) return sperre('fassung_ohne_stammdaten');
-      const art = Steuerkern.KASSEN_ARTEN.includes(vor.art) ? vor.art : stammSpaeter.includes('art_ab') ? null : kasse.art; // art fließt nicht in die Rechnung ein
-      stamm = { art, grundaufzeichnung: vor.grundaufzeichnung, datenquelle: vor.datenquelle };
-      stammAusFassung = vorN;
     }
+    const stammVerlauf = stammVerlaufAus(kasse);
+    let stamm;
+    if (!stammVerlauf) {
+      // Kasse ohne Historie (vor J1): nur ohne späteren Wechsel sind die Werte der Kasse sicher die des Tages
+      if (stammSpaeter.length) return sperre('verlauf_fehlt');
+      stamm = { art: kasse.art, grundaufzeichnung: kasse.grundaufzeichnung, datenquelle: kasse.datenquelle, karte_ueber_integration: kasse.karte_ueber_integration || 'keine' };
+    } else {
+      const am = stammAm(stammVerlauf, tag);
+      if (am.fehlend.length) return sperre('stammdaten_unbekannt', am.fehlend);
+      stamm = am.werte;
+    }
+    const unplausibel = Steuerkern.kassenStammPlausibel(stamm.art, stamm.grundaufzeichnung, stamm.datenquelle);
+    if (unplausibel) return { antwort: fehlerAntwort(409, 'STAMMDATEN_UNPLAUSIBEL', cors, { kassentag_id: tagId, feld: unplausibel }) };
     // Letzter Abschluss aus dem Zeiger der Kasse (hyg H2/N4): keine Suche, die Zahl der Unteranfragen hängt nicht von Pausen ab. Der Tagesplatz, auf den er zeigt,
     // wird gelesen und muss genau dieser Abschluss sein (fail-closed 503 KASSENZEIGER_UNGUELTIG), sein gezählter Bestand ist der Anfangsbestand.
     const zeiger = zeigerAus(kasse.letzter_abschluss);
@@ -440,7 +483,7 @@ async function abschliessen(c) {
     const anfangsbestand = letzter ? letzter.daten.gezaehlt_cent : kasse.anfangsbestand_cent;
     if (!Number.isSafeInteger(anfangsbestand) || anfangsbestand < 0) throw new Error('Anfangsbestand unlesbar');
     const bewegungen = (await bewegungenDesTages(fs, uid, kasseId, tag)).map((d) => bewegungFuerKern(d.daten));
-    const kasseKern = { datenquelle: stamm.datenquelle, grundaufzeichnung: stamm.grundaufzeichnung, karte_ueber_integration: kasse.karte_ueber_integration || 'keine' };
+    const kasseKern = { datenquelle: stamm.datenquelle, grundaufzeichnung: stamm.grundaufzeichnung, karte_ueber_integration: stamm.karte_ueber_integration };
     // SumUp nur, wenn die Datenquelle DIESES Versuchs sumup_integration ist (der Stand kann sich zwischen zwei Wiederholungen ändern); gelesen wird einmal je Aufruf
     if (kasseKern.datenquelle === 'sumup_integration' && !memo.sumup) memo.sumup = await sumupLesen(c, tag);
     const sumup = kasseKern.datenquelle === 'sumup_integration' ? memo.sumup : null;
@@ -511,8 +554,9 @@ async function abschliessen(c) {
     };
     const fassung = {
       n, kasse_id: kasseId, geschaeftstag: tag, z_nummern: w.z_nummern, quelle: stamm.datenquelle, quelle_import_id: null, grundaufzeichnung: stamm.grundaufzeichnung, datenquelle: stamm.datenquelle,
-      // G1-Fix H-1: art mitschreiben (für eine spätere Neuerfassung nach einem Stammdatenwechsel); stammdaten_aus_fassung nennt die Fassung, aus der sie stammen
-      art: stamm.art, ...(stammAusFassung !== null ? { stammdaten_aus_fassung: stammAusFassung } : {}),
+      // Momentaufnahme der Stammdaten am Geschäftstag (art ab G1, karte_ueber_integration ab J1); stammdaten_aus_verlauf: Neuerfassung vor einem späteren Wechsel,
+      // die Werte stammen aus der Stammdaten-Historie und können von denen der Kasse abweichen (J1-Fix M-1, ersetzt stammdaten_aus_fassung)
+      art: stamm.art, karte_ueber_integration: stamm.karte_ueber_integration, ...(stammSpaeter.length ? { stammdaten_aus_verlauf: true } : {}),
       modus: w.modus, kassensturz: w.kassensturz,
       umsaetze: w.umsaetze, gutschein_mehrzweck_verkauf: w.gutschein_mehrzweck_verkauf, korrekturen: w.korrekturen, trinkgeld_inhaber: w.trinkgeld_inhaber,
       gutschein_einzweck_verkauf: w.gutschein_einzweck_verkauf, anzahlungen_erhalten: w.anzahlungen_erhalten,

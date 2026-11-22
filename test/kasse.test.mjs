@@ -298,7 +298,8 @@ test('/kasse aendern: Bezeichnung und Verlauf (am, felder, von); Stammwechsel nu
 test('Stammdaten gelten ab …_ab: ein Abschluss für einen Tag davor wäre mit unbekannten alten Werten gebucht, deshalb 409 STAMMDATEN_WECHSEL_SPAETER', async () => {
   const u = umgebung();
   const id = await u.legeKasseAn();
-  u.fs.setze(P(`kassen/${id}`), { ...u.fs.lies(P(`kassen/${id}`)), datenquelle_ab: '2026-11-10' });
+  const k0 = u.fs.lies(P(`kassen/${id}`));
+  u.fs.setze(P(`kassen/${id}`), { ...k0, datenquelle_ab: '2026-11-10', stammdaten_verlauf: { ...k0.stammdaten_verlauf, datenquelle: [{ wert: 'manuell', ab: '2026-11-10', am: null }] } });
   const r = await u.tagRufe(abschluss(id, '2026-11-02'));
   assert.equal(r.status, 409);
   assert.equal(r.json.fehler[0].code, 'STAMMDATEN_WECHSEL_SPAETER');
@@ -408,7 +409,7 @@ test('G1-Fix H-1: Wechsel der Datenquelle ab morgen, Storno des letzten Tages, B
   assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200); // gezählt 707,00
   assert.equal((await u.tagRufe(abschluss(id, '2026-11-03', { gezaehlt_cent: 70700 + 60700 }))).status, 200);
   const f1 = u.fs.lies(P(`kassentage/${id}_2026-11-03/fassungen/1`));
-  assert.deepEqual([f1.art, f1.grundaufzeichnung, f1.datenquelle, f1.stammdaten_aus_fassung], ['registrierkasse', 'tse_kasse', 'manuell', undefined], 'art steht ab G1 in der Fassung');
+  assert.deepEqual([f1.art, f1.grundaufzeichnung, f1.datenquelle, f1.stammdaten_aus_verlauf], ['registrierkasse', 'tse_kasse', 'manuell', undefined], 'art steht ab G1 in der Fassung');
   const w = await u.kasse({ aktion: 'aendern', kasse_id: id, datenquelle: 'sumup_integration', datenquelle_ab: '2026-11-04' });
   assert.equal(w.status, 200, JSON.stringify(w.json));
   // Storno des letzten Tages geht (wie bisher), der Umsatz ist danach aufgehoben
@@ -423,7 +424,7 @@ test('G1-Fix H-1: Wechsel der Datenquelle ab morgen, Storno des letzten Tages, B
   assert.equal(neu.status, 200, JSON.stringify(neu.json));
   assert.deepEqual([neu.json.fassung, neu.json.beleg_id, neu.json.differenz_cent], [2, `kasse_${id}_2026-11-03_f2`, 0]);
   const f2 = u.fs.lies(P(`kassentage/${id}_2026-11-03/fassungen/2`));
-  assert.deepEqual([f2.art, f2.grundaufzeichnung, f2.datenquelle, f2.quelle, f2.stammdaten_aus_fassung, f2.anfangsbestand_cent, f2.bewegungen_saldo_cent], ['registrierkasse', 'tse_kasse', 'manuell', 'manuell', 1, 70700, 500]);
+  assert.deepEqual([f2.art, f2.grundaufzeichnung, f2.datenquelle, f2.quelle, f2.stammdaten_aus_verlauf, f2.anfangsbestand_cent, f2.bewegungen_saldo_cent], ['registrierkasse', 'tse_kasse', 'manuell', 'manuell', true, 70700, 500]);
   assert.deepEqual(u.fs.lies(P(`kassentage/${id}_2026-11-03/fassungen/1`)), f1, 'Fassung 1 unverändert');
   // Kern-Beleg: alle Belege des 03.11. (Original, Storno, Neuerfassung) ergeben genau die Neuerfassung: Kz 81 100,00 / 19,00, EÜR 112 = 100,00, 140 = 19,00
   const ids = tagBelege(u, id, '2026-11-03');
@@ -438,7 +439,7 @@ test('G1-Fix H-1: Wechsel der Datenquelle ab morgen, Storno des letzten Tages, B
   const t4 = await u.tagRufe(ohneUmsatz(id, '2026-11-04', { gezaehlt_cent: 83100 }));
   assert.equal(t4.status, 200, JSON.stringify(t4.json));
   const f4 = u.fs.lies(P(`kassentage/${id}_2026-11-04/fassungen/1`));
-  assert.deepEqual([f4.datenquelle, f4.stammdaten_aus_fassung, f4.anfangsbestand_cent], ['sumup_integration', undefined, 83100]);
+  assert.deepEqual([f4.datenquelle, f4.stammdaten_aus_verlauf, f4.anfangsbestand_cent], ['sumup_integration', undefined, 83100]);
   assert.equal((await kettepruefen(u.audit())).ok, true);
 });
 
@@ -461,7 +462,7 @@ test('G1-Fix H-1: ein Tag ohne stornierte Fassung vor dem Wechsel bleibt gesperr
   // der stornierte 04.11. lässt sich ersetzen (art aus Fassung 1: registrierkasse)
   const neu = await u.tagRufe(abschluss(id, '2026-11-04', { gezaehlt_cent: 70700 + 60700 }));
   assert.equal(neu.status, 200, JSON.stringify(neu.json));
-  assert.deepEqual([u.fs.lies(P(`kassentage/${id}_2026-11-04/fassungen/2`)).art, u.fs.lies(P(`kassentage/${id}_2026-11-04/fassungen/2`)).stammdaten_aus_fassung], ['registrierkasse', 1]);
+  assert.deepEqual([u.fs.lies(P(`kassentage/${id}_2026-11-04/fassungen/2`)).art, u.fs.lies(P(`kassentage/${id}_2026-11-04/fassungen/2`)).stammdaten_aus_verlauf], ['registrierkasse', true]);
 });
 
 test('G1-Fix H-1 Chronologie: wird nach dem Storno zuerst der Folgetag abgeschlossen, ist der stornierte Tag gesperrt (409 SPAETERE_TAGE, wie ohne Wechsel); Ersatz geht über den Storno des Folgetags rückwärts (Nr. 13)', async () => {
@@ -485,33 +486,209 @@ test('G1-Fix H-1 Chronologie: wird nach dem Storno zuerst der Folgetag abgeschlo
   assert.equal(e4.status, 200, JSON.stringify(e4.json));
   const fa3 = u.fs.lies(P(`kassentage/${id}_2026-11-03/fassungen/2`));
   const fa4 = u.fs.lies(P(`kassentage/${id}_2026-11-04/fassungen/2`));
-  assert.deepEqual([fa3.art, fa3.stammdaten_aus_fassung, fa4.art, fa4.stammdaten_aus_fassung, fa4.anfangsbestand_cent], ['registrierkasse', 1, 'pc_kasse', undefined, 131400]);
+  assert.deepEqual([fa3.art, fa3.stammdaten_aus_verlauf, fa4.art, fa4.stammdaten_aus_verlauf, fa4.anfangsbestand_cent], ['registrierkasse', true, 'pc_kasse', undefined, 131400]);
 });
 
-test('G1-Fix H-1: Fassung ohne lesbare Stammdaten (Altdaten) 409 mit grund fassung_ohne_stammdaten, nichts geraten; ohne art (vor G1) art null; Fassungs-Obergrenze gilt weiter, auch für neue Bewegungen', async () => {
+test('J1-Fix M-1 (ersetzt G1 „Fassung ohne Stammdaten“): die alte Fassung spielt keine Rolle mehr; Kasse ohne Historie (vor J1) vor einem Wechsel 409 verlauf_fehlt, Historie widersprüchlich 503, Lücke in der Historie 409 stammdaten_unbekannt; nichts geraten; Fassungs-Obergrenze gilt weiter, auch für neue Bewegungen', async () => {
   const u = umgebung();
   const id = await u.legeKasseAn();
   assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200);
   assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, art: 'pc_kasse', art_ab: '2026-11-03' })).status, 200);
   assert.equal((await u.tagRufe(stornoBody(id, '2026-11-02'))).status, 200);
+  const pk = P(`kassen/${id}`);
+  const kasseMit = u.fs.lies(pk);
+  // Fassung 1 ohne Stammdaten: egal, die Werte kommen aus der Historie
   const pf = P(`kassentage/${id}_2026-11-02/fassungen/1`);
-  const { datenquelle: _d, art: _a, ...ohne } = u.fs.lies(pf);
+  const { datenquelle: _d, art: _a, grundaufzeichnung: _g, ...ohne } = u.fs.lies(pf);
   u.fs.setze(pf, ohne);
+  // Kasse ohne Historie (vor J1): vor dem Wechsel ist der Wert des Tages unbekannt
+  const { stammdaten_verlauf: _v, ...ohneVerlauf } = kasseMit;
+  u.fs.setze(pk, ohneVerlauf);
+  const vor = u.fs.log.commits;
   const r = await u.tagRufe(abschluss(id, '2026-11-02'));
-  assert.deepEqual([r.status, r.json.fehler[0].code, r.json.grund], [409, 'STAMMDATEN_WECHSEL_SPAETER', 'fassung_ohne_stammdaten'], JSON.stringify(r.json));
-  u.fs.setze(pf, { ...ohne, datenquelle: 'manuell' }); // Fassung vor G1: ohne art
+  assert.deepEqual([r.status, r.json.fehler[0].code, r.json.grund, r.json.felder], [409, 'STAMMDATEN_WECHSEL_SPAETER', 'verlauf_fehlt', ['art_ab']], JSON.stringify(r.json));
+  // Historie im Widerspruch zur Kasse (letzter Eintrag art ≠ Wert der Kasse): 503, fail-closed
+  u.fs.setze(pk, { ...kasseMit, stammdaten_verlauf: { ...kasseMit.stammdaten_verlauf, art: [{ wert: 'registrierkasse', ab: '2026-11-01', am: null }] } });
+  const w = await u.tagRufe(abschluss(id, '2026-11-02'));
+  assert.deepEqual([w.status, w.json.fehler[0].code], [503, 'STAMMDATEN_VERLAUF_UNGUELTIG'], JSON.stringify(w.json));
+  // Historie beginnt erst nach dem Tag (Kasse vor J1, Startliste aus …_ab): 409 stammdaten_unbekannt mit dem Feld
+  u.fs.setze(pk, { ...kasseMit, stammdaten_verlauf: { ...kasseMit.stammdaten_verlauf, art: [{ wert: 'pc_kasse', ab: '2026-11-03', am: null }] } });
+  const l = await u.tagRufe(abschluss(id, '2026-11-02'));
+  assert.deepEqual([l.status, l.json.fehler[0].code, l.json.grund, l.json.felder], [409, 'STAMMDATEN_WECHSEL_SPAETER', 'stammdaten_unbekannt', ['art']], JSON.stringify(l.json));
+  assert.equal(u.fs.log.commits, vor, 'nichts geschrieben');
+  u.fs.setze(pk, kasseMit);
   const f2 = await u.tagRufe(abschluss(id, '2026-11-02'));
   assert.equal(f2.status, 200, JSON.stringify(f2.json));
-  assert.deepEqual([u.fs.lies(P(`kassentage/${id}_2026-11-02/fassungen/2`)).art, u.fs.lies(P(`kassentage/${id}_2026-11-02/fassungen/2`)).stammdaten_aus_fassung], [null, 1]);
+  const fa2 = u.fs.lies(P(`kassentage/${id}_2026-11-02/fassungen/2`));
+  assert.deepEqual([fa2.art, fa2.grundaufzeichnung, fa2.datenquelle, fa2.karte_ueber_integration, fa2.stammdaten_aus_verlauf], ['registrierkasse', 'tse_kasse', 'manuell', 'keine', true]);
   // Fassung 3 aus Fassung 2, dann FASSUNGEN_MAX (Abschluss und neue Bewegung)
   assert.equal((await u.tagRufe(stornoBody(id, '2026-11-02'))).status, 200);
   const f3 = await u.tagRufe(abschluss(id, '2026-11-02'));
   assert.equal(f3.status, 200, JSON.stringify(f3.json));
-  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-02/fassungen/3`)).stammdaten_aus_fassung, 2);
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-02/fassungen/3`)).stammdaten_aus_verlauf, true);
   assert.equal((await u.tagRufe(stornoBody(id, '2026-11-02'))).status, 200);
   assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).json.fehler[0].code, 'FASSUNGEN_MAX');
   const b = await u.bewRufe(bewegung(id, '2026-11-02', 'geldtransit_bank_ein', 500));
   assert.deepEqual([b.status, b.json.fehler[0].code], [409, 'FASSUNGEN_MAX'], JSON.stringify(b.json));
+});
+
+// ---------------------------------------------------------------------------------------------
+// J1-Fix M-1/N-e (o-final-c-gegenlesung): Neuerfassung eines stornierten Tages mit den Stammdaten, die AM TAG gelten (Stammdaten-Historie), Feld für Feld
+// ---------------------------------------------------------------------------------------------
+const sumupBar = (u, tag, betrag, nr = '1') => u.fs.setze(P(`dokumente/sumup_${tag}_${nr}`), {
+  quelle: 'sumup_webhook', typ: 'rechnung_ausgehend', betrag, mwst_satz: '19', datum: tag, bezahlt: true, bezahlt_am: tag, buchungstext: `SumUp-Barzahlung T${nr}`, name: 'SumUp-Barzahlung November 2026', kategorie: 'Erlöse',
+});
+const alleTagBelege = (u, tag) => u.fs.pfade(P('dokumente/')).filter((p) => p.split('/').length === 4).map((p) => p.split('/').pop()).filter((x) => x.includes(`_${tag}_`) || x.startsWith(`sumup_${tag}`));
+
+test('J1-Fix M-1 Szenario A/C: Tage storniert, danach Datenquelle rückwirkend sumup ab 01.11. (art wechselt erst am 04.11.); Neuerfassung rechnet mit sumup (nicht mit manuell der alten Fassung): SumUp-Barbeleg 119,00 ohne Überschuss, Kz 81 100,00 / 19,00 statt 200,00', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const k0 = u.fs.lies(P(`kassen/${id}`));
+  assert.deepEqual(k0.stammdaten_verlauf, Object.fromEntries(['art', 'grundaufzeichnung', 'datenquelle', 'karte_ueber_integration'].map((x) => [x, [{ wert: k0[x], ab: '2026-11-01', am: k0.erstellt_am }]])), 'anlegen schreibt die Startwerte');
+  assert.equal(k0.karte_ueber_integration_ab, '2026-11-01');
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200);
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-03', { gezaehlt_cent: 70700 + 60700 }))).status, 200);
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, art: 'pc_kasse', art_ab: '2026-11-04' })).status, 200);
+  assert.equal((await u.tagRufe(stornoBody(id, '2026-11-03'))).status, 200);
+  assert.equal((await u.tagRufe(stornoBody(id, '2026-11-02'))).status, 200);
+  const dq = await u.kasse({ aktion: 'aendern', kasse_id: id, datenquelle: 'sumup_integration', datenquelle_ab: '2026-11-01' });
+  assert.equal(dq.status, 200, JSON.stringify(dq.json));
+  const k1 = u.fs.lies(P(`kassen/${id}`));
+  assert.deepEqual([k1.art, k1.art_ab, k1.datenquelle, k1.datenquelle_ab], ['pc_kasse', '2026-11-04', 'sumup_integration', '2026-11-01']);
+  assert.deepEqual(k1.stammdaten_verlauf.art.map((e) => [e.wert, e.ab]), [['registrierkasse', '2026-11-01'], ['pc_kasse', '2026-11-04']]);
+  assert.deepEqual(k1.stammdaten_verlauf.datenquelle.map((e) => [e.wert, e.ab]), [['sumup_integration', '2026-11-01']], 'der neue Wechsel ersetzt den Starteintrag mit gleichem ab');
+  u.fs.setze(P('webhook_secrets/sumup'), { enabled: true, sync_letzter_lauf: '2026-11-03T06:00:00Z' });
+  sumupBar(u, '2026-11-02', 119);
+  // am Tag gilt sumup: Umsatzzeilen 422 (mit manuell aus der Fassung wäre das durchgegangen), nichts geschrieben
+  const vor = u.fs.log.commits;
+  const mitZeilen = await u.tagRufe(abschluss(id, '2026-11-02', { umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 11900, unbar_cent: 0 }], gezaehlt_cent: 21900 }));
+  assert.deepEqual([mitZeilen.status, mitZeilen.json.fehler[0].code], [422, 'DATENQUELLE_SUMUP'], JSON.stringify(mitZeilen.json));
+  assert.equal(u.fs.log.commits, vor);
+  // gezählt 219,00 = 100,00 + 119,00 SumUp bar: Soll 219,00, Differenz 0, kein Kassenbeleg (mit manuell: Soll 100,00, Überschuss 119,00 als zweite Einnahme)
+  const neu = await u.tagRufe(ohneUmsatz(id, '2026-11-02', { gezaehlt_cent: 21900 }));
+  assert.equal(neu.status, 200, JSON.stringify(neu.json));
+  assert.deepEqual([neu.json.fassung, neu.json.soll_endbestand_cent, neu.json.differenz_cent, neu.json.beleg_id, neu.json.differenz_beleg_id], [2, 21900, 0, null, null]);
+  const f2 = u.fs.lies(P(`kassentage/${id}_2026-11-02/fassungen/2`));
+  assert.deepEqual([f2.art, f2.grundaufzeichnung, f2.datenquelle, f2.karte_ueber_integration, f2.stammdaten_aus_verlauf, f2.bar_einnahmen_cent], ['registrierkasse', 'tse_kasse', 'sumup_integration', 'keine', true, 11900]);
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-02/fassungen/1`)).datenquelle, 'manuell', 'die stornierte Fassung zeigt andere Stammdaten als heute und bleibt unverändert');
+  // Kern über alle Belege des 02.11. (Original, Storno, SumUp-Barbeleg): Kz 81 100,00 / 19,00, EÜR 112 = 100,00, 140 = 19,00
+  const ids = alleTagBelege(u, '2026-11-02');
+  assert.deepEqual(ids.sort(), [`kasse_${id}_2026-11-02_f1`, `kasse_${id}_2026-11-02_f1_storno`, 'sumup_2026-11-02_1'].sort());
+  const wk = kernVon(u, ids);
+  const kz = K.ustvaFuer(wk, REGEL, '2026-11').kennzahlen;
+  assert.deepEqual([kz['81'], kz['81_steuer'], kz['86'] ?? 0, kz['86_steuer'] ?? 0], [10000, 1900, 0, 0], JSON.stringify(kz));
+  assert.deepEqual(K.euerFuer(wk, REGEL, 2026).zeilen.filter((z) => z.betrag_cent !== 0).map((z) => [z.kz, z.betrag_cent]), [[112, 10000], [140, 1900]]);
+  // 03.11.: ebenfalls sumup und art registrierkasse (art pc_kasse erst ab 04.11.); 04.11. art pc_kasse
+  u.fs.setze(P('webhook_secrets/sumup'), { enabled: true, sync_letzter_lauf: '2026-11-05T06:00:00Z' });
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-03', { gezaehlt_cent: 21900 }))).status, 200);
+  assert.deepEqual(['datenquelle', 'art'].map((x) => u.fs.lies(P(`kassentage/${id}_2026-11-03/fassungen/2`))[x]), ['sumup_integration', 'registrierkasse']);
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-04', { gezaehlt_cent: 21900 }))).status, 200);
+  const f4 = u.fs.lies(P(`kassentage/${id}_2026-11-04/fassungen/1`));
+  assert.deepEqual([f4.art, f4.datenquelle, f4.stammdaten_aus_verlauf], ['pc_kasse', 'sumup_integration', undefined]);
+  assert.equal((await kettepruefen(u.audit())).ok, true);
+});
+
+test('J1-Fix M-1 Szenario B: dasselbe Feld wechselt zweimal um einen stornierten Tag (sumup ab 03.11., manuell ab 05.11.); Neuerfassung 03.11. mit sumup, 04.11. mit sumup, 05.11. mit manuell', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200); // 707,00
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-03', { gezaehlt_cent: 70700 + 60700 }))).status, 200);
+  assert.equal((await u.tagRufe(stornoBody(id, '2026-11-03'))).status, 200);
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, datenquelle: 'sumup_integration', datenquelle_ab: '2026-11-03' })).status, 200);
+  u.fs.setze(P('webhook_secrets/sumup'), { enabled: true, sync_letzter_lauf: '2026-11-06T06:00:00Z' });
+  // 04.11. abschließen, der 03.11. bleibt storniert (zulässig); Anfang 707,00 aus dem 02.11.
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-04', { gezaehlt_cent: 70700 }))).status, 200);
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, datenquelle: 'manuell', datenquelle_ab: '2026-11-05' })).status, 200);
+  assert.deepEqual(u.fs.lies(P(`kassen/${id}`)).stammdaten_verlauf.datenquelle.map((e) => [e.wert, e.ab]), [['manuell', '2026-11-01'], ['sumup_integration', '2026-11-03'], ['manuell', '2026-11-05']]);
+  assert.equal((await u.tagRufe(stornoBody(id, '2026-11-04'))).status, 200);
+  sumupBar(u, '2026-11-03', 119);
+  // Neuerfassung 03.11.: sumup (Fassung 1 sagt manuell, die Kasse sagt manuell); 707,00 + 119,00 SumUp bar = 826,00, Differenz 0
+  const e3 = await u.tagRufe(ohneUmsatz(id, '2026-11-03', { gezaehlt_cent: 82600 }));
+  assert.equal(e3.status, 200, JSON.stringify(e3.json));
+  assert.deepEqual([e3.json.fassung, e3.json.differenz_cent, e3.json.beleg_id, e3.json.differenz_beleg_id], [2, 0, null, null]);
+  const f3 = u.fs.lies(P(`kassentage/${id}_2026-11-03/fassungen/2`));
+  assert.deepEqual([f3.datenquelle, f3.stammdaten_aus_verlauf, f3.bar_einnahmen_cent, f3.anfangsbestand_cent], ['sumup_integration', true, 11900, 70700]);
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-03/fassungen/1`)).datenquelle, 'manuell');
+  const wk = kernVon(u, alleTagBelege(u, '2026-11-03'));
+  const kz = K.ustvaFuer(wk, REGEL, '2026-11').kennzahlen;
+  assert.deepEqual([kz['81'], kz['81_steuer']], [10000, 1900], JSON.stringify(kz));
+  // 04.11. (Fassung 2): sumup; 05.11.: manuell (Umsatz bar 119,00 zu 19 % mit Kassenbeleg)
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-04', { gezaehlt_cent: 82600 }))).status, 200);
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-04/fassungen/2`)).datenquelle, 'sumup_integration');
+  const t5 = await u.tagRufe(abschluss(id, '2026-11-05', { umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 11900, unbar_cent: 0 }], gezaehlt_cent: 82600 + 11900 }));
+  assert.equal(t5.status, 200, JSON.stringify(t5.json));
+  assert.deepEqual([u.fs.lies(P(`kassentage/${id}_2026-11-05/fassungen/1`)).datenquelle, t5.json.beleg_id], ['manuell', `kasse_${id}_2026-11-05_f1`]);
+});
+
+test('J1-Fix M-1 Nebenfolge: denselben Wert nach einem Storno früher setzen wird eingetragen (nicht „unveraendert“), _ab rückt vor; der stornierte Tag rechnet mit dem neuen Wert', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200);
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-03', { gezaehlt_cent: 70700 + 60700 }))).status, 200);
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, datenquelle: 'sumup_integration', datenquelle_ab: '2026-11-04' })).status, 200);
+  assert.equal((await u.tagRufe(stornoBody(id, '2026-11-03'))).status, 200);
+  const r = await u.kasse({ aktion: 'aendern', kasse_id: id, datenquelle: 'sumup_integration', datenquelle_ab: '2026-11-03' });
+  assert.deepEqual([r.status, r.json.unveraendert], [200, undefined], JSON.stringify(r.json));
+  const k = u.fs.lies(P(`kassen/${id}`));
+  assert.deepEqual([k.datenquelle, k.datenquelle_ab, k.stammdaten_verlauf.datenquelle.map((e) => [e.wert, e.ab])], ['sumup_integration', '2026-11-03', [['manuell', '2026-11-01'], ['sumup_integration', '2026-11-03']]]);
+  // Wiederholung mit demselben ab: jetzt wirklich unverändert
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, datenquelle: 'sumup_integration', datenquelle_ab: '2026-11-03' })).json.unveraendert, true);
+  u.fs.setze(P('webhook_secrets/sumup'), { enabled: true, sync_letzter_lauf: '2026-11-04T06:00:00Z' });
+  const e3 = await u.tagRufe(ohneUmsatz(id, '2026-11-03', { gezaehlt_cent: 70700 }));
+  assert.equal(e3.status, 200, JSON.stringify(e3.json));
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-03/fassungen/2`)).datenquelle, 'sumup_integration');
+});
+
+test('J1-Fix M-1: Plausibilität eines rückwirkenden Wechsels an jedem Stichtag (offene Ladenkasse mit Papier bis 03.11., sumup ab 01.11. wäre dort unplausibel) 400 FORMAT, nichts geschrieben; Historie unplausibel am Tag 409 STAMMDATEN_UNPLAUSIBEL', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn({ art: 'offene_ladenkasse', grundaufzeichnung: 'papier_kassenbuch' });
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200);
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-03', { gezaehlt_cent: 70700 + 60700 }))).status, 200);
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, art: 'registrierkasse', art_ab: '2026-11-04', grundaufzeichnung: 'tse_kasse', grundaufzeichnung_ab: '2026-11-04' })).status, 200);
+  assert.equal((await u.tagRufe(stornoBody(id, '2026-11-03'))).status, 200);
+  assert.equal((await u.tagRufe(stornoBody(id, '2026-11-02'))).status, 200);
+  const vorher = u.fs.lies(P(`kassen/${id}`));
+  const r = await u.kasse({ aktion: 'aendern', kasse_id: id, datenquelle: 'sumup_integration', datenquelle_ab: '2026-11-01' });
+  assert.deepEqual([r.status, r.json.fehler[0].code], [400, 'FORMAT'], JSON.stringify(r.json));
+  assert.deepEqual(u.fs.lies(P(`kassen/${id}`)), vorher, 'nichts geschrieben');
+  // Historie von Hand unplausibel gemacht (am 02.11. offene Ladenkasse mit sumup): Abschluss fail-closed 409
+  const pk = P(`kassen/${id}`);
+  u.fs.setze(pk, { ...vorher, datenquelle: 'sumup_integration', datenquelle_ab: '2026-11-01', stammdaten_verlauf: { ...vorher.stammdaten_verlauf, datenquelle: [{ wert: 'sumup_integration', ab: '2026-11-01', am: null }] } });
+  const a = await u.tagRufe(ohneUmsatz(id, '2026-11-02'));
+  assert.deepEqual([a.status, a.json.fehler[0].code], [409, 'STAMMDATEN_UNPLAUSIBEL'], JSON.stringify(a.json));
+});
+
+test('J1-Fix N-e: karte_ueber_integration gilt ab dem nächsten freien Tag (Historie), nicht rückwirkend: Neuerfassung eines stornierten Tages mit Kartenumsatz geht, solange am Tag „keine“ galt; ab dem Wechsel 422 KARTE_UEBER_INTEGRATION; derselbe Wert früher gesetzt gilt auch früher', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200); // 19 % 500,00 bar + 300,00 Karte
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-03', { gezaehlt_cent: 70700 + 60700 }))).status, 200);
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, karte_ueber_integration: 'sumup' })).status, 200);
+  const k = u.fs.lies(P(`kassen/${id}`));
+  assert.deepEqual([k.karte_ueber_integration, k.karte_ueber_integration_ab, k.stammdaten_verlauf.karte_ueber_integration.map((e) => [e.wert, e.ab])], ['sumup', '2026-11-04', [['keine', '2026-11-01'], ['sumup', '2026-11-04']]]);
+  assert.equal((await u.tagRufe(stornoBody(id, '2026-11-03'))).status, 200);
+  assert.equal((await u.tagRufe(stornoBody(id, '2026-11-02'))).status, 200);
+  // Neuerfassung 02.11. mit Karte: am Tag galt „keine“ (vorher 422, die Kartenumsätze des Tages fehlten sonst)
+  const e2 = await u.tagRufe(abschluss(id, '2026-11-02'));
+  assert.equal(e2.status, 200, JSON.stringify(e2.json));
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-02/fassungen/2`)).karte_ueber_integration, 'keine');
+  const kz = K.ustvaFuer(kernVon(u, tagBelege(u, id, '2026-11-02')), REGEL, '2026-11').kennzahlen;
+  // Bemessungsgrundlagen: 19 % 500,00 bar + 300,00 Karte = 420,17 + 252,10 netto = 672,27 (ohne Karte wären es 420,17); 7 % 107,00 = 100,00 netto
+  assert.deepEqual([kz['81'], kz['86']], [67227, 10000], JSON.stringify(kz));
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-03', { gezaehlt_cent: 70700 + 60700 }))).status, 200);
+  // ab 04.11. gilt sumup: Karte 422, ohne Karte 200
+  const t4 = await u.tagRufe(abschluss(id, '2026-11-04', { gezaehlt_cent: 131400 + 60700 }));
+  assert.deepEqual([t4.status, t4.json.fehler[0].code], [422, 'KARTE_UEBER_INTEGRATION'], JSON.stringify(t4.json));
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-04', { umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 50000, unbar_cent: 0 }], gezaehlt_cent: 131400 + 50000 }))).status, 200);
+  // zweite Kasse: nach dem Storno denselben Wert (sumup) früher setzen: gilt dann auch am stornierten Tag
+  const v = umgebung();
+  const id2 = await v.legeKasseAn();
+  assert.equal((await v.tagRufe(abschluss(id2, '2026-11-02'))).status, 200);
+  assert.equal((await v.kasse({ aktion: 'aendern', kasse_id: id2, karte_ueber_integration: 'sumup' })).status, 200);
+  assert.equal((await v.tagRufe(stornoBody(id2, '2026-11-02'))).status, 200);
+  const früher = await v.kasse({ aktion: 'aendern', kasse_id: id2, karte_ueber_integration: 'sumup' });
+  assert.deepEqual([früher.status, früher.json.unveraendert, v.fs.lies(P(`kassen/${id2}`)).karte_ueber_integration_ab], [200, undefined, '2026-11-01'], JSON.stringify(früher.json));
+  assert.equal((await v.tagRufe(abschluss(id2, '2026-11-02'))).json.fehler[0].code, 'KARTE_UEBER_INTEGRATION');
 });
 
 test('/kasse aendern: Verlauf höchstens 200, ältere Einträge landen create-only in kassen/{id}/verlauf/{n}', async () => {
