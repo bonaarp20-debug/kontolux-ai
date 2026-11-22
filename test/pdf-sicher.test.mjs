@@ -528,3 +528,27 @@ test('Zweite Lesung F-5: eingebettete XML mit Kette aus zwei Filtern wird wieder
   assert.ok(zuwachs < 20 * 1024 * 1024, `Kettenbombe nicht voll entpackt (${(zuwachs / 1048576).toFixed(1)} MB)`);
   // Objektströme mit Kette bleiben abgelehnt (Test oben)
 });
+
+// ---- Dritte Gegenlesung (G3-1 bis G3-4) ----
+// wie mit128MB, aber mit kleinerer Heap-Grenze und Ballast wie im Worker (Base64-Text der Anfrage und atob-Text)
+function mitHeap(mb, code) {
+  const r = spawnSync(process.execPath, [`--max-old-space-size=${mb}`, '--expose-gc', '--input-type=module', '-e', code], { cwd: new URL('..', import.meta.url).pathname, encoding: 'utf8', timeout: 60000 });
+  return { status: r.status, out: (r.stdout || '').trim(), err: (r.stderr || '').slice(0, 600) };
+}
+
+test('Dritte Lesung G3-1: Ströme als direkte Objekte (im Array) werden abgelehnt, statt bis zur Objektgrenze je 475 Byte zu halten (OOM)', async () => {
+  const p = mitHeap(100, `import { ladePdfBegrenzt } from './regel/pdf-sicher.js';
+    console.warn = () => {};
+    const b = new Uint8Array(Buffer.from('%PDF-1.7\\n1 0 obj\\n[' + '<<>>stream\\nx\\nendstream '.repeat(300000) + ']\\nendobj\\ntrailer\\n<< /Root 1 0 R >>\\n%%EOF\\n'));
+    const ballast = [Buffer.from(b).toString('base64'), Buffer.from(b).toString('latin1')]; // Anfragetext (Base64) und atob-Text wie im Worker
+    const c = process.cpuUsage(); const r = await ladePdfBegrenzt(b); const d = process.cpuUsage(c);
+    console.log(JSON.stringify({ zuGross: !!r.zuGross, cpuMs: Math.round((d.user + d.system) / 1000), ballast: ballast[0].length > 0 }));`);
+  assert.equal(p.status, 0, `Prozess mit 100 MB: ${p.err}`);
+  const e = JSON.parse(p.out);
+  assert.equal(e.zuGross, true);
+  assert.ok(e.cpuMs < 500, `CPU ${e.cpuMs} ms`);
+  // indirekte Ströme laden weiter (Tests oben); ein Strom als Wert in einem Dict ist ebenso unzulässig
+  assert.equal((await ladePdfBegrenzt(mitObjekt3('<< /A <<>>stream\nx\nendstream >>'))).zuGross, true);
+  const indirekt = await ladePdfBegrenzt(mitObjekt3('<< /Length 1 >>\nstream\nx\nendstream'));
+  assert.ok(indirekt.pdf && !indirekt.zuGross);
+});
