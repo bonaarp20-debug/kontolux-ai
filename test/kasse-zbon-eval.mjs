@@ -73,7 +73,7 @@ for (const f of dateien) {
   const ist = flach(e.vorschlag, '', {});
   const soll = x.erwartet;
   const pruefe = (ok, text) => { r.felder += 1; if (ok) r.treffer += 1; else r.probleme.push(text); return ok; };
-  pruefe(e.dokumentart === soll.dokumentart, `dokumentart ${e.dokumentart} statt ${soll.dokumentart}`);
+  pruefe(soll.dokumentart_erlaubt ? soll.dokumentart_erlaubt.includes(e.dokumentart) : e.dokumentart === soll.dokumentart, `dokumentart ${e.dokumentart} statt ${soll.dokumentart_erlaubt ? soll.dokumentart_erlaubt.join(' oder ') : soll.dokumentart}`);
   const wahr = soll.nur_kein_vorschlag_oder_wahre_werte || null;
   if (!wahr) pruefe(!e.sperre === !soll.kein_vorschlag, `kein_vorschlag: ${e.sperre ? 'ja' : 'nein'} statt ${soll.kein_vorschlag ? 'ja' : 'nein'}`);
   if (!soll.kein_vorschlag) {
