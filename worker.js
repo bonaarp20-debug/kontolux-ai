@@ -17,6 +17,7 @@ import { regelZaehler, ZAEHLER_PFADE } from './regel/zaehler.js'; // KX-RB (BP-1
 import { regelAdminFeatures } from './regel/admin-features.js';
 import { regelOssMeldung } from './regel/oss-meldung.js'; // WORKER-C (Release C, BP-29)
 import { regelKasse, KASSE_PFADE } from './regel/kasse.js'; // KASSE-P1b: Kassenbuch (Feature kasse, Standard aus)
+import { regelKasseZbonLesen, KASSE_ZBON_PFAD } from './regel/kasse-zbon-ki.js'; // KASSE-P5-KI: Z-Bon lesen (Features kasse und kasse_ki, Standard aus)
 import { kassenPrueferDaten } from './regel/kasse-daten.js'; // KASSE-P1b: Prüfer-Daten Kassenbuch
 import { kassenAusgabeBeleg } from './regel/kasse-ausgabe.js'; // KASSE-P1b-4: Ausgabe aus der Kasse über den Beleg-Schreibweg v2
 import { regelEzbKurs } from './regel/ezb-kurs.js'; // WORKER-C (Release C, BP-29)
@@ -31,7 +32,7 @@ import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLese
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
 import { v2Vorbereiten, clientSteuerVorbereiten, v2RestFelder, nachFestschreibungAntwort, festPruefungMarkieren } from './regel/schreibweg-v2.js';
 // BP-21a-W (Phase 3): Steuerdaten je Plattformbeleg, OSS-Datenbasis, hinter Feature 'plattform'
-import { agbZustimmungAb, AGB_FASSUNG_RELEASE_B } from './regel/gemeinsam.js'; // KX-EB A6
+import { agbZustimmungAb, AGB_FASSUNG_RELEASE_B, AGB_MINDESTFASSUNG_KASSE } from './regel/gemeinsam.js'; // KX-EB A6
 import { plattformAuswerten, plattformFeatureAn, plattformEingabe, plattformSteuerKennzeichnen, plattformDatenFeld, originalZurErstattung, stripeChargeLaden, paypalOrderLaden, refBereinigen, waehrungCode, hinweisAusland, HINWEIS_LAND_FEHLT } from './regel/plattform.js';
 import { plattformDatenSigFeld, plattformDatenPruefen, SIG_FELD as PLATTFORM_SIG_FELD } from './regel/plattform-signatur.js'; // POLITUR-B
 import { kodiereWert as kodiereFirestoreWert } from './regel/firestore.js';
@@ -427,6 +428,8 @@ const UID_LIMITS = {
   '/kassentag':                      { limit: 60, windowMs: 10 * 60 * 1000 },
   '/kasse':                          { limit: 30, windowMs: 10 * 60 * 1000 },
   '/kassenbewegung':                 { limit: 120, windowMs: 10 * 60 * 1000 },
+  // KASSE-P5-KI (2.14): „Z-Bon lesen“ kostet je Aufruf einen Haiku-Aufruf: 10 je 10 Minuten, dazu das Tageslimit 5 im Modul (atomar, fail-closed)
+  [KASSE_ZBON_PFAD]:                 { limit: 10, windowMs: 10 * 60 * 1000 },
   // G6-M5: kostenpflichtige Datei-Aufrufe je Nutzer (zusätzlich zum atomaren Monatskontingent)
   '/image':                          { limit: 30, windowMs: 10 * 60 * 1000 },
   '/document':                       { limit: 300, windowMs: 10 * 60 * 1000 },
@@ -627,6 +630,7 @@ export default {
       protectedPaths.push(...ZAEHLER_PFADE); // KX-RB
       protectedPaths.push('/oss-meldung', '/ezb-kurs'); // WORKER-C
       protectedPaths.push(...KASSE_PFADE); // KASSE-P1b
+      protectedPaths.push(KASSE_ZBON_PFAD); // KASSE-P5-KI
 
       if (protectedPaths.includes(url.pathname)) {
         try {
@@ -666,6 +670,7 @@ export default {
           emailVerifiedRequiredPaths.push(...ZAEHLER_PFADE); // KX-RB
           emailVerifiedRequiredPaths.push('/oss-meldung', '/ezb-kurs'); // WORKER-C
           emailVerifiedRequiredPaths.push(...KASSE_PFADE); // KASSE-P1b
+          emailVerifiedRequiredPaths.push(KASSE_ZBON_PFAD); // KASSE-P5-KI
           if (emailVerifiedRequiredPaths.includes(url.pathname) && !verified.emailVerified) {
             const errorCors = getCORS(origin);
             return new Response(JSON.stringify({ error: 'E-Mail nicht verifiziert', code: 'email-not-verified' }), {
@@ -773,6 +778,9 @@ export default {
       if (url.pathname === '/ezb-kurs') return regelEzbKurs(body, env, cors, { ...regelAbhaengigkeiten(env), kv: env.PROFIL_KV });
       // KASSE-P1b (Baukonzept 2.3): Kassenbuch; nur der Worker schreibt users/{uid}/kassen*, Feature kasse (Standard aus: 503)
       if (KASSE_PFADE.includes(url.pathname)) return regelKasse(url.pathname, body, env, cors, regelAbhaengigkeiten(env));
+      // KASSE-P5-KI (2.14): Z-Bon lesen. Der Anthropic-Aufruf läuft über den Durchreicher anthropicFetchMitKontingent (ohne Upload-Kontingent, Nr. 28); das Tageslimit 5 zählt
+      // genau einmal das Modul selbst (reserviereKasseZbon, Sammlung kassezbonlimit), nicht zusätzlich reserviereZaehler. Kein Eintrag in GLOBALE_LIMITS wie bei /image (siehe dort).
+      if (url.pathname === KASSE_ZBON_PFAD) return regelKasseZbonLesen(body, env, cors, { ...regelAbhaengigkeiten(env), kiAufruf: (uid, init) => anthropicFetchMitKontingent(uid, env, 'https://api.anthropic.com/v1/messages', init), estimateCostCents, agbMindestfassungKasse: AGB_MINDESTFASSUNG_KASSE });
       if (url.pathname === '/admin/features') return regelAdminFeatures(request, authHeader, env, cors, regelAbhaengigkeiten(env));
       // Bewusst NICHT in protectedPaths: ein Betriebsprüfer hat keinen Firebase-Login, der
       // Zugriffsnachweis ist der Besitz des Tokens selbst (siehe handlePrueferDaten unten).
