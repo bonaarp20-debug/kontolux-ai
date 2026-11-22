@@ -858,3 +858,42 @@ test('B-M1: Lesefehler bei Kassendaten brechen den Export ab (503, klare Meldung
     assert.match(r.text, /kein unvollständiger Stapel/, name);
   }
 });
+
+// G2-Fix H-1: Live-Regeln vor dem Kassenbuch-Release kennen keinen kassen-Block (403 auch bei leerer Sammlung). Geht der Worker vor den Regeln live,
+// darf der Export für Konten ohne Kassenbuch (SumUp-Barbelege) nicht mit 503 abbrechen; mit Kassenbuch bleibt ein 403 fail-closed (503).
+const kassen403 = (fs) => { fs.haken.fehler = (url) => (/\/users\/[^/]+\/kassen\?/.test(url) ? json(403, { error: { code: 403, status: 'PERMISSION_DENIED' } }) : null); };
+test('G2-Fix H-1: 403 auf kassen, Konto mit SumUp-Barbeleg ohne Kassenbuch: Export 200, Barzahlung auf der Bank wie auf main', async () => {
+  const fs = fakeFirestore();
+  fs.setze('config/features', AN);
+  fs.setze(P('steuerprofil/aktuell'), REGEL);
+  fs.setze(P('profil/settings'), { datev_skr: 'SKR03', datev_bankkonto: '1200', datev_berater_nr: '1001', datev_mandanten_nr: '1', kleinunternehmer: 'Nein' });
+  fs.setze(P('dokumente/s1'), sumupBeleg('TCBAR1', 'Barzahlung', 119));
+  fs.setze(P('privatvorgaenge/p1'), { art: 'entnahme', datum: '2026-11-03', betrag: 50, notiz: 'x', storniert: false });
+  kassen403(fs);
+  const r = await exportiere(fs);
+  assert.equal(r.status, 200, r.text.slice(0, 300));
+  assert.deepEqual(kurz(r.zeilen, 'TCBAR1').map((x) => x.slice(0, 4)), [['119,00', 'S', '1200', '8400']]);
+  assert.doesNotMatch(r.warnung, /Kassenbuch|SumUp-Barzahlung/);
+});
+test('G2-Fix H-1: 403 auf kassen bleibt 503, sobald Kassenbuch-Daten da sind (Tagesabschluss; SumUp mit Privatvorgang aus der Kasse); andere Fehler ohne Kassenbuch bleiben 503', async () => {
+  const w = await welt();
+  ok200(await w.tag(nur19(w.id, '2026-11-02')));
+  w.fs.setze(P('dokumente/s1'), sumupBeleg('TCBAR1', 'Barzahlung', 119));
+  kassen403(w.fs);
+  const r = await w.exp();
+  assert.equal(r.status, 503, r.text.slice(0, 200));
+  assert.match(r.text, /Kassen des Kassenbuchs konnten nicht gelesen werden/);
+  // SumUp-Barbeleg (liest kassen zuerst mit 403), danach Privatvorgang aus der Kasse: kein stilles Standardkonto
+  const fs = fakeFirestore();
+  fs.setze('config/features', AN);
+  fs.setze(P('steuerprofil/aktuell'), REGEL);
+  fs.setze(P('profil/settings'), { datev_skr: 'SKR03', datev_bankkonto: '1200', datev_berater_nr: '1001', datev_mandanten_nr: '1', kleinunternehmer: 'Nein' });
+  fs.setze(P('dokumente/s1'), sumupBeleg('TCBAR1', 'Barzahlung', 119));
+  fs.setze(P('privatvorgaenge/p1'), { art: 'einlage', datum: '2026-11-02', betrag: 1, storniert: false, zahlweg: 'kasse', kasse_id: 'k1' });
+  kassen403(fs);
+  assert.equal((await exportiere(fs)).status, 503);
+  // 500 auf kassen ohne Kassenbuch: echter Lesefehler, kein Raten
+  fs.haken.fehler = (url) => (/\/kassen\?/.test(url) ? json(500, { error: { status: 'INTERNAL' } }) : null);
+  fs.setze(P('privatvorgaenge/p1'), { art: 'entnahme', datum: '2026-11-03', betrag: 5, storniert: false }); // kein Kassenbezug mehr
+  assert.equal((await exportiere(fs)).status, 503);
+});

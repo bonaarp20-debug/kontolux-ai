@@ -143,11 +143,11 @@ test('N5: Pfad-Traversal und Bereiche außerhalb der erlaubten Ordner: selbst mi
     const schlecht = [
       `users/${UID}/kasse/../../${FREMD}/belege/x.pdf`, `users/${UID}/kasse/%2e%2e/x.pdf`, `users/${UID}/kasse/%252e%252e/x.pdf`,
       `users/${UID}/kasse\\..\\x.pdf`, `users/${UID}/logo`, `users/${UID}/chats/c1/x.pdf`, `users/${UID}/kasse`, `users/${UID}/kasse//x.pdf`, `users/${UID}/kasse/./x.pdf`,
-      `users/${UID}/kasse/x.pdf?alt=media`, `users/${UID}/kasse/x.pdf#`, `users/${UID}/kasse/a\u0000b.pdf`, `users/${UID}x/kasse/k/x.pdf`, `/users/${UID}/kasse/k/x.pdf`, `users/${UID}/kasse/k/x.pdf/`,
+      `users/${UID}/kasse/a\u0000b.pdf`, `users/${UID}/kasse/a%2fb.pdf`, `users/${UID}/kasse/a%5c..pdf`, `users/${UID}/kasse/%2E%2e/x.pdf`, `users/${UID}/kasse/%25252e%25252e/x.pdf`, `users/${UID}/kasse/a\u007fb.pdf`, `users/${UID}/kasse/k/..`, `users/${UID}x/kasse/k/x.pdf`, `/users/${UID}/kasse/k/x.pdf`, `users/${UID}/kasse/k/x.pdf/`,
     ];
     for (const p of schlecht) {
       assert.equal(prueferDateiPfadOk(UID, p), false, p);
-      const r = await get(env, linkFuer(env, p), '198.51.100.10');
+      const r = await get(env, linkFuer(env, p), `192.0.2.${schlecht.indexOf(p) + 1}`); // eigene IP je Fall (Grundlimit 20 je IP und 10 s)
       assert.equal(r.status, 401, p);
     }
     // rohe, nicht passend kodierte Traversal-Schreibweisen in der Adresse
@@ -299,5 +299,44 @@ test('F2-Fix N5-b: Link ist an die Zugangs-Generation gebunden: nach Widerruf un
     // ohne g: ungültig
     q.delete('g');
     assert.equal((await get(env, alt.pathname + '?' + q, '198.51.100.64')).status, 401);
+  } finally { a.zurueck(); }
+});
+
+// G2-Fix M-1: Chat-Uploads speichern den rohen Dateinamen (index.html: users/{uid}/uploads/{zeit}_{name}). #, %, ?, Leerzeichen und Umlaute im Namen dürfen den Link
+// beim Prüfer nicht kosten (live sieht er den Beleg heute); Kurzlink, Signatur, Erneuerung und Storage-Abruf transportieren den Namen verlustfrei und ohne Doppelkodierung.
+test('G2-Fix M-1: Dateinamen mit #, %, ?, Leerzeichen und Umlaut: Kurzlink in den Prüfer-Daten, p dekodiert exakt, Abruf und Erneuerung gehen, Storage einmal kodiert', async () => {
+  const namen = ['1732_Rechnung #1001.pdf', '1733_100% Rabatt.pdf', '1734_Frage?.pdf', '1735_Müller.pdf', '1736_Quittung 50%.jpg', '1737_Beleg..pdf', '1738_a+b&c=d.pdf'];
+  const pfade = namen.map((n) => `users/${UID}/uploads/${n}`);
+  const dateien = Object.fromEntries(pfade.map((p, i) => [p, { typ: 'application/pdf', inhalt: `DATEI-${i}` }]));
+  const a = aufbau({ dateien }); const env = await erzeugeTestEnv();
+  try {
+    pfade.forEach((p, i) => a.fs.setze(`users/${UID}/dokumente/m${i}`, { name: `M1-${i}`, typ: 'rechnung_eingehend', url: dl(p) }));
+    for (const p of pfade) assert.equal(prueferDateiPfadOk(UID, p), true, p);
+    const text = await (await holeDaten(env, '192.0.2.200')).text();
+    assert.ok(!/token=/i.test(text) && !text.includes('firebasestorage.googleapis.com'));
+    const doks = JSON.parse(text).dokumente;
+    for (let i = 0; i < pfade.length; i++) {
+      const d = doks.find((x) => x.name === `M1-${i}`);
+      assert.ok(typeof d.url === 'string' && d.url.startsWith('https://'), `${namen[i]}: Kurzlink vorhanden`);
+      const u = new URL(d.url);
+      assert.equal(u.searchParams.get('p'), pfade[i], `${namen[i]}: verlustfrei`);
+      const vorher = a.log.storage.length;
+      const r = await get(env, u.pathname + u.search, `192.0.2.${100 + i}`);
+      assert.equal(r.status, 200, namen[i]);
+      assert.equal(await r.text(), `DATEI-${i}`);
+      const abruf = a.log.storage.slice(vorher).map((x) => x.url);
+      assert.ok(abruf.every((x) => x.includes(`/o/${encodeURIComponent(pfade[i])}?alt=media`)), `${namen[i]}: genau einmal kodiert`);
+      assert.ok(abruf.every((x) => !/%25(23|3F|25|20)/i.test(x) || namen[i].includes('%')), 'keine Doppelkodierung');
+      // Erneuerung beim Klick wie in index.html: pfad aus searchParams
+      const ern = await anfrage(env, { path: '/pruefer-datei-link', body: { pfad: u.searchParams.get('p') }, headers: { Authorization: `Bearer ${TOKEN}` }, ip: `192.0.2.${120 + i}` });
+      assert.equal(ern.status, 200, namen[i]);
+      const neu = new URL((await ern.json()).url);
+      assert.equal(neu.searchParams.get('p'), pfade[i]);
+      assert.equal((await get(env, neu.pathname + neu.search, `192.0.2.${140 + i}`)).status, 200, `${namen[i]}: erneuerter Link`);
+    }
+    // die Signatur gilt nur für den exakten Namen: ein anders kodierter oder abgeschnittener Name (#-Fragment) passt nicht
+    const u0 = new URL(doks.find((x) => x.name === 'M1-0').url);
+    const ohneKodierung = `/pruefer-datei?u=${UID}&p=${pfade[0]}&exp=${u0.searchParams.get('exp')}&g=${GEN}&sig=${u0.searchParams.get('sig')}`;
+    assert.equal((await get(env, ohneKodierung, '192.0.2.201')).status, 401, 'roher # schneidet ab: Signatur passt nicht');
   } finally { a.zurueck(); }
 });

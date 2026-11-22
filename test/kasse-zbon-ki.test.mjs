@@ -737,11 +737,12 @@ test('Schema: Endpunkt reicht deps.schema an die Anfrage weiter', async () => {
 });
 
 test('Eval Fall 8: Einzelbon, den das Modell als kassenbericht einstuft, wird deterministisch abgefangen (kein Vorschlag); echter Z-Bericht mit einem Satz bleibt', () => {
-  const festerText = 'Das sieht aus wie ein einzelner Kassenbon. Im Kassenbuch überträgst du nur den Tagesabschluss deiner Kasse.';
+  // G2-Fix N-2: die Sperre bleibt, der Text ist neutral (keine Z-Nummer, eine Summenzeile), kein Einzelbon-Vorwurf
+  const festerText = 'Auf dem Bon ist keine Z-Nummer lesbar und es gibt nur eine Summenzeile. Bitte trag die Werte selbst ein.';
   for (const art of ['kassenbericht', 'z_bericht', 'kassenbuchseite']) {
     for (const saetze of [[], [{ satz_prozent: null, brutto_cent: 350, netto_cent: null, steuer_cent: null }]]) {
       const e = pr({ dokumentart: art, z_nummer: null, saetze, zahlarten: [{ art: 'bar', betrag_cent: 500 }], gesamt_brutto_cent: 350 });
-      assert.equal(e.sperre, 'SPERRE_EINZELBON', `${art}/${saetze.length}`); assert.equal(e.dokumentart, 'sonstiges');
+      assert.equal(e.sperre, 'SPERRE_OHNE_ZNUMMER', `${art}/${saetze.length}`); assert.equal(e.dokumentart, 'sonstiges');
       assert.deepEqual(e.hinweise, [festerText]); assert.deepEqual(e.markiert, []); assert.deepEqual(e.vorschlag.umsaetze_je_satz, []);
     }
   }
@@ -779,4 +780,47 @@ test('Delta C-M1: Text in Form-XObjects zählt zur Token-Schätzung (dasselbe XO
   await abgelehnt(u, d(await pdfMitForm(1, 40 * 1024)), 400, 'ZBON_ZU_GROSS');
   // kleines XObject (Logo, Kopfzeile) bleibt erlaubt
   assert.equal((await umgebung().rufe(d(await pdfMitForm(2, 200)))).status, 200);
+});
+
+test('G2-Fix N-2: Z-Nummer als „#123“, „Nr. 123“, „No. 0412“, „№ 7“ wird vor der Prüfung normiert (Z-Bericht mit einem Satz bleibt vorbefüllt); die Form gespeicherter Z-Nummern bleibt streng', () => {
+  const einSatz = (z) => pr({ z_nummer: z, saetze: [{ satz_prozent: 19, brutto_cent: 8500, netto_cent: null, steuer_cent: null }], zahlarten: [{ art: 'bar', betrag_cent: 8500 }], gesamt_brutto_cent: 8500 });
+  for (const [roh, soll] of [['#123', '123'], ['Nr. 123', '123'], ['Nr.123', '123'], ['nr 123', '123'], ['No. 0412', '0412'], ['№ 7', '7'], ['  Z-17 ', 'Z-17'], ['# 12/3', '12/3'], ['Nr: 5', '5']]) {
+    const e = einSatz(roh);
+    assert.equal(e.sperre, null, roh); assert.equal(e.vorschlag.z_nummer, soll, roh); assert.equal(e.vorschlag.zbon_gesamt_cent, 8500, roh);
+  }
+  // nicht aufgeweicht: Leerzeichen in der Nummer, Sonderzeichen, nur Präfix, Wort ohne Ziffer, Präfix ohne Trenner bleiben ungültig: neutraler Text
+  assert.equal(einSatz('NoA1').vorschlag.z_nummer, 'NoA1', 'Präfix nur vor Trenner oder Ziffer');
+  for (const roh of ['Z 12/3', '12#3', '#', 'Nr.', 'Kasse', '<b>12</b>']) {
+    const e = einSatz(roh);
+    assert.equal(e.sperre, 'SPERRE_OHNE_ZNUMMER', roh);
+    assert.ok(!e.hinweise.join(' ').includes('einzelner Kassenbon'), `${roh}: kein Einzelbon-Vorwurf`);
+  }
+  // mehrere Sätze ohne gültige Nummer: Vorschlag, z_nummer unsicher
+  const m = pr({ z_nummer: 'Z 12/3' }); assert.equal(m.sperre, null); assert.equal(m.vorschlag.z_nummer, null); assert.ok(m.unsicher.includes('z_nummer'));
+  // vom Modell als sonstiges eingestuft: weiter der Einzelbon-Text
+  assert.equal(pr({ dokumentart: 'sonstiges' }).sperre, 'SPERRE_EINZELBON');
+});
+
+test('G2-Fix N-3: Kachelmuster (/PatternType 1), Type3-Glyphen (/CharProcs, auch in direkt eingebetteter Schrift) und indirektes /Subtype zählen zur Token-Schätzung', async () => {
+  const bau = async (seiten, mach) => {
+    const doc = await PDFDocument.create();
+    const res = mach(doc);
+    for (let i = 0; i < seiten; i += 1) {
+      const p = doc.addPage([200, 200]);
+      p.node.set(PDFName.of('Resources'), doc.context.obj(res));
+      p.node.set(PDFName.of('Contents'), doc.context.register(doc.context.stream('q Q')));
+    }
+    return pruefeZbonDatei({ type: 'application/pdf', base64: Buffer.from(await doc.save()).toString('base64') });
+  };
+  const text = (n) => `BT /F1 6 Tf 0 0 Td (${'A'.repeat(n)}) Tj ET`;
+  const muster = (n) => (doc) => ({ Pattern: { P0: doc.context.register(doc.context.stream(text(n), { Type: 'Pattern', PatternType: 1, PaintType: 1, TilingType: 1, BBox: [0, 0, 200, 200], XStep: 200, YStep: 200 })) } });
+  const typ3 = (n) => (doc) => ({ Font: { T3: { Type: 'Font', Subtype: 'Type3', FontBBox: [0, 0, 1, 1], FontMatrix: [1, 0, 0, 1, 0, 0], CharProcs: { a: doc.context.register(doc.context.stream(text(n))) }, Encoding: { Type: 'Encoding', Differences: [97, 'a'] }, FirstChar: 97, LastChar: 97, Widths: [1] } } });
+  const formIndirekt = (n) => (doc) => ({ XObject: { X0: doc.context.register(doc.context.stream(text(n), { Type: 'XObject', Subtype: doc.context.register(PDFName.of('Form')), BBox: [0, 0, 200, 200] })) } });
+  for (const [name, mach] of [['Kachelmuster', muster], ['Type3', typ3], ['Form mit indirektem Subtype', formIndirekt]]) {
+    // 5 Seiten, 5.000 Zeichen im Strom: 12.500 + 12.500 + 2.000 > 20.000 (vor dem Fix: nur Seiten, angenommen)
+    assert.equal((await bau(5, mach(5000))).code, 'ZBON_ZU_GROSS', name);
+    const klein = await bau(2, mach(200));
+    assert.equal(klein.ok, true, name);
+    assert.ok(klein.token >= 2000 + 2 * 2500 + 200, `${name}: Strom zählt mit (${klein.token})`);
+  }
 });

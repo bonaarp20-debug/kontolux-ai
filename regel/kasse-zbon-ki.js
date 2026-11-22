@@ -23,7 +23,7 @@
 // Vision: Fotos verkleinert der Browser auf höchstens 2000 px lange Kante (2.14 Ablauf 2). Der Höchstwert für Haiku 5.5 ist gegen die
 // Vision-Doku (https://docs.claude.com/en/docs/build-with-claude/vision) vor O4 zu prüfen; der Worker lässt Bilder bis 10 MB durch.
 // Structured Outputs: JSON-Schema ohne maxLength/maxItems/minimum/maximum (die API bildet sie nicht ab); der Worker prüft sie (siehe unten).
-import { PDFDocument, PDFArray, PDFName, PDFRawStream, decodePDFRawStream } from 'pdf-lib';
+import { PDFDocument, PDFArray, PDFDict, PDFName, PDFNumber, PDFRawStream, PDFParser, decodePDFRawStream } from 'pdf-lib';
 import * as Steuerkern from '../steuerkern/index.js';
 import {
   antwort, fehlerAntwort, featureAusAntwort, grundpruefung, istObjekt, istDatum, nurSchluessel, CONFIG_PFAD, configBereinigen, featureAktiv,
@@ -50,6 +50,12 @@ export const ZBON_FEST_TOKEN = 2000;       // System-Prompt (zbon-2, rund 500 bi
 export const ZBON_BILD_TOKEN = 2000;       // die API verkleinert Bilder auf höchstens etwa 1.600 Token
 export const ZBON_PDF_SEITE_TOKEN = 2500;  // je Seite: Seitenbild plus Rahmen
 export const ZBON_PDF_INHALT_MAX_ROH = 32 * 1024; // Seiteninhalt (komprimiert) darüber: zu groß, ohne ihn zu entpacken (Schutz vor Entpack-Bomben)
+// G2-Fix M-2 (Entpack-Bombe): jeder Strom, den der Worker oder pdf-lib entpackt (Objekt- und XRef-Ströme beim Laden, Seiteninhalte und XObjects beim Zählen),
+// wird gezählt und begrenzt entpackt: höchstens 4 MB je Strom und 16 MB je Datei, Abbruch beim Überschreiten (der Entpacker selbst stoppt, kein volles Entpacken).
+// Filterketten (mehr als ein Filter) werden abgelehnt: die Rohgrenze schützt nur eine Stufe (474 Byte mit doppeltem FlateDecode = 200 MB).
+export const ZBON_PDF_STROM_MAX = 4 * 1024 * 1024;
+export const ZBON_PDF_ENTPACKT_MAX = 16 * 1024 * 1024;
+export const ZBON_PDF_XREF_EINTRAEGE_MAX = 100000; // XRef-Strom: Einträge ohne Bytes (/W [0 0 0], großes /Size) wären eine Schleife ohne Entpacken
 export const ZBON_ZU_GROSS_TEXT = 'Die Datei ist zu groß zum Lesen. Verkleinere die Datei (weniger Seiten, kürzerer Text) oder trag die Werte selbst ein.';
 export const ZBON_ERLAUBTE_TYPEN = Object.freeze(['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'text/plain', 'text/csv']);
 // Entscheidung: obere Grenze je Betrag 1.000.000 EUR in Cent (strenger als BELEG_MAX_BETRAG = 10.000.000 EUR in worker.js; ein Tagesabschluss
@@ -64,6 +70,12 @@ const SCHLUESSEL = ['userId', 'token', 'anfrage_id', 'kasse_id', 'geschaeftstag_
 const DATEI_SCHLUESSEL = ['name', 'type', 'base64'];
 const KASSE_ID = /^k[a-z0-9]{8}$/;
 const Z_NUMMER = /^[A-Za-z0-9\-/]{1,20}$/;
+// G2-Fix N-2: gedruckte Z-Nummern stehen oft als „#123“, „Nr. 123“, „No. 0412“ oder „№ 7“ da. Vor der Prüfung werden nur Leerraum am Rand und dieses eine Präfix entfernt;
+// die Prüfung selbst bleibt Z_NUMMER (dieselbe Form wie gespeicherte Z-Nummern, nicht aufgeweicht). „Nr“/„No“ nur vor Punkt, Doppelpunkt, Leerraum oder Ziffer.
+export function zNummerNormiert(s) {
+  if (typeof s !== 'string') return '';
+  return s.trim().replace(/^(?:#|№|(?:nr|no)(?=[.:\s\d])\.?:?)\s*/i, '').trim();
+}
 const BODY_MAX_ZEICHEN = Math.ceil(ZBON_DATEI_MAX_BYTES * 4 / 3) + 4096;
 const EXPORT_TYPEN = ['application/zip', 'application/x-zip-compressed', 'application/gzip', 'application/x-gzip', 'application/x-tar', 'application/x-compressed-tar', 'application/xml', 'text/xml', 'application/octet-stream'];
 const EXPORT_HINWEIS = 'Für Exporte deiner Kasse gibt es später einen eigenen Import.';
@@ -159,6 +171,7 @@ const PRUEF_TEXTE = Object.freeze({
   K12_LESBARKEIT: 'Der Bon ist nur teilweise lesbar. Vergleiche jeden Wert genau mit deinem Bon.',
   SPERRE_X_BERICHT: 'Das ist ein Zwischenbericht (X). Für den Tagesabschluss brauchst du den Z-Bericht.',
   SPERRE_EINZELBON: 'Das sieht aus wie ein einzelner Kassenbon. Im Kassenbuch überträgst du nur den Tagesabschluss deiner Kasse.',
+  SPERRE_OHNE_ZNUMMER: 'Auf dem Bon ist keine Z-Nummer lesbar und es gibt nur eine Summenzeile. Bitte trag die Werte selbst ein.', // G2-Fix N-2: neutral, kein Einzelbon-Vorwurf
   SPERRE_WAEHRUNG: 'Der Bon ist nicht in Euro. Das Kassenbuch rechnet nur in Euro. Trag die Werte selbst ein.',
   SPERRE_LESBARKEIT: 'Der Bon ist nicht gut lesbar. Bitte trag die Werte selbst ein.',
 });
@@ -226,10 +239,11 @@ export function pruefeZbonVorschlag(roh, ctx = {}) {
   // Kopf
   let zNummer = null;
   if (r.z_nummer !== null && r.z_nummer !== undefined) {
-    const s = typeof r.z_nummer === 'string' ? r.z_nummer : '';
-    const sauber = zeichenBereinigen(s);
+    const roh = typeof r.z_nummer === 'string' ? r.z_nummer : '';
+    const sauber = zeichenBereinigen(roh);
+    const s = zNummerNormiert(roh); // G2-Fix N-2
     // mindestens eine Ziffer: ein reines Wort (zum Beispiel ein Name) ist keine Z-Nummer
-    if (sauber === s && Z_NUMMER.test(s) && /\d/.test(s)) zNummer = s;
+    if (sauber === roh && Z_NUMMER.test(s) && /\d/.test(s)) zNummer = s;
     else mark('z_nummer');
   } else mark('z_nummer');
   let tag = null;
@@ -397,7 +411,8 @@ export function pruefeZbonVorschlag(roh, ctx = {}) {
   if (lesbarkeit === 'schlecht' && nullAnteil > 0.5) return sperreErgebnis(r, dokumentart, 'SPERRE_LESBARKEIT');
   // Schutz vor Einzelbon (Grenze 3, Eval Fall 8): unabhängig von der Klassifikation des Modells. Ohne gültige Z-Nummer und mit höchstens einer Satzzeile
   // ist es kein Tagesabschluss (der hat Z-Nummer oder mehrere Summen): kein Vorschlag. Im Zweifel lieber von Hand eintragen.
-  if (!zNummer && saetzeRoh.length <= 1) return sperreErgebnis(r, 'sonstiges', 'SPERRE_EINZELBON');
+  // G2-Fix N-2: eigener, neutraler Text (ein echter Z-Bericht mit einem Satz und unlesbarer Nummer ist kein Einzelbon); die Sperre selbst bleibt.
+  if (!zNummer && saetzeRoh.length <= 1) return sperreErgebnis(r, 'sonstiges', 'SPERRE_OHNE_ZNUMMER');
   if (lesbarkeit !== 'gut') pruefungen.push({ code: 'K12_LESBARKEIT', stufe: 'hinweis', felder: [] });
 
   // Eigene Unsicher-Angaben des Modells: nur als zusätzliche Markierung (nie als Wert); nur bekannte Feldpfade werden abgebildet
@@ -472,13 +487,86 @@ export function zbonEingabeTokens(art, { bytes, seiten, inhaltBytes } = {}) {
   if (art === 'bild') return ZBON_FEST_TOKEN + ZBON_BILD_TOKEN;
   return ZBON_FEST_TOKEN + (seiten || 0) * ZBON_PDF_SEITE_TOKEN + Math.ceil((inhaltBytes === undefined ? Infinity : inhaltBytes) / 2);
 }
-function pdfInhaltBytes(pdf) { // geschätzte Textebene: Seiteninhalte plus Form-XObjects (je Seite einmal gerechnet, auch Annotationen), oder Infinity (zu groß/unlesbar)
+class ZbonPdfZuGross extends Error {}
+// Entpackte Länge eines Stroms, begrenzt (G2-Fix M-2). budget = { rest } gilt für die ganze Datei. Wirft ZbonPdfZuGross bei Filterkette, unbekanntem Filtertyp
+// oder Überschreitung. Begrenzt wird im Entpacker: ensureBuffer der einen Dekodierstufe (pdf-lib DecodeStream; jede Stufe wächst nur darüber) wirft, sobald mehr
+// als die Grenze angefordert wird. Der Puffer bleibt so höchstens bei der Grenze (Zweierpotenz), auch wenn ein einzelner Deflate-Block mehr liefern wollte.
+export function zbonStromLaenge(st, budget) {
+  if (!(st instanceof PDFRawStream)) throw new ZbonPdfZuGross('kein Rohstrom');
+  const filter = st.dict.lookup(PDFName.of('Filter'));
+  if (filter instanceof PDFArray && filter.size() > 1) throw new ZbonPdfZuGross('Filterkette');
+  if (filter !== undefined && !(filter instanceof PDFName) && !(filter instanceof PDFArray)) throw new ZbonPdfZuGross('Filtertyp');
+  const grenze = Math.min(ZBON_PDF_STROM_MAX, budget.rest);
+  let n;
+  if (filter === undefined || (filter instanceof PDFArray && filter.size() === 0)) n = st.contents.length;
+  else {
+    const s = decodePDFRawStream(st);
+    if (typeof s.ensureBuffer !== 'function' || typeof s.readBlock !== 'function') throw new ZbonPdfZuGross('Dekodierer');
+    const original = s.ensureBuffer;
+    s.ensureBuffer = function begrenzt(angefordert) { if (angefordert > grenze) throw new ZbonPdfZuGross('Strom zu groß'); return original.call(this, angefordert); };
+    n = s.decode().length;
+  }
+  if (n > grenze) throw new ZbonPdfZuGross('Strom zu groß');
+  budget.rest -= n;
+  return n;
+}
+// XRef-Strom: /W aus drei kleinen ganzen Zahlen mit mindestens einem Byte je Eintrag, Einträge passen zu den entpackten Bytes und bleiben unter der Grenze
+function zbonXrefOk(st, laenge) {
+  const zahl = (x) => (x instanceof PDFNumber && Number.isSafeInteger(x.asNumber()) && x.asNumber() >= 0 ? x.asNumber() : null);
+  const w = st.dict.lookup(PDFName.of('W'));
+  if (!(w instanceof PDFArray) || w.size() !== 3) return false;
+  const breiten = w.asArray().map((x) => zahl(st.dict.context.lookup(x)));
+  if (breiten.some((b) => b === null || b > 8)) return false;
+  const jeEintrag = breiten[0] + breiten[1] + breiten[2];
+  if (jeEintrag < 1) return false;
+  const index = st.dict.lookup(PDFName.of('Index'));
+  let eintraege = 0;
+  if (index instanceof PDFArray) {
+    if (index.size() % 2 !== 0) return false;
+    for (let i = 1; i < index.size(); i += 2) { const l = zahl(st.dict.context.lookup(index.get(i))); if (l === null || zahl(st.dict.context.lookup(index.get(i - 1))) === null) return false; eintraege += l; }
+  } else {
+    const size = zahl(st.dict.lookup(PDFName.of('Size')));
+    if (size === null) return false;
+    eintraege = size;
+  }
+  return eintraege <= ZBON_PDF_XREF_EINTRAEGE_MAX && eintraege * jeEintrag <= laenge;
+}
+// Lädt das PDF wie PDFDocument.load (dieselben Optionen), prüft aber jeden Objekt- und XRef-Strom vorher mit dem gezählten Entpacker. pdf-lib entpackt diese
+// Ströme beim Laden sonst ohne Grenze (ByteStream.fromPDFRawStream). Der Vorabblick liest dasselbe Objekt an derselben Stelle mit demselben Kontext wie danach
+// pdf-lib (parseObject entpackt nichts, verändert den Kontext nicht), sieht also genau den Strom, den pdf-lib entpacken würde.
+// Ergebnis { pdf } oder { zuGross: true }; andere Fehler werfen (FORMAT beim Aufrufer).
+export async function ladeZbonPdf(bytes, budget) {
+  const parser = PDFParser.forBytesWithOptions(bytes, 100, false, false); // wie PDFDocument.load: ParseSpeeds.Slow, throwOnInvalidObject false, capNumbers false
+  const original = parser.parseIndirectObject;
+  let zuGross = false;
+  parser.parseIndirectObject = async function vorabGeprueft() {
+    const start = this.bytes.offset();
+    this.parseIndirectObjectHeader();
+    this.skipWhitespaceAndComments();
+    const obj = this.parseObject();
+    if (obj instanceof PDFRawStream) {
+      const typ = obj.dict.lookup(PDFName.of('Type'));
+      if (typ === PDFName.of('ObjStm') || typ === PDFName.of('XRef')) {
+        try {
+          const laenge = zbonStromLaenge(obj, budget);
+          if (typ === PDFName.of('XRef') && !zbonXrefOk(obj, laenge)) throw new ZbonPdfZuGross('XRef');
+        } catch (e) { zuGross = true; throw e; } // pdf-lib fängt den Fehler und legt ein ungültiges Objekt an (ohne Entpacken); zuGross entscheidet danach
+      }
+    }
+    this.bytes.moveTo(start);
+    return original.call(this);
+  };
+  const context = await parser.parseDocument();
+  if (zuGross) return { zuGross: true };
+  return { pdf: new PDFDocument(context, true, false) }; // wie load mit ignoreEncryption true, updateMetadata false
+}
+function pdfInhaltBytes(pdf, budget) { // geschätzte Textebene: Seiteninhalte plus Form-XObjects (je Seite einmal gerechnet, auch Annotationen), oder Infinity (zu groß/unlesbar)
   let roh = 0; let seiteSumme = 0; let formSumme = 0;
   const zaehle = (st) => {
     if (st instanceof PDFRawStream) {
       roh += st.contents.length;
       if (roh > ZBON_PDF_INHALT_MAX_ROH) throw new Error('zu gross');
-      return decodePDFRawStream(st).decode().length;
+      return zbonStromLaenge(st, budget); // G2-Fix M-2: begrenzt, keine Filterketten
     }
     if (st && typeof st.getContentsSize === 'function') return st.getContentsSize();
     throw new Error('unbekannt');
@@ -490,9 +578,28 @@ function pdfInhaltBytes(pdf) { // geschätzte Textebene: Seiteninhalte plus Form
       for (const st of strs) if (st) seiteSumme += zaehle(st);
     }
     // alle Form-XObjects des Dokuments (Text kann dort stehen); dasselbe XObject kann auf jeder Seite stehen: mal Seitenzahl gerechnet
+    // G2-Fix N-3: ebenso Kachelmuster (/PatternType 1, Inhaltsstrom wie ein Form) und die Glyphen-Ströme von Type3-Schriften (/CharProcs); /Subtype und
+    // /PatternType auch indirekt angegeben. Type3-Schriften können direkt in Ressourcen stehen: verschachtelte direkte Dicts werden durchsucht (Tiefe begrenzt).
+    const weitere = new Set();
+    const N = (x) => PDFName.of(x);
+    const type3 = (d, tiefe) => {
+      if (tiefe > 8) return;
+      if (d instanceof PDFDict) {
+        if (d.lookup(N('Subtype')) === N('Type3')) {
+          const cp = d.lookup(N('CharProcs'));
+          if (cp instanceof PDFDict) for (const [, v] of cp.entries()) { const st = pdf.context.lookup(v); if (st instanceof PDFRawStream) weitere.add(st); }
+        }
+        for (const [, v] of d.entries()) if (v instanceof PDFDict || v instanceof PDFArray) type3(v, tiefe + 1);
+      } else if (d instanceof PDFArray) for (const v of d.asArray()) if (v instanceof PDFDict || v instanceof PDFArray) type3(v, tiefe + 1);
+    };
     for (const [, o] of pdf.context.enumerateIndirectObjects()) {
-      if (o instanceof PDFRawStream && o.dict.get(PDFName.of('Subtype')) === PDFName.of('Form')) formSumme += zaehle(o);
+      if (o instanceof PDFRawStream) {
+        const pt = o.dict.lookup(N('PatternType'));
+        if (o.dict.lookup(N('Subtype')) === N('Form') || (pt instanceof PDFNumber && pt.asNumber() === 1)) weitere.add(o);
+        type3(o.dict, 0);
+      } else type3(o, 0);
     }
+    for (const st of weitere) formSumme += zaehle(st);
   } catch { return Infinity; }
   return seiteSumme + formSumme * Math.max(1, pdf.getPageCount());
 }
@@ -522,9 +629,14 @@ export async function pruefeZbonDatei(datei, { validateDatei } = {}) {
   if (type === 'application/pdf') {
     if (!beginnt(bytes, [0x25, 0x50, 0x44, 0x46, 0x2D])) return FORMAT();
     let pdf; let seiten;
-    try { pdf = await PDFDocument.load(bytes, { ignoreEncryption: true, throwOnInvalidObject: false, updateMetadata: false }); seiten = pdf.getPageCount(); } catch { return FORMAT(); }
+    const budget = { rest: ZBON_PDF_ENTPACKT_MAX }; // G2-Fix M-2: gilt für Laden und Zählen zusammen
+    try {
+      const geladen = await ladeZbonPdf(bytes, budget);
+      if (geladen.zuGross) return ZU_GROSS(); // Entpack-Grenze oder Filterkette beim Laden: fester Text, keine KI-Anfrage
+      pdf = geladen.pdf; seiten = pdf.getPageCount();
+    } catch { return FORMAT(); }
     if (seiten > ZBON_PDF_SEITEN_MAX) return { ok: false, status: 400, code: 'ZBON_ZU_LANG', seiten_max: ZBON_PDF_SEITEN_MAX };
-    const token = zbonEingabeTokens('pdf', { seiten, inhaltBytes: pdfInhaltBytes(pdf) });
+    const token = zbonEingabeTokens('pdf', { seiten, inhaltBytes: pdfInhaltBytes(pdf, budget) });
     if (token > ZBON_EINGABE_TOKEN_MAX) return ZU_GROSS();
     return { ok: true, art: 'pdf', type, bytes, sha256, token };
   }

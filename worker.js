@@ -4312,14 +4312,30 @@ const PRUEFER_DATEI_ORDNER = ['kasse', 'belege', 'rechnungen', 'mahnungen', 'sam
 const PRUEFER_DATEI_BASIS = 'https://kontolux-main.jonadrews012.workers.dev';
 const PRUEFER_UID_FORMAT = /^[A-Za-z0-9]{10,40}$/;
 
-// Erlaubter Speicherpfad: users/{uid}/{erlaubter Ordner}/…, ohne Traversal, Prozentzeichen, Backslash, Steuerzeichen, leere oder Punkt-Segmente
+// Erlaubter Speicherpfad: users/{uid}/{erlaubter Ordner}/…, ohne Backslash, Steuerzeichen, leere, „.“- oder „..“-Segmente.
+// G2-Fix M-1: #, %, ? und Leerzeichen sind im Dateinamen erlaubt (Chat-Uploads speichern den rohen Namen, z. B. „1732_Rechnung #1001.pdf“). Der Pfad ist immer der
+// dekodierte Objektname: der Kurzlink kodiert ihn mit encodeURIComponent (searchParams.get dekodiert genau einmal), der Storage-Abruf ebenso; die Signatur läuft über
+// den dekodierten Namen, eine Doppelkodierung entsteht nicht. Gegen eine spätere zweite Dekodierung irgendwo: ein Segment, das nach weiterem Dekodieren zu „.“/„..“
+// wird oder einen Schrägstrich, Backslash oder ein Steuerzeichen enthält (%2e%2e, %2f, %5c, %252e …), wird abgelehnt.
+const prueferSegmentOk = (t) => {
+  if (t === '' || t === '.' || t === '..') return false;
+  let x = t;
+  for (let i = 0; i < 3 && /%[0-9a-f]{2}/i.test(x); i++) {
+    let y;
+    try { y = decodeURIComponent(x); } catch { y = x.replace(/%(2e|2f|5c|00)/gi, (m) => decodeURIComponent(m)); } // „100% Rabatt“ ist kein gültiges Escape: nur die gefährlichen Escapes auflösen
+    if (y === x) break;
+    x = y;
+    if (x === '.' || x === '..' || /[\u0000-\u001f\u007f/\\]/.test(x)) return false;
+  }
+  return true;
+};
 export function prueferDateiPfadOk(uid, pfad) {
   if (typeof uid !== 'string' || !PRUEFER_UID_FORMAT.test(uid) || typeof pfad !== 'string' || pfad.length > 400) return false;
-  if (/[\u0000-\u001f\u007f%\\?#]/.test(pfad) || pfad.includes('..')) return false;
+  if (/[\u0000-\u001f\u007f\\]/.test(pfad)) return false;
   const praefix = `users/${uid}/`;
   if (!pfad.startsWith(praefix)) return false;
   const teile = pfad.slice(praefix.length).split('/');
-  return teile.length >= 2 && PRUEFER_DATEI_ORDNER.includes(teile[0]) && teile.every(t => t !== '' && t !== '.');
+  return teile.length >= 2 && PRUEFER_DATEI_ORDNER.includes(teile[0]) && teile.every(prueferSegmentOk);
 }
 
 // null, wenn das Secret fehlt: dann entstehen keine Links (fail-closed)
@@ -5215,12 +5231,20 @@ async function handleDatevExport(body, env, cors = {}) {
     let kasseMehrzweck = 0; let kasseAusgabeJahr = 0; let kasseBewGebucht = 0; let kassePrivat = 0;
     const userBasis = base; // users/{uid}
     let kassenDocs = null;
-    const kassenLaden = async () => {
+    let kassenVerweigert = false; // G2-Fix H-1: 403 auf kassen bei einem Konto ohne Kassenbelege (Regeln noch alt) als „keine Kassen“ gewertet
+    // G2-Fix H-1: ohneKassenbuch = der Aufrufer weiß, dass das Konto keine Kassenbelege hat (SumUp-Pfad bei !hatKasseDok). Nur dann gilt ein 403 als „keine Kassen“:
+    // Die Live-Regeln vor dem Kassenbuch-Release haben keinen kassen-Block (Standard-Verweigerung), ohne Kassenbuch gibt es dort nichts zu lesen. Jeder andere Fehler,
+    // und jeder Aufruf aus einem Kassenbuch-Pfad (Kassenbelege, Privatvorgänge aus der Kasse, Kassenbewegungen), bleibt fail-closed (503), auch nach einem früheren 403.
+    const kassenLaden = async ({ ohneKassenbuch = false } = {}) => {
       if (kassenDocs === null) {
         const m = new Map();
-        try { for (const k of await firestoreListAll(`${base}/kassen`, authHeader)) m.set(String(k.name || '').split('/').pop(), datevDekodiereFelder(k.fields || {})); } catch (e) { console.error('DATEV-Export Kassen:', e?.message); throw new DatevLesefehler('Die Kassen des Kassenbuchs konnten nicht gelesen werden.'); }
+        try { for (const k of await firestoreListAll(`${base}/kassen`, authHeader)) m.set(String(k.name || '').split('/').pop(), datevDekodiereFelder(k.fields || {})); } catch (e) {
+          if (ohneKassenbuch && /^Firestore read failed \(403\)/.test(String(e?.message || ''))) { console.warn('DATEV-Export Kassen: 403 ohne Kassenbelege, als keine Kassen gewertet'); kassenVerweigert = true; kassenDocs = m; return kassenDocs; }
+          console.error('DATEV-Export Kassen:', e?.message); throw new DatevLesefehler('Die Kassen des Kassenbuchs konnten nicht gelesen werden.');
+        }
         kassenDocs = m;
       }
+      if (kassenVerweigert && !ohneKassenbuch) throw new DatevLesefehler('Die Kassen des Kassenbuchs konnten nicht gelesen werden.');
       return kassenDocs;
     };
     const kassenKonto = async (kasseId) => {
@@ -5367,7 +5391,7 @@ async function handleDatevExport(body, env, cors = {}) {
       // A-H2: SumUp-Barbeleg einer Kasse mit Datenquelle sumup_integration: gegen deren Kassenkonto statt gegen die Bank (Belegfeld 1 bleibt der Transaktionscode)
       let sumupKasse = null;
       if (!istKasseAusgabe && firestoreValue(fields.quelle) === 'sumup_webhook' && istSumupBarbeleg({ quelle: 'sumup_webhook', typ: firestoreValue(fields.typ), deleted: firestoreValue(fields.deleted), storniert: firestoreValue(fields.storniert), buchungstext: firestoreValue(fields.buchungstext), name: firestoreValue(fields.name) })) {
-        sumupKasse = sumupKasseWahl(await kassenLaden(), String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || ''));
+        sumupKasse = sumupKasseWahl(await kassenLaden({ ohneKassenbuch: !hatKasseDok }), String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || ''));
         if (sumupKasse && firestoreValue(fields.bezahlt) === true && String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || '').slice(0, 4) === String(jahr)) { if (sumupKasse.mehrere) kasseSumupMehrere++; else kasseSumupBar++; }
       }
       const kasseKonto = istKasseAusgabe ? await kassenKonto(firestoreValue(fields.kasse_id)) : (sumupKasse && sumupKasse.id ? await kassenKonto(sumupKasse.id) : bankkonto);
@@ -5823,7 +5847,10 @@ async function handleDatevExport(body, env, cors = {}) {
     }
     // A-M1: Posten eines Tagesabschlusses außerhalb des Umsatzbelegs (Bareingang auf Rechnung, Durchlaufendes, Trinkgeld der Mitarbeiter), aus der aktiven Fassung des Tages.
     // F2-Fix B-N2: Ein Umsatzbeleg, der storniert wurde, trägt seine Posten weiter: Original aus der Fassung des Belegs (kassentag_id, kassen_fassung) am Tag des Belegs,
-    // gespiegelt (Soll/Haben vertauscht) am Tag des Stornos. Original und Storno ergeben auch für die Posten null, das Kassenkonto entspricht danach wieder dem Kassenbuch (der Tag
+    // gespiegelt (Soll/Haben vertauscht) am wirkdatum des Stornos. G2-Fix N-1: das wirkdatum ist der Geschäftstag des Originals (steuerkern/kasse.js, Storno-Beleg
+    // wirkdatum = o.geschaeftstag), nicht der Kalendertag, an dem storniert wurde: Original und Spiegel stehen also am selben Tag im selben Jahr (wie der Haupt-Storno des
+    // Umsatzbelegs). Ein Spiegel in einem anderen Jahr entsteht nur aus Altdaten oder von Hand gesetztem wirkdatum; dann steht jede Seite in ihrem Jahr.
+    // Original und Storno ergeben auch für die Posten null, das Kassenkonto entspricht danach wieder dem Kassenbuch (der Tag
     // ist weg, ein neu abgeschlossener Tag bucht seine eigene aktive Fassung). Ein stornierter Tag ohne Umsatzbeleg hat keine Posten.
     let kasseTagesPostenGebucht = 0;
     if (kasseAktiv) {
