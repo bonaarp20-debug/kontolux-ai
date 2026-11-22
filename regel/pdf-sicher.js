@@ -26,6 +26,13 @@ export const PDF_NAMEN_ZEICHEN_MAX = 2 * 1024 * 1024;
 // Einträge der klassischen XRef-Tabelle, XRef-Ströme, Objektköpfe und Objektströme. Gemessen: 400 reale PDFs höchstens 7.224 (201 Seiten),
 // pdf-lib-Dokument mit 3000 Seiten 15.014.
 export const PDF_VERWEISE_MAX = 50000;
+// Strings und Namen: pdf-lib setzt sie Zeichen für Zeichen zusammen (verkettete Strings, rund 32 Byte je Zeichen, bis zum Ende des Strings im Speicher)
+// und zählt sie als ein Objekt: ohne Grenze OOM ab 2 MB Hex- bzw. 4 MB Literal-String (128 MB). Die Länge wird deshalb vor dem Parsen im Puffer
+// bestimmt. Gemessen an 400 realen PDFs: längster String 3.404 Zeichen, Summe je Datei höchstens 72.181, längster Name 54 Zeichen. Je String 512 KiB
+// lassen Signaturen (/Contents als Hex-String) bis 256 KB zu.
+export const PDF_STRING_MAX = 512 * 1024;
+export const PDF_STRING_ZEICHEN_MAX = 2 * 1024 * 1024;
+export const PDF_NAME_MAX = 4096;
 
 // Grenze überschritten oder verbotene Form (Filterkette, XRef ohne Bytes je Eintrag …)
 export class PdfZuGross extends Error {}
@@ -84,7 +91,37 @@ function xrefEintraege(st, laenge) {
 // Zähler je Dokument: hängt am PDFContext, den PDFParser und PDFObjectStreamParser teilen (gleichzeitige Anfragen im Isolat zählen getrennt).
 // Der Eingriff in pdf-lib wirkt nur auf Kontexte mit Zähler; jeder andere Gebrauch von pdf-lib bleibt unverändert.
 const ZAEHLER = Symbol('pdfSicherZaehler');
-const ueber = (z) => z.objekte < 0 || z.namen < 0 || z.verweise < 0;
+const ueber = (z) => z.objekte < 0 || z.namen < 0 || z.verweise < 0 || z.strings < 0;
+// Trennzeichen wie pdf-lib (syntax/Whitespace.js, syntax/Delimiters.js): Ende eines Namens
+const NAMENSENDE = new Uint8Array(256);
+for (const c of [0, 9, 10, 12, 13, 32, 0x28, 0x29, 0x3c, 0x3e, 0x5b, 0x5d, 0x7b, 0x7d, 0x2f, 0x25]) NAMENSENDE[c] = 1;
+// Länge des Strings/Namens ab der aktuellen Position (dort steht '<', '(' oder '/'), höchstens bis max + 1 gesucht; > max heißt zu lang.
+// Ohne Ende vor Dateiende: Restlänge (pdf-lib wirft dann selbst, der Speicher ist durch die Restlänge begrenzt).
+function hexLaenge(b, max) {
+  const start = b.offset(); const bis = Math.min(b.length, start + max + 2);
+  for (let i = start + 1; i < bis; i += 1) if (b.peekAt(i) === 0x3e) return i - start - 1;
+  return bis === b.length ? b.length - start : max + 1;
+}
+function literalLaenge(b, max) { // wie PDFObjectParser.parseString: Klammern zählen, Escape mit Backslash
+  const start = b.offset(); const bis = Math.min(b.length, start + max + 2);
+  let tiefe = 0; let escape = false;
+  for (let i = start; i < bis; i += 1) {
+    const c = b.peekAt(i);
+    if (!escape) { if (c === 0x28) tiefe += 1; if (c === 0x29) tiefe -= 1; }
+    if (c === 0x5c) escape = !escape; else if (escape) escape = false;
+    if (tiefe === 0) return i - start - 1;
+  }
+  return bis === b.length ? b.length - start : max + 1;
+}
+function nameLaenge(b, max) {
+  const start = b.offset(); const bis = Math.min(b.length, start + max + 2);
+  let i = start + 1;
+  while (i < bis && !NAMENSENDE[b.peekAt(i)]) i += 1;
+  return i - start - 1;
+}
+// verketteten String in einen flachen umwandeln (V8 ersetzt ihn dabei an Ort und Stelle: 1 statt 32 Byte je Zeichen, gleicher Wert)
+const flach = (t) => { if (typeof t === 'string' && t.length > 12) t.charCodeAt(0); return t; };
+function zuLang(z, grund) { z.zuGross = true; throw new PdfZuGross(grund); }
 // Globaler Verweis-Speicher von pdf-lib: PDFRef.of legt Verweise auch außerhalb von parseObject an (klassische XRef-Tabelle mit 6 Byte je Eintrag,
 // XRef-Ströme, Objektköpfe, Objektströme). Gezählt wird jeder Verweis, den ein begrenztes Laden zum ersten Mal sieht (gesehenVerweise gilt wie der
 // Speicher von pdf-lib je Isolat). aktiv: Zähler der Datei, deren Parser gerade synchron läuft; jeder Parser-Eingriff setzt ihn, auch nach jedem await,
@@ -120,7 +157,22 @@ function parserBegrenzen() {
   const proto = Object.getPrototypeOf(PDFParser.prototype); // PDFObjectParser, gemeinsame Basis von PDFParser und PDFObjectStreamParser
   if (typeof proto?.parseObject !== 'function' || typeof proto?.parseName !== 'function') throw new Error('pdf-lib: Parser unbekannt');
   if (typeof PDFRef.of !== 'function') throw new Error('pdf-lib: PDFRef unbekannt');
-  const objekt = proto.parseObject; const name = proto.parseName; const refOf = PDFRef.of;
+  if (typeof proto.parseHexString !== 'function' || typeof proto.parseString !== 'function') throw new Error('pdf-lib: Parser unbekannt');
+  const objekt = proto.parseObject; const name = proto.parseName; const refOf = PDFRef.of; const hex = proto.parseHexString; const literal = proto.parseString;
+  const stringBegrenzt = (original, laenge) => function begrenzterString() {
+    const z = this.context && this.context[ZAEHLER];
+    if (!z) return original.call(this);
+    aktiv = z;
+    const l = laenge(this.bytes, PDF_STRING_MAX);
+    if (l > PDF_STRING_MAX) zuLang(z, 'String zu lang');
+    z.strings -= l;
+    if (z.strings < 0) zuLang(z, 'zu viele Stringzeichen');
+    const o = original.call(this);
+    flach(o.asString());
+    return o;
+  };
+  proto.parseHexString = stringBegrenzt(hex, hexLaenge);
+  proto.parseString = stringBegrenzt(literal, literalLaenge);
   PDFRef.of = function begrenzterVerweis(objectNumber, generationNumber) {
     const r = refOf(objectNumber, generationNumber);
     const z = aktiv;
@@ -151,6 +203,7 @@ function parserBegrenzen() {
     if (!z) return name.call(this);
     aktiv = z;
     if (ueber(z)) throw new PdfZuGross('zu viele Objekte');
+    if (nameLaenge(this.bytes, PDF_NAME_MAX) > PDF_NAME_MAX) zuLang(z, 'Name zu lang');
     const n = name.call(this);
     z.objekte -= 1; z.namen -= n.encodedName.length;
     return n;
@@ -164,7 +217,7 @@ function parserBegrenzen() {
 export async function ladePdfBegrenzt(bytes, { budget = pdfBudget(), ignoreEncryption = true, updateMetadata = false } = {}) {
   parserBegrenzen();
   const parser = PDFParser.forBytesWithOptions(bytes, 100, false, false);
-  const zaehler = { objekte: PDF_OBJEKTE_MAX, namen: PDF_NAMEN_ZEICHEN_MAX, verweise: PDF_VERWEISE_MAX, budget, oben: false, imXref: false, zuGross: false, stromFehler: false };
+  const zaehler = { objekte: PDF_OBJEKTE_MAX, namen: PDF_NAMEN_ZEICHEN_MAX, verweise: PDF_VERWEISE_MAX, budget, oben: false, strings: PDF_STRING_ZEICHEN_MAX, imXref: false, zuGross: false, stromFehler: false };
   parser.context[ZAEHLER] = zaehler;
   const original = parser.parseIndirectObject;
   parser.parseIndirectObject = async function begrenzt() {

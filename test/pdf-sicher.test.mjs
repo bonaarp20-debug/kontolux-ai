@@ -274,3 +274,23 @@ test('Härtung H-1a: Verweise aus klassischer XRef-Tabelle und XRef-Strömen zä
   const { PDFRef } = await import('pdf-lib');
   assert.equal(PDFRef.of(9999999, 3).toString(), '9999999 3 R');
 });
+
+test('Härtung H-1b: Länge von Hex-/Literal-Strings und Namen vor dem Parsen begrenzt (je String 512 KiB, je Datei 2 MiB Zeichen, Name 4096), Werte unverändert', async () => {
+  const L = 512 * 1024;
+  const r = (inhalt) => ladePdfBegrenzt(mitObjekt3(inhalt));
+  assert.equal((await r('<' + 'a'.repeat(L + 1) + '>')).zuGross, true, 'Hex-String über 512 KiB');
+  assert.equal((await r('(' + 'a'.repeat(L + 1) + ')')).zuGross, true, 'Literal-String über 512 KiB');
+  assert.equal((await r('(' + 'a'.repeat(L + 100))).zuGross, true, 'Literal-String ohne Ende (pdf-lib las bis Dateiende)');
+  assert.equal((await r('<' + 'a'.repeat(L + 100))).zuGross, true, 'Hex-String ohne Ende');
+  assert.equal((await r('/' + 'n'.repeat(4097))).zuGross, true, 'Name über 4096');
+  assert.equal((await r('[' + Array.from({ length: 5 }, () => '<' + 'b'.repeat(450 * 1024) + '>').join(' ') + ']')).zuGross, true, 'Summe über 2 MiB');
+  // an der Grenze: lädt, Wert gleich, bleibend flach gespeichert (verkettet wären es rund 16 MB)
+  const h = await bleibend(async () => { const x = await r('<' + 'c'.repeat(L) + '>'); return x.pdf ? x.pdf.context.lookup(x.pdf.context.enumerateIndirectObjects().find(([ref]) => ref.objectNumber === 3)[0]) : x; });
+  assert.equal(h.r.asString(), 'c'.repeat(L));
+  assert.ok(h.mb < 4, `512 KiB Hex-String: ${h.mb.toFixed(1)} MB bleibend`);
+  // Escapes, Klammern, Grenzfälle: gleiche Objekte wie PDFDocument.load
+  const knifflig = '[(a\\) b) (x (y) z) (\\\\) (\\() <41 42> <> () /A#20B /n /' + 'm'.repeat(4096) + ' (' + 'q'.repeat(L) + ') <' + 'f'.repeat(L) + '>]';
+  const neu = await ladePdfBegrenzt(mitObjekt3(knifflig), { updateMetadata: true }); const alt = await ALT(mitObjekt3(knifflig));
+  assert.ok(neu.pdf && !neu.zuGross, 'Grenzfälle laden');
+  assert.equal(objektBild(neu.pdf), objektBild(alt));
+});
