@@ -1,7 +1,7 @@
 // regel/kasse-zbon-ki.js (Kassenbuch P5-KI, Teil W, Baukonzept 2.14): POST /kasse-zbon-lesen, "Z-Bon lesen" (Vorbefüllung per Claude Haiku 5.5).
 //
 // Grenzen (fest, 2.14): Die KI-Antwort geht NUR an den Browser und füllt Formularfelder vor. Dieses Modul schreibt nichts außer dem Tageszähler
-// (kassezbonlimit/{uid}_{JJJJ-MM-TT}) und dem Upload-Kontingent (über deps.kiAufruf). Es entstehen keine Dokumente in kassen, kassentage, dokumente,
+// (kassezbonlimit/{uid}_{JJJJ-MM-TT}); ein monatliches Upload-Kontingent gibt es nicht mehr (Kap. 6 Nr. 28). Es entstehen keine Dokumente in kassen, kassentage, dokumente,
 // tagesdaten oder audit_v2. Verwendet wird ausschließlich die Schema-Ausgabe des Modells (nie Fließtext), jeder Wert wird im Worker geprüft und nie
 // "repariert": was die Prüfung nicht besteht, wird null plus unsicher. Das Schema hat kein Freitextfeld außer z_nummer (kein Ort für Namen oder
 // eingeschleuste Befehle). Die KI urteilt nie über Steuer: der Steuerfall folgt aus dem gelesenen Satz nach festen Regeln (19 -> A_INLAND_19,
@@ -9,11 +9,12 @@
 //
 // Einhängen in worker.js (später, nach P1b; Muster regelOssMeldung): import { regelKasseZbonLesen, KASSE_ZBON_PFAD } from './regel/kasse-zbon-ki.js';
 //   if (url.pathname === KASSE_ZBON_PFAD) return regelKasseZbonLesen(body, env, cors, { ...regelAbhaengigkeiten(env),
-//     kiAufruf: (uid, init) => anthropicFetchMitKontingent(uid, env, 'https://api.anthropic.com/v1/messages', init),
+//     kiAufruf: (uid, init) => anthropicFetchMitKontingent(uid, env, 'https://api.anthropic.com/v1/messages', init), // seit Nr. 28 ein reiner Durchreicher ohne Zähler
 //     estimateCostCents, agbMindestfassungKasse: AGB_MINDESTFASSUNG_KASSE });
-//   dazu protectedPaths, emailVerifiedRequiredPaths, UID_LIMITS['/kasse-zbon-lesen'] = { limit: 10, windowMs: 10 min }, globale Bremse wie /image.
-//   Der Anthropic-Aufruf läuft über deps.kiAufruf (EU-KI Stufe 1 stellt diese fünfte Aufrufstelle mit um). Das Upload-Kontingent zählt
-//   anthropicFetchMitKontingent (atomar, Freigabe bei Fehler); ohne deps.kiAufruf, ohne API-Schlüssel oder ohne AGB-Fassung: fail-closed.
+//   dazu protectedPaths, emailVerifiedRequiredPaths, UID_LIMITS['/kasse-zbon-lesen'] = { limit: 10, windowMs: 10 min }. Eine globale Bremse (GLOBALE_LIMITS) kennen /image, /document und /chat nicht: begrenzt
+//   wird nur durch das eigene Tageslimit (ZBON_TAGESLIMIT 5 je Nutzer und Tag, Firestore) und UID_LIMITS (im Speicher je Isolate).
+//   Der Anthropic-Aufruf läuft über deps.kiAufruf (EU-KI Stufe 1 stellt diese fünfte Aufrufstelle mit um). Ein Upload-Kontingent gibt es nicht
+//   mehr (anthropicFetchMitKontingent reicht nur durch); ohne deps.kiAufruf, ohne API-Schlüssel oder ohne AGB-Fassung: fail-closed.
 //
 // Denken: Standard ist thinking 'disabled' (wie /document, Haiku 5.5). Die Alternative "adaptiv, effort low" ist über deps.denken = 'low'
 // schaltbar. Die Wahl nach Messwerten legt der Eval fest (test/kasse-zbon-eval.mjs); bis dahin gilt 'aus' (schneller, billiger, kein Denken in
@@ -591,7 +592,7 @@ export async function regelKasseZbonLesen(body, env, cors = {}, deps = {}) {
       return fehler(503, 'KI_NICHT_ERREICHBAR', cors);
     }
     reserviert = true;
-    // 10./11. Upload-Kontingent (in deps.kiAufruf) und Anthropic-Aufruf
+    // 10./11. Anthropic-Aufruf (über deps.kiAufruf; kein Upload-Kontingent mehr, Nr. 28)
     const base64 = datei.art === 'text' ? '' : body.datei.base64;
     let ki;
     try {
@@ -601,7 +602,7 @@ export async function regelKasseZbonLesen(body, env, cors = {}, deps = {}) {
       return fehler(503, 'KI_NICHT_ERREICHBAR', cors);
     }
     if (!ki || !ki.ok) {
-      await gibKasseZbonZurueck(fs, uid, heute); reserviert = false; // HTTP-Fehler oder Sperre des Upload-Kontingents: keine Kosten
+      await gibKasseZbonZurueck(fs, uid, heute); reserviert = false; // HTTP-Fehler der KI-Schnittstelle: keine Kosten
       const sperre = ki && ki.headers && typeof ki.headers.get === 'function' ? ki.headers.get('X-Kx-Sperre') : null;
       if (sperre === 'limit' || sperre === 'ausgelastet') return fehler(429, `upload_${sperre}`, cors);
       return fehler(503, 'KI_NICHT_ERREICHBAR', cors);
