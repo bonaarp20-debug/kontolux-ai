@@ -502,3 +502,28 @@ test('Zweite Lesung F-4: volle Obergrenze je Isolat wird getrennt protokolliert 
   assert.ok(w.every((z) => !z.includes('Mueller')), 'kein Dateiname im Log');
   // sonst weiter „Entpack-Grenze“ (Test oben: Bomben)
 });
+
+test('Zweite Lesung F-5: eingebettete XML mit Kette aus zwei Filtern wird wieder gelesen (Stufe für Stufe begrenzt), längere Ketten und Bomben nicht', async () => {
+  const doc = await PDFDocument.create();
+  const a85 = (b) => { // ASCII85 wie Adobe, mit ~> am Ende
+    let s = ''; for (let i = 0; i < b.length; i += 4) { const t = [b[i], b[i + 1] ?? 0, b[i + 2] ?? 0, b[i + 3] ?? 0]; let v = ((t[0] << 24) >>> 0) + (t[1] << 16) + (t[2] << 8) + t[3]; const n = Math.min(4, b.length - i);
+      if (v === 0 && n === 4) { s += 'z'; continue; } const c = []; for (let k = 0; k < 5; k += 1) { c.unshift(String.fromCharCode(33 + (v % 85))); v = Math.floor(v / 85); } s += c.slice(0, n + 1).join(''); }
+    return Buffer.from(s + '~>');
+  };
+  const kette2 = PDFRawStream.of(doc.context.obj({ Filter: [PDFName.of('ASCII85Decode'), PDFName.of('FlateDecode')] }), a85(zlib.deflateSync(XML)));
+  assert.ok(Buffer.from(await eingebettetEntpacken(kette2)).equals(XML), 'ASCII85 + Flate');
+  const hexFlate = PDFRawStream.of(doc.context.obj({ Filter: [PDFName.of('ASCIIHexDecode'), PDFName.of('FlateDecode')] }), Buffer.from(zlib.deflateSync(XML).toString('hex') + '>'));
+  assert.ok(Buffer.from(await eingebettetEntpacken(hexFlate)).equals(XML), 'ASCIIHex + Flate');
+  // ganzes PDF: wird wieder als ZUGFeRD erkannt (main ja, 480fc58 nein)
+  assert.deepEqual(await detectAndParseERechnung(new Uint8Array(zugferdRoh('/Filter [/ASCII85Decode /FlateDecode]', a85(zlib.deflateSync(XML)))), 'r.pdf', 'application/pdf', ''), ERWARTET);
+  // drei Filter, Bombe in der Kette: übergangen, Puffer bleibt bei der Grenze
+  const drei = PDFRawStream.of(doc.context.obj({ Filter: [PDFName.of('ASCIIHexDecode'), PDFName.of('FlateDecode'), PDFName.of('FlateDecode')] }), Buffer.from('00>'));
+  assert.equal(await eingebettetEntpacken(drei), null);
+  const bombe = PDFRawStream.of(doc.context.obj({ Filter: [PDFName.of('FlateDecode'), PDFName.of('FlateDecode')] }), zlib.deflateSync(await deflateNullen(64 * 1024 * 1024)));
+  gc(); const vorher = process.memoryUsage().arrayBuffers;
+  assert.equal(await eingebettetEntpacken(bombe), null);
+  const zuwachs = process.memoryUsage().arrayBuffers - vorher;
+  // Grenze 5 MB je Stufe; pdf-lib verdoppelt den Puffer (bis 8 MB plus Vorgänger), unabhängig von der Größe der Bombe (64 MB)
+  assert.ok(zuwachs < 20 * 1024 * 1024, `Kettenbombe nicht voll entpackt (${(zuwachs / 1048576).toFixed(1)} MB)`);
+  // Objektströme mit Kette bleiben abgelehnt (Test oben)
+});

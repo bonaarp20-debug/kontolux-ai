@@ -3051,8 +3051,9 @@ export async function eingebettetEntpacken(stream, maxBytes = ENTPACKEN_MAX_BYTE
     } catch (_) { return null; }
   }
   if (roh.length > 1024 * 1024) return null;
-  // Hotfix: auch hier begrenzt entpacken (eine Kette wie [/ASCIIHexDecode /FlateDecode] wurde vorher ohne Grenze entpackt); Filterketten: übergehen
-  try { return stromEntpackenBegrenzt(stream, pdfBudget(maxBytes), { stromMax: maxBytes }); } catch (_) { return null; }
+  // Hotfix: auch hier begrenzt entpacken (eine Kette wie [/ASCIIHexDecode /FlateDecode] wurde vorher ohne Grenze entpackt); Ketten bis 2 Filter
+  // Stufe für Stufe, jede Stufe höchstens maxBytes; längere Ketten: übergehen
+  try { return stromEntpackenBegrenzt(stream, pdfBudget(maxBytes), { stromMax: maxBytes, kette: 2 }); } catch (_) { return null; }
 }
 
 // Sucht im /Names /EmbeddedFiles-Baum eines PDFs nach einer eingebetteten XML-Datei.

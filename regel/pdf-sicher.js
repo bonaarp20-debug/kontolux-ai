@@ -10,7 +10,7 @@
 // Parsen (parseObject entpackt nichts) und vor der Rückgabe an pdf-lib geprüft: Ist es ein Objekt- oder XRef-Strom, wird er zuerst gezählt und begrenzt
 // entpackt (höchstens PDF_STROM_MAX je Strom, PDF_ENTPACKT_MAX je Datei; Filterketten und unbekannte Filterangaben abgelehnt; XRef-Einträge geprüft). Erst
 // danach entpackt pdf-lib ihn selbst. Jedes Objekt wird nur einmal geparst und gezählt; normale PDFs laden dadurch genau wie vorher.
-import { PDFDocument, PDFArray, PDFName, PDFNumber, PDFRawStream, PDFParser, PDFNull, PDFBool, PDFRef, decodePDFRawStream } from 'pdf-lib';
+import { PDFDocument, PDFArray, PDFDict, PDFName, PDFNumber, PDFRawStream, PDFParser, PDFNull, PDFBool, PDFRef, decodePDFRawStream } from 'pdf-lib';
 
 export const PDF_STROM_MAX = 4 * 1024 * 1024;
 export const PDF_ENTPACKT_MAX = 16 * 1024 * 1024;
@@ -137,10 +137,26 @@ export const pdfBudget = (max = PDF_ENTPACKT_MAX) => ({ rest: max });
 // Begrenzt wird im Entpacker selbst: ensureBuffer der einen pdf-lib-Dekodierstufe (DecodeStream, jeder Puffer wächst nur darüber) wirft, sobald mehr als
 // die Grenze angefordert wird. Der Puffer bleibt so höchstens bei der Grenze, auch wenn ein einzelner Deflate-Block mehr liefern wollte.
 // Wirft PdfZuGross bei Filterkette, Filter in falscher Form oder Überschreitung; andere Fehler (kaputte Daten, unbekannter Filter) wirft der Dekodierer.
-export function stromEntpackenBegrenzt(st, budget, { stromMax = PDF_STROM_MAX } = {}) {
+// kette: höchstens so viele Filter nacheinander (Standard 1: Objekt- und XRef-Ströme). Eine Kette wird Stufe für Stufe entpackt, jede Stufe mit
+// höchstens stromMax (Zwischenstufen mit eigenem Budget, nach der nächsten Stufe frei); nur die letzte Stufe zählt gegen budget.
+export function stromEntpackenBegrenzt(st, budget, { stromMax = PDF_STROM_MAX, kette = 1 } = {}) {
   if (!(st instanceof PDFRawStream)) throw new PdfZuGross('kein Rohstrom');
   const filter = st.dict.lookup(PDFName.of('Filter'));
-  if (filter instanceof PDFArray && filter.size() > 1) throw new PdfZuGross('Filterkette');
+  if (filter instanceof PDFArray && filter.size() > 1) {
+    if (filter.size() > kette) throw new PdfZuGross('Filterkette');
+    const parms = st.dict.lookup(PDFName.of('DecodeParms'));
+    let daten = st.contents;
+    for (let i = 0; i < filter.size(); i += 1) {
+      const f = filter.lookup(i);
+      if (!(f instanceof PDFName)) throw new PdfZuGross('Filtertyp');
+      const dict = st.dict.context.obj({ Filter: f });
+      const p = parms instanceof PDFArray ? parms.lookup(i) : undefined;
+      if (p instanceof PDFDict) dict.set(PDFName.of('DecodeParms'), p);
+      const letzte = i === filter.size() - 1;
+      daten = stromEntpackenBegrenzt(PDFRawStream.of(dict, daten), letzte ? budget : pdfBudget(stromMax), { stromMax });
+    }
+    return daten;
+  }
   if (filter !== undefined && !(filter instanceof PDFName) && !(filter instanceof PDFArray)) throw new PdfZuGross('Filtertyp');
   const grenze = Math.min(stromMax, budget.rest);
   let aus;
