@@ -198,3 +198,60 @@ test('N5: Rate-Limit pro IP greift auch für /pruefer-datei (429; zuerst das all
     assert.equal(letzter, 429);
   } finally { a.zurueck(); }
 });
+
+// ── Erneuerung beim Klick: /pruefer-datei-link ──
+const linkHolen = (env, pfad, token = TOKEN, ip = '198.51.100.30') => anfrage(env, { path: '/pruefer-datei-link', body: { pfad }, headers: { Authorization: `Bearer ${token}` }, ip });
+
+test('N5 Erneuerung: mit Zugangstoken kommt ein frischer, funktionierender Kurzlink (UID nur aus dem Zugang)', async () => {
+  const a = aufbau(); const env = await erzeugeTestEnv();
+  try {
+    const r = await linkHolen(env, PFAD_KASSE);
+    assert.equal(r.status, 200, await r.clone().text());
+    const j = await r.json();
+    const u = new URL(j.url);
+    assert.equal(u.searchParams.get('u'), UID);
+    assert.equal(u.searchParams.get('sig'), sig(env, UID, PFAD_KASSE, u.searchParams.get('exp')));
+    assert.ok(Number(u.searchParams.get('exp')) - Date.now() <= 15 * 60 * 1000);
+    assert.equal((await get(env, u.pathname + u.search, '198.51.100.31')).status, 200);
+    // fremde UID im Body ändert nichts
+    const r2 = await anfrage(env, { path: '/pruefer-datei-link', body: { pfad: PFAD_BELEG, userId: FREMD, uid: FREMD }, headers: { Authorization: `Bearer ${TOKEN}` }, ip: '198.51.100.32' });
+    assert.equal(new URL((await r2.json()).url).searchParams.get('u'), UID);
+  } finally { a.zurueck(); }
+});
+
+test('N5 Erneuerung: falscher/fehlender Token, widerrufener oder abgelaufener Zugang, fremder oder unerlaubter Pfad: nie ein Link', async () => {
+  const env = await erzeugeTestEnv();
+  let a = aufbau();
+  try {
+    assert.equal((await linkHolen(env, PFAD_KASSE, 'x'.repeat(32), '198.51.100.40')).status, 404);
+    assert.equal((await anfrage(env, { path: '/pruefer-datei-link', body: { pfad: PFAD_KASSE }, ip: '198.51.100.41' })).status, 400);
+    for (const p of [`users/${FREMD}/kasse/k1/2026-11-02/x.pdf`, `users/${UID}/logo`, `users/${UID}/kasse/../belege/x.pdf`, `users/${UID}/kasse/%2e%2e/x.pdf`, `users/${UID}/chats/c/x.pdf`, '']) {
+      const r = await linkHolen(env, p, TOKEN, '198.51.100.42');
+      assert.ok([400, 404].includes(r.status), p);
+      assert.ok(!(await r.text()).includes('pruefer-datei?'), p);
+    }
+  } finally { a.zurueck(); }
+  for (const opt of [{ zugang: false }, { ablauf: Date.now() - 1000 }]) {
+    a = aufbau(opt);
+    try {
+      const r = await linkHolen(env, PFAD_KASSE, TOKEN, '198.51.100.43');
+      assert.equal(r.status, 404, JSON.stringify(opt));
+      assert.ok(!(await r.text()).includes('sig='));
+    } finally { a.zurueck(); }
+  }
+});
+
+test('N5 Erneuerung: ohne Secret kein Link; Logs ohne Token; Rate-Limit greift; Prüfer-Seite ruft den Erneuerungsweg beim Klick auf', async () => {
+  let a = aufbau(); let env = await erzeugeTestEnv({ TOKEN_ENCRYPTION_KEY: undefined });
+  try { assert.equal((await linkHolen(env, PFAD_KASSE, TOKEN, '198.51.100.50')).status, 404); } finally { a.zurueck(); }
+  a = aufbau(); env = await erzeugeTestEnv();
+  try {
+    let letzter = 0;
+    for (let i = 0; i < 70; i++) { letzter = (await linkHolen(env, PFAD_KASSE, TOKEN, '198.51.100.51')).status; if (letzter === 429) break; }
+    assert.equal(letzter, 429);
+    assert.ok(a.log.konsole.every(z => !/token|sig=|users\//i.test(z)));
+  } finally { a.zurueck(); }
+  const { readFileSync, existsSync } = await import('node:fs');
+  const appDatei = new URL('../../Kontolux/index.html', import.meta.url);
+  if (existsSync(appDatei)) assert.match(readFileSync(appDatei, 'utf8'), /\/pruefer-datei-link/); // App-Repo daneben, wie beim Paritätswächter
+});

@@ -378,6 +378,7 @@ const ROUTEN_LIMITS = {
   '/kontakt':               { limit: 5,  windowMs: 10 * 60 * 1000 },
   '/send-password-reset':   { limit: 5,  windowMs: 10 * 60 * 1000 },
   '/pruefer-daten':         { limit: 10, windowMs: 10 * 60 * 1000 },
+  '/pruefer-datei-link':    { limit: 60, windowMs: 10 * 60 * 1000 },
   '/konto-archivieren':     { limit: 3,  windowMs: 60 * 60 * 1000 },
   '/konto-art':              { limit: 10, windowMs: 10 * 60 * 1000 },
   '/anfrage':               { limit: 5,  windowMs: 60 * 60 * 1000 },
@@ -790,6 +791,8 @@ export default {
       // Bewusst NICHT in protectedPaths: ein Betriebsprüfer hat keinen Firebase-Login, der
       // Zugriffsnachweis ist der Besitz des Tokens selbst (siehe handlePrueferDaten unten).
       if (url.pathname === '/pruefer-daten') return handlePrueferDaten(body, env, cors, authHeader);
+      // N5: frischer Kurzlink beim Öffnen einer Datei in der Prüfer-Seite (gleicher Zugangsnachweis wie /pruefer-daten)
+      if (url.pathname === '/pruefer-datei-link') return handlePrueferDateiLink(body, env, cors, authHeader);
       if (url.pathname === '/freigabe-status') {
         return new Response(JSON.stringify({ status: (await freigabeStatus(verifiedUid, env)) || 'frei' }), {
           status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
@@ -4356,6 +4359,32 @@ async function prueferLinksErsetzen(wert, uid, signiere) {
     return o;
   };
   return geh(wert, 0);
+}
+
+// Erneuerung beim Klick: der Prüfer weist sich wie bei /pruefer-daten mit dem Zugangstoken aus (Bearer), die UID kommt nur aus dem Zugang, nie aus dem Body.
+// Antwort: { url } mit frischem Kurzlink, nur für erlaubte Pfade des eigenen Kontos. Alles andere: 404 (kein Hinweis auf den Grund).
+async function handlePrueferDateiLink(body, env, cors, authHeader) {
+  const json = (status, o) => new Response(JSON.stringify(o), { status, headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+  const headerToken = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+  const token = String(headerToken || '').trim();
+  const pfad = body && typeof body.pfad === 'string' ? body.pfad : '';
+  if (!token || token.length < 16 || token.length > 64 || !pfad) return json(400, { error: 'invalid' });
+  try {
+    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+    const match = await prueferZugangSuchen(adminToken, 'token_hash', await sha256Hex(token));
+    const f = match?.document?.fields || {};
+    const ablaufMs = firestoreValue(f.ablauf) ? new Date(firestoreValue(f.ablauf)).getTime() : NaN;
+    const m = /\/documents\/users\/([^/]+)\/profil\/prueferZugang$/.exec(match?.document?.name || '');
+    if (!m || firestoreValue(f.aktiv) !== true || !Number.isFinite(ablaufMs) || ablaufMs <= Date.now()) return json(404, { error: 'invalid' });
+    const uid = m[1];
+    const signiere = await prueferDateiSigner(env);
+    if (!signiere || !prueferDateiPfadOk(uid, pfad)) return json(404, { error: 'invalid' });
+    const exp = Date.now() + PRUEFER_DATEI_GUELTIG_MS;
+    return json(200, { url: `${PRUEFER_DATEI_BASIS}/pruefer-datei?u=${encodeURIComponent(uid)}&p=${encodeURIComponent(pfad)}&exp=${exp}&sig=${await signiere(uid, pfad, exp)}`, exp });
+  } catch (e) {
+    console.error('Prüfer-Dateilink Fehler');
+    return json(500, { error: 'server_error' });
+  }
 }
 
 const PRUEFER_DATEI_INLINE = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp'];
