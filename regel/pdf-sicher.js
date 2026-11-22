@@ -46,6 +46,9 @@ export const PDF_ISOLAT_NAMEN_MAX = 8 * 1024 * 1024;
 export const PDF_STRING_MAX = 512 * 1024;
 export const PDF_STRING_ZEICHEN_MAX = 2 * 1024 * 1024;
 export const PDF_NAME_MAX = 4096;
+// Zahlen: pdf-lib (BaseParser.parseRawInt/parseRawNumber) setzt auch sie Zeichen für Zeichen zusammen (rund 32 Byte je Ziffer, ohne Grenze): eine Zahl
+// mit 5 MB Ziffern bringt das Isolat zum OOM (Objekt, Objektkopf, %PDF-Kopf, XRef-Tabelle, startxref, Offsets im Objektstrom). Reale PDFs: siehe Bericht.
+export const PDF_ZAHL_MAX = 64;
 
 // Grenze überschritten oder verbotene Form (Filterkette, XRef ohne Bytes je Eintrag …)
 export class PdfZuGross extends Error {}
@@ -136,6 +139,22 @@ function nameLaenge(b, max) {
 // in senke, sonst entfernt der optimierende Compiler den Aufruf (gemessen: ohne senke blieben 20 Byte je Zeichen).
 let senke = 0;
 const flach = (t) => { if (typeof t === 'string' && t.length > 12) senke = (senke + t.charCodeAt(0)) | 0; return t; };
+// Länge der Zahl ab der aktuellen Position, genau wie pdf-lib liest: parseRawInt nur Ziffern; parseRawNumber zuerst 0-9 + - . (bis einschließlich
+// des ersten Punkts), dann Ziffern. Höchstens bis max + 1 gesucht.
+const ZIFFER = new Uint8Array(256); for (let c = 0x30; c <= 0x39; c += 1) ZIFFER[c] = 1;
+const NUMERISCH = new Uint8Array(ZIFFER); NUMERISCH[0x2b] = 1; NUMERISCH[0x2d] = 1; NUMERISCH[0x2e] = 1;
+function ganzzahlLaenge(b, max) {
+  const start = b.offset(); const bis = Math.min(b.length, start + max + 1);
+  let i = start; while (i < bis && ZIFFER[b.peekAt(i)]) i += 1;
+  return i - start;
+}
+function zahlLaenge(b, max) {
+  const start = b.offset(); const bis = Math.min(b.length, start + max + 1);
+  let i = start;
+  while (i < bis && NUMERISCH[b.peekAt(i)]) { const c = b.peekAt(i); i += 1; if (c === 0x2e) break; }
+  while (i < bis && ZIFFER[b.peekAt(i)]) i += 1;
+  return i - start;
+}
 function zuLang(z, grund) { z.zuGross = true; throw new PdfZuGross(grund); }
 // Globaler Verweis-Speicher von pdf-lib: PDFRef.of legt Verweise auch außerhalb von parseObject an (klassische XRef-Tabelle mit 6 Byte je Eintrag,
 // XRef-Ströme, Objektköpfe, Objektströme). Gezählt wird jeder Verweis, den ein begrenztes Laden zum ersten Mal sieht (gesehenVerweise gilt wie der
@@ -212,6 +231,18 @@ function parserBegrenzen() {
   };
   proto.parseHexString = stringBegrenzt(hex, hexLaenge);
   proto.parseString = stringBegrenzt(literal, literalLaenge);
+  // Zahlen (BaseParser, gemeinsame Basis aller Parser; PDFXRefStreamParser liest Bytes, nicht Text)
+  const basis = Object.getPrototypeOf(proto);
+  if (typeof basis?.parseRawInt !== 'function' || typeof basis?.parseRawNumber !== 'function') throw new Error('pdf-lib: Parser unbekannt');
+  const rawInt = basis.parseRawInt; const rawNumber = basis.parseRawNumber;
+  const zahlBegrenzt = (original, laenge) => function begrenzteZahl() {
+    const z = this.context && this.context[ZAEHLER];
+    if (!z) return original.call(this);
+    if (laenge(this.bytes, PDF_ZAHL_MAX) > PDF_ZAHL_MAX) zuLang(z, 'Zahl zu lang');
+    return original.call(this);
+  };
+  basis.parseRawInt = zahlBegrenzt(rawInt, ganzzahlLaenge);
+  basis.parseRawNumber = zahlBegrenzt(rawNumber, zahlLaenge);
   PDFRef.of = function begrenzterVerweis(objectNumber, generationNumber) {
     const r = refOf(objectNumber, generationNumber);
     const z = aktiv;

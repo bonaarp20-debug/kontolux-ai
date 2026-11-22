@@ -352,3 +352,46 @@ test('Härtung M-1: Objektstrom mit großem /N (mehr als Restbudget oder Länge/
   assert.ok(r.pdf && !r.zuGross);
   assert.equal(objektBild(r.pdf), objektBild(await ALT(klein)));
 });
+
+// ---- Zweite Gegenlesung (F-1 bis F-5) und Vorab-Scan ----
+// Führt Angriffsdateien in einem eigenen Prozess mit 128 MB aus (ohne Fix OOM möglich) und misst CPU und Heap je Datei.
+// faelle: Quelltext eines Objekts { name: () => Uint8Array }, im Kindprozess ausgewertet (Helfer K, d3, MB, zlib vorhanden)
+function angriffeIm128MB(faelleQuelltext) {
+  const p = mit128MB(`import zlib from 'node:zlib'; import { ladePdfBegrenzt } from './regel/pdf-sicher.js';
+    console.warn = () => {}; const K = ${JSON.stringify(KATALOG)}; const MB = 1048576;
+    const enc = (s) => new Uint8Array(Buffer.from(s, 'latin1'));
+    const d3 = (x) => enc(K + '3 0 obj\\n' + x + '\\nendobj\\ntrailer\\n<< /Root 1 0 R >>\\n%%EOF\\n');
+    const faelle = ${faelleQuelltext}; const erg = {};
+    for (const [name, f] of Object.entries(faelle)) {
+      let b = f(); gc(); const h = process.memoryUsage().heapUsed; const c = process.cpuUsage();
+      let r; try { r = await ladePdfBegrenzt(b); r = r.zuGross ? 'zuGross' : 'pdf'; } catch (e) { r = 'Wurf ' + e.message; }
+      const cpu = process.cpuUsage(c); b = null; gc();
+      erg[name] = { r, cpuMs: Math.round((cpu.user + cpu.system) / 1000), heapMB: Math.round((process.memoryUsage().heapUsed - h) / MB) };
+    }
+    console.log(JSON.stringify(erg));`);
+  assert.equal(p.status, 0, `Prozess mit 128 MB: ${p.err}`);
+  return JSON.parse(p.out);
+}
+
+test('Zweite Lesung F-1: Zahlen mit sehr vielen Ziffern (Objekt, Nachkomma, Objektkopf, %PDF-Kopf, XRef, startxref, Objektstrom) abgelehnt, ohne OOM', async () => {
+  const e = angriffeIm128MB(`{
+    objekt: () => d3('1'.repeat(6 * MB)),
+    nachkomma: () => d3('.' + '1'.repeat(6 * MB)),
+    minus: () => d3('-'.repeat(6 * MB)),
+    kopf: () => enc('%PDF-1.7\\n' + '1'.repeat(6 * MB) + ' 0 obj\\nnull\\nendobj\\n'),
+    pdfKopf: () => enc('%PDF-' + '1'.repeat(6 * MB) + '.7\\n1 0 obj\\nnull\\nendobj\\n'),
+    xref: () => enc(K + 'xref\\n' + '1'.repeat(6 * MB) + ' 1\\ntrailer\\n<< /Root 1 0 R >>\\n'),
+    startxref: () => enc(K + 'startxref\\n' + '1'.repeat(6 * MB) + '\\n%%EOF'),
+    objektstrom: () => { const d = zlib.deflateSync(Buffer.from('1'.repeat(3 * MB) + ' 0 null')); return new Uint8Array(Buffer.concat([Buffer.from(K + '4 0 obj\\n<< /Type /ObjStm /N 1 /First 3145740 /Filter /FlateDecode /Length ' + d.length + ' >>\\nstream\\n'), d, Buffer.from('\\nendstream\\nendobj\\ntrailer\\n<< /Root 1 0 R >>\\n%%EOF\\n')])); },
+  }`);
+  for (const [name, x] of Object.entries(e)) {
+    assert.equal(x.r, 'zuGross', `${name}: ${JSON.stringify(x)}`);
+    assert.ok(x.cpuMs < 400 && x.heapMB < 20, `${name}: ${JSON.stringify(x)}`);
+  }
+  // normale Zahlen und genau 64 Zeichen: objektgleich wie PDFDocument.load
+  const zahlen = `[-.5 +3 123.456 -0 0.0 4. ${'9'.repeat(64)} ${'1'.repeat(30)}.${'2'.repeat(33)}]`;
+  const neu = await ladePdfBegrenzt(mitObjekt3(zahlen), { updateMetadata: true });
+  assert.ok(neu.pdf && !neu.zuGross, 'normale Zahlen laden');
+  assert.equal(objektBild(neu.pdf), objektBild(await ALT(mitObjekt3(zahlen))));
+  assert.equal((await ladePdfBegrenzt(mitObjekt3('1'.repeat(65)))).zuGross, true, '65 Ziffern');
+});
