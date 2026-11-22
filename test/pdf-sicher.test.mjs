@@ -552,3 +552,23 @@ test('Dritte Lesung G3-1: Ströme als direkte Objekte (im Array) werden abgelehn
   const indirekt = await ladePdfBegrenzt(mitObjekt3('<< /Length 1 >>\nstream\nx\nendstream'));
   assert.ok(indirekt.pdf && !indirekt.zuGross);
 });
+
+test('Dritte Lesung G3-2: Dicts zählen 2 Einheiten (rund 230 Byte je leeres Dict)', async () => {
+  // 110.000 leere Dicts: vorher 110.000 Einheiten (geladen), jetzt 220.000 über der Grenze von 200.000
+  assert.equal((await ladePdfBegrenzt(mitObjekt3('[' + '<<>>'.repeat(110000) + ']'))).zuGross, true);
+  const r = await ladePdfBegrenzt(mitObjekt3('[' + '<<>>'.repeat(90000) + ']'));
+  assert.ok(r.pdf && !r.zuGross, '90.000 Dicts laden');
+  const p = mit128MB(`import { ladePdfBegrenzt } from './regel/pdf-sicher.js'; console.warn = () => {};
+    const b = new Uint8Array(Buffer.from('%PDF-1.7\\n1 0 obj\\n[' + '<<>>'.repeat(2000000) + ']\\nendobj\\n'));
+    // Heap-Spitze: in jedem 1024. parseDict abgetastet (PDFObjectParser.prototype)
+    let spitze = 0; let k = 0; const pa = Object.getPrototypeOf((await import('pdf-lib')).PDFParser.prototype);
+    const o = pa.parseDict; pa.parseDict = function (...a) { if ((++k & 1023) === 0) { const h = process.memoryUsage().heapUsed; if (h > spitze) spitze = h; } return o.apply(this, a); };
+    gc(); const v = process.memoryUsage().heapUsed; const r = await ladePdfBegrenzt(b);
+    console.log(JSON.stringify({ zuGross: !!r.zuGross, dicts: k, spitzeMB: Math.round((spitze - v) / 1048576) }));`);
+  assert.equal(p.status, 0, p.err);
+  const e = JSON.parse(p.out);
+  assert.equal(e.zuGross, true);
+  if (process.env.PDF_MESSWERTE) console.log(JSON.stringify(e));
+  assert.ok(e.dicts > 50000, `Messung greift (${e.dicts} Dicts)`);
+  assert.ok(e.spitzeMB < 35, `Heap-Spitze ${e.spitzeMB} MB`);
+});

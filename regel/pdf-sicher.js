@@ -363,6 +363,7 @@ function parserBegrenzen() {
     // Ströme nur als indirekte Objekte (ISO 32000-1, 7.3.8): direkt im Array oder Dict hält pdf-lib je Strom rund 475 Byte (Dict, Map, kopierter Inhalt),
     // gezählt als 1 Einheit; 200.000 Ströme in einem Array (4,4 MB Datei) ergaben rund 95 MB Heap und OOM. Reale PDFs: 0 direkte Ströme
     else if (o instanceof PDFRawStream) { if (!oben) zuLang(z, 'Strom als direktes Objekt'); z.objekte -= 1; }
+    else if (o instanceof PDFDict) z.objekte -= 2; // Dict mit Map rund 230 Byte: 200.000 leere Dicts ergaben rund 46 MB, jetzt höchstens rund 23 MB
     else if (!(o instanceof PDFName)) z.objekte -= 1; // Namen zählt parseName
     if (oben && o instanceof PDFRawStream) stromPruefen(o, z);
     return o;
