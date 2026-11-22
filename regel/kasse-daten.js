@@ -102,11 +102,14 @@ export async function bewegungenDesTages(fs, uid, kasseId, tag) {
   return r;
 }
 
-// Bewegungen aller Tage eines Bereichs (Ruhetage-Prüfung), höchstens 300
+// Bewegungen aller Tage eines Bereichs (Lücke vor einem Abschluss, Ruhetage), aufsteigend, höchstens 300. Gibt es mehr, trägt die Liste
+// unvollstaendig: true (B-N1: kein 500 mehr); der Aufrufer entscheidet nur mit dem Gelesenen, wenn das reicht, sonst 422 BEWEGUNGEN_ZU_VIELE.
+export const BEREICH_MAX = 300;
 export async function bewegungenImBereich(fs, uid, kasseId, vonTag, bisTag) {
-  const r = await fs.runQuery(`users/${uid}`, idBereich(uid, 'kassenbewegungen', `${kasseId}_${vonTag}_000`, `${kasseId}_${bisTag}_999`, { limit: 301 }));
-  if (r.length > 300) throw new Error('Kassenbewegungen: mehr als 300 im Bereich');
-  return r;
+  const r = await fs.runQuery(`users/${uid}`, idBereich(uid, 'kassenbewegungen', `${kasseId}_${vonTag}_000`, `${kasseId}_${bisTag}_999`, { limit: BEREICH_MAX + 1 }));
+  const liste = r.slice(0, BEREICH_MAX);
+  liste.unvollstaendig = r.length > BEREICH_MAX;
+  return liste;
 }
 
 // B-M1 (o-p1c-gegenlesung): Ein Bewegungs-Storno liegt immer am Tag des Originals; Original und Storno (storno_von) heben sich auf. Für die Frage

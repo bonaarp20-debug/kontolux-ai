@@ -411,7 +411,12 @@ async function abschliessen(c) {
     const lueckeVon = letzter ? Steuerkern.addiereTage(letzter.daten.geschaeftstag, 1) : kasse.anfangsbestand_am;
     const lueckeBis = Steuerkern.addiereTage(tag, -1);
     if (lueckeVon <= lueckeBis) {
-      const offen = ohneStornoPaare(await bewegungenImBereich(fs, uid, kasseId, lueckeVon, lueckeBis));
+      const gelesen = await bewegungenImBereich(fs, uid, kasseId, lueckeVon, lueckeBis);
+      // B-N1: mehr als 300 Bewegungen in der Lücke: der zuletzt gelesene Tag ist evtl. nur teilweise gelesen (sein Storno-Gegenstück kann fehlen) und zählt nicht;
+      // offene Tage davor sind sicher offen und werden gemeldet; sonst 422 BEWEGUNGEN_ZU_VIELE statt 500
+      const randTag = gelesen.unvollstaendig ? gelesen[gelesen.length - 1].daten.geschaeftstag : null;
+      const offen = ohneStornoPaare(gelesen).filter((d) => !randTag || d.daten.geschaeftstag < randTag);
+      if (!offen.length && gelesen.unvollstaendig) return { antwort: fehlerAntwort(422, 'BEWEGUNGEN_ZU_VIELE', cors, { bis_tag: gelesen[gelesen.length - 1].daten.geschaeftstag }) };
       if (offen.length) return { antwort: fehlerAntwort(409, 'OFFENE_BEWEGUNGEN_VORTAG', cors, { tage: [...new Set(offen.map((d) => d.daten.geschaeftstag))].sort().slice(0, 31) }) };
     }
     const anfangsbestand = letzter ? letzter.daten.gezaehlt_cent : kasse.anfangsbestand_cent;
@@ -559,8 +564,11 @@ async function ruhetage(c, aktion) {
     if (tage[0] < kasse.anfangsbestand_am) return { antwort: fehlerAntwort(422, 'VOR_ANFANGSBESTAND', cors, { anfangsbestand_am: kasse.anfangsbestand_am }) };
     const bew = await bewegungenImBereich(fs, uid, kasseId, tage[0], tage[tage.length - 1]);
     // B-M1: eine stornierte Bewegung (Original und Storno am selben Tag) hindert den Ruhetag nicht
-    const mit = ohneStornoPaare(bew).find((d) => tage.includes(d.daten.geschaeftstag));
+    const randTag = bew.unvollstaendig ? bew[bew.length - 1].daten.geschaeftstag : null; // B-N1: nur vollständig gelesene Tage entscheiden
+    const mit = ohneStornoPaare(bew).find((d) => tage.includes(d.daten.geschaeftstag) && (!randTag || d.daten.geschaeftstag < randTag));
     if (mit) return { antwort: fehlerAntwort(409, 'RUHETAG_MIT_BEWEGUNG', cors, { geschaeftstag: mit.daten.geschaeftstag }) };
+    // B-N1: mehr als 300 Bewegungen im Bereich und das Gelesene entscheidet nicht: 422 (weniger Tage auf einmal bestätigen), nie 500 und nie ein ungeprüfter Ruhetag
+    if (bew.unvollstaendig) return { antwort: fehlerAntwort(422, 'BEWEGUNGEN_ZU_VIELE', cors, { bis_tag: bew[bew.length - 1].daten.geschaeftstag }) };
     const ts = zeitstempel(zeit);
     const writes = tage.map((t, i) => schreibe.anlegen(P.kassentag(uid, ids[i]), {
       kasse_id: kasseId, geschaeftstag: t, status: 'ruhetag', fassung_aktiv: null, fassungen_kurz: [], anfangsbestand_cent: null, soll_endbestand_cent: null, gezaehlt_cent: null,

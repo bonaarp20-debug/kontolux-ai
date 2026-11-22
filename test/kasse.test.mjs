@@ -2207,3 +2207,27 @@ test('hyg B-M1: eine falsch datierte und stornierte Bewegung (Original + Storno 
     assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-05' })).json.fehler[0].code, 'RUHETAG_MIT_BEWEGUNG');
   }
 });
+
+test('hyg B-N1: mehr als 300 Bewegungen in der Lücke oder im Ruhetag-Bereich ergeben 409/422 mit Tag statt 500; ein nur teilweise gelesener Tag wird nie als offen gemeldet', async () => {
+  const setzeBew = (u, id, tag, n, start = 1) => {
+    for (let i = start; i < start + n; i += 1) u.fs.setze(P(`kassenbewegungen/${id}_${tag}_${String(i).padStart(3, '0')}`), { kasse_id: id, geschaeftstag: tag, art: 'geldtransit_bank_ein', betrag_cent: 1, storno_von: null });
+  };
+  // 310 offene Bewegungen am 02.11.: der Tag ist nur teilweise gelesen, also 422 BEWEGUNGEN_ZU_VIELE mit bis_tag
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  setzeBew(u, id, '2026-11-02', 310);
+  const a = await u.tagRufe(ohneUmsatz(id, '2026-11-03'));
+  assert.deepEqual([a.status, a.json.fehler[0].code, a.json.bis_tag], [422, 'BEWEGUNGEN_ZU_VIELE', '2026-11-02'], JSON.stringify(a.json));
+  const r = await u.tagRufe({ aktion: 'ruhetage', kasse_id: id, tage: ['2026-11-02', '2026-11-03'] });
+  assert.deepEqual([r.status, r.json.fehler[0].code], [422, 'BEWEGUNGEN_ZU_VIELE'], JSON.stringify(r.json));
+  assert.deepEqual(u.fs.pfade(P('kassentage/')), []);
+  // ein vollständig gelesener offener Tag davor wird gemeldet (409 mit tage), der Randtag nicht
+  const v = umgebung();
+  const vid = await v.legeKasseAn();
+  setzeBew(v, vid, '2026-11-02', 1);
+  setzeBew(v, vid, '2026-11-03', 310);
+  const b = await v.tagRufe(ohneUmsatz(vid, '2026-11-04'));
+  assert.deepEqual([b.status, b.json.fehler[0].code, b.json.tage], [409, 'OFFENE_BEWEGUNGEN_VORTAG', ['2026-11-02']], JSON.stringify(b.json));
+  const c = await v.tagRufe({ aktion: 'ruhetage', kasse_id: vid, tage: ['2026-11-02', '2026-11-03'] });
+  assert.deepEqual([c.status, c.json.fehler[0].code, c.json.geschaeftstag], [409, 'RUHETAG_MIT_BEWEGUNG', '2026-11-02'], JSON.stringify(c.json));
+});
