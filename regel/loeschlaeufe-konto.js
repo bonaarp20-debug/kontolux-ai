@@ -121,7 +121,7 @@ export async function kontoLoeschenSchritt(ctx, uid, art, modus) {
         continue;
       }
       if (s.phase === 'zaehler') {
-        if (!ctx.b.reicht(1)) break;
+        if (!ctx.b.reicht(6)) break;
         if (modus === 'an') { await ctx.fs.loeschen(`nachrichtenlimit/${uid}`, waechterZaehler); s.zaehler.nachrichtenlimit = 1; }
         else s.zaehler.nachrichtenlimit = (await ctx.fs.holen(`nachrichtenlimit/${uid}`)) ? 1 : 0;
         await uploadlimitLoeschen(ctx, uid, modus, waechterZaehler, s); // NL-F: Upload-Reservierung uploadlimit/{uid}_JJJJ-MM mit löschen (wie nachrichtenlimit)
@@ -216,7 +216,7 @@ export async function nachlaufSchritt(ctx, uid, modus, archivWert = null) {
     }
     while (s.phase !== 'fertig') {
       if (s.phase === 'zaehler') {
-        if (!ctx.b.reicht(1)) break;
+        if (!ctx.b.reicht(6)) break;
         if (modus === 'an') { await ctx.fs.loeschen(`nachrichtenlimit/${uid}`, wZaehler); s.zaehler.nachrichtenlimit = 1; }
         else s.zaehler.nachrichtenlimit = (await ctx.fs.holen(`nachrichtenlimit/${uid}`)) ? 1 : 0;
         await uploadlimitLoeschen(ctx, uid, modus, wZaehler, s); // NL-F
@@ -383,21 +383,37 @@ export function kassezbonlimitSchluessel(uid, jetzt) {
   }
   return out;
 }
-async function kassezbonlimitLoeschen(ctx, uid, modus, waechter, s) {
+// A-M3 (Gegenlesung o-p1c): die festen Schlüssel oben decken nur die Tage und Monate um den Löschzeitpunkt. Ein Zähler eines früheren Aufrufs trägt die UID in der ID und
+// bliebe sonst für immer stehen (Art. 17 DSGVO). Darum alle Dokumente einer Sammlung mit der ID-Vorsilbe {uid}_ suchen: die IDs sind nach Name sortiert, die Vorsilbe steht
+// zusammenhängend (startAt auf {uid}_, Ende beim ersten Namen ohne Vorsilbe), keine Indexe nötig. Nur IDs der Form {uid}_{Muster} gehen durch den Wächter (andere UIDs
+// mit gleichem Anfang, z. B. {uid}X_…, bleiben). Höchstens ZAEHLER_SEITEN Seiten je Sammlung (300 je Seite).
+const ZAEHLER_SEITEN = 20;
+async function zaehlerMitVorsilbeLoeschen(ctx, uid, sammlung, muster, modus, waechter) {
+  const vorsilbe = `${sammlung}/${uid}_`;
+  const passt = new RegExp(`^${sammlung}/${uid}_${muster}$`);
   let n = 0;
-  for (const pfad of kassezbonlimitSchluessel(uid, ctx.jetzt)) {
-    if (modus === 'an') { await ctx.fs.loeschen(pfad, waechter); n++; }
-    else if (await ctx.fs.holen(pfad)) n++;
+  let cursor = FS_PRAEFIX + vorsilbe;
+  for (let seite = 0; seite < ZAEHLER_SEITEN; seite++) {
+    const docs = await ctx.fs.abfrage(sammlung, { orderBy: ['__name__'], nach: [{ referenceValue: cursor }], limit: 300, nurName: true });
+    const namen = [];
+    let ende = docs.length < 300;
+    for (const d of docs) {
+      const rel = relPfad(d.name);
+      if (!rel.startsWith(vorsilbe)) { ende = true; break; }
+      if (passt.test(rel)) namen.push(d.name);
+      cursor = d.name;
+    }
+    n += namen.length;
+    if (modus === 'an' && namen.length) await ctx.fs.batchLoeschen(namen, waechter);
+    if (ende) break;
   }
-  s.zaehler.kassezbonlimit = n;
+  return n;
+}
+async function kassezbonlimitLoeschen(ctx, uid, modus, waechter, s) {
+  s.zaehler.kassezbonlimit = await zaehlerMitVorsilbeLoeschen(ctx, uid, 'kassezbonlimit', '\\d{4}-\\d{2}-\\d{2}', modus, waechter);
 }
 async function uploadlimitLoeschen(ctx, uid, modus, waechter, s) {
-  let n = 0;
-  for (const pfad of uploadlimitSchluessel(uid, ctx.jetzt)) {
-    if (modus === 'an') { await ctx.fs.loeschen(pfad, waechter); n++; }
-    else if (await ctx.fs.holen(pfad)) n++;
-  }
-  s.zaehler.uploadlimit = n;
+  s.zaehler.uploadlimit = await zaehlerMitVorsilbeLoeschen(ctx, uid, 'uploadlimit', '\\d{4}-\\d{2}', modus, waechter);
 }
 function teilLaufWaechterProfil(uid) {
   return (pfad) => { if (!profilOhneBuchungsbezug(uid, pfad)) throw new SchutzVerletzt(relPfad(pfad)); };
