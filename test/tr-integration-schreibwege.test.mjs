@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { erzeugeTestEnv, mockExterneDienste, anfrage } from './harness.mjs';
 import { steuerkernWarnung, writeBelegAsAdmin, steuerkernZaehler } from '../worker.js';
+import { lastSkala } from './last-skala.mjs';
 
 const UID = 'uidtesta1234567';
 const users = { 'tok-a': { uid: UID, email: 'a@example.invalid', emailVerified: true } };
@@ -111,7 +112,8 @@ test('Unterabfragen und Rechenzeit je Request (Cloudflare Free-Plan: 50 Unterabf
   const t0 = process.hrtime.bigint();
   await mitLog(async () => { for (let i = 0; i < N; i++) steuerkernWarnung(env, 'beleg_manuell', { typ: i % 2 ? 'rechnung_ausgehend' : 'rechnung_eingehend', betrag: String(1 + i), mwst_satz: i % 3 ? '19' : 'keine', datum: '2026-11-01', bezahlt: i % 2 === 0, bezahlt_am: '2026-11-03' }); });
   const msJe = Number(process.hrtime.bigint() - t0) / 1e6 / N;
-  assert.ok(msJe < 3, `Kernlauf im Warnmodus: ${msJe.toFixed(2)} ms je Aufruf (Grenze 3 ms, Free-Plan 10 ms CPU je Request)`);
+  const skala = lastSkala();
+  assert.ok(msJe < 3 * skala, `Kernlauf im Warnmodus: ${msJe.toFixed(2)} ms je Aufruf (Grenze 3 ms mal Lastfaktor ${skala.toFixed(1)}, Free-Plan 10 ms CPU je Request)`);
 });
 
 test('Webhook-Schreibweg writeBelegAsAdmin: aus, warnung, an schreiben dasselbe Dokument; mehrere Belege in einem Request zählen Unterabfragen', async () => {

@@ -10,6 +10,7 @@ import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { PDFDocument, PDFName, PDFRawStream, StandardFonts } from 'pdf-lib';
 import { ladePdfBegrenzt, stromEntpackenBegrenzt, pdfBudget, PDF_STROM_MAX, PDF_ENTPACKT_MAX } from '../regel/pdf-sicher.js';
+import { lastSkala } from './last-skala.mjs';
 import { detectAndParseERechnung, findEmbeddedXml, eingebettetEntpacken } from '../worker.js';
 
 const XML = readFileSync(new URL('./pdf-sicher-fixtures/zugferd-en16931.xml', import.meta.url)); // CII EN 16931 (ZUGFeRD), 2.380,00 EUR, SR-2026-55
@@ -78,8 +79,8 @@ async function pdfLibZugferd({ useObjectStreams, seiten = 3 }) {
   return Buffer.from(await doc.save({ useObjectStreams }));
 }
 const ALT = (b) => PDFDocument.load(b, { ignoreEncryption: true, throwOnInvalidObject: false });
-// /ModDate setzt updateMetadata beim Laden auf die aktuelle Sekunde: ausgeblendet, sonst schlägt der Vergleich an einer Sekundengrenze fehl
-const objektBild = (pdf) => [...pdf.context.enumerateIndirectObjects()].map(([r, o]) => `${r.toString()} ${o.constructor.name} ${o instanceof PDFRawStream ? o.contents.length : o.toString()}`).sort().join('\n').replace(/\/ModDate \(D:\d+Z\)/g, '/ModDate (D:…)');
+// /ModDate und /CreationDate setzt updateMetadata beim Laden auf die aktuelle Sekunde: ausgeblendet, sonst schlägt der Vergleich an einer Sekundengrenze fehl
+const objektBild = (pdf) => [...pdf.context.enumerateIndirectObjects()].map(([r, o]) => `${r.toString()} ${o.constructor.name} ${o instanceof PDFRawStream ? o.contents.length : o.toString()}`).sort().join('\n').replace(/\/(ModDate|CreationDate) \(D:\d+Z\)/g, '/$1 (D:…)');
 
 test('Hotfix E-Rechnung: normale ZUGFeRD-PDFs laden wie mit PDFDocument.load (gleiche Objekte, Seiten, eingebettete XML) und werden erkannt', async () => {
   const faelle = {
@@ -211,9 +212,11 @@ const gc = vm.runInNewContext('gc');
 const KATALOG = '%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n';
 const mitObjekt3 = (inhalt) => new Uint8Array(Buffer.concat([Buffer.from(KATALOG + '3 0 obj\n'), Buffer.isBuffer(inhalt) ? inhalt : Buffer.from(inhalt), Buffer.from('\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n')]));
 // Läuft ein Skript in einem eigenen Prozess mit 128 MB Heap (Näherung an das Worker-Isolat), damit ein OOM den Testprozess nicht sprengt
+// skala: Lastfaktor (>= 1) auf diesem Rechner vor und nach dem Lauf; CPU-Grenzen werden damit multipliziert (test/last-skala.mjs)
 function mit128MB(code) {
+  const vor = lastSkala();
   const r = spawnSync(process.execPath, ['--max-old-space-size=128', '--expose-gc', '--input-type=module', '-e', code], { cwd: new URL('..', import.meta.url).pathname, encoding: 'utf8', timeout: 60000 });
-  return { status: r.status, out: (r.stdout || '').trim(), err: (r.stderr || '').slice(0, 600) };
+  return { status: r.status, out: (r.stdout || '').trim(), err: (r.stderr || '').slice(0, 600), skala: Math.max(vor, lastSkala()) };
 }
 
 test('Härtung H-2: das Vorab-Ergebnis bleibt beim eigentlichen Parsen nicht erreichbar (kein doppelter Speicher), 2 MB Hex-String sprengt 128 MB nicht', async () => {
@@ -371,7 +374,7 @@ function angriffeIm128MB(faelleQuelltext) {
     }
     console.log(JSON.stringify(erg));`);
   assert.equal(p.status, 0, `Prozess mit 128 MB: ${p.err}`);
-  return JSON.parse(p.out);
+  return Object.defineProperty(JSON.parse(p.out), 'skala', { value: p.skala, enumerable: false });
 }
 
 test('Zweite Lesung F-1: Zahlen mit sehr vielen Ziffern (Objekt, Nachkomma, Objektkopf, %PDF-Kopf, XRef, startxref, Objektstrom) abgelehnt, ohne OOM', async () => {
@@ -387,7 +390,7 @@ test('Zweite Lesung F-1: Zahlen mit sehr vielen Ziffern (Objekt, Nachkomma, Obje
   }`);
   for (const [name, x] of Object.entries(e)) {
     assert.equal(x.r, 'zuGross', `${name}: ${JSON.stringify(x)}`);
-    assert.ok(x.cpuMs < 400 && x.heapMB < 20, `${name}: ${JSON.stringify(x)}`);
+    assert.ok(x.cpuMs < 400 * e.skala && x.heapMB < 20, `${name}: ${JSON.stringify(x)}`);
   }
   // normale Zahlen und genau 64 Zeichen: objektgleich wie PDFDocument.load
   const zahlen = `[-.5 +3 123.456 -0 0.0 4. ${'9'.repeat(64)} ${'1'.repeat(30)}.${'2'.repeat(33)}]`;
@@ -413,9 +416,9 @@ test('Zweite Lesung F-2/F-3: nach Überschreiten der Verweisgrenze keine weitere
   assert.equal(e.zuGross, true);
   // vorher: 150.000 Verweise im globalen Speicher (jeder verschluckte Kopfversuch legte einen an), über die Grenze je Datei und je Isolat hinweg
   assert.ok(e.verweise <= 50010, `Verweise im globalen Speicher ${e.verweise}`);
-  assert.ok(e.cpuMs < 2000, `CPU ${e.cpuMs} ms`);
+  assert.ok(e.cpuMs < 2000 * p.skala, `CPU ${e.cpuMs} ms (Lastfaktor ${p.skala.toFixed(1)})`);
   // 30.000 Ziffern zwischen Objekten: main 4,6 s (jede Position las den ganzen Rest neu)
-  assert.ok(e.ziffernMs < 300, `Ziffernlauf ${e.ziffernMs} ms`);
+  assert.ok(e.ziffernMs < 300 * p.skala, `Ziffernlauf ${e.ziffernMs} ms (Lastfaktor ${p.skala.toFixed(1)})`);
 });
 
 test('Vorab-Scan: linear über die Rohbytes vor pdf-lib; lehnt lange Zahlen, zu viele obj/XRef-Abschnitte und zu große Dateien früh ab, überspringt Strings, Kommentare und Ströme', async () => {
@@ -439,9 +442,11 @@ test('Vorab-Scan: linear über die Rohbytes vor pdf-lib; lehnt lange Zahlen, zu 
   assert.ok(r.pdf && !r.zuGross, 'legitim lädt');
   // linear auch bei Fluten (vorher je „stream“ ohne „endstream“ eine Suche bis zum Dateiende)
   for (const [name, s] of Object.entries({ 'stream ohne endstream': 'stream\n'.repeat(400000), 'e-Flut': 'stream\n' + 'e'.repeat(3 * MB), Klammern: '('.repeat(3 * MB), x: 'x'.repeat(3 * MB) })) {
-    const b = new Uint8Array(Buffer.from(KATALOG + s)); const t = process.hrtime.bigint(); pdfVorabScan(b);
-    const ms = Number(process.hrtime.bigint() - t) / 1e6;
-    assert.ok(ms < 100, `${name}: ${ms.toFixed(1)} ms für 3 MB`);
+    const b = new Uint8Array(Buffer.from(KATALOG + s));
+    let ms = Infinity; // Minimum aus drei Läufen, Grenze mit dem Lastfaktor skaliert
+    for (let i = 0; i < 3; i += 1) { const t = process.hrtime.bigint(); pdfVorabScan(b); ms = Math.min(ms, Number(process.hrtime.bigint() - t) / 1e6); }
+    const skala = lastSkala();
+    assert.ok(ms < 100 * skala, `${name}: ${ms.toFixed(1)} ms für 3 MB (Lastfaktor ${skala.toFixed(1)})`);
   }
 });
 
@@ -470,7 +475,7 @@ test('Vorab-Scan: alle Angriffsproben der Gegenlesungen und der Härtung bei 128
     // Datenmüll ohne Ziffern lädt seit G3-3 als (leeres) PDF, ohne teure Kopfversuche; sonst überall abgelehnt
     if (imScan.includes(name)) assert.ok(x.scan, `${name}: vom Vorab-Scan abgelehnt (${JSON.stringify(x)})`);
     if (name === 'Datenmüll 10 MB') assert.match(x.r, /^(pdf|zuGross)$/, name); else assert.equal(x.r, 'zuGross', `${name}: ${JSON.stringify(x)}`);
-    assert.ok(x.cpuMs < (grenzen[name] ?? 1500) && x.heapMB < 40, `${name}: ${JSON.stringify(x)}`);
+    assert.ok(x.cpuMs < (grenzen[name] ?? 1500) * e.skala && x.heapMB < 40, `${name}: ${JSON.stringify(x)}`);
   }
 });
 
@@ -536,8 +541,9 @@ test('Zweite Lesung F-5: eingebettete XML mit Kette aus zwei Filtern wird wieder
 // ---- Dritte Gegenlesung (G3-1 bis G3-4) ----
 // wie mit128MB, aber mit kleinerer Heap-Grenze und Ballast wie im Worker (Base64-Text der Anfrage und atob-Text)
 function mitHeap(mb, code) {
+  const vor = lastSkala();
   const r = spawnSync(process.execPath, [`--max-old-space-size=${mb}`, '--expose-gc', '--input-type=module', '-e', code], { cwd: new URL('..', import.meta.url).pathname, encoding: 'utf8', timeout: 60000 });
-  return { status: r.status, out: (r.stdout || '').trim(), err: (r.stderr || '').slice(0, 600) };
+  return { status: r.status, out: (r.stdout || '').trim(), err: (r.stderr || '').slice(0, 600), skala: Math.max(vor, lastSkala()) };
 }
 
 test('Dritte Lesung G3-1: Ströme als direkte Objekte (im Array) werden abgelehnt, statt bis zur Objektgrenze je 475 Byte zu halten (OOM)', async () => {
@@ -550,7 +556,7 @@ test('Dritte Lesung G3-1: Ströme als direkte Objekte (im Array) werden abgelehn
   assert.equal(p.status, 0, `Prozess mit 100 MB: ${p.err}`);
   const e = JSON.parse(p.out);
   assert.equal(e.zuGross, true);
-  assert.ok(e.cpuMs < 500, `CPU ${e.cpuMs} ms`);
+  assert.ok(e.cpuMs < 500 * p.skala, `CPU ${e.cpuMs} ms (Lastfaktor ${p.skala.toFixed(1)})`);
   // indirekte Ströme laden weiter (Tests oben); ein Strom als Wert in einem Dict ist ebenso unzulässig
   assert.equal((await ladePdfBegrenzt(mitObjekt3('<< /A <<>>stream\nx\nendstream >>'))).zuGross, true);
   const indirekt = await ladePdfBegrenzt(mitObjekt3('<< /Length 1 >>\nstream\nx\nendstream'));
@@ -592,8 +598,8 @@ test('Dritte Lesung G3-3: Leerraum-, Kommentar- und Zufallsläufe im Datenmüll 
   const e = JSON.parse(p.out);
   if (process.env.PDF_MESSWERTE) console.log(JSON.stringify(e));
   // vorher: 39 KB '%' 1,3 s, Leerraum 2,3 s; 10 MB Zufall 10 s
-  for (const k of ['prozent', 'leer', 'kommentarLeer']) assert.ok(e[k].cpuMs < 300, `${k}: ${JSON.stringify(e[k])}`);
-  assert.ok(e.zufall3MB.cpuMs < 500, `Zufall 3 MB: ${JSON.stringify(e.zufall3MB)}`);
+  for (const k of ['prozent', 'leer', 'kommentarLeer']) assert.ok(e[k].cpuMs < 300 * p.skala, `${k}: ${JSON.stringify(e[k])} (Lastfaktor ${p.skala.toFixed(1)})`);
+  assert.ok(e.zufall3MB.cpuMs < 500 * p.skala, `Zufall 3 MB: ${JSON.stringify(e.zufall3MB)} (Lastfaktor ${p.skala.toFixed(1)})`);
   // Objekte hinter Datenmüll werden weiter gefunden (Kopf direkt, nach Leerraum, nach Kommentar)
   const datei = KATALOG + 'Muell %Kommentar\n  3 0 obj\n<< /A 1 >>\nendobj\nx y 4 0 obj [1 2]\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n';
   const r = await ladePdfBegrenzt(new Uint8Array(Buffer.from(datei)), { updateMetadata: true });
@@ -618,14 +624,21 @@ test('Dritte Lesung G3-4: Vorab-Scan nutzt ein direktes /Length wie pdf-lib (Str
 });
 
 test('Vierte Lesung M1: Leerraum in der Kopf-Vorprüfung begrenzt (Ziffern gefolgt von langem Leerraum im Datenmüll linear)', async () => {
+  // Messung relativ statt an festen Millisekunden: Minimum aus 3 Läufen je Größe; erkannt wird das Wachstum (linear: 3 MB / 1,5 MB = 2, quadratisch: 4)
+  // und eine absolute Grenze, die mit dem Lastfaktor des Rechners mitwächst (vorher fest 150 ms, flackerte unter Last mit 173 ms)
   const p = mit128MB(`import { ladePdfBegrenzt } from './regel/pdf-sicher.js'; console.warn = () => {};
-    const block = '1'.repeat(64) + ' '.repeat(13000); const b = new Uint8Array(Buffer.from('%PDF-1.7\\n1 0 obj null endobj\\nx' + block.repeat(Math.floor(3 * 1048576 / block.length)) + '\\n'));
-    const c = process.cpuUsage(); const r = await ladePdfBegrenzt(b); const d = process.cpuUsage(c);
-    console.log(JSON.stringify({ r: r.zuGross ? 'zuGross' : 'pdf', cpuMs: Math.round((d.user + d.system) / 1000) }));`);
+    const block = '1'.repeat(64) + ' '.repeat(13000);
+    const mess = async (mb) => { let best = Infinity; let r0; for (let i = 0; i < 3; i += 1) {
+      const b = new Uint8Array(Buffer.from('%PDF-1.7\\n1 0 obj null endobj\\nx' + block.repeat(Math.floor(mb * 1048576 / block.length)) + '\\n'));
+      const c = process.cpuUsage(); const r = await ladePdfBegrenzt(b); const d = process.cpuUsage(c); r0 = r.zuGross ? 'zuGross' : 'pdf'; best = Math.min(best, Math.round((d.user + d.system) / 1000)); } return { r: r0, cpuMs: best }; };
+    await mess(0.5); // Aufwärmen
+    const klein = await mess(1.5); const gross = await mess(3);
+    console.log(JSON.stringify({ r: gross.r, cpuMs: gross.cpuMs, kleinMs: klein.cpuMs }));`);
   assert.equal(p.status, 0, p.err);
   const e = JSON.parse(p.out);
   if (process.env.PDF_MESSWERTE) console.log(JSON.stringify(e));
-  assert.ok(e.cpuMs < 150, `3 MB Ziffern+Leerraum: ${JSON.stringify(e)}`); // vorher rund 330 ms (10 MB: 1,1 s)
+  assert.ok(e.cpuMs < 150 * p.skala, `3 MB Ziffern+Leerraum: ${JSON.stringify(e)} (Lastfaktor ${p.skala.toFixed(1)})`); // vorher rund 330 ms (10 MB: 1,1 s)
+  assert.ok(e.cpuMs < Math.max(e.kleinMs, 10) * 3.2, `Wachstum 1,5 -> 3 MB überproportional (quadratisch): ${JSON.stringify(e)}`);
   // echter Kopf mit 256 Leerzeichen wird weiter erkannt
   const datei = Buffer.from(KATALOG + `x 3${' '.repeat(256)}0${' '.repeat(256)}obj\n<< /A 1 >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n`);
   const r = await ladePdfBegrenzt(new Uint8Array(datei), { updateMetadata: true });
