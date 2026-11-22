@@ -30,6 +30,7 @@ export const WIEDERHOLUNGEN_MAX = 3; // Wiederholungen bei gleichzeitiger Änder
 const BODY_MAX_ZEICHEN = 30000;
 const VERLAUF_MAX = 200;
 const SPERRENDE = ['festgeschrieben', 'sperre_laeuft'];
+const STAMMDATEN_AB = Object.freeze(['art_ab', 'grundaufzeichnung_ab', 'datenquelle_ab']); // Stammdaten mit Gültigkeitsbeginn (Wechsel nur ab dem nächsten freien Tag)
 const AKTIONEN = { '/kasse': ['anlegen', 'aendern', 'system_wechseln'], '/kassentag': ['abschliessen', 'ruhetag', 'ruhetage', 'stornieren', 'ruhetag_aufheben'], '/kassenbewegung': ['anlegen', 'stornieren'] };
 // Abbildung der Kern-Prüfcodes auf HTTP (stand-kasse.md 5): FORMAT-Gruppe 400 mit code FORMAT (kern_code nennt den Kern-Code), die übrigen gleichnamig
 const FORMAT_GRUPPE = ['FORMAT', 'STEUERFALL_UNZULAESSIG', 'KU_MEHRERE_SAETZE', 'DIFFERENZ_OHNE_GRUND', 'ZBON_SUMME_ABWEICHUNG', 'RETROGRAD_DIFFERENZ'];
@@ -399,8 +400,24 @@ async function abschliessen(c) {
     const n = bisher.length + 1;
     if (n > FASSUNGEN_MAX) return { antwort: fehlerAntwort(409, 'FASSUNGEN_MAX', cors, { max: FASSUNGEN_MAX }) };
     if (tag < kasse.anfangsbestand_am) return { antwort: fehlerAntwort(422, 'VOR_ANFANGSBESTAND', cors, { anfangsbestand_am: kasse.anfangsbestand_am }) };
-    // Stammdaten gelten ab einem Datum (…_ab): ein Tag davor hätte andere Werte, die nicht gespeichert sind (Wechsel gibt es nur ab dem nächsten freien Tag)
-    if (['art_ab', 'grundaufzeichnung_ab', 'datenquelle_ab'].some((x) => typeof kasse[x] === 'string' && kasse[x] > tag)) return { antwort: fehlerAntwort(409, 'STAMMDATEN_WECHSEL_SPAETER', cors) };
+    // Stammdaten gelten ab einem Datum (…_ab, Wechsel nur ab dem nächsten freien Tag). Für einen Tag davor gelten andere Werte. G1-Fix H-1: Hat der Tag eine
+    // stornierte Fassung (Neuerfassung nach Storno), stehen diese Werte in ihr (grundaufzeichnung, datenquelle; art erst ab G1): die Neuerfassung rechnet mit
+    // den Stammdaten der letzten Fassung und vermerkt stammdaten_aus_fassung. Sonst (Tag ohne stornierte Fassung, z. B. eine Lücke) bleibt es bei 409:
+    // abgeschlossene Tage bleiben unveränderlich, nur der Ersatz eines stornierten Tages ist erlaubt. Fassungs-Obergrenze und alle Prüfungen gelten weiter.
+    const stammSpaeter = STAMMDATEN_AB.filter((x) => typeof kasse[x] === 'string' && kasse[x] > tag);
+    let stamm = { art: kasse.art, grundaufzeichnung: kasse.grundaufzeichnung, datenquelle: kasse.datenquelle };
+    let stammAusFassung = null;
+    if (stammSpaeter.length) {
+      const sperre = (grund) => ({ antwort: fehlerAntwort(409, 'STAMMDATEN_WECHSEL_SPAETER', cors, { kassentag_id: tagId, felder: stammSpaeter, stammdaten_ab: stammSpaeter.map((x) => kasse[x]).sort()[0], ...(grund ? { grund } : {}) }) });
+      const vorN = bisher.length ? bisher[bisher.length - 1].n : null;
+      if (!tagAlt || tagAlt.status !== 'storniert' || vorN !== n - 1) return sperre(null);
+      const vor = (await fs.get(P.fassung(uid, tagId, vorN)))?.daten;
+      // fail-closed: fehlen der Fassung die Stammdaten (oder sind sie unbekannt), wird nichts geraten
+      if (!istObjekt(vor) || !Steuerkern.KASSEN_GRUNDAUFZEICHNUNGEN.includes(vor.grundaufzeichnung) || !Steuerkern.KASSEN_DATENQUELLEN.includes(vor.datenquelle)) return sperre('fassung_ohne_stammdaten');
+      const art = Steuerkern.KASSEN_ARTEN.includes(vor.art) ? vor.art : stammSpaeter.includes('art_ab') ? null : kasse.art; // art fließt nicht in die Rechnung ein
+      stamm = { art, grundaufzeichnung: vor.grundaufzeichnung, datenquelle: vor.datenquelle };
+      stammAusFassung = vorN;
+    }
     // Letzter Abschluss aus dem Zeiger der Kasse (hyg H2/N4): keine Suche, die Zahl der Unteranfragen hängt nicht von Pausen ab. Der Tagesplatz, auf den er zeigt,
     // wird gelesen und muss genau dieser Abschluss sein (fail-closed 503 KASSENZEIGER_UNGUELTIG), sein gezählter Bestand ist der Anfangsbestand.
     const zeiger = zeigerAus(kasse.letzter_abschluss);
@@ -423,15 +440,17 @@ async function abschliessen(c) {
     const anfangsbestand = letzter ? letzter.daten.gezaehlt_cent : kasse.anfangsbestand_cent;
     if (!Number.isSafeInteger(anfangsbestand) || anfangsbestand < 0) throw new Error('Anfangsbestand unlesbar');
     const bewegungen = (await bewegungenDesTages(fs, uid, kasseId, tag)).map((d) => bewegungFuerKern(d.daten));
-    const kasseKern = { datenquelle: kasse.datenquelle, grundaufzeichnung: kasse.grundaufzeichnung, karte_ueber_integration: kasse.karte_ueber_integration || 'keine' };
-    if (kasse.datenquelle === 'sumup_integration' && !memo.sumup) memo.sumup = await sumupLesen(c, tag);
-    if (memo.sumup && !memo.sumup.aktuell) return { antwort: fehlerAntwort(409, 'SUMUP_NICHT_AKTUELL', cors) };
+    const kasseKern = { datenquelle: stamm.datenquelle, grundaufzeichnung: stamm.grundaufzeichnung, karte_ueber_integration: kasse.karte_ueber_integration || 'keine' };
+    // SumUp nur, wenn die Datenquelle DIESES Versuchs sumup_integration ist (der Stand kann sich zwischen zwei Wiederholungen ändern); gelesen wird einmal je Aufruf
+    if (kasseKern.datenquelle === 'sumup_integration' && !memo.sumup) memo.sumup = await sumupLesen(c, tag);
+    const sumup = kasseKern.datenquelle === 'sumup_integration' ? memo.sumup : null;
+    if (sumup && !sumup.aktuell) return { antwort: fehlerAntwort(409, 'SUMUP_NICHT_AKTUELL', cors) };
     const status = Steuerkern.statusAm(profil, tag).status;
     if (status === 'ku' && memo.ku === undefined) memo.ku = await kuSummeVorTag(c, tag, kernOptionen);
     const fassungKern = { ...kernFassung(w), beleg_id: Steuerkern.kassenBelegId(tagId, n), beleg_id_gm: Steuerkern.kassenBelegId(tagId, n, 'gm') };
     const pr = Steuerkern.pruefeKassentag(fassungKern, {
       kasse: kasseKern, profil, anfangsbestand_cent: anfangsbestand, bewegungen, erfasst_am: heute,
-      ...(memo.sumup ? { sumup_bar_cent: memo.sumup.barCent } : {}),
+      ...(sumup ? { sumup_bar_cent: sumup.barCent } : {}),
       ...(status === 'ku' ? { ku_summe_vor_tag_cent: memo.ku, gruendungsjahr: istObjekt(profil.gruendung) && typeof profil.gruendung.datum === 'string' && profil.gruendung.datum.slice(0, 4) === jahr } : {}),
     });
     if (pr.hinweise.some((h) => h.code === 'STATUS_UNBEKANNT')) return { antwort: fehlerAntwort(403, 'PROFIL_FEHLT', cors) };
@@ -491,7 +510,9 @@ async function abschliessen(c) {
       vorheriger_abschluss: zeiger,
     };
     const fassung = {
-      n, kasse_id: kasseId, geschaeftstag: tag, z_nummern: w.z_nummern, quelle: kasse.datenquelle, quelle_import_id: null, grundaufzeichnung: kasse.grundaufzeichnung, datenquelle: kasse.datenquelle,
+      n, kasse_id: kasseId, geschaeftstag: tag, z_nummern: w.z_nummern, quelle: stamm.datenquelle, quelle_import_id: null, grundaufzeichnung: stamm.grundaufzeichnung, datenquelle: stamm.datenquelle,
+      // G1-Fix H-1: art mitschreiben (für eine spätere Neuerfassung nach einem Stammdatenwechsel); stammdaten_aus_fassung nennt die Fassung, aus der sie stammen
+      art: stamm.art, ...(stammAusFassung !== null ? { stammdaten_aus_fassung: stammAusFassung } : {}),
       modus: w.modus, kassensturz: w.kassensturz,
       umsaetze: w.umsaetze, gutschein_mehrzweck_verkauf: w.gutschein_mehrzweck_verkauf, korrekturen: w.korrekturen, trinkgeld_inhaber: w.trinkgeld_inhaber,
       gutschein_einzweck_verkauf: w.gutschein_einzweck_verkauf, anzahlungen_erhalten: w.anzahlungen_erhalten,
@@ -593,7 +614,6 @@ async function ruhetage(c, aktion) {
 // kassentag_ruhetag_aufgehoben für diesen Tag mit dieser anfrage_id, antwortet der Worker 200 mit schon_aufgehoben (nichts geschrieben, kein zweiter Audit-Eintrag).
 // ---------------------------------------------------------------------------------------------
 const AUFHEBEN_AUDIT_RUECKBLICK = 5; // so viele letzte Audit-Einträge prüft die Wiederholung (ein batchGet)
-const STAMMDATEN_AB = Object.freeze(['art_ab', 'grundaufzeichnung_ab', 'datenquelle_ab']);
 async function ruhetagAufheben(c) {
   const { fs, uid, body, cors, zeit, heute } = c;
   const f = pruefeRuhetage(body, 'ruhetag', { heute });
@@ -749,13 +769,22 @@ async function stornieren(c) {
 // (409 SPAETERE_TAGE: eine Bewegung in einer Lücke fehlte in jeder Soll-Rechnung). Bewegungen sind unveränderlich; ein Storno ist eine eigene Bewegung mit Bezug.
 // Eine Kassennummer je Bewegung aus dem Zähler der Kasse und des Jahres (lückenlos, zusammen mit Fassungen und Stornos).
 // ---------------------------------------------------------------------------------------------
-async function offenerTag(c, kasseDok, tagDok, tag, tagId) {
+async function offenerTag(c, kasseDok, tagDok, tag, tagId, { neu = false } = {}) {
   const { cors } = c;
   const kasse = kasseDok.daten;
   if (kasse.kassenbuch === false) return { antwort: fehlerAntwort(422, 'KASSE_OHNE_KASSENBUCH', cors) };
   if (kasse.aktiv === false) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors) };
   if (tagDok && istObjekt(tagDok.daten) && (tagDok.daten.status === 'abgeschlossen' || tagDok.daten.status === 'ruhetag')) return { antwort: fehlerAntwort(409, 'TAG_ABGESCHLOSSEN', cors, { kassentag_id: tagId, status: tagDok.daten.status }) };
   if (tag < kasse.anfangsbestand_am) return { antwort: fehlerAntwort(422, 'VOR_ANFANGSBESTAND', cors, { anfangsbestand_am: kasse.anfangsbestand_am }) };
+  if (neu) {
+    // G1-Fix H-1: Eine neue Bewegung nur an einem Tag, der sich danach auch abschließen lässt. Vor einem Stammdatenwechsel (…_ab nach dem Tag) ist das nur ein
+    // stornierter Tag (Neuerfassung mit den Stammdaten seiner Fassung); sonst sperrte die Bewegung alle Folgetage (OFFENE_BEWEGUNGEN_VORTAG). Ebenso ein
+    // stornierter Tag mit schon FASSUNGEN_MAX Fassungen. Der Storno einer Bewegung bleibt immer möglich (Ausweg).
+    const felder = STAMMDATEN_AB.filter((x) => typeof kasse[x] === 'string' && kasse[x] > tag);
+    const storniert = Boolean(tagDok) && istObjekt(tagDok.daten) && tagDok.daten.status === 'storniert';
+    if (felder.length && !storniert) return { antwort: fehlerAntwort(409, 'STAMMDATEN_WECHSEL_SPAETER', cors, { kassentag_id: tagId, felder, stammdaten_ab: felder.map((x) => kasse[x]).sort()[0] }) };
+    if (storniert && Array.isArray(tagDok.daten.fassungen_kurz) && tagDok.daten.fassungen_kurz.length >= FASSUNGEN_MAX) return { antwort: fehlerAntwort(409, 'FASSUNGEN_MAX', cors, { max: FASSUNGEN_MAX, kassentag_id: tagId }) };
+  }
   // Zeiger der Kasse (hyg H2): keine Suche. Die Bewegung schreibt die Kasse nicht; einen gleichzeitigen Abschluss fängt der Audit-Kopf (Wiederholung, neu gelesen).
   const zeiger = zeigerAus(kasse.letzter_abschluss);
   if (zeiger && tag < zeiger.tag) return { antwort: fehlerAntwort(409, 'SPAETERE_TAGE', cors, { letzter_tag: zeiger.tag }) };
@@ -786,7 +815,7 @@ async function bewegungAnlegen(c) {
     // Wiederholung derselben Anfrage (Netzabbruch): bestätigen, nie ein zweites Mal schreiben
     const gleiche = bisher.find((d) => d.daten.anfrage_id === body.anfrage_id);
     if (gleiche) return { antwort: antwort({ ok: true, idempotent: true, bewegung_id: idVon(gleiche), kassennummer: gleiche.daten.kassennummer, beleg_id: gleiche.daten.beleg_id ?? null, privatvorgang_id: gleiche.daten.privatvorgang_id ?? null }, 200, cors) };
-    const sperre = await offenerTag(c, kasseDok, docs.get(P.kassentag(uid, tagId)), tag, tagId);
+    const sperre = await offenerTag(c, kasseDok, docs.get(P.kassentag(uid, tagId)), tag, tagId, { neu: true });
     if (sperre) return sperre;
     const kasse = kasseDok.daten;
     const nr = naechsteNr(bisher);
