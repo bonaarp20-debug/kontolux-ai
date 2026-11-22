@@ -199,6 +199,8 @@ function baueZahlungen(e, belegId, leistungBis, richtung, vorschlaege, unsicherh
       status: z.status === 'rueckgaengig' ? 'rueckgaengig' : 'aktiv',
       // KERN-B2 F-2: Anzahlung in fremder Währung (§ 16 Abs. 6 S. 1 UStG), nur wenn fremdVorbereiten sie gesetzt hat
       ...(istCent(z.rc_basis_cent) ? { rc_basis_cent: z.rc_basis_cent, fremd_betrag_cent: z.fremd_betrag_cent } : {}),
+      // K3-Fix (K-N3): Satz der Mehrzweck-Einlösung (kasse.js kassentagZuBelegEingabe), nur an der Gutschein-Zahlung eines Tagesabschlusses
+      ...(kanalBekannt && z.kanal === 'gutschein_mehrzweck' && SAETZE_ZULAESSIG.includes(z.mehrzweck_satz_bp) ? { mehrzweck_satz_bp: z.mehrzweck_satz_bp } : {}),
     });
   });
   return out;

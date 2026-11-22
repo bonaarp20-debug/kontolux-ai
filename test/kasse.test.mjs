@@ -1340,6 +1340,29 @@ test('Mehrzweck-Gutschein-Verkauf (SB-3): eigener Beleg _gm (A_GUTSCHEIN_MEHRZWE
   assert.equal(u.fs.lies(P(`tagesdaten/${tag}`)).einnahmen, 0);
 });
 
+test('K3-Fix (K-N3): Mehrzweck-Einlösung 119,00 für 19 %-Ware plus bar 107,00 für 7 %-Ware: gespeicherter Beleg trägt die Gutschein-Zahlung mit mehrzweck_satz_bp 1900, Kz 81/86 je 100,00, EÜR 112 = 100,00 / 140 = 7,00; Storno zusammen 0', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const tag = '2026-11-02';
+  const r = await u.tagRufe(abschluss(id, tag, { umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 0, unbar_cent: 0, mehrzweck_eingeloest_cent: 11900 }, { steuerfall: 'A_INLAND_7', bar_cent: 10700, unbar_cent: 0 }], gezaehlt_cent: 20700 }));
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  const bid = `kasse_${id}_${tag}_f1`;
+  const d = { ...u.fs.lies(P(`dokumente/${bid}`)), id: bid };
+  assert.deepEqual(d.steuer.zahlungen.map((z) => [z.kanal, z.betrag_cent, z.mehrzweck_satz_bp ?? null]), [['bar', 10700, null], ['gutschein_mehrzweck', 11900, 1900]]);
+  assert.equal(K.driftStatus(d), 'ok');
+  assert.ok(K.validiereBeleg(K.belegFuerKern(d, REGEL).beleg).ok);
+  const w = kernSumme([bid], u);
+  const kz = K.ustvaFuer(w, REGEL, '2026-11').kennzahlen;
+  assert.deepEqual([kz['81'], kz['81_steuer'], kz['86'], kz['86_steuer']], [10000, 1900, 10000, 700]);
+  assert.deepEqual(Object.fromEntries(K.euerFuer(w, REGEL, 2026).zeilen.filter((z) => z.betrag_cent !== 0).map((z) => [z.kz, z.betrag_cent])), { 112: 10000, 140: 700 });
+  const s = await u.tagRufe(stornoBody(id, tag));
+  assert.equal(s.status, 200, JSON.stringify(s.json));
+  const ws = kernSumme([bid, `${bid}_storno`], u);
+  const ks = K.ustvaFuer(ws, REGEL, '2026-11').kennzahlen;
+  assert.deepEqual([ks['81'], ks['81_steuer'], ks['86'], ks['86_steuer']], [0, 0, 0, 0]);
+  assert.deepEqual(K.euerFuer(ws, REGEL, 2026).zeilen.filter((z) => z.betrag_cent !== 0), []);
+});
+
 // ---------------------------------------------------------------------------------------------
 // Teilschritt 4: /kassenbewegung (Ausgabe über den Beleg-Schreibweg, Privatvorgang, Geldtransit), nur an offenen Tagen
 // ---------------------------------------------------------------------------------------------

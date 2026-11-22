@@ -1196,6 +1196,52 @@ function schliesseAus(s, profil, ctx, out, grund, extraHinweise) {
   if (per) weitereHinweisWirkungen(s, profil, ctx, out, per, { status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: grund });
 }
 
+// K3-Fix (K-N3, ABWEICHUNGEN 5.40; § 4 Abs. 3, § 11 Abs. 1 EStG, § 3 Abs. 15 UStG): Tagesabschluss mit Mehrzweck-Einlösung je Satz (Zahlungen kanal
+// gutschein_mehrzweck mit mehrzweck_satz_bp, kasse.js kassentagZuBelegEingabe). Eingenommenes Geld je Satz = Brutto des Satzes minus Einlösung des Satzes
+// (negativ möglich: Barrückgabe in diesem Satz); Steuer daraus je Satz wie bei einem eigenen Barbeleg (ustAusBrutto). Netto und Steuer über alle Sätze
+// werden auf die Geldzahlungen verteilt (Steuer nach Betragsanteil, die letzte Geldzahlung bekommt den Rest: Summen auf den Cent). Ohne Geldzahlung, aber
+// mit Verschiebung zwischen den Sätzen (Geld zusammen 0), trägt die letzte Gutschein-Zahlung das Paar Kz 112/140 (hebt sich auf). Die Voranmeldung bleibt
+// bei zahlungsAnteile (Summen je Satz gleich, alle Zahlungen am Geschäftstag). Rückgabe: Map Zahlungsindex -> { netto_cent, ust_cent } (nur Zahlungen mit
+// EÜR-Zufluss) oder null (keine Zuordnung je Satz wie im Bestand, Satz unbekannt, Skonto/Rabatt, Teilleistung, Summe der Geldzahlungen passt nicht zum Geld
+// je Satz): dann gilt die anteilige Verteilung wie bisher.
+const MZ_SAETZE = Object.freeze(STEUERSAETZE.map((x) => x.bp));
+function kassenMehrzweckGeld(s, gruppen, zahlungen, teil) {
+  if (s.beleg_art !== 'tagesabschluss' || teil) return null;
+  const mz = zahlungen.filter((z) => z.kanal === KANAL_MEHRZWECK);
+  if (!mz.length || !mz.every((z) => MZ_SAETZE.includes(z.mehrzweck_satz_bp))) return null;
+  if (zahlungen.some((z) => !istCent(z.betrag_cent) || z.betrag_cent <= 0 || (istCent(z.skonto_cent) && z.skonto_cent !== 0) || (istCent(z.rabatt_cent) && z.rabatt_cent !== 0))) return null;
+  const geld = new Map(); // Satz -> Brutto des Satzes - Einlösung des Satzes
+  for (const g of gruppen) {
+    if (!MZ_SAETZE.includes(g.satz_bp)) return null;
+    geld.set(g.satz_bp, (geld.get(g.satz_bp) || 0) + g.netto_cent + g.ust_cent);
+  }
+  for (const z of mz) geld.set(z.mehrzweck_satz_bp, (geld.get(z.mehrzweck_satz_bp) || 0) - z.betrag_cent);
+  let netto = 0;
+  let ust = 0;
+  for (const [satz, b] of geld) {
+    const u = satz === 0 ? 0 : ustAusBrutto(b, satz);
+    netto += b - u;
+    ust += u;
+  }
+  const geldIdx = [];
+  let summe = 0;
+  zahlungen.forEach((z, zi) => { if (z.kanal !== KANAL_MEHRZWECK) { geldIdx.push(zi); summe += z.betrag_cent; } });
+  if (summe !== netto + ust) return null;
+  const out = new Map();
+  if (!geldIdx.length) {
+    if (netto !== 0 || ust !== 0) out.set(zahlungen.lastIndexOf(mz[mz.length - 1]), { netto_cent: netto, ust_cent: ust });
+    return out;
+  }
+  let uAcc = 0;
+  geldIdx.forEach((zi, k) => {
+    const b = zahlungen[zi].betrag_cent;
+    const u = k === geldIdx.length - 1 ? ust - uAcc : mulDivRund(b, ust, summe);
+    uAcc += u;
+    out.set(zi, { netto_cent: b - u, ust_cent: u });
+  });
+  return out;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Ausgang, regelbesteuert (A_INLAND_19, A_INLAND_7, A_INLAND_0_PV)
 // ---------------------------------------------------------------------------------------------
@@ -1355,18 +1401,27 @@ function ausgangWirkungen(s, profil, ctx, out, opt) {
       gruppen.forEach((g, gi) => { if (je[gi].netto_cent !== 0 || je[gi].ust_cent !== 0) ustW(g, 'minderung', z.datum, 0 - je[gi].netto_cent, 0 - je[gi].ust_cent, 'R-KOR-02', z.id); });
     });
   }
-  // O2-Fix K-N3 (ABWEICHUNGEN 5.40): Mehrzweck-Einlösung am Kassentag mit mehreren Sätzen. Der Beleg kennt den Satz des Gutscheins nicht (eine Zahlung
-  // kanal gutschein_mehrzweck); die Geldzahlungen werden anteilig auf alle Sätze verteilt, die Aufteilung EÜR Kz 112/140 ist dann eine Näherung (Summe,
-  // Gewinn und Voranmeldung stimmen). Nur Hinweis an den EÜR-Zeilen, keine Zahl.
-  if (s.beleg_art === 'tagesabschluss' && zahlungen.some((z) => z.kanal === KANAL_MEHRZWECK) && zahlungen.some((z) => z.kanal !== KANAL_MEHRZWECK)
+  // K3-Fix (K-N3, ABWEICHUNGEN 5.40): Mehrzweck-Einlösung je Satz zugeordnet (mehrzweck_satz_bp): EÜR aus dem Geld je Satz (kassenMehrzweckGeld)
+  const mzGeld = kassenMehrzweckGeld(s, gruppen, zahlungen, teil);
+  // O2-Fix K-N3: Restfall ohne Zuordnung je Satz (eine Gutschein-Zahlung ohne mehrzweck_satz_bp, von kassentagZuBelegEingabe seit dem K3-Fix nicht mehr
+  // erzeugt): die Geldzahlungen werden anteilig auf alle Sätze verteilt, die Aufteilung EÜR Kz 112/140 ist dann eine Näherung (Summe, Gewinn und
+  // Voranmeldung stimmen). Nur Hinweis an den EÜR-Zeilen, keine Zahl.
+  if (!mzGeld && s.beleg_art === 'tagesabschluss' && zahlungen.some((z) => z.kanal === KANAL_MEHRZWECK) && zahlungen.some((z) => z.kanal !== KANAL_MEHRZWECK)
     && gruppen.filter((g) => g.netto_cent !== 0 || g.ust_cent !== 0).length > 1 && !ctx.hinweise.includes('HN_KASSE_MEHRZWECK_SAETZE')) ctx.hinweise.push('HN_KASSE_MEHRZWECK_SAETZE');
   // EÜR: Zufluss je Zahlung (R-ZP-20), unabhängig von Soll und Ist
   zahlungen.forEach((z, zi) => {
-    if (z.kanal === KANAL_MEHRZWECK && s.beleg_art === 'tagesabschluss') return; // KERN-26 (SB-3), O2 N2 nur am Kassenbeleg: Einlösung eines Mehrzweck-Gutscheins: Umsatzsteuer ja, aber kein Zufluss (stand beim Verkauf in Kz 103)
-    const jahr = String(jahrVon(z.datum));
     let nettoS = 0;
     let ustS = 0;
-    for (let gi = 0; gi < gruppen.length; gi++) { nettoS += anteile[zi][gi].netto_cent; ustS += anteile[zi][gi].ust_cent; }
+    if (mzGeld) {
+      const a = mzGeld.get(zi);
+      if (!a) return; // K3-Fix: Gutschein-Zahlung ohne Zufluss (wie unten), Geld je Satz aus kassenMehrzweckGeld
+      nettoS = a.netto_cent;
+      ustS = a.ust_cent;
+    } else {
+      if (z.kanal === KANAL_MEHRZWECK && s.beleg_art === 'tagesabschluss') return; // KERN-26 (SB-3), O2 N2 nur am Kassenbeleg: Einlösung eines Mehrzweck-Gutscheins: Umsatzsteuer ja, aber kein Zufluss (stand beim Verkauf in Kz 103)
+      for (let gi = 0; gi < gruppen.length; gi++) { nettoS += anteile[zi][gi].netto_cent; ustS += anteile[zi][gi].ust_cent; }
+    }
+    const jahr = String(jahrVon(z.datum));
     if (nettoS === 0 && ustS === 0) return;
     if (s.steuerfall === 'A_INLAND_0_PV') {
       out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: z.datum, kz: 103, netto_cent: nettoS, betrag_cent: nettoS, rolle: 'einnahme', spalte: 'einnahme', satz_bp: 0, regel_id: 'R-EUER-03', ereignis_id: z.id }));
