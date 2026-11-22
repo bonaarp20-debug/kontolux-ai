@@ -49,6 +49,10 @@ export const PDF_NAME_MAX = 4096;
 // Zahlen: pdf-lib (BaseParser.parseRawInt/parseRawNumber) setzt auch sie Zeichen für Zeichen zusammen (rund 32 Byte je Ziffer, ohne Grenze): eine Zahl
 // mit 5 MB Ziffern bringt das Isolat zum OOM (Objekt, Objektkopf, %PDF-Kopf, XRef-Tabelle, startxref, Offsets im Objektstrom). Reale PDFs: siehe Bericht.
 export const PDF_ZAHL_MAX = 64;
+// Kopfversuche: pdf-lib skipJibberish ruft matchIndirectObjectHeader für jedes druckbare Byte zwischen Objekten auf und verschluckt jeden Fehler.
+// Ohne Grenze lief ein Angriff nach dem Überschreiten der Verweisgrenze byteweise weiter (2,5 MB: 200.000 Verweise im globalen Speicher, 5 s CPU;
+// 7,5 MB OOM). Normale PDFs: ein Versuch je Objekt (siehe Bericht).
+export const PDF_KOPFVERSUCHE_MAX = 400000;
 
 // Grenze überschritten oder verbotene Form (Filterkette, XRef ohne Bytes je Eintrag …)
 export class PdfZuGross extends Error {}
@@ -244,6 +248,8 @@ function parserBegrenzen() {
   basis.parseRawInt = zahlBegrenzt(rawInt, ganzzahlLaenge);
   basis.parseRawNumber = zahlBegrenzt(rawNumber, zahlLaenge);
   PDFRef.of = function begrenzterVerweis(objectNumber, generationNumber) {
+    // schon über der Grenze: gar nicht erst anlegen (pdf-lib verschluckt den Fehler in matchIndirectObjectHeader)
+    if (aktiv && tiefe > 0 && ueber(aktiv)) zuLang(aktiv, 'zu viele Verweise');
     const r = refOf(objectNumber, generationNumber);
     const z = aktiv;
     if (z) {
@@ -288,7 +294,7 @@ export async function ladePdfBegrenzt(bytes, { budget = pdfBudget(), ignoreEncry
   parserBegrenzen();
   if (isolatVoll()) return { zuGross: true, stromFehler: false, isolatVoll: true };
   const parser = PDFParser.forBytesWithOptions(bytes, 100, false, false);
-  const zaehler = { objekte: PDF_OBJEKTE_MAX, namen: PDF_NAMEN_SPEICHER_MAX, verweise: PDF_VERWEISE_MAX, budget, oben: false, strings: PDF_STRING_ZEICHEN_MAX, imXref: false, zuGross: false, stromFehler: false };
+  const zaehler = { objekte: PDF_OBJEKTE_MAX, namen: PDF_NAMEN_SPEICHER_MAX, verweise: PDF_VERWEISE_MAX, budget, oben: false, strings: PDF_STRING_ZEICHEN_MAX, kopfVersuche: PDF_KOPFVERSUCHE_MAX, imXref: false, zuGross: false, stromFehler: false };
   parser.context[ZAEHLER] = zaehler;
   const original = parser.parseIndirectObject;
   parser.parseIndirectObject = async function begrenzt() {
@@ -302,6 +308,15 @@ export async function ladePdfBegrenzt(bytes, { budget = pdfBudget(), ignoreEncry
   const xref = parser.maybeParseCrossRefSection; const kopf = parser.parseIndirectObjectHeader;
   parser.maybeParseCrossRefSection = function begrenzteXref(...a) { zaehler.imXref = true; try { return imRahmen(zaehler, xref, this, a); } finally { zaehler.imXref = false; } };
   parser.parseIndirectObjectHeader = function begrenzterKopf(...a) { return imRahmen(zaehler, kopf, this, a); };
+  // Kopfversuche aus skipJibberish/skipBinaryHeaderComment: nach einer Überschreitung ans Dateiende springen (skipJibberish endet dann sofort),
+  // sonst zählen; so bleibt die Laufzeit linear und kein verschluckter Fehler legt weitere Verweise an
+  const kopfSuche = parser.matchIndirectObjectHeader;
+  parser.matchIndirectObjectHeader = function begrenzteKopfsuche(...a) {
+    zaehler.kopfVersuche -= 1;
+    if (zaehler.kopfVersuche < 0) zaehler.zuGross = true;
+    if (zaehler.zuGross || ueber(zaehler)) { this.bytes.moveTo(this.bytes.length); return false; }
+    return kopfSuche.apply(this, a);
+  };
   let context;
   try { context = await parser.parseDocument(); } catch (e) { if (zaehler.zuGross || ueber(zaehler)) return { zuGross: true, stromFehler: zaehler.stromFehler, isolatVoll: isolatVoll() }; throw e; } finally { delete parser.context[ZAEHLER]; if (aktiv === zaehler) aktiv = null; }
   // Über der Grenze: pdf-lib fängt den Fehler je Objekt ab und liest weiter (jedes weitere Objekt bricht sofort ab); das Ergebnis ist dann zu groß

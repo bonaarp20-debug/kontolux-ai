@@ -395,3 +395,22 @@ test('Zweite Lesung F-1: Zahlen mit sehr vielen Ziffern (Objekt, Nachkomma, Obje
   assert.equal(objektBild(neu.pdf), objektBild(await ALT(mitObjekt3(zahlen))));
   assert.equal((await ladePdfBegrenzt(mitObjekt3('1'.repeat(65)))).zuGross, true, '65 Ziffern');
 });
+
+test('Zweite Lesung F-2/F-3: nach Überschreiten der Verweisgrenze keine weiteren Verweise über verschluckte Kopfversuche, Ziffernläufe zwischen Objekten linear', async () => {
+  const p = mit128MB(`import { ladePdfBegrenzt, pdfIsolatStand } from './regel/pdf-sicher.js';
+    console.warn = () => {};
+    let s = '%PDF-1.7\\n'; for (let i = 1; i <= 50001; i += 1) s += i + ' 0 obj null endobj\\n';
+    s += 'x'; for (let k = 0; k < 100000; k += 1) s += (100000 + k) + ' 0 obj ';
+    s += '\\ntrailer\\n<< /Root 1 0 R >>\\n%%EOF\\n';
+    const c = process.cpuUsage(); const r = await ladePdfBegrenzt(new Uint8Array(Buffer.from(s))); const d = process.cpuUsage(c);
+    const c2 = process.cpuUsage(); const j = await ladePdfBegrenzt(new Uint8Array(Buffer.from('%PDF-1.7\\n1 0 obj\\nnull\\nendobj\\nx' + '1'.repeat(30000) + 'x\\ntrailer\\n<< >>\\n'))); const d2 = process.cpuUsage(c2);
+    console.log(JSON.stringify({ zuGross: !!r.zuGross, verweise: pdfIsolatStand().verweise, cpuMs: Math.round((d.user + d.system) / 1000), ziffernMs: Math.round((d2.user + d2.system) / 1000) }));`);
+  assert.equal(p.status, 0, p.err);
+  const e = JSON.parse(p.out);
+  assert.equal(e.zuGross, true);
+  // vorher: 150.000 Verweise im globalen Speicher (jeder verschluckte Kopfversuch legte einen an), über die Grenze je Datei und je Isolat hinweg
+  assert.ok(e.verweise <= 50010, `Verweise im globalen Speicher ${e.verweise}`);
+  assert.ok(e.cpuMs < 2000, `CPU ${e.cpuMs} ms`);
+  // 30.000 Ziffern zwischen Objekten: main 4,6 s (jede Position las den ganzen Rest neu)
+  assert.ok(e.ziffernMs < 300, `Ziffernlauf ${e.ziffernMs} ms`);
+});
