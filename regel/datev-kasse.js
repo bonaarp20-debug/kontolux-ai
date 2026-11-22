@@ -186,3 +186,23 @@ export function kasseBewegungOhneBuchung(b) {
   const art = b.art === 'storno' ? b.storno_art : b.art;
   return BEWEGUNG_OHNE_BUCHUNG.includes(art);
 }
+
+// A-H2 (Gegenlesung o-p1c): SumUp-Barbelege (Integration, Einzelbelege, Baukonzept Kap. 6 Nr. 17) sind die Bareinnahmen einer Kasse mit Datenquelle sumup_integration
+// (kassenBarEinnahmen nimmt dort genau diese Belege, Filter wie sumupLesen in regel/kasse.js). Sie gehören gegen das Kassenkonto dieser Kasse, nicht gegen die Bank.
+// f: { quelle, typ, deleted, storniert, buchungstext, name } des Belegs (dekodierte Werte).
+export function istSumupBarbeleg(f) {
+  return ISTOBJEKT(f) && f.quelle === 'sumup_webhook' && f.typ === 'rechnung_ausgehend' && f.deleted !== true && f.storniert !== true
+    && /^SumUp-Barzahlung/.test(String(f.buchungstext || f.name || ''));
+}
+// kassen: Map Kassen-ID -> dekodierte Kasse. Rückgabe: { id } (genau eine SumUp-Kasse, gültig am Tag) | { mehrere: true } | null (keine).
+export function sumupKasseWahl(kassen, datum) {
+  if (!kassen || typeof kassen.entries !== 'function') return null;
+  const treffer = [];
+  for (const [id, k] of kassen.entries()) {
+    if (!ISTOBJEKT(k) || k.datenquelle !== 'sumup_integration') continue;
+    if (typeof k.datenquelle_ab === 'string' && DATUM.test(k.datenquelle_ab) && DATUM.test(String(datum || '')) && k.datenquelle_ab > datum) continue;
+    treffer.push(id);
+  }
+  if (treffer.length === 1) return { id: treffer[0] };
+  return treffer.length ? { mehrere: true } : null;
+}

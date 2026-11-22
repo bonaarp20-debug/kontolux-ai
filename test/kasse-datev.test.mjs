@@ -9,7 +9,7 @@ import { regelKasse } from '../regel/kasse.js';
 import { kassenAusgabeBeleg } from '../regel/kasse-ausgabe.js';
 import { AGB_MINDESTFASSUNG_KASSE } from '../regel/gemeinsam.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
-import { kasseBelegPlan, kasseBewegungBuchung, kassenKontoWahl, DATEV_KASSE_KONTEN } from '../regel/datev-kasse.js';
+import { kasseBelegPlan, kasseBewegungBuchung, kassenKontoWahl, DATEV_KASSE_KONTEN, istSumupBarbeleg, sumupKasseWahl } from '../regel/datev-kasse.js';
 
 const UID = 'kassenDatevUid000000000001';
 const HEUTE = '2026-11-20';
@@ -393,6 +393,53 @@ test('A-H1: Storno eines Tages mit Einlösung spiegelt auch die Einlösung (Summ
   for (const [konto, v] of Object.entries(k)) assert.equal(v, 0, `Konto ${konto}`);
   assert.ok(r.zeilen.filter((x) => x[6] === '8200').length === 2, 'Einlösung und Gegenbuchung');
   assert.match(r.warnung, /1 Tagesabschluss\/-abschlüsse mit Einlösung von Mehrzweck-Gutscheinen \(zusammen 100,00 €\)/, 'der Storno zählt nicht als weitere Einlösung');
+});
+
+// A-H2 (Gegenlesung o-p1c): bei einer Kasse mit sumup_integration liefen die SumUp-Barbelege gegen die Bank, die DATEV-Kasse hatte keinen Barumsatz, ohne Warnung.
+const sumupBeleg = (id, art, betrag, extra = {}) => ({ typ: 'rechnung_ausgehend', betrag, absender: 'SumUp-Kunde', rechnungsnr: id, bezahlt: true, bezahlt_am: '2026-11-03', datum: '2026-11-03', mwst_satz: '19', kategorie: 'Einnahmen 19%',
+  quelle: 'sumup_webhook', name: `SumUp-${art} 11/2026`, buchungstext: `SumUp-${art} ${id}`, ...extra });
+test('A-H2: SumUp-Barzahlung einer Kasse mit sumup_integration bucht gegen das Kassenkonto, SumUp-Kartenzahlung bleibt auf der Bank; Belegfeld 1 = Transaktionscode; Soll gleich Haben', async () => {
+  const w = await welt({ kasseExtra: { datenquelle: 'sumup_integration' } });
+  w.fs.setze(P('dokumente/s1'), sumupBeleg('TCBAR1', 'Barzahlung', 119));
+  w.fs.setze(P('dokumente/s2'), sumupBeleg('TCKARTE1', 'Kartenzahlung', 59.5));
+  const r = await w.exp();
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(kurz(r.zeilen, 'TCBAR1').map((x) => x.slice(0, 4)), [['119,00', 'S', '1000', '8400']]);
+  assert.deepEqual(kurz(r.zeilen, 'TCKARTE1').map((x) => x.slice(0, 4)), [['59,50', 'S', '1200', '8400']]);
+  assert.match(r.warnung, /1 SumUp-Barzahlung\(en\) stehen auf dem Kassenkonto der SumUp-Kasse statt auf der Bank/);
+  assert.match(r.warnung, /Kassenbuch:/, 'die Kassenhinweise gelten auch ohne Tagesabschluss-Beleg');
+  // eigenes DATEV-Konto der Kasse geht vor dem Profil
+  const w2 = await welt({ kasseExtra: { datenquelle: 'sumup_integration', datev_konto: '1010' } });
+  w2.fs.setze(P('dokumente/s1'), sumupBeleg('TCBAR1', 'Barzahlung', 119));
+  assert.deepEqual(kurz((await w2.exp()).zeilen, 'TCBAR1').map((x) => x.slice(0, 4)), [['119,00', 'S', '1010', '8400']]);
+});
+
+test('A-H2: ohne SumUp-Kasse (manuelle Kasse oder kein Kassenbuch) bleibt die SumUp-Barzahlung auf der Bank; bei mehr als einer SumUp-Kasse bleibt sie auf der Bank mit Warnung', async () => {
+  const w = await welt();
+  w.fs.setze(P('dokumente/s1'), sumupBeleg('TCBAR1', 'Barzahlung', 119));
+  assert.deepEqual(kurz((await w.exp()).zeilen, 'TCBAR1').map((x) => x.slice(0, 4)), [['119,00', 'S', '1200', '8400']]);
+  const m = await welt({ kasseExtra: { datenquelle: 'sumup_integration' } });
+  const zweite = await m.fs.pfade(P('kassen/')).map((p) => p)[0];
+  const alt = m.fs.lies(zweite);
+  m.fs.setze(P('kassen/zweiteSumupKasse0000000000001'), { ...alt, bezeichnung: 'Zweite', kuerzel: 'ZW2' });
+  m.fs.setze(P('dokumente/s1'), sumupBeleg('TCBAR1', 'Barzahlung', 119));
+  const r = await m.exp();
+  assert.deepEqual(kurz(r.zeilen, 'TCBAR1').map((x) => x.slice(0, 4)), [['119,00', 'S', '1200', '8400']]);
+  assert.match(r.warnung, /1 SumUp-Barzahlung\(en\) konnten keiner Kasse eindeutig zugeordnet werden/);
+});
+
+test('istSumupBarbeleg und sumupKasseWahl (rein): nur Einnahme-Barbelege der Integration, Kasse gültig ab datenquelle_ab', () => {
+  const b = (x = {}) => ({ quelle: 'sumup_webhook', typ: 'rechnung_ausgehend', buchungstext: 'SumUp-Barzahlung TC1', ...x });
+  assert.equal(istSumupBarbeleg(b()), true);
+  assert.equal(istSumupBarbeleg(b({ buchungstext: 'SumUp-Kartenzahlung TC1' })), false);
+  assert.equal(istSumupBarbeleg(b({ typ: 'rechnung_eingehend', buchungstext: 'SumUp-Rückerstattung TC1' })), false);
+  assert.equal(istSumupBarbeleg(b({ deleted: true })), false);
+  assert.equal(istSumupBarbeleg(b({ quelle: 'kasse' })), false);
+  const kassen = new Map([['k1', { datenquelle: 'sumup_integration', datenquelle_ab: '2026-11-05' }], ['k2', { datenquelle: 'manuell' }]]);
+  assert.equal(sumupKasseWahl(kassen, '2026-11-04'), null);
+  assert.deepEqual(sumupKasseWahl(kassen, '2026-11-05'), { id: 'k1' });
+  kassen.set('k3', { datenquelle: 'sumup_integration' });
+  assert.deepEqual(sumupKasseWahl(kassen, '2026-11-05'), { mehrere: true });
 });
 
 // ── 6. Bestandsnutzer unverändert, Jahr, Hinweis ─────────────────────────────────────────────────
