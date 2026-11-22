@@ -90,11 +90,12 @@ export const AUFBEWAHRUNG_SAMMLUNGEN = Object.freeze([
   'zeiteintraege', 'reisekosten', 'sammelbelege', 'stripe_links', 'stripe_rechnungen', 'agb_zustimmung',
   'steuerprofil', 'festschreibung', 'audit_v2', 'migration', 'rechnungsnummern', 'zaehler', // zaehler: Nummernkreis (FIX-RB N6)
   'oss_meldung', // WORKER-C: OSS-Aufzeichnung, zehn Jahre nach § 22 Abs. 1 S. 4 UStG (regel/oss-meldung.js)
+  'kassen', 'kassentage', 'kassenbewegungen', 'betriebsstaetten', 'kassenmeldungen', // KASSE-P1a: Kassenbuch, zehn Jahre (§ 147 AO)
 ]);
 // Profil-Dokumente, die zu den Buchungsdaten gehören (Firmendaten, Steuernummer, Nummernkreise, DATEV) oder die Archiv-Markierung sind
 export const AUFBEWAHRUNG_PROFIL = Object.freeze(['settings', 'steuer', 'rechnungsCounter', 'angeboteCounter', 'datevImporte', 'konto_archiv']);
 // Dateiordner im Storage mit Belegdateien
-export const AUFBEWAHRUNG_ORDNER = Object.freeze(['belege', 'rechnungen', 'mahnungen', 'angebote', 'sammelbelege', 'logo']);
+export const AUFBEWAHRUNG_ORDNER = Object.freeze(['belege', 'rechnungen', 'mahnungen', 'angebote', 'sammelbelege', 'logo', 'kasse']); // 'kasse': KASSE-P1a, Z-Bon, Kassenbuchseite, Eigenbeleg, ELSTER-Protokoll
 
 export const FS_PRAEFIX = 'projects/kontolux-ai/databases/(default)/documents/';
 export const FS_WURZEL = 'https://firestore.googleapis.com/v1/' + FS_PRAEFIX.slice(0, -1);

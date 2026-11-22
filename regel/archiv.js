@@ -9,7 +9,9 @@ export const FIRESTORE_WURZEL = 'https://firestore.googleapis.com/v1/projects/ko
 // FIX-RB N6 (G-RB): zaehler (benannte Zähler, regel/zaehler.js) gehört mit in Archiv, Löschlauf, Speicher-Umzug und Export
 // WORKER-C (Release C, Q-5): oss_meldung (Abgabe-Schnappschüsse der OSS-Quartale, regel/oss-meldung.js), Aufbewahrung zehn Jahre ab Ende des
 // Kalenderjahres der Abgabe (§ 22 Abs. 1 S. 4 UStG); Unterkollektion oss_meldung/{periode}/verlauf läuft über REGEL_UNTERSAMMLUNGEN ('verlauf').
-export const REGEL_SAMMLUNGEN = Object.freeze(['steuerprofil', 'festschreibung', 'audit_v2', 'migration', 'rechnungsnummern', 'zaehler', 'oss_meldung']);
+export const REGEL_SAMMLUNGEN = Object.freeze(['steuerprofil', 'festschreibung', 'audit_v2', 'migration', 'rechnungsnummern', 'zaehler', 'oss_meldung',
+  // KASSE-P1a (Baukonzept 08 2.3 Nr. 4): Kassenbuch, zehn Jahre (§ 147 AO); Unterkollektionen kassentage/fassungen und kassen/verlauf über REGEL_UNTERSAMMLUNGEN
+  'kassen', 'kassentage', 'kassenbewegungen', 'betriebsstaetten', 'kassenmeldungen']);
 // FIX-L (G-RECHT-B F-D3): Profil-Dokumente ohne Aufbewahrungspflicht, die schon die Kontolöschung (/konto-archivieren) entfernt.
 // selbsttest: Ergebnis des Abgleichs im Hintergrund (Zählwerte, Zeitpunkt, Version, Fingerabdruck), keine Unterlage nach § 147 AO.
 // Für vorher archivierte Konten räumt der Nachlauf nach der Kontolöschung es ab (NACHLAUF_PROFIL in regel/loeschlaeufe-konto.js).
@@ -25,9 +27,9 @@ export async function profilRestLoeschen(uid, token, fetchFn = globalThis.fetch)
   return ARCHIV_LOESCHEN_PROFIL.length;
 }
 // Unterkollektionen je Sammlung (chats/messages räumt der Löschlauf schon heute je Chat ab)
-export const UNTERSAMMLUNGEN = Object.freeze({ chats: ['messages'], steuerprofil: ['verlauf'], dokumente: ['versionen'], oss_meldung: ['verlauf'] });
+export const UNTERSAMMLUNGEN = Object.freeze({ chats: ['messages'], steuerprofil: ['verlauf'], dokumente: ['versionen'], oss_meldung: ['verlauf'], kassentage: ['fassungen'], kassen: ['verlauf'] });
 // Für den Löschlauf und den Export über allDescendants (messages bleibt beim bisherigen Weg je Chat)
-export const REGEL_UNTERSAMMLUNGEN = Object.freeze(['verlauf', 'versionen']);
+export const REGEL_UNTERSAMMLUNGEN = Object.freeze(['verlauf', 'versionen', 'fassungen']);
 const SEITE = 300;
 const RUNDEN_MAX = 100;
 
@@ -96,5 +98,6 @@ export async function untersammlungenExport(uid, token, fetchFn = globalThis.fet
   return {
     steuerprofil_verlauf: await untersammlungLesen(uid, 'verlauf', token, fetchFn),
     dokumente_versionen: await untersammlungLesen(uid, 'versionen', token, fetchFn),
+    kassentage_fassungen: await untersammlungLesen(uid, 'fassungen', token, fetchFn), // KASSE-P1a
   };
 }

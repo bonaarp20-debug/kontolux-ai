@@ -8,7 +8,7 @@ import worker from '../worker.js';
 import { erzeugeTestEnv } from './harness.mjs';
 import { fakeGoogle, fakeKv } from './n7-fake-google.mjs';
 import { kodiere } from './regel-fake-firestore.mjs';
-import { loeschModus, alleModi, SCHALTER, teilLaufWaechter, istAufbewahrungsPfad, LOESCH_BUDGET } from '../regel/loeschlaeufe.js';
+import { loeschModus, alleModi, SCHALTER, teilLaufWaechter, istAufbewahrungsPfad, istAufbewahrungsDatei, LOESCH_BUDGET, AUFBEWAHRUNG_SAMMLUNGEN, AUFBEWAHRUNG_ORDNER } from '../regel/loeschlaeufe.js';
 import { loeschlaeufeStuendlich, adminArchivLoeschen, LOESCH_CRON, fruehesteFrist } from '../regel/loeschlaeufe-plan.js';
 import { feedbackGrenze, dreiJahreGrenze } from '../regel/loeschlaeufe-fristen.js';
 
@@ -90,6 +90,22 @@ test('FIX-RB N6: Sammlung zaehler (Nummernkreis der Rechnungsnummern) ist geschÃ
   assert.equal(istAufbewahrungsPfad('users/u1/zaehler/RE'), true);
   assert.equal(istAufbewahrungsPfad('users/u1/profil/rechnungsCounter'), true);
   assert.equal(istAufbewahrungsPfad('users/u1/rechnungsnummern/RE-2026-001'), true);
+});
+
+test('KASSE-P1a: Kassenbuch (5 Sammlungen, Unterkollektionen, Ordner kasse) ist Aufbewahrung; kein Teil-LÃ¶schlauf fasst es an', () => {
+  for (const c of ['kassen', 'kassentage', 'kassenbewegungen', 'betriebsstaetten', 'kassenmeldungen']) {
+    assert.ok(AUFBEWAHRUNG_SAMMLUNGEN.includes(c), c);
+    assert.equal(istAufbewahrungsPfad(`users/u1/${c}/x1`), true, c);
+  }
+  assert.equal(istAufbewahrungsPfad('users/u1/kassentage/k1_2026-11-20/fassungen/1'), true);
+  assert.equal(istAufbewahrungsPfad('users/u1/kassen/k1/verlauf/1'), true);
+  assert.ok(AUFBEWAHRUNG_ORDNER.includes('kasse'));
+  assert.equal(istAufbewahrungsDatei('users/u1/kasse/kabc12345/2026-11-20/1700000000000_zbon.pdf'), true, 'Storage-Ordner kasse');
+  assert.equal(istAufbewahrungsDatei('users/u1/kasse/meldungen/m1_protokoll.pdf'), true);
+  const w = teilLaufWaechter([/^feedback\/[^/]+$/]);
+  for (const p of ['users/u1/kassen/k1', 'users/u1/kassentage/k1_2026-11-20', 'users/u1/kassentage/k1_2026-11-20/fassungen/1', 'users/u1/kassenbewegungen/b1', 'users/u1/betriebsstaetten/b1', 'users/u1/kassenmeldungen/m1']) {
+    assert.throws(() => w(p), /schutz_verletzt/, p);
+  }
 });
 
 test('Schalter: ohne Variable ist jeder Lauf aus; LOESCHLAEUFE_MAX deckelt; unbekannte Werte gelten als aus', () => {

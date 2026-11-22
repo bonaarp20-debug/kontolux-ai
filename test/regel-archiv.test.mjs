@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { archivDatenLoeschen } from '../worker.js';
-import { REGEL_SAMMLUNGEN, untersammlungenExport, untersammlungLesen, untersammlungenLoeschen } from '../regel/archiv.js';
+import { REGEL_SAMMLUNGEN, REGEL_UNTERSAMMLUNGEN, UNTERSAMMLUNGEN, untersammlungenExport, untersammlungLesen, untersammlungenLoeschen } from '../regel/archiv.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
 import { erzeugeTestEnv } from './harness.mjs';
 
@@ -26,6 +26,15 @@ function befuelle(fs, uid) {
   fs.setze(`${u}/migration/_aktiv`, { lauf: 'x' });
   fs.setze(`${u}/rechnungsnummern/R1`, { beleg: 'd2' });
   fs.setze(`${u}/zaehler/RE`, { name: 'RE', letzte: 1 }); // FIX-RB N6
+  // KASSE-P1a: Kassenbuch samt Unterkollektionen (kassentage/fassungen, kassen/verlauf)
+  fs.setze(`${u}/kassen/k1`, { bezeichnung: 'Theke' });
+  fs.setze(`${u}/kassen/k1/verlauf/1`, { felder: ['bezeichnung'] });
+  fs.setze(`${u}/kassentage/k1_2026-11-20`, { status: 'abgeschlossen' });
+  fs.setze(`${u}/kassentage/k1_2026-11-20/fassungen/1`, { z_nummer: '17' });
+  fs.setze(`${u}/kassentage/k1_2026-11-20/fassungen/2`, { z_nummer: '18' });
+  fs.setze(`${u}/kassenbewegungen/k1_2026-11-20_001`, { art: 'ausgabe', betrag_cent: 500 });
+  fs.setze(`${u}/betriebsstaetten/b1`, { name: 'Laden' });
+  fs.setze(`${u}/kassenmeldungen/m1`, { stand: 'gemeldet' });
   fs.setze(`${u}/chats/c1`, { titel: 'x' });
   fs.setze(`${u}/chats/c1/messages/m1`, { text: 'x' });
   fs.setze(`${u}/monatsabschluesse/August-2026`, { festgeschrieben: true });
@@ -33,7 +42,9 @@ function befuelle(fs, uid) {
 }
 
 test('ARCHIV_SAMMLUNGEN in worker.js enthält die neuen Sammlungen; Speicher-Umzug und Export nutzen die Unterkollektionen', () => {
-  assert.deepEqual([...REGEL_SAMMLUNGEN].sort(), ['audit_v2', 'festschreibung', 'migration', 'oss_meldung', 'rechnungsnummern', 'steuerprofil', 'zaehler']);
+  assert.deepEqual([...REGEL_SAMMLUNGEN].sort(), ['audit_v2', 'betriebsstaetten', 'festschreibung', 'kassen', 'kassenbewegungen', 'kassenmeldungen', 'kassentage', 'migration', 'oss_meldung', 'rechnungsnummern', 'steuerprofil', 'zaehler']);
+  assert.deepEqual([...REGEL_UNTERSAMMLUNGEN].sort(), ['fassungen', 'verlauf', 'versionen'], 'KASSE-P1a: fassungen kommt dazu');
+  assert.deepEqual({ ...UNTERSAMMLUNGEN }, { chats: ['messages'], steuerprofil: ['verlauf'], dokumente: ['versionen'], oss_meldung: ['verlauf'], kassentage: ['fassungen'], kassen: ['verlauf'] });
   const quelle = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
   assert.match(quelle, /const ARCHIV_SAMMLUNGEN = \[[\s\S]*?\.\.\.REGEL_SAMMLUNGEN\s*\];/);
   assert.match(quelle, /\[\.\.\.ARCHIV_SAMMLUNGEN, 'messages', \.\.\.REGEL_UNTERSAMMLUNGEN\]/, 'Speicher-Umzug');
@@ -75,9 +86,10 @@ test('Unterkollektionen: Lesen über alle Nachfahren mit Seiten, Löschen in Bü
   const ex = await untersammlungenExport(UID, 't', fs.fetchFn);
   assert.equal(ex.dokumente_versionen.length, 650);
   assert.equal(ex.steuerprofil_verlauf.length, 1);
+  assert.equal(ex.kassentage_fassungen.length, 0, 'KASSE-P1a: Schlüssel vorhanden (hier ohne Kassendaten)');
   assert.ok(ex.dokumente_versionen.every((d) => d.name.includes(`/users/${UID}/`)));
   const bericht = await untersammlungenLoeschen(UID, 't', fs.fetchFn);
-  assert.deepEqual(bericht, { verlauf: 1, versionen: 650 });
+  assert.deepEqual(bericht, { verlauf: 1, versionen: 650, fassungen: 0 });
   assert.equal((await untersammlungLesen(UID, 'versionen', 't', fs.fetchFn)).length, 0);
   assert.ok(fs.lies(`users/${FREMD}/dokumente/x/versionen/v1`), 'fremdes Konto bleibt');
 });
@@ -88,4 +100,19 @@ test('Export gesperrter Konten ist vollständig: jede Sammlung aus ARCHIV_SAMMLU
   // Prüfer-Zugang zeigt die Festschreibungen (Nachweis), ohne die interne Sperrliste
   assert.match(quelle, /firestoreListAll\(`\$\{base\}\/festschreibung`, adminToken\)\.catch\(\(\) => \[\]\)/);
   assert.match(quelle, /JSON\.stringify\(\{ dokumente, monatsabschluesse, sammelbelege, festschreibungen \}\)/);
+});
+
+test('KASSE-P1a: Kassenbuch im Archiv-Register; Export und Löschlauf erfassen Fassungen und verlauf, fremdes Konto bleibt', async () => {
+  const fs = fakeFirestore();
+  befuelle(fs, UID);
+  befuelle(fs, FREMD);
+  const ex = await untersammlungenExport(UID, 't', fs.fetchFn);
+  assert.deepEqual(ex.kassentage_fassungen.map((d) => d.name.split('/').slice(-4).join('/')).sort(), ['kassentage/k1_2026-11-20/fassungen/1', 'kassentage/k1_2026-11-20/fassungen/2']);
+  assert.ok(ex.steuerprofil_verlauf.some((d) => d.name.includes('/kassen/k1/verlauf/1')), 'kassen/verlauf liegt in der verlauf-Liste');
+  assert.ok(ex.kassentage_fassungen.every((d) => d.name.includes(`/users/${UID}/`)));
+  const bericht = await untersammlungenLoeschen(UID, 't', fs.fetchFn);
+  assert.equal(bericht.fassungen, 2);
+  assert.equal(fs.pfade(`users/${UID}/`).filter((p) => /\/(fassungen|verlauf)\//.test(p)).length, 0);
+  assert.ok(fs.lies(`users/${FREMD}/kassentage/k1_2026-11-20/fassungen/1`), 'fremdes Konto bleibt');
+  assert.ok(fs.lies(`users/${UID}/kassen/k1`), 'Elterndokumente bleiben (löscht erst archivDatenLoeschen)');
 });
