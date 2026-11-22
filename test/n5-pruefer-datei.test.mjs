@@ -1,7 +1,10 @@
-// N5 (Gegenlesung O6): Prüferzugang gibt keine dauerhaften Download-Token-URLs mehr heraus, sondern kurzlebige signierte Links auf /pruefer-datei.
+// N5 (Gegenlesung O6) und H1-Fix: Der Prüferzugang gibt keine Datei-Adressen heraus, weder Firebase-Download-URLs (dauerhaftes token) noch signierte Kurzlinks
+// (sig/exp in der Adresse, landen im Cloudflare-Protokoll). Die Ausgabe enthält nur geprüfte Speicherpfade; die Datei kommt per POST /pruefer-datei mit dem
+// Prüfer-Token im Authorization-Header und dem Pfad im JSON-Körper.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, createHmac } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { readFileSync, existsSync } from 'node:fs';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
 import { erzeugeTestEnv, anfrage } from './harness.mjs';
 import { prueferDateiPfadOk } from '../worker.js';
@@ -40,119 +43,117 @@ function aufbau({ zugang = true, ablauf = Date.now() + 86400000, dateien = { [PF
     }
     return J({}, 200);
   };
-  const konsole = console.error; console.error = (...a) => log.konsole.push(a.join(' '));
-  return { fs, log, zurueck: () => { globalThis.fetch = original; console.error = konsole; } };
+  const alt = { error: console.error, warn: console.warn, log: console.log };
+  for (const k of ['error', 'warn', 'log']) console[k] = (...a) => log.konsole.push(a.map(String).join(' '));
+  return { fs, log, zurueck: () => { globalThis.fetch = original; Object.assign(console, alt); } };
 }
-const GEN = createHash('sha256').update(TOKEN).digest('hex').slice(0, 16); // Zugangs-Generation: Anfang des token_hash
-const sig = (env, uid, pfad, exp, g = GEN) => createHmac('sha256', createHash('sha256').update('pruefer-datei|' + env.TOKEN_ENCRYPTION_KEY).digest()).update(`${uid}\n${pfad}\n${exp}\n${g}`).digest('hex');
-const linkFuer = (env, pfad, { uid = UID, exp = Date.now() + 600000, s } = {}) => `/pruefer-datei?u=${uid}&p=${encodeURIComponent(pfad)}&exp=${exp}&g=${GEN}&sig=${s ?? sig(env, uid, pfad, exp)}`;
-const holeDaten = async (env, ip = '198.51.100.1') => anfrage(env, { path: '/pruefer-daten', body: { token: TOKEN }, ip });
-const get = (env, pfadUndQuery, ip = '198.51.100.2') => anfrage(env, { method: 'GET', path: pfadUndQuery, ip });
+const ORIGIN = 'https://app.kontolux-ai.de';
+const holeDaten = async (env, ip = '198.51.100.1', token = TOKEN) => anfrage(env, { path: '/pruefer-daten', body: {}, headers: { Authorization: `Bearer ${token}`, Origin: ORIGIN }, ip });
+const datei = (env, pfad, { token = TOKEN, ip = '198.51.100.2', body } = {}) => anfrage(env, { path: '/pruefer-datei', body: body ?? { pfad }, headers: token === null ? { Origin: ORIGIN } : { Authorization: `Bearer ${token}`, Origin: ORIGIN }, ip });
+const KEINE_ADRESSE = (text) => !/sig=|token=|exp=|[?&]g=|GEHEIMES-TOKEN|firebasestorage|storage\.googleapis|pruefer-datei|https?:\/\//i.test(text);
 
-test('N5: Prüfer-Daten enthalten nirgends mehr eine Token-URL; Kassenanhänge und Belege tragen signierte Kurzlinks, fremde Pfade null', async () => {
+test('H1-Fix: Prüfer-Daten enthalten nur geprüfte Speicherpfade, nirgends sig=, token=, exp= oder eine Datei-Adresse; fremde Pfade null', async () => {
   const a = aufbau(); const env = await erzeugeTestEnv();
   try {
     const r = await holeDaten(env);
     assert.equal(r.status, 200, await r.clone().text());
     const text = await r.text();
-    assert.ok(!/token=/i.test(text) && !text.includes('GEHEIMES-TOKEN') && !text.includes('firebasestorage.googleapis.com'), 'keine Download-Token-URL');
+    assert.ok(KEINE_ADRESSE(text), text.slice(0, 400));
     const j = JSON.parse(text);
     const an = j.kassentage[0].fassungen[0].anhaenge;
     assert.equal(an[0].pfad, PFAD_KASSE);
-    const u = new URL(an[0].url);
-    assert.equal(u.pathname, '/pruefer-datei');
-    assert.equal(u.searchParams.get('p'), PFAD_KASSE);
-    assert.equal(u.searchParams.get('sig'), sig(env, UID, PFAD_KASSE, u.searchParams.get('exp')));
-    const lebensdauer = Number(u.searchParams.get('exp')) - Date.now();
-    assert.ok(lebensdauer > 0 && lebensdauer <= 15 * 60 * 1000, 'höchstens 15 Minuten');
-    assert.equal(an[1].url, null, 'fremder Pfad: kein Link');
-    const d = j.dokumente[0];
-    assert.equal(new URL(d.storage_url).searchParams.get('p'), PFAD_BELEG);
-    assert.equal(new URL(d.xml_storage_url).searchParams.get('p'), `users/${UID}/rechnungen/x.xml`);
+    assert.equal(an[0].url, PFAD_KASSE, 'Anhang: url ist der geprüfte Pfad');
+    assert.equal(an[1].url, null, 'fremder Pfad: kein Verweis');
+    const d = j.dokumente.find((x) => x.name === 'Beleg');
+    assert.equal(d.storage_url, PFAD_BELEG);
+    assert.equal(d.xml_storage_url, `users/${UID}/rechnungen/x.xml`);
     assert.equal(d.url, null, 'fremde Datei-Adresse im Beleg wird nicht ausgegeben');
     assert.equal(r.headers.get('Cache-Control'), 'no-store');
   } finally { a.zurueck(); }
 });
 
-test('N5: ohne Secret entstehen keine Links (fail-closed), trotzdem keine Token-URL', async () => {
-  const a = aufbau(); const env = await erzeugeTestEnv({ TOKEN_ENCRYPTION_KEY: undefined });
-  try {
-    const text = await (await holeDaten(env, '198.51.100.3')).text();
-    assert.ok(!/token=|firebasestorage/i.test(text));
-    assert.equal(JSON.parse(text).kassentage[0].fassungen[0].anhaenge[0].url, null);
-  } finally { a.zurueck(); }
-});
-
-test('N5: gültiger Link liefert die Datei (Dienstkonto-Token, alter Bucket als Rückfall), PDF inline, Header gehärtet', async () => {
+test('H1-Fix: POST /pruefer-datei mit gültigem Token liefert die Datei (Dienstkonto, alter Bucket als Rückfall), PDF mit Typ, gehärtet, CORS für die Prüfer-Seite', async () => {
   const a = aufbau(); const env = await erzeugeTestEnv();
   try {
-    const r = await get(env, linkFuer(env, PFAD_KASSE));
+    const r = await datei(env, PFAD_KASSE);
     assert.equal(r.status, 200);
     assert.equal(await r.text(), 'PDF-INHALT');
     assert.equal(r.headers.get('Content-Type'), 'application/pdf');
+    assert.equal(r.headers.get('Content-Disposition'), 'inline');
     assert.equal(r.headers.get('X-Content-Type-Options'), 'nosniff');
     assert.match(r.headers.get('Cache-Control'), /no-store/);
-    assert.ok(a.log.storage.every(s => s.auth === 'Bearer dienstkonto-test' && !s.url.includes('token=')));
-    // der Link aus den Prüfer-Daten funktioniert unmittelbar
-    const j = await (await holeDaten(env, '198.51.100.4')).json();
-    const u = new URL(j.kassentage[0].fassungen[0].anhaenge[0].url);
-    const r2 = await get(env, u.pathname + u.search);
-    assert.equal(r2.status, 200);
-  } finally { a.zurueck(); }
-});
-
-test('N5: aktive Typen (HTML, SVG, XML) werden nie inline angezeigt', async () => {
-  const p = `users/${UID}/belege/evil.html`;
-  const a = aufbau({ dateien: { [p]: { typ: 'text/html', inhalt: '<script>alert(1)</script>' } } }); const env = await erzeugeTestEnv();
-  try {
-    const r = await get(env, linkFuer(env, p));
-    assert.equal(r.status, 200);
-    assert.equal(r.headers.get('Content-Type'), 'application/octet-stream');
-    assert.equal(r.headers.get('Content-Disposition'), 'attachment');
     assert.match(r.headers.get('Content-Security-Policy'), /sandbox/);
+    assert.equal(r.headers.get('Access-Control-Allow-Origin'), ORIGIN);
+    assert.ok(a.log.storage.length >= 1 && a.log.storage.every((s) => s.auth === 'Bearer dienstkonto-test' && !s.url.includes('token=')));
+    // der Pfad aus den Prüfer-Daten funktioniert unmittelbar; die UID im Körper ändert nichts (sie kommt nur aus dem Zugang)
+    const j = await (await holeDaten(env, '198.51.100.4')).json();
+    assert.equal((await datei(env, j.dokumente.find((x) => x.name === 'Beleg').storage_url, { ip: '198.51.100.5' })).status, 200);
+    const fremd = await datei(env, null, { body: { pfad: `users/${FREMD}/belege/geheim.pdf`, userId: FREMD, uid: FREMD }, ip: '198.51.100.6' });
+    assert.equal(fremd.status, 404);
+    // CORS-Vorabanfrage der Prüfer-Seite: Authorization-Header erlaubt
+    const pre = await anfrage(env, { method: 'OPTIONS', path: '/pruefer-datei', headers: { Origin: ORIGIN, 'Access-Control-Request-Headers': 'authorization,content-type' }, ip: '198.51.100.7' });
+    assert.match(pre.headers.get('Access-Control-Allow-Headers'), /Authorization/);
+    assert.match(pre.headers.get('Access-Control-Allow-Methods'), /POST/);
   } finally { a.zurueck(); }
 });
 
-test('N5: abgelaufen, manipuliert, fremder Nutzer, fremder Pfad: 401 ohne Dateizugriff und ohne Dateiinhalt', async () => {
-  const a = aufbau(); const env = await erzeugeTestEnv();
+test('H1-Fix: aktive Typen (HTML, SVG, XML) kommen nur als application/octet-stream zum Herunterladen', async () => {
+  const p = `users/${UID}/belege/evil.html`;
+  const a = aufbau({ dateien: { [p]: { typ: 'text/html', inhalt: '<script>alert(1)</script>' }, [`users/${UID}/belege/x.svg`]: { typ: 'image/svg+xml', inhalt: '<svg/>' } } }); const env = await erzeugeTestEnv();
   try {
-    const fremdPfad = `users/${FREMD}/kasse/k1/2026-11-02/x.pdf`;
-    const faelle = {
-      abgelaufen: linkFuer(env, PFAD_KASSE, { exp: Date.now() - 1000 }),
-      'Signatur verändert': linkFuer(env, PFAD_KASSE, { s: 'f'.repeat(64) }),
-      'Signatur fehlt': `/pruefer-datei?u=${UID}&p=${encodeURIComponent(PFAD_KASSE)}&exp=${Date.now() + 60000}`,
-      'Pfad getauscht (Signatur eines anderen Pfads)': `/pruefer-datei?u=${UID}&p=${encodeURIComponent(PFAD_BELEG)}&exp=${Date.now() + 600000}&g=${GEN}&sig=${sig(env, UID, PFAD_KASSE, Date.now() + 600000)}`,
-      'ablauf verlängert': (() => { const e = Date.now() - 5000; return `/pruefer-datei?u=${UID}&p=${encodeURIComponent(PFAD_KASSE)}&exp=${e + 9e6}&g=${GEN}&sig=${sig(env, UID, PFAD_KASSE, e)}`; })(),
-      'anderer Nutzer, Signatur des Nutzers': `/pruefer-datei?u=${FREMD}&p=${encodeURIComponent(PFAD_KASSE)}&exp=${Date.now() + 600000}&g=${GEN}&sig=${sig(env, UID, PFAD_KASSE, Date.now() + 600000)}`,
-      'fremder Pfad, gültig signiert für fremden Nutzer ohne Zugang': linkFuer(env, fremdPfad, { uid: FREMD }),
-      'Pfad unter eigener UID, aber anderer Nutzer in u': `/pruefer-datei?u=${FREMD}&p=${encodeURIComponent(PFAD_KASSE)}&exp=${Date.now() + 600000}&g=${GEN}&sig=${sig(env, FREMD, PFAD_KASSE, Date.now() + 600000)}`,
-    };
-    for (const [name, pfad] of Object.entries(faelle)) {
-      const r = await get(env, pfad, '198.51.100.9');
-      assert.ok([401, 403].includes(r.status), `${name}: ${r.status}`);
+    for (const [pfad, ip] of [[p, '198.51.100.8'], [`users/${UID}/belege/x.svg`, '198.51.100.9']]) {
+      const r = await datei(env, pfad, { ip });
+      assert.equal(r.status, 200);
+      assert.equal(r.headers.get('Content-Type'), 'application/octet-stream');
+      assert.equal(r.headers.get('Content-Disposition'), 'attachment');
+      assert.match(r.headers.get('Content-Security-Policy'), /sandbox/);
+    }
+  } finally { a.zurueck(); }
+});
+
+test('H1-Fix: ohne, falscher, abgelaufener, widerrufener oder gelöschter Zugang, fremder Pfad: 400/404 ohne Speicherzugriff und ohne Leck', async () => {
+  const env = await erzeugeTestEnv();
+  let a = aufbau();
+  try {
+    const faelle = [
+      ['ohne Token', await datei(env, PFAD_KASSE, { token: null, ip: '198.51.100.20' }), 400],
+      ['Token zu kurz', await datei(env, PFAD_KASSE, { token: 'kurz', ip: '198.51.100.20' }), 400],
+      ['falscher Token', await datei(env, PFAD_KASSE, { token: 'x'.repeat(32), ip: '198.51.100.20' }), 404],
+      ['Token im Körper statt Header', await datei(env, null, { token: null, body: { pfad: PFAD_KASSE, token: TOKEN }, ip: '198.51.100.21' }), 400],
+      ['ohne Pfad', await datei(env, null, { body: {}, ip: '198.51.100.21' }), 400],
+      ['Pfad keine Zeichenkette', await datei(env, null, { body: { pfad: ['x'] }, ip: '198.51.100.21' }), 400],
+      ['fremder Nutzer', await datei(env, `users/${FREMD}/kasse/k1/2026-11-02/x.pdf`, { ip: '198.51.100.22' }), 404],
+    ];
+    for (const [name, r, st] of faelle) {
+      assert.equal(r.status, st, name);
       const t = await r.text();
       assert.ok(!t.includes('PDF-INHALT') && !t.includes(UID) && !t.includes('users/'), `${name}: kein Leck`);
     }
-    assert.equal(a.log.storage.length, 0, 'bei ungültigem Link wird nie Storage gelesen');
+    assert.equal(a.log.storage.length, 0, 'nie Storage gelesen');
   } finally { a.zurueck(); }
+  for (const opt of [{ zugang: 'aus' }, { ablauf: Date.now() - 1000 }, { zugang: false }]) {
+    a = aufbau(opt);
+    try {
+      const r = await datei(env, PFAD_KASSE, { ip: '198.51.100.23' });
+      assert.equal(r.status, 404, JSON.stringify(opt));
+      assert.ok(!(await r.text()).includes('PDF-INHALT'));
+      assert.equal(a.log.storage.length, 0);
+    } finally { a.zurueck(); }
+  }
 });
 
-test('N5: Pfad-Traversal und Bereiche außerhalb der erlaubten Ordner: selbst mit gültiger Signatur nie ein Zugriff', async () => {
+test('H1-Fix: Pfad-Traversal und Bereiche außerhalb der erlaubten Ordner: nie ein Zugriff', async () => {
   const a = aufbau(); const env = await erzeugeTestEnv();
   try {
     const schlecht = [
       `users/${UID}/kasse/../../${FREMD}/belege/x.pdf`, `users/${UID}/kasse/%2e%2e/x.pdf`, `users/${UID}/kasse/%252e%252e/x.pdf`,
       `users/${UID}/kasse\\..\\x.pdf`, `users/${UID}/logo`, `users/${UID}/chats/c1/x.pdf`, `users/${UID}/kasse`, `users/${UID}/kasse//x.pdf`, `users/${UID}/kasse/./x.pdf`,
-      `users/${UID}/kasse/a\u0000b.pdf`, `users/${UID}/kasse/a%2fb.pdf`, `users/${UID}/kasse/a%5c..pdf`, `users/${UID}/kasse/%2E%2e/x.pdf`, `users/${UID}/kasse/%25252e%25252e/x.pdf`, `users/${UID}/kasse/a\u007fb.pdf`, `users/${UID}/kasse/k/..`, `users/${UID}x/kasse/k/x.pdf`, `/users/${UID}/kasse/k/x.pdf`, `users/${UID}/kasse/k/x.pdf/`,
+      `users/${UID}/kasse/a\u0000b.pdf`, `users/${UID}/kasse/a%2fb.pdf`, `users/${UID}/kasse/a%5c..pdf`, `users/${UID}/kasse/%2E%2e/x.pdf`, `users/${UID}/kasse/%25252e%25252e/x.pdf`, `users/${UID}/kasse/a\u007fb.pdf`, `users/${UID}/kasse/k/..`, `users/${UID}x/kasse/k/x.pdf`, `/users/${UID}/kasse/k/x.pdf`, `users/${UID}/kasse/k/x.pdf/`, `users/${UID}/angebote/x.pdf`, `users/${UID}/uploads`, `users/${UID}/kasse/${'x'.repeat(400)}.pdf`,
     ];
-    for (const p of schlecht) {
+    for (const [i, p] of schlecht.entries()) {
       assert.equal(prueferDateiPfadOk(UID, p), false, p);
-      const r = await get(env, linkFuer(env, p), `192.0.2.${schlecht.indexOf(p) + 1}`); // eigene IP je Fall (Grundlimit 20 je IP und 10 s)
-      assert.equal(r.status, 401, p);
-    }
-    // rohe, nicht passend kodierte Traversal-Schreibweisen in der Adresse
-    for (const roh of [`u=${UID}&p=users/${UID}/kasse/%2e%2e/%2e%2e/x&exp=${Date.now() + 60000}&g=${GEN}&sig=${'a'.repeat(64)}`, `u=${UID}&p=..%2f..%2fetc&exp=${Date.now() + 60000}&g=${GEN}&sig=${'a'.repeat(64)}`]) {
-      assert.equal((await get(env, `/pruefer-datei?${roh}`, '198.51.100.10')).status, 401);
+      const r = await datei(env, p, { ip: `192.0.2.${i + 1}` }); // eigene IP je Fall (Grundlimit 20 je IP und 10 s)
+      assert.ok([400, 404].includes(r.status), `${p}: ${r.status}`);
     }
     assert.equal(a.log.storage.length, 0);
     assert.equal(prueferDateiPfadOk(UID, PFAD_KASSE), true);
@@ -160,183 +161,108 @@ test('N5: Pfad-Traversal und Bereiche außerhalb der erlaubten Ordner: selbst mi
   } finally { a.zurueck(); }
 });
 
-test('N5: Prüferzugang widerrufen, abgelaufen oder gelöscht: auch ein noch gültiger Kurzlink liefert nichts (403)', async () => {
-  const env = await erzeugeTestEnv();
-  for (const opt of [{ zugang: 'aus' }, { ablauf: Date.now() - 1000 }, { zugang: false }]) {
-    const a = aufbau(opt);
-    try {
-      const r = await get(env, linkFuer(env, PFAD_KASSE), '198.51.100.11');
-      assert.equal(r.status, 403, JSON.stringify(opt));
-      assert.ok(!(await r.text()).includes('PDF-INHALT'));
-      assert.equal(a.log.storage.length, 0);
-    } finally { a.zurueck(); }
-  }
+test('H1-Fix: Zugang neu erteilt (neuer Token, neue Generation): der alte Token liefert keine Datei mehr, der neue schon', async () => {
+  const a = aufbau(); const env = await erzeugeTestEnv();
+  try {
+    assert.equal((await datei(env, PFAD_KASSE, { ip: '198.51.100.60' })).status, 200);
+    const NEU = 'z'.repeat(32);
+    a.fs.setze(`users/${UID}/profil/prueferZugang`, { token_hash: createHash('sha256').update(NEU).digest('hex'), aktiv: true, ablauf: new Date(Date.now() + 86400000).toISOString() });
+    const alt = await datei(env, PFAD_KASSE, { ip: '198.51.100.61' });
+    assert.equal(alt.status, 404, 'alter Token endet mit der Neuerteilung');
+    assert.ok(!(await alt.text()).includes('PDF-INHALT'));
+    assert.equal((await datei(env, PFAD_KASSE, { token: NEU, ip: '198.51.100.62' })).status, 200);
+  } finally { a.zurueck(); }
 });
 
-test('N5: Datei fehlt 404, Storage-Fehler 502, kein Leck; nur GET, Logs ohne URL und Token', async () => {
+test('H1-Fix: Datei fehlt 404, Storage-Fehler 502, ohne Leck; Logs ohne Pfad, Token und Adresse', async () => {
   const env = await erzeugeTestEnv();
   let a = aufbau({ dateien: {} });
   try {
-    assert.equal((await get(env, linkFuer(env, PFAD_KASSE), '198.51.100.12')).status, 404);
-    assert.equal((await anfrage(env, { method: 'POST', path: linkFuer(env, PFAD_KASSE), body: {}, ip: '198.51.100.12' })).status, 404, 'POST ist keine Route');
+    const r = await datei(env, PFAD_KASSE, { ip: '198.51.100.12' });
+    assert.equal(r.status, 404);
+    assert.deepEqual(await r.json(), { error: 'nicht_gefunden' });
   } finally { a.zurueck(); }
   a = aufbau({ storageStatus: 500 });
   try {
-    const r = await get(env, linkFuer(env, PFAD_KASSE), '198.51.100.13');
+    const r = await datei(env, PFAD_KASSE, { ip: '198.51.100.13' });
     assert.equal(r.status, 502);
     assert.ok(!(await r.text()).includes('users/'));
     await holeDaten(env, '198.51.100.14');
-    assert.ok(a.log.konsole.every(z => !/token|firebasestorage|users\/|sig=/i.test(z)), a.log.konsole.join('|'));
+    await datei(env, PFAD_BELEG, { token: 'y'.repeat(32), ip: '198.51.100.15' });
+    assert.ok(a.log.konsole.every((z) => !/token|firebasestorage|users\/|sig=|nnnnnnnn|yyyyyyyy/i.test(z)), a.log.konsole.join('|'));
   } finally { a.zurueck(); }
 });
 
-test('N5: Rate-Limit pro IP greift auch für /pruefer-datei (429; zuerst das allgemeine 20 je 10 s, dahinter das eigene 120 je 10 min)', async () => {
+test('H1-Fix: alte Wege sind entfernt: GET /pruefer-datei?…&sig= und POST /pruefer-datei-link liefern nichts, im Quelltext gibt es keinen Signierer mehr', async () => {
+  const a = aufbau(); const env = await erzeugeTestEnv();
+  try {
+    const alt = await anfrage(env, { method: 'GET', path: `/pruefer-datei?u=${UID}&p=${encodeURIComponent(PFAD_KASSE)}&exp=${Date.now() + 60000}&g=${'a'.repeat(16)}&sig=${'a'.repeat(64)}`, ip: '198.51.100.70' });
+    assert.equal(alt.status, 405);
+    const link = await anfrage(env, { path: '/pruefer-datei-link', body: { pfad: PFAD_KASSE }, headers: { Authorization: `Bearer ${TOKEN}`, Origin: ORIGIN }, ip: '198.51.100.71' });
+    assert.ok(link.status >= 400, String(link.status));
+    assert.ok(KEINE_ADRESSE(await link.text()));
+    assert.equal(a.log.storage.length, 0);
+  } finally { a.zurueck(); }
+  const quelle = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
+  assert.ok(!/pruefer-datei-link|prueferDateiSigner|prueferDateiLinkBau|pruefer-datei\?u=/.test(quelle), 'kein Erzeuger signierter Prüfer-Links mehr');
+});
+
+test('H1-Fix: Rate-Limit greift für POST /pruefer-datei (429; zuerst das allgemeine 20 je 10 s, dahinter 120 je 10 min)', async () => {
   const a = aufbau(); const env = await erzeugeTestEnv();
   try {
     let letzter = 0;
     for (let i = 0; i < 125; i++) {
-      letzter = (await get(env, '/pruefer-datei?u=x', '198.51.100.77')).status;
+      letzter = (await datei(env, PFAD_KASSE, { token: 'x'.repeat(32), ip: '198.51.100.77' })).status;
       if (letzter === 429) break;
     }
     assert.equal(letzter, 429);
   } finally { a.zurueck(); }
 });
 
-// ── Erneuerung beim Klick: /pruefer-datei-link ──
-const linkHolen = (env, pfad, token = TOKEN, ip = '198.51.100.30') => anfrage(env, { path: '/pruefer-datei-link', body: { pfad }, headers: { Authorization: `Bearer ${token}` }, ip });
-
-test('N5 Erneuerung: mit Zugangstoken kommt ein frischer, funktionierender Kurzlink (UID nur aus dem Zugang)', async () => {
-  const a = aufbau(); const env = await erzeugeTestEnv();
-  try {
-    const r = await linkHolen(env, PFAD_KASSE);
-    assert.equal(r.status, 200, await r.clone().text());
-    const j = await r.json();
-    const u = new URL(j.url);
-    assert.equal(u.searchParams.get('u'), UID);
-    assert.equal(u.searchParams.get('sig'), sig(env, UID, PFAD_KASSE, u.searchParams.get('exp')));
-    assert.ok(Number(u.searchParams.get('exp')) - Date.now() <= 15 * 60 * 1000);
-    assert.equal((await get(env, u.pathname + u.search, '198.51.100.31')).status, 200);
-    // fremde UID im Body ändert nichts
-    const r2 = await anfrage(env, { path: '/pruefer-datei-link', body: { pfad: PFAD_BELEG, userId: FREMD, uid: FREMD }, headers: { Authorization: `Bearer ${TOKEN}` }, ip: '198.51.100.32' });
-    assert.equal(new URL((await r2.json()).url).searchParams.get('u'), UID);
-  } finally { a.zurueck(); }
-});
-
-test('N5 Erneuerung: falscher/fehlender Token, widerrufener oder abgelaufener Zugang, fremder oder unerlaubter Pfad: nie ein Link', async () => {
-  const env = await erzeugeTestEnv();
-  let a = aufbau();
-  try {
-    assert.equal((await linkHolen(env, PFAD_KASSE, 'x'.repeat(32), '198.51.100.40')).status, 404);
-    assert.equal((await anfrage(env, { path: '/pruefer-datei-link', body: { pfad: PFAD_KASSE }, ip: '198.51.100.41' })).status, 400);
-    for (const p of [`users/${FREMD}/kasse/k1/2026-11-02/x.pdf`, `users/${UID}/logo`, `users/${UID}/kasse/../belege/x.pdf`, `users/${UID}/kasse/%2e%2e/x.pdf`, `users/${UID}/chats/c/x.pdf`, '']) {
-      const r = await linkHolen(env, p, TOKEN, '198.51.100.42');
-      assert.ok([400, 404].includes(r.status), p);
-      assert.ok(!(await r.text()).includes('pruefer-datei?'), p);
-    }
-  } finally { a.zurueck(); }
-  for (const opt of [{ zugang: false }, { ablauf: Date.now() - 1000 }]) {
-    a = aufbau(opt);
-    try {
-      const r = await linkHolen(env, PFAD_KASSE, TOKEN, '198.51.100.43');
-      assert.equal(r.status, 404, JSON.stringify(opt));
-      assert.ok(!(await r.text()).includes('sig='));
-    } finally { a.zurueck(); }
-  }
-});
-
-test('N5 Erneuerung: ohne Secret kein Link; Logs ohne Token; Rate-Limit greift; Prüfer-Seite ruft den Erneuerungsweg beim Klick auf', async () => {
-  let a = aufbau(); let env = await erzeugeTestEnv({ TOKEN_ENCRYPTION_KEY: undefined });
-  try { assert.equal((await linkHolen(env, PFAD_KASSE, TOKEN, '198.51.100.50')).status, 404); } finally { a.zurueck(); }
-  a = aufbau(); env = await erzeugeTestEnv();
-  try {
-    let letzter = 0;
-    for (let i = 0; i < 70; i++) { letzter = (await linkHolen(env, PFAD_KASSE, TOKEN, '198.51.100.51')).status; if (letzter === 429) break; }
-    assert.equal(letzter, 429);
-    assert.ok(a.log.konsole.every(z => !/token|sig=|users\//i.test(z)));
-  } finally { a.zurueck(); }
-  const { readFileSync, existsSync } = await import('node:fs');
-  const appDatei = new URL('../../Kontolux/index.html', import.meta.url);
-  if (existsSync(appDatei)) assert.match(readFileSync(appDatei, 'utf8'), /\/pruefer-datei-link/); // App-Repo daneben, wie beim Paritätswächter
-});
-
-test('F2-Fix A-H1: Chat-Uploads (users/{uid}/uploads/…) erhalten in den Prüfer-Daten einen Kurzlink (storage_url und url), ohne token=; Erneuerung und Abruf gehen', async () => {
+test('F2-Fix A-H1: Chat-Uploads (users/{uid}/uploads/…) erscheinen als Pfad in storage_url und url, ohne Adresse; Abruf per POST geht', async () => {
   const a = aufbau({ dateien: { [PFAD_UPLOAD]: { typ: 'application/pdf', inhalt: 'CHAT-BELEG' } } }); const env = await erzeugeTestEnv();
   try {
     const text = await (await holeDaten(env, '198.51.100.40')).text();
-    assert.ok(!/token=/i.test(text) && !text.includes('firebasestorage.googleapis.com'));
-    const d2 = JSON.parse(text).dokumente.find(d => d.name === 'E-Rechnung aus dem Chat');
-    for (const feld of ['storage_url', 'url']) {
-      assert.ok(typeof d2[feld] === 'string' && d2[feld].startsWith('https://'), `${feld} ist ein Kurzlink`);
-      assert.equal(new URL(d2[feld]).searchParams.get('p'), PFAD_UPLOAD);
-    }
-    assert.equal(prueferDateiPfadOk(UID, PFAD_UPLOAD), true);
-    assert.equal(prueferDateiPfadOk(UID, `users/${UID}/angebote/x.pdf`), false);
-    assert.equal(prueferDateiPfadOk(UID, `users/${UID}/uploads`), false);
-    const u = new URL(d2.storage_url);
-    const r = await get(env, u.pathname + u.search, '198.51.100.41');
+    assert.ok(KEINE_ADRESSE(text));
+    const d2 = JSON.parse(text).dokumente.find((d) => d.name === 'E-Rechnung aus dem Chat');
+    assert.equal(d2.storage_url, PFAD_UPLOAD);
+    assert.equal(d2.url, PFAD_UPLOAD);
+    const r = await datei(env, d2.storage_url, { ip: '198.51.100.41' });
     assert.equal(r.status, 200);
     assert.equal(await r.text(), 'CHAT-BELEG');
   } finally { a.zurueck(); }
-  const { readFileSync, existsSync } = await import('node:fs');
-  const appDatei = new URL('../../Kontolux/index.html', import.meta.url);
-  if (existsSync(appDatei)) assert.match(readFileSync(appDatei, 'utf8'), /safeHref\(d\.storage_url \|\| d\.url\)/, 'Prüfer-Seite zeigt storage_url || url');
 });
 
-test('F2-Fix N5-b: Link ist an die Zugangs-Generation gebunden: nach Widerruf und neuer Erteilung (neuer Token) enden alte Links, neue funktionieren', async () => {
-  const a = aufbau(); const env = await erzeugeTestEnv();
-  try {
-    const text = await (await holeDaten(env, '198.51.100.60')).text();
-    const alt = new URL(JSON.parse(text).dokumente[0].storage_url);
-    assert.equal(alt.searchParams.get('g'), GEN);
-    assert.equal((await get(env, alt.pathname + alt.search, '198.51.100.61')).status, 200);
-    // Widerruf, dann neue Erteilung: neuer Token, neuer token_hash, aktiv wieder true
-    a.fs.setze(`users/${UID}/profil/prueferZugang`, { token_hash: createHash('sha256').update('z'.repeat(32)).digest('hex'), aktiv: true, ablauf: new Date(Date.now() + 86400000).toISOString() });
-    assert.equal((await get(env, alt.pathname + alt.search, '198.51.100.62')).status, 403, 'alter Link endet mit der Generation');
-    // g gefälscht auf die neue Generation: Signatur passt nicht
-    const neuGen = createHash('sha256').update('z'.repeat(32)).digest('hex').slice(0, 16);
-    const q = new URLSearchParams(alt.search); q.set('g', neuGen);
-    assert.equal((await get(env, alt.pathname + '?' + q, '198.51.100.63')).status, 401);
-    // ohne g: ungültig
-    q.delete('g');
-    assert.equal((await get(env, alt.pathname + '?' + q, '198.51.100.64')).status, 401);
-  } finally { a.zurueck(); }
-});
-
-// G2-Fix M-1: Chat-Uploads speichern den rohen Dateinamen (index.html: users/{uid}/uploads/{zeit}_{name}). #, %, ?, Leerzeichen und Umlaute im Namen dürfen den Link
-// beim Prüfer nicht kosten (live sieht er den Beleg heute); Kurzlink, Signatur, Erneuerung und Storage-Abruf transportieren den Namen verlustfrei und ohne Doppelkodierung.
-test('G2-Fix M-1: Dateinamen mit #, %, ?, Leerzeichen und Umlaut: Kurzlink in den Prüfer-Daten, p dekodiert exakt, Abruf und Erneuerung gehen, Storage einmal kodiert', async () => {
+// G2-Fix M-1 / H1-Fix: Chat-Uploads speichern den rohen Dateinamen. #, %, ?, Leerzeichen und Umlaute reisen im JSON-Körper verlustfrei; der Storage-Abruf kodiert genau einmal.
+test('H1-Fix: Dateinamen mit #, %, ?, Leerzeichen, Umlaut, + und &: Pfad in den Prüfer-Daten exakt, POST-Abruf geht, Storage einmal kodiert, Adresse ohne Pfad', async () => {
   const namen = ['1732_Rechnung #1001.pdf', '1733_100% Rabatt.pdf', '1734_Frage?.pdf', '1735_Müller.pdf', '1736_Quittung 50%.jpg', '1737_Beleg..pdf', '1738_a+b&c=d.pdf'];
   const pfade = namen.map((n) => `users/${UID}/uploads/${n}`);
   const dateien = Object.fromEntries(pfade.map((p, i) => [p, { typ: 'application/pdf', inhalt: `DATEI-${i}` }]));
   const a = aufbau({ dateien }); const env = await erzeugeTestEnv();
   try {
     pfade.forEach((p, i) => a.fs.setze(`users/${UID}/dokumente/m${i}`, { name: `M1-${i}`, typ: 'rechnung_eingehend', url: dl(p) }));
-    for (const p of pfade) assert.equal(prueferDateiPfadOk(UID, p), true, p);
     const text = await (await holeDaten(env, '192.0.2.200')).text();
-    assert.ok(!/token=/i.test(text) && !text.includes('firebasestorage.googleapis.com'));
+    assert.ok(!/token=|firebasestorage/i.test(text));
     const doks = JSON.parse(text).dokumente;
     for (let i = 0; i < pfade.length; i++) {
       const d = doks.find((x) => x.name === `M1-${i}`);
-      assert.ok(typeof d.url === 'string' && d.url.startsWith('https://'), `${namen[i]}: Kurzlink vorhanden`);
-      const u = new URL(d.url);
-      assert.equal(u.searchParams.get('p'), pfade[i], `${namen[i]}: verlustfrei`);
+      assert.equal(d.url, pfade[i], `${namen[i]}: verlustfrei`);
       const vorher = a.log.storage.length;
-      const r = await get(env, u.pathname + u.search, `192.0.2.${100 + i}`);
+      const r = await datei(env, d.url, { ip: `192.0.2.${100 + i}` });
       assert.equal(r.status, 200, namen[i]);
       assert.equal(await r.text(), `DATEI-${i}`);
       const abruf = a.log.storage.slice(vorher).map((x) => x.url);
-      assert.ok(abruf.every((x) => x.includes(`/o/${encodeURIComponent(pfade[i])}?alt=media`)), `${namen[i]}: genau einmal kodiert`);
-      assert.ok(abruf.every((x) => !/%25(23|3F|25|20)/i.test(x) || namen[i].includes('%')), 'keine Doppelkodierung');
-      // Erneuerung beim Klick wie in index.html: pfad aus searchParams
-      const ern = await anfrage(env, { path: '/pruefer-datei-link', body: { pfad: u.searchParams.get('p') }, headers: { Authorization: `Bearer ${TOKEN}` }, ip: `192.0.2.${120 + i}` });
-      assert.equal(ern.status, 200, namen[i]);
-      const neu = new URL((await ern.json()).url);
-      assert.equal(neu.searchParams.get('p'), pfade[i]);
-      assert.equal((await get(env, neu.pathname + neu.search, `192.0.2.${140 + i}`)).status, 200, `${namen[i]}: erneuerter Link`);
+      assert.ok(abruf.length >= 1 && abruf.every((x) => x.includes(`/o/${encodeURIComponent(pfade[i])}?alt=media`)), `${namen[i]}: genau einmal kodiert`);
     }
-    // die Signatur gilt nur für den exakten Namen: ein anders kodierter oder abgeschnittener Name (#-Fragment) passt nicht
-    const u0 = new URL(doks.find((x) => x.name === 'M1-0').url);
-    const ohneKodierung = `/pruefer-datei?u=${UID}&p=${pfade[0]}&exp=${u0.searchParams.get('exp')}&g=${GEN}&sig=${u0.searchParams.get('sig')}`;
-    assert.equal((await get(env, ohneKodierung, '192.0.2.201')).status, 401, 'roher # schneidet ab: Signatur passt nicht');
   } finally { a.zurueck(); }
+});
+
+test('H1-Fix: Prüfer-Seite (App daneben) holt Dateien per POST /pruefer-datei mit Bearer-Token und benutzt den alten Erneuerungsweg nicht mehr', () => {
+  const appDatei = new URL('../../Kontolux/index.html', import.meta.url);
+  if (!existsSync(appDatei)) return; // App-Repo daneben, wie beim Paritätswächter
+  const html = readFileSync(appDatei, 'utf8');
+  assert.ok(!html.includes('/pruefer-datei-link'), 'kein Erneuerungsweg mehr');
+  assert.match(html, /WORKER_BASE_URL \+ '\/pruefer-datei'/);
+  assert.match(html, /prueferDateiLinkHtml\(d\.storage_url \|\| d\.url,/, 'Belegliste nutzt storage_url || url');
+  assert.ok(!/pruefer-datei\?/.test(html), 'keine Datei-Adresse mit Parametern');
 });
