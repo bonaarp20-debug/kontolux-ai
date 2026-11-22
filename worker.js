@@ -5215,12 +5215,20 @@ async function handleDatevExport(body, env, cors = {}) {
     let kasseMehrzweck = 0; let kasseAusgabeJahr = 0; let kasseBewGebucht = 0; let kassePrivat = 0;
     const userBasis = base; // users/{uid}
     let kassenDocs = null;
-    const kassenLaden = async () => {
+    let kassenVerweigert = false; // G2-Fix H-1: 403 auf kassen bei einem Konto ohne Kassenbelege (Regeln noch alt) als „keine Kassen“ gewertet
+    // G2-Fix H-1: ohneKassenbuch = der Aufrufer weiß, dass das Konto keine Kassenbelege hat (SumUp-Pfad bei !hatKasseDok). Nur dann gilt ein 403 als „keine Kassen“:
+    // Die Live-Regeln vor dem Kassenbuch-Release haben keinen kassen-Block (Standard-Verweigerung), ohne Kassenbuch gibt es dort nichts zu lesen. Jeder andere Fehler,
+    // und jeder Aufruf aus einem Kassenbuch-Pfad (Kassenbelege, Privatvorgänge aus der Kasse, Kassenbewegungen), bleibt fail-closed (503), auch nach einem früheren 403.
+    const kassenLaden = async ({ ohneKassenbuch = false } = {}) => {
       if (kassenDocs === null) {
         const m = new Map();
-        try { for (const k of await firestoreListAll(`${base}/kassen`, authHeader)) m.set(String(k.name || '').split('/').pop(), datevDekodiereFelder(k.fields || {})); } catch (e) { console.error('DATEV-Export Kassen:', e?.message); throw new DatevLesefehler('Die Kassen des Kassenbuchs konnten nicht gelesen werden.'); }
+        try { for (const k of await firestoreListAll(`${base}/kassen`, authHeader)) m.set(String(k.name || '').split('/').pop(), datevDekodiereFelder(k.fields || {})); } catch (e) {
+          if (ohneKassenbuch && /^Firestore read failed \(403\)/.test(String(e?.message || ''))) { console.warn('DATEV-Export Kassen: 403 ohne Kassenbelege, als keine Kassen gewertet'); kassenVerweigert = true; kassenDocs = m; return kassenDocs; }
+          console.error('DATEV-Export Kassen:', e?.message); throw new DatevLesefehler('Die Kassen des Kassenbuchs konnten nicht gelesen werden.');
+        }
         kassenDocs = m;
       }
+      if (kassenVerweigert && !ohneKassenbuch) throw new DatevLesefehler('Die Kassen des Kassenbuchs konnten nicht gelesen werden.');
       return kassenDocs;
     };
     const kassenKonto = async (kasseId) => {
@@ -5367,7 +5375,7 @@ async function handleDatevExport(body, env, cors = {}) {
       // A-H2: SumUp-Barbeleg einer Kasse mit Datenquelle sumup_integration: gegen deren Kassenkonto statt gegen die Bank (Belegfeld 1 bleibt der Transaktionscode)
       let sumupKasse = null;
       if (!istKasseAusgabe && firestoreValue(fields.quelle) === 'sumup_webhook' && istSumupBarbeleg({ quelle: 'sumup_webhook', typ: firestoreValue(fields.typ), deleted: firestoreValue(fields.deleted), storniert: firestoreValue(fields.storniert), buchungstext: firestoreValue(fields.buchungstext), name: firestoreValue(fields.name) })) {
-        sumupKasse = sumupKasseWahl(await kassenLaden(), String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || ''));
+        sumupKasse = sumupKasseWahl(await kassenLaden({ ohneKassenbuch: !hatKasseDok }), String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || ''));
         if (sumupKasse && firestoreValue(fields.bezahlt) === true && String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || '').slice(0, 4) === String(jahr)) { if (sumupKasse.mehrere) kasseSumupMehrere++; else kasseSumupBar++; }
       }
       const kasseKonto = istKasseAusgabe ? await kassenKonto(firestoreValue(fields.kasse_id)) : (sumupKasse && sumupKasse.id ? await kassenKonto(sumupKasse.id) : bankkonto);
