@@ -20,7 +20,7 @@ import { profilBereit, wirkPerioden, nachFestschreibungAntwort, festPruefungMark
 import { legacyHash } from './drift.js';
 import { heuteBerlin } from './oss-meldung.js';
 import { KASSE_PFADE, FEATURE, aufbewahrungBis, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, pruefeBewegung, kernFassung, stammKombination, PRIVAT_ARTEN } from './kasse-form.js';
-import { P, kasseIdAus, kassennummer, zeigerAus, zeigerPasst, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern, KasseLesefehler } from './kasse-daten.js';
+import { P, kasseIdAus, kassennummer, zeigerAus, zeigerPasst, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern, ohneStornoPaare, KasseLesefehler } from './kasse-daten.js';
 
 export { KASSE_PFADE, FEATURE, aufbewahrungBis, pruefeKasse, pruefeKassentag };
 export const BEWEGUNGEN_MAX_JE_TAG = 999;
@@ -407,11 +407,11 @@ async function abschliessen(c) {
     if (zeiger && !zeigerPasst(zeiger, (await fs.get(P.kassentag(uid, Steuerkern.kassentagId(kasseId, zeiger.tag))))?.daten)) throw new KasseLesefehler('KASSENZEIGER_UNGUELTIG', 'Kasse: Zeiger passt nicht zum Tagesplatz');
     const letzter = zeiger ? { daten: { geschaeftstag: zeiger.tag, gezaehlt_cent: zeiger.gezaehlt_cent } } : null;
     // O6 H1: Bewegungen an einem offenen Tag VOR diesem Tag (nach dem letzten Abschluss) fehlten in der Soll-Rechnung dieses Abschlusses und wären danach gesperrt
-    // (SPAETERE_TAGE): der Nutzer schließt zuerst diese Tage ab (oder storniert die Bewegung).
+    // (SPAETERE_TAGE): der Nutzer schließt zuerst diese Tage ab (oder storniert die Bewegung: Paare aus Original und Storno zählen nicht, B-M1).
     const lueckeVon = letzter ? Steuerkern.addiereTage(letzter.daten.geschaeftstag, 1) : kasse.anfangsbestand_am;
     const lueckeBis = Steuerkern.addiereTage(tag, -1);
     if (lueckeVon <= lueckeBis) {
-      const offen = await bewegungenImBereich(fs, uid, kasseId, lueckeVon, lueckeBis);
+      const offen = ohneStornoPaare(await bewegungenImBereich(fs, uid, kasseId, lueckeVon, lueckeBis));
       if (offen.length) return { antwort: fehlerAntwort(409, 'OFFENE_BEWEGUNGEN_VORTAG', cors, { tage: [...new Set(offen.map((d) => d.daten.geschaeftstag))].sort().slice(0, 31) }) };
     }
     const anfangsbestand = letzter ? letzter.daten.gezaehlt_cent : kasse.anfangsbestand_cent;
@@ -558,7 +558,8 @@ async function ruhetage(c, aktion) {
     }
     if (tage[0] < kasse.anfangsbestand_am) return { antwort: fehlerAntwort(422, 'VOR_ANFANGSBESTAND', cors, { anfangsbestand_am: kasse.anfangsbestand_am }) };
     const bew = await bewegungenImBereich(fs, uid, kasseId, tage[0], tage[tage.length - 1]);
-    const mit = bew.find((d) => tage.includes(d.daten.geschaeftstag));
+    // B-M1: eine stornierte Bewegung (Original und Storno am selben Tag) hindert den Ruhetag nicht
+    const mit = ohneStornoPaare(bew).find((d) => tage.includes(d.daten.geschaeftstag));
     if (mit) return { antwort: fehlerAntwort(409, 'RUHETAG_MIT_BEWEGUNG', cors, { geschaeftstag: mit.daten.geschaeftstag }) };
     const ts = zeitstempel(zeit);
     const writes = tage.map((t, i) => schreibe.anlegen(P.kassentag(uid, ids[i]), {

@@ -109,6 +109,15 @@ export async function bewegungenImBereich(fs, uid, kasseId, vonTag, bisTag) {
   return r;
 }
 
+// B-M1 (o-p1c-gegenlesung): Ein Bewegungs-Storno liegt immer am Tag des Originals; Original und Storno (storno_von) heben sich auf. Für die Frage
+// „hat dieser Tag Bewegungen?“ (Lücke vor einem Abschluss, O6 H1; Ruhetag) zählen solche Paare nicht, sonst erzwänge eine falsch datierte und stornierte Bewegung
+// einen Schein-Abschluss für einen geschlossenen Tag. Ein Storno ohne sein Original in der Liste zählt weiter (fail-closed). Der Soll-Bestand rechnet beide (Summe 0).
+export function ohneStornoPaare(liste) {
+  const ids = new Set(liste.map(idVon));
+  const aufgehoben = new Set(liste.filter((d) => d.daten && d.daten.art === 'storno' && ids.has(d.daten.storno_von)).map((d) => d.daten.storno_von));
+  return liste.filter((d) => !aufgehoben.has(idVon(d)) && !(d.daten && d.daten.art === 'storno' && aufgehoben.has(d.daten.storno_von)));
+}
+
 // Nur die für kassenSoll nötigen Felder einer Bewegung
 export function bewegungFuerKern(d) {
   const o = { art: d.art, betrag_cent: d.betrag_cent };

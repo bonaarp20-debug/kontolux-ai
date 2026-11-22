@@ -2181,3 +2181,29 @@ test('O6 N3: eine vorhandene tagesdaten.beschreibung wird beim Abschluss nicht Ã
   assert.equal((await u.tagRufe(abschluss(id, '2026-11-03', { gezaehlt_cent: 70700 + 60700 }))).status, 200);
   assert.equal(u.fs.lies(P('tagesdaten/2026-11-03')).beschreibung, 'Tagesabschluss Theke');
 });
+
+test('hyg B-M1: eine falsch datierte und stornierte Bewegung (Original + Storno am selben Tag) hindert weder den Ruhetag noch den Abschluss des Folgetags; eine offene Bewegung weiter schon', async () => {
+  for (const weg of ['ruhetag', 'folgetag']) {
+    const u = umgebung();
+    const id = await u.legeKasseAn();
+    const b = await u.bewRufe(bewegung(id, '2026-11-02', 'entnahme', 2000, { eigenbeleg_pfad: eigen(id, '2026-11-02') }));
+    assert.equal(b.status, 200, JSON.stringify(b.json));
+    // solange offen: beides gesperrt
+    assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-02' })).json.fehler[0].code, 'RUHETAG_MIT_BEWEGUNG');
+    assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-03'))).json.fehler[0].code, 'OFFENE_BEWEGUNGEN_VORTAG');
+    assert.equal((await u.bewRufe(stornoBew(id, b.json.bewegung_id))).status, 200);
+    if (weg === 'ruhetag') {
+      const r = await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-02' });
+      assert.equal(r.status, 200, JSON.stringify(r.json));
+    } else {
+      const r = await u.tagRufe(ohneUmsatz(id, '2026-11-03'));
+      assert.equal(r.status, 200, JSON.stringify(r.json));
+      assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-03`)).anfangsbestand_cent, 10000, 'Paar wirkt nicht auf den Bestand');
+    }
+    // eine zweite, offene Bewegung an einem anderen offenen Tag sperrt weiter
+    const c = await u.bewRufe(bewegung(id, '2026-11-05', 'geldtransit_bank_ein', 500));
+    assert.equal(c.status, 200, JSON.stringify(c.json));
+    assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-06'))).json.fehler[0].code, 'OFFENE_BEWEGUNGEN_VORTAG');
+    assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-05' })).json.fehler[0].code, 'RUHETAG_MIT_BEWEGUNG');
+  }
+});
