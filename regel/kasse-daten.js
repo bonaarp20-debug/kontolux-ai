@@ -152,6 +152,19 @@ export function stammVerlaufMit(verlauf, feld, wert, ab, am) {
   return { ...verlauf, [feld]: [...verlauf[feld].filter((e) => e.ab < ab), { wert, ab, am }] };
 }
 
+// K1-Fix N-1: verlustfreie Verdichtung. Ein Eintrag mit demselben Wert wie sein Vorgänger ändert für keinen Tag etwas (stammAm liefert denselben Wert) und fällt weg;
+// der LETZTE Eintrag bleibt immer (sein ab muss dem …_ab der Kasse gleichen, stammVerlaufAus). Solche Einträge entstehen bei system_wechseln (es trägt alle drei Felder
+// neu ein, auch unveränderte). Ohne Verdichtung füllten wiederholte Systemwechsel die Liste und sperrten danach jeden Wechsel (422 STAMMDATEN_VERLAUF_VOLL).
+// Den vollständigen Weg der Beschlüsse zeigen weiter Audit-Kette und verlauf.
+export function stammVerlaufVerdichten(verlauf) {
+  const aus = {};
+  for (const feld of STAMM_FELDER) {
+    const liste = verlauf[feld];
+    aus[feld] = liste.filter((e, i) => i === 0 || i === liste.length - 1 || e.wert !== liste[i - 1].wert);
+  }
+  return aus;
+}
+
 // Startliste für eine Kasse ohne Historie (anlegen: alle ab = anfangsbestand_am). Für eine Kasse vor J1 nur, was sicher bekannt ist: der Wert der Kasse ab seinem
 // …_ab; karte_ueber_integration ab dem Anfangsbestand nur, wenn der Verlauf keinen Wechsel dieses Felds nennt (sonst ab kartenAbSonst, z. B. nächster freier Tag).
 // Tage davor haben dann keinen Wert (fehlend: 409, nichts geraten).

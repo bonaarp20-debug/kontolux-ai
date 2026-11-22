@@ -2698,3 +2698,46 @@ test('hyg B-N3: ruhetag_aufheben macht einen irrtümlichen Ruhetag nach dem letz
   const f = await u.tagRufe({ aktion: 'ruhetag_aufheben', kasse_id: id, geschaeftstag: '2026-11-05', grund: 'x' });
   assert.deepEqual([f.status, f.json.feld], [400, 'grund']);
 });
+
+// K1-Fix N-1 (Gegenlesung E): 422 STAMMDATEN_VERLAUF_VOLL war ungetestet; system_wechseln trug unveränderte Felder immer neu ein und füllte die Liste.
+const voll = (u, id, werte) => {
+  const pk = P(`kassen/${id}`);
+  const k = u.fs.lies(pk);
+  const art = werte.map((wert, i) => ({ wert, ab: K.addiereTage('2026-04-15', i), am: null }));
+  u.fs.setze(pk, { ...k, art: art.at(-1).wert, art_ab: art.at(-1).ab, stammdaten_verlauf: { ...k.stammdaten_verlauf, art } });
+  return u.fs.lies(pk);
+};
+test('K1-Fix N-1: 200 echte Wechsel eines Felds: der nächste Wechsel 422 STAMMDATEN_VERLAUF_VOLL, nichts geschrieben; Wechsel anderer Felder gehen weiter', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const vorher = voll(u, id, Array.from({ length: 200 }, (_, i) => (i % 2 ? 'pc_kasse' : 'registrierkasse')));
+  assert.equal(vorher.stammdaten_verlauf.art.length, 200);
+  const r = await u.kasse({ aktion: 'aendern', kasse_id: id, art: 'registrierkasse', art_ab: '2026-11-01' });
+  assert.deepEqual([r.status, r.json.error ?? r.json.fehler?.[0]?.code, r.json.max], [422, 'STAMMDATEN_VERLAUF_VOLL', 200], JSON.stringify(r.json));
+  assert.deepEqual(u.fs.lies(P(`kassen/${id}`)), vorher, 'nichts geschrieben');
+  // ein anderes Feld (Datenquelle) hat Platz: geht
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, datenquelle: 'sumup_integration', datenquelle_ab: '2026-11-01' })).status, 200);
+});
+
+test('K1-Fix N-1: system_wechseln mit unveränderter Art bei voller Liste geht (verlustfreie Verdichtung gleicher Werte), die Werte an jedem Tag bleiben gleich', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  // 199 Wechsel im Wechsel, dazu ein gleicher Wert am Ende (wie nach einem früheren Systemwechsel): 200 Einträge
+  const werte = [...Array.from({ length: 199 }, (_, i) => (i % 2 ? 'pc_kasse' : 'registrierkasse')), 'registrierkasse'];
+  const vorher = voll(u, id, werte);
+  const body = { aktion: 'system_wechseln', anfrage_id: 'wechsel-voll-01', kasse_id: id, gueltig_ab: '2026-11-01', art: 'registrierkasse', grundaufzeichnung: 'tse_kasse', datenquelle: 'manuell', software: 'NeuKasse' };
+  const r = await u.kasse(body);
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  const k = u.fs.lies(P(`kassen/${id}`));
+  assert.equal(k.stammdaten_verlauf.art.length, 200, '201 Einträge, davon einer ohne Wirkung (gleicher Wert wie der Vorgänger) entfernt');
+  assert.deepEqual(k.stammdaten_verlauf.art.at(-1), { wert: 'registrierkasse', ab: '2026-11-01', am: k.stammdaten_verlauf.art.at(-1).am });
+  assert.equal(k.art_ab, '2026-11-01');
+  // verlustfrei: für jeden Tag vom 15.04. bis 02.11. derselbe Wert wie vorher (vorher ab 31.10. registrierkasse)
+  const am = (liste, tag) => liste.filter((e) => e.ab <= tag).at(-1).wert;
+  for (let i = 0; i < 202; i++) {
+    const tag = K.addiereTage('2026-04-15', i);
+    assert.equal(am(k.stammdaten_verlauf.art, tag), am(vorher.stammdaten_verlauf.art, tag), tag);
+  }
+  // die Kasse liest sich weiter (Abschluss mit Historie)
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200);
+});

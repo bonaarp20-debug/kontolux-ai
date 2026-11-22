@@ -22,7 +22,7 @@ import { heuteBerlin } from './oss-meldung.js';
 import { KASSE_PFADE, FEATURE, aufbewahrungBis, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, pruefeBewegung, kernFassung, stammKombination, PRIVAT_ARTEN } from './kasse-form.js';
 import {
   P, kasseIdAus, kassennummer, zeigerAus, zeigerPasst, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern, ohneStornoPaare, KasseLesefehler,
-  STAMM_FELDER, STAMMDATEN_VERLAUF_MAX, stammVerlaufAus, stammAm, stammVerlaufMit, stammVerlaufStart,
+  STAMM_FELDER, STAMMDATEN_VERLAUF_MAX, stammVerlaufAus, stammAm, stammVerlaufMit, stammVerlaufStart, stammVerlaufVerdichten,
 } from './kasse-daten.js';
 
 export { KASSE_PFADE, FEATURE, aufbewahrungBis, pruefeKasse, pruefeKassentag };
@@ -254,6 +254,9 @@ async function kasseAktion(c, aktion) {
       geaendert.push('meldestatus');
     }
     if (geaendert.some((x) => STAMM_FELDER.includes(x))) {
+      // K1-Fix N-1: erst verlustfrei verdichten (gleiche Werte hintereinander), dann die Grenze prüfen. Echte 200 Wechsel desselben Felds an 200 Geschäftstagen bleiben
+      // gesperrt (422, nichts geschrieben): ältere Einträge zu streichen wäre nicht verlustfrei (über eine Kette von Stornos des jeweils letzten Abschlusses kann auch ein alter Tag neu erfasst werden).
+      sv = stammVerlaufVerdichten(sv);
       if (STAMM_FELDER.some((x) => sv[x].length > STAMMDATEN_VERLAUF_MAX)) return { antwort: fehlerAntwort(422, 'STAMMDATEN_VERLAUF_VOLL', cors, { max: STAMMDATEN_VERLAUF_MAX }) };
       neu.stammdaten_verlauf = sv;
     }
