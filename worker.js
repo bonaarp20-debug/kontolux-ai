@@ -3096,7 +3096,7 @@ export async function detectAndParseERechnung(bytes, filename, mimeType, sellerN
       // Hotfix: PDFDocument.load entpackt Objekt- und XRef-Ströme ohne Grenze (Entpack-Bombe: 474 Byte -> 200 MB, Isolat-Abbruch).
       // Gleicher Ladeweg mit Grenze (regel/pdf-sicher.js, je Strom 4 MB, je Datei 16 MB); bei Überschreitung wie jede unlesbare Datei: keine E-Rechnung.
       const geladen = await ladePdfBegrenzt(bytes, { ignoreEncryption: true, updateMetadata: true });
-      if (geladen.zuGross) { console.warn('detectAndParseERechnung: PDF nicht lesbar (Entpack-Grenze)'); return { format: null }; }
+      if (geladen.zuGross) { console.warn(`detectAndParseERechnung: PDF nicht lesbar (${geladen.isolatVoll ? 'Isolat-Obergrenze' : 'Entpack-Grenze'})`); return { format: null }; }
       const pdfDoc = geladen.pdf;
       const embedded = await findEmbeddedXml(pdfDoc);
       if (!embedded) return { format: null };

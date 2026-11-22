@@ -485,3 +485,20 @@ test('Vorab-Scan Regression: signiertes ZUGFeRD-PDF (inkrementelles Update, /Con
   assert.equal(objektBild(r.pdf), objektBild(await ALT(datei)));
   assert.deepEqual(await detectAndParseERechnung(new Uint8Array(datei), 'Rechnung.pdf', 'application/pdf', ''), ERWARTET);
 });
+
+test('Zweite Lesung F-4: volle Obergrenze je Isolat wird getrennt protokolliert (ohne Kundendaten)', async () => {
+  const p = mit128MB(`import { detectAndParseERechnung } from './worker.js';
+    const w = []; console.warn = (...a) => w.push(a.join(' '));
+    const K = ${JSON.stringify(KATALOG)};
+    const datei = (inhalt) => new Uint8Array(Buffer.from(K + '3 0 obj\\n' + inhalt + '\\nendobj\\ntrailer\\n<< /Root 1 0 R >>\\n%%EOF\\n'));
+    for (let r = 0; r < 4; r += 1) { let s = '['; for (let i = 0; i < 49000; i += 1) s += (r * 1000000 + i) + ' 0 R '; await detectAndParseERechnung(datei(s + ']'), 'Kunde-Mueller.pdf', 'application/pdf', ''); }
+    w.length = 0;
+    const e = await detectAndParseERechnung(datei('<< /A 1 >>'), 'Kunde-Mueller.pdf', 'application/pdf', '');
+    console.log(JSON.stringify({ e, w }));`);
+  assert.equal(p.status, 0, p.err);
+  const { e, w } = JSON.parse(p.out);
+  assert.deepEqual(e, { format: null });
+  assert.ok(w.some((z) => z.includes('Isolat-Obergrenze')), w.join('|'));
+  assert.ok(w.every((z) => !z.includes('Mueller')), 'kein Dateiname im Log');
+  // sonst weiter „Entpack-Grenze“ (Test oben: Bomben)
+});
