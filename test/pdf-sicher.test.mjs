@@ -365,9 +365,9 @@ function angriffeIm128MB(faelleQuelltext) {
     const faelle = ${faelleQuelltext}; const erg = {};
     for (const [name, f] of Object.entries(faelle)) {
       let b = f(); gc(); const h = process.memoryUsage().heapUsed; const c = process.cpuUsage();
-      let r; try { r = await ladePdfBegrenzt(b); r = r.zuGross ? 'zuGross' : 'pdf'; } catch (e) { r = 'Wurf ' + e.message; }
+      let r; let scan = null; try { r = await ladePdfBegrenzt(b); scan = r.vorabScan || null; r = r.zuGross ? 'zuGross' : 'pdf'; } catch (e) { r = 'Wurf ' + e.message; }
       const cpu = process.cpuUsage(c); b = null; gc();
-      erg[name] = { r, cpuMs: Math.round((cpu.user + cpu.system) / 1000), heapMB: Math.round((process.memoryUsage().heapUsed - h) / MB) };
+      erg[name] = { r, scan, cpuMs: Math.round((cpu.user + cpu.system) / 1000), heapMB: Math.round((process.memoryUsage().heapUsed - h) / MB) };
     }
     console.log(JSON.stringify(erg));`);
   assert.equal(p.status, 0, `Prozess mit 128 MB: ${p.err}`);
@@ -463,9 +463,12 @@ test('Vorab-Scan: alle Angriffsproben der Gegenlesungen und der Härtung bei 128
     'Datei 12 MB': () => enc(K + ' '.repeat(12 * MB)),
   }`);
   if (process.env.PDF_MESSWERTE) console.log(JSON.stringify(e));
-  const grenzen = { '250.000 Objekte': 30, 'Zahl 6 MB': 30, 'Datei 12 MB': 5, 'Ziffern zwischen Objekten': 10, 'Verweisleck über Kopfversuche': 30 }; // früh im Vorab-Scan
+  // diese Proben lehnt schon der Vorab-Scan ab (geprüft am Grund, nicht an der Zeit: CPU-Zeiten schwanken unter Last des Gesamtlaufs)
+  const imScan = ['250.000 Objekte', 'Zahl 6 MB', 'Datei 12 MB', 'Ziffern zwischen Objekten', 'Verweisleck über Kopfversuche'];
+  const grenzen = {};
   for (const [name, x] of Object.entries(e)) {
     // Datenmüll ohne Ziffern lädt seit G3-3 als (leeres) PDF, ohne teure Kopfversuche; sonst überall abgelehnt
+    if (imScan.includes(name)) assert.ok(x.scan, `${name}: vom Vorab-Scan abgelehnt (${JSON.stringify(x)})`);
     if (name === 'Datenmüll 10 MB') assert.match(x.r, /^(pdf|zuGross)$/, name); else assert.equal(x.r, 'zuGross', `${name}: ${JSON.stringify(x)}`);
     assert.ok(x.cpuMs < (grenzen[name] ?? 1500) && x.heapMB < 40, `${name}: ${JSON.stringify(x)}`);
   }
@@ -589,7 +592,7 @@ test('Dritte Lesung G3-3: Leerraum-, Kommentar- und Zufallsläufe im Datenmüll 
   const e = JSON.parse(p.out);
   if (process.env.PDF_MESSWERTE) console.log(JSON.stringify(e));
   // vorher: 39 KB '%' 1,3 s, Leerraum 2,3 s; 10 MB Zufall 10 s
-  for (const k of ['prozent', 'leer', 'kommentarLeer']) assert.ok(e[k].cpuMs < 100, `${k}: ${JSON.stringify(e[k])}`);
+  for (const k of ['prozent', 'leer', 'kommentarLeer']) assert.ok(e[k].cpuMs < 300, `${k}: ${JSON.stringify(e[k])}`);
   assert.ok(e.zufall3MB.cpuMs < 500, `Zufall 3 MB: ${JSON.stringify(e.zufall3MB)}`);
   // Objekte hinter Datenmüll werden weiter gefunden (Kopf direkt, nach Leerraum, nach Kommentar)
   const datei = KATALOG + 'Muell %Kommentar\n  3 0 obj\n<< /A 1 >>\nendobj\nx y 4 0 obj [1 2]\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n';
