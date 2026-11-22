@@ -4300,7 +4300,9 @@ async function prueferZugangSuchen(adminToken, feld, wert) {
 // ── N5: kurzlebige, signierte Datei-Links für den Prüferzugang ──────────────────────────────────────────────
 // Firebase-Download-URLs tragen ein dauerhaftes token: wer sie einmal hat (Prüfer, Weitergabe, Verlauf, Log), liest die Datei ohne Anmeldung für immer.
 // Der Prüferzugang gibt sie deshalb nicht mehr heraus. Stattdessen: GET /pruefer-datei?u=&p=&exp=&sig= (HMAC wie freigabe/abo-abmelden, Schlüssel abgeleitet von
-// TOKEN_ENCRYPTION_KEY mit eigener Domäne, kein neues Secret). Die Signatur bindet UID, Pfad und Ablauf. Der Endpunkt liest die Datei mit dem Dienstkonto.
+// TOKEN_ENCRYPTION_KEY mit eigener Domäne, kein neues Secret). Die Signatur bindet UID, Pfad, Ablauf und Zugangs-Generation (g). Der Endpunkt liest die Datei mit dem Dienstkonto.
+// Bekannt und angenommen (F2-Fix N5-a): Cloudflare-Observability protokolliert die Anfrage-URL samt sig. Die Links gelten nur 15 Minuten und enden mit dem Zugang;
+// sig per Header zu übertragen würde das Öffnen im neuen Tab (Prüfer-Seite, Mittelklick, Link kopieren) unmöglich machen. Kein Umbau.
 const PRUEFER_DATEI_GUELTIG_MS = 15 * 60 * 1000;
 // Nur Ordner, deren Dateien in den Prüfer-Daten vorkommen; alles andere (logo, chats …) bleibt gesperrt.
 // uploads: Chat-Uploads (index.html: users/{uid}/uploads/…); E-Rechnungen aus dem Chat tragen sie als storage_url, Chat-Belege als url (F2-Fix A-H1).
@@ -4324,8 +4326,8 @@ export function prueferDateiPfadOk(uid, pfad) {
 async function prueferDateiSigner(env) {
   if (!env.TOKEN_ENCRYPTION_KEY) return null;
   const schluessel = await crypto.subtle.importKey('raw', await crypto.subtle.digest('SHA-256', new TextEncoder().encode('pruefer-datei|' + env.TOKEN_ENCRYPTION_KEY)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  return async (uid, pfad, exp) => {
-    const sig = await crypto.subtle.sign('HMAC', schluessel, new TextEncoder().encode(`${uid}\n${pfad}\n${exp}`));
+  return async (uid, pfad, exp, gen) => {
+    const sig = await crypto.subtle.sign('HMAC', schluessel, new TextEncoder().encode(`${uid}\n${pfad}\n${exp}\n${gen}`));
     return Array.from(new Uint8Array(sig), b => b.toString(16).padStart(2, '0')).join('');
   };
 }
@@ -4344,11 +4346,12 @@ function storageUrlZuPfad(wert, uid) {
 
 // Ersetzt in der Prüfer-Ausgabe jede Firebase-Download-URL (und die url in { pfad, url }-Anhängen) durch einen signierten Kurzlink oder, wenn der Pfad
 // nicht erlaubt ist oder kein Signierer da ist, durch null. Es bleibt nie eine Token-URL stehen.
-async function prueferLinksErsetzen(wert, uid, signiere) {
+// gen: Zugangs-Generation (Anfang des token_hash des Zugangs); ein neu erteilter Zugang hat einen neuen Token, alte Links des früheren Prüfers enden damit (N5-A-N4)
+const prueferGeneration = (felder) => { const h = firestoreValue(felder?.token_hash); return typeof h === 'string' && /^[0-9a-f]{64}$/.test(h) ? h.slice(0, 16) : ''; };
+const prueferDateiLinkBau = async (signiere, uid, pfad, exp, gen) => `${PRUEFER_DATEI_BASIS}/pruefer-datei?u=${encodeURIComponent(uid)}&p=${encodeURIComponent(pfad)}&exp=${exp}&g=${gen}&sig=${await signiere(uid, pfad, exp, gen)}`;
+async function prueferLinksErsetzen(wert, uid, signiere, gen) {
   const exp = Date.now() + PRUEFER_DATEI_GUELTIG_MS;
-  const link = async (pfad) => (pfad && signiere)
-    ? `${PRUEFER_DATEI_BASIS}/pruefer-datei?u=${encodeURIComponent(uid)}&p=${encodeURIComponent(pfad)}&exp=${exp}&sig=${await signiere(uid, pfad, exp)}`
-    : null;
+  const link = async (pfad) => (pfad && signiere && gen) ? await prueferDateiLinkBau(signiere, uid, pfad, exp, gen) : null;
   const geh = async (v, tiefe) => {
     if (typeof v === 'string') return /^https?:\/\/(?:[a-z0-9-]+\.)*(?:firebasestorage\.googleapis\.com|storage\.googleapis\.com|firebasestorage\.app)\//i.test(v) ? await link(storageUrlZuPfad(v, uid)) : v;
     if (v === null || typeof v !== 'object') return v;
@@ -4382,8 +4385,10 @@ async function handlePrueferDateiLink(body, env, cors, authHeader) {
     const uid = m[1];
     const signiere = await prueferDateiSigner(env);
     if (!signiere || !prueferDateiPfadOk(uid, pfad)) return json(404, { error: 'invalid' });
+    const gen = prueferGeneration(f);
+    if (!gen) return json(404, { error: 'invalid' });
     const exp = Date.now() + PRUEFER_DATEI_GUELTIG_MS;
-    return json(200, { url: `${PRUEFER_DATEI_BASIS}/pruefer-datei?u=${encodeURIComponent(uid)}&p=${encodeURIComponent(pfad)}&exp=${exp}&sig=${await signiere(uid, pfad, exp)}`, exp });
+    return json(200, { url: await prueferDateiLinkBau(signiere, uid, pfad, exp, gen), exp });
   } catch (e) {
     console.error('Prüfer-Dateilink Fehler');
     return json(500, { error: 'server_error' });
@@ -4398,10 +4403,11 @@ async function handlePrueferDatei(url, env, clientIP) {
   const pfad = url.searchParams.get('p') || '';
   const expText = url.searchParams.get('exp') || '';
   const sig = url.searchParams.get('sig') || '';
+  const gen = url.searchParams.get('g') || '';
   // Form zuerst, dann Signatur; jede Abweichung gibt dieselbe Antwort (kein Hinweis, was fehlte)
-  if (!PRUEFER_UID_FORMAT.test(uid) || !/^\d{10,16}$/.test(expText) || !/^[0-9a-f]{64}$/.test(sig) || !prueferDateiPfadOk(uid, pfad)) return antwort(401, 'Ungültiger Link.');
+  if (!PRUEFER_UID_FORMAT.test(uid) || !/^\d{10,16}$/.test(expText) || !/^[0-9a-f]{64}$/.test(sig) || !/^[0-9a-f]{16}$/.test(gen) || !prueferDateiPfadOk(uid, pfad)) return antwort(401, 'Ungültiger Link.');
   const signiere = await prueferDateiSigner(env);
-  if (!signiere || !(await istGleichesGeheimnis(sig, await signiere(uid, pfad, expText)))) return antwort(401, 'Ungültiger Link.');
+  if (!signiere || !(await istGleichesGeheimnis(sig, await signiere(uid, pfad, expText, gen)))) return antwort(401, 'Ungültiger Link.');
   if (Number(expText) <= Date.now()) return antwort(401, 'Der Link ist abgelaufen. Bitte die Prüferseite neu laden.');
   try {
     // Der Zugang muss noch bestehen: ein widerrufener oder abgelaufener Prüferzugang beendet auch bereits ausgegebene Kurzlinks
@@ -4410,7 +4416,7 @@ async function handlePrueferDatei(url, env, clientIP) {
     if (!zRes.ok) return antwort(zRes.status === 404 ? 403 : 502, zRes.status === 404 ? 'Zugang beendet.' : 'Vorübergehend nicht verfügbar.');
     const f = (await zRes.json().catch(() => ({}))).fields || {};
     const ablaufMs = firestoreValue(f.ablauf) ? new Date(firestoreValue(f.ablauf)).getTime() : NaN;
-    if (firestoreValue(f.aktiv) !== true || !Number.isFinite(ablaufMs) || ablaufMs <= Date.now()) return antwort(403, 'Zugang beendet.');
+    if (firestoreValue(f.aktiv) !== true || !Number.isFinite(ablaufMs) || ablaufMs <= Date.now() || prueferGeneration(f) !== gen) return antwort(403, 'Zugang beendet.');
     const storageToken = await getGoogleAccessToken(env, STORAGE_SCOPE);
     let res = null; let infraFehler = false;
     for (const bucket of STORAGE_BUCKETS) {
@@ -4517,7 +4523,7 @@ async function handlePrueferDaten(body, env, cors = {}, authHeader = null) {
     // KASSE-P1b (2.12 H8): Kassenbuch (alle Fassungen, vollständiger verlauf, Bewegungen); nur Lesen, auch bei ausgeschaltetem Feature (Notaus: Daten bleiben lesbar)
     const kasse = await kassenPrueferDaten(uid, adminToken, (...a) => fetch(...a));
     // N5: keine dauerhaften Download-Token-URLs an den Prüfer: Datei-Adressen werden durch kurzlebige, signierte Worker-Links ersetzt
-    const ausgabe = await prueferLinksErsetzen({ dokumente, monatsabschluesse, sammelbelege, festschreibungen, ...kasse }, uid, await prueferDateiSigner(env));
+    const ausgabe = await prueferLinksErsetzen({ dokumente, monatsabschluesse, sammelbelege, festschreibungen, ...kasse }, uid, await prueferDateiSigner(env), prueferGeneration(zugangFields));
     return new Response(JSON.stringify(ausgabe), {
       status: 200, headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
     });
