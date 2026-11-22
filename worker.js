@@ -18,6 +18,7 @@ import { regelAdminFeatures } from './regel/admin-features.js';
 import { regelOssMeldung } from './regel/oss-meldung.js'; // WORKER-C (Release C, BP-29)
 import { regelKasse, KASSE_PFADE } from './regel/kasse.js'; // KASSE-P1b: Kassenbuch (Feature kasse, Standard aus)
 import { kassenPrueferDaten } from './regel/kasse-daten.js'; // KASSE-P1b: Prüfer-Daten Kassenbuch
+import { kassenAusgabeBeleg } from './regel/kasse-ausgabe.js'; // KASSE-P1b-4: Ausgabe aus der Kasse über den Beleg-Schreibweg v2
 import { regelEzbKurs } from './regel/ezb-kurs.js'; // WORKER-C (Release C, BP-29)
 import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // KX-WC2 (Release C, BP-30 DATEV-Teil)
 import { rechnungsnrDuplikat, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c)
@@ -423,6 +424,7 @@ const UID_LIMITS = {
   // KASSE-P1b (Baukonzept 2.3): Tagesabschluss je Kasse und Tag, Stammdaten selten
   '/kassentag':                      { limit: 60, windowMs: 10 * 60 * 1000 },
   '/kasse':                          { limit: 30, windowMs: 10 * 60 * 1000 },
+  '/kassenbewegung':                 { limit: 120, windowMs: 10 * 60 * 1000 },
   // G6-M5: kostenpflichtige Datei-Aufrufe je Nutzer (zusätzlich zum atomaren Monatskontingent)
   '/image':                          { limit: 30, windowMs: 10 * 60 * 1000 },
   '/document':                       { limit: 300, windowMs: 10 * 60 * 1000 },
@@ -510,8 +512,8 @@ export default {
           headers: { ...cors, 'Content-Type': 'application/json' }
         });
       }
-      const limitResult = await peekUploadLimit(limitVerified.uid, env);
-      return new Response(JSON.stringify(limitResult), {
+      // Kein Upload-Kontingent mehr (Kap. 6 Nr. 28): immer erlaubt. Der Weg bleibt für ältere App-Stände, die vor dem Hochladen fragen.
+      return new Response(JSON.stringify({ erlaubt: true }), {
         status: 200,
         headers: { ...cors, 'Content-Type': 'application/json' }
       });
@@ -680,7 +682,7 @@ export default {
       }
 
       // Verifizierte UID überschreibt client-seitige userId — auch wenn der Client sie weglässt
-      // (Prüfung 2026-09-28): sonst fiel checkNachrichtenLimit/peekUploadLimit auf den frei
+      // (Prüfung 2026-09-28): sonst fiel checkNachrichtenLimit auf den frei
       // wählbaren Nutzernamen zurück, und mit wechselnden Namen ließ sich das Tageslimit umgehen.
       if (verifiedUid) body.userId = verifiedUid;
       // Security-Audit 2026-10-16: Firestore-Zugriffe in Handlern nutzen den Token aus dem
@@ -819,71 +821,37 @@ export default {
   }
 };
 
-// ── Upload Limit (50/Monat) via KV ──────────────────────────
-const UPLOAD_LIMIT = 50;
-function uploadLimitKey(userId, jetzt) {
+// ── Kein monatliches Upload-Kontingent mehr (Kassenbuch P1b-4; Entscheidung Jona 21.11.2026, Kap. 6 Nr. 28, konzept-kassenbuch.md Abschnitt 14) ──────────
+// Früher: 50 Uploads je Monat (KV-Zähler uploads:{uid}:{JJJJ-MM}, atomare Reservierung uploadlimit/{uid}_{JJJJ-MM}, Vorab-Prüfung vor jedem Upload, 429
+// "Upload-Limit erreicht"). Das gibt es technisch nicht mehr: nichts zählt, nichts sperrt. Begrenzt wird weiter
+//   - das Tageslimit der KI-Aktionen (checkNachrichtenLimit, atomar, 15 je Tag): Chat (auch mit Anhang), /image, /document mit Datei, Monatsabschluss-PDF;
+//     „Z-Bon lesen“ (KI-Paket W) bekommt zusätzlich ein eigenes Tageslimit von 5 (reserviereZaehler unten);
+//   - die technischen Anfrage-Raten je Nutzer (UID_LIMITS je 10 Minuten) und die Bremse je IP (kein Upload-Limit, Schutz vor Schleifen).
+// Belegarchiv-Speichern ohne KI (BELEG_MANUELL, BELEG_SPEICHERN) und Steuerprofil-Nachweise kosten nichts und zählen nirgends.
+// Altlasten: bestehende KV-Schlüssel uploads:… laufen mit ihrer TTL (35 Tage) aus; beim Löschen eines Kontos werden sie und die Firestore-Dokumente
+// uploadlimit/… trotzdem entfernt (Konto-Löschung unten, regel/loeschlaeufe-konto.js uploadlimitLoeschen).
+function uploadLimitKey(userId, jetzt) { // nur noch für die Altlast-Löschung beim Entfernen eines Kontos
   return `uploads:${userId}:${jetzt.getFullYear()}-${String(jetzt.getMonth() + 1).padStart(2, '0')}`;
 }
 
-// Nur lesen, NICHT hochzählen — für den Vorab-Check vor dem Storage-Upload
-// und vor dem eigentlichen Speichern (kein Zählen von Versuchen, die scheitern).
-async function peekUploadLimit(userId, env) {
-  if (!userId) return { erlaubt: false };
-  const jetzt = new Date();
-  const key = uploadLimitKey(userId, jetzt);
-
-  try {
-    const val = await env.PROFIL_KV.get(key);
-    const anzahl = val ? parseInt(val) : 0;
-    return { erlaubt: anzahl < UPLOAD_LIMIT, anzahl };
-  } catch(e) {
-    return { erlaubt: false }; // Fail-closed: ohne Zähler kein Upload
-  }
-}
-
-// Zählt hoch — nur aufrufen, NACHDEM der Beleg erfolgreich gespeichert wurde.
-async function incrementUploadLimit(userId, env) {
-  if (!userId) return;
-  const jetzt = new Date();
-  const key = uploadLimitKey(userId, jetzt);
-  const ttlSeconds = 35 * 86400; // 35 Tage — überlebt sicher den ganzen Kalendermonat
-
-  try {
-    const val = await env.PROFIL_KV.get(key);
-    const anzahl = val ? parseInt(val) : 0;
-    await env.PROFIL_KV.put(key, String(anzahl + 1), { expirationTtl: ttlSeconds });
-  } catch(e) {
-    // Im Zweifel nicht zählen
-  }
-}
-
-// G6-M5: Atomare Kontingent-Reservierung unmittelbar vor dem kostenpflichtigen Anthropic-Aufruf. Der KV-Zähler (peek/increment) ist
-// nicht atomar (get+put, eventuell konsistent): 100 parallele Uploads würden alle an der Grenze vorbeikommen. Deshalb zählt zusätzlich
-// ein Firestore-Dokument je Nutzer und Monat (uploadlimit/{uid}_{JJJJ-MM}) mit Vorbedingung currentDocument.updateTime (wie
-// checkNachrichtenLimit): nur wer den Zähler wirklich fortschreibt, darf aufrufen. Scheitert der Aufruf, gibt gibUploadZurueck die
-// Reservierung (Firestore und KV) wieder frei. Fail-closed: ohne Zähler kein Anthropic-Aufruf.
-const UPLOAD_FS_COLLECTION = 'uploadlimit';
-export function uploadReservierungsKey(userId, jetzt = new Date()) {
-  return `${userId}_${berlinDatumAlsString(jetzt).slice(0, 7)}`;
-}
-export async function reserviereUpload(userId, env, optionen = {}) {
-  const limit = Number.isInteger(optionen.limit) ? optionen.limit : UPLOAD_LIMIT;
-  const key = uploadReservierungsKey(userId, optionen.jetzt instanceof Date ? optionen.jetzt : new Date()); // NL-F: Zeitpunkt der Reservierung (für die Freigabe am Monatswechsel)
-  const maxVersuche = 6;
-  if (!userId) return { erlaubt: false, grund: 'infra' };
+// Atomarer Zähler mit Obergrenze (Firestore-Dokument {sammlung}/{key}, Feld anzahl, Vorbedingung currentDocument.updateTime wie checkNachrichtenLimit): nur wer den
+// Zähler wirklich fortschreitet, darf weitermachen. Allgemeiner Baustein, übrig aus der früheren Upload-Reservierung und für Limits wie das Tageslimit „Z-Bon lesen“
+// (KI-Paket W: reserviereZaehler('kassezbonlimit', `${uid}_${tag}`, 5, env)). Fail-closed: ohne Zähler { erlaubt: false, grund: 'infra' }.
+export async function reserviereZaehler(sammlung, key, limit, env, { maxVersuche = 6 } = {}) {
+  if (!sammlung || !key || !Number.isInteger(limit)) return { erlaubt: false, grund: 'infra' };
   let token;
-  try { token = await getGoogleAccessToken(env, FIRESTORE_SCOPE); } catch (e) { console.error('reserviereUpload: Token fehlgeschlagen:', e.message); return { erlaubt: false, grund: 'infra' }; }
-  const basis = `${NACHRICHT_FS}/${UPLOAD_FS_COLLECTION}`;
+  try { token = await getGoogleAccessToken(env, FIRESTORE_SCOPE); } catch (e) { console.error('reserviereZaehler: Token fehlgeschlagen:', e.message); return { erlaubt: false, grund: 'infra' }; }
+  const basis = `${NACHRICHT_FS}/${sammlung}`;
   for (let versuch = 0; versuch < maxVersuche; versuch++) {
     let doc;
-    try { doc = await nachrichtenDocLesenIn(UPLOAD_FS_COLLECTION, key, token); } catch (e) { console.error('reserviereUpload lesen:', e.message, 'key=', kurz(key)); return { erlaubt: false, grund: 'infra' }; }
+    try { doc = await nachrichtenDocLesenIn(sammlung, key, token); } catch (e) { console.error('reserviereZaehler lesen:', e.message, 'key=', kurz(key)); return { erlaubt: false, grund: 'infra' }; }
     if (!doc) {
       const res = await fetch(`${basis}?documentId=${encodeURIComponent(key)}`, {
         method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ fields: { anzahl: { integerValue: '1' } } })
       });
       if (res.ok) return { erlaubt: true, anzahl: 1 };
-      if (res.status !== 409) { console.error('reserviereUpload INSERT:', res.status, 'key=', kurz(key)); return { erlaubt: false, grund: 'infra' }; }
+      if (res.status !== 409) { console.error('reserviereZaehler INSERT:', res.status, 'key=', kurz(key)); return { erlaubt: false, grund: 'infra' }; }
       continue;
     }
     const anzahl = parseInt(doc.fields?.anzahl?.integerValue || '0', 10);
@@ -894,66 +862,34 @@ export async function reserviereUpload(userId, env, optionen = {}) {
     });
     if (res.ok) return { erlaubt: true, anzahl: anzahl + 1 };
     if (res.status === 400 || res.status === 409 || res.status === 412) continue; // paralleler Aufruf hat gezählt: neu lesen
-    console.error('reserviereUpload PATCH:', res.status, 'key=', kurz(key));
+    console.error('reserviereZaehler PATCH:', res.status, 'key=', kurz(key));
     return { erlaubt: false, grund: 'infra' };
   }
-  return { erlaubt: false, grund: 'ausgelastet' }; // N3: alle Versuche an parallelen Aufrufen gescheitert (Wettlauf), kein Infrastrukturfehler
+  return { erlaubt: false, grund: 'ausgelastet' }; // alle Versuche an parallelen Aufrufen gescheitert (Wettlauf), kein Infrastrukturfehler
 }
-// NL-F: reserviertAm = Zeitpunkt der Reservierung. Die Freigabe zählt im Monat der Reservierung zurück, nicht im (inzwischen neuen) Monat.
-export async function gibUploadZurueck(userId, env, reserviertAm = null) {
-  if (!userId) return;
-  const bezug = reserviertAm instanceof Date ? reserviertAm : new Date();
+// Gibt eine Reservierung zurück (ein gescheiterter Aufruf zählt nicht). Wirft nie.
+export async function gibZaehlerZurueck(sammlung, key, env) {
   try {
-    const key = uploadReservierungsKey(userId, bezug);
     const token = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
     for (let versuch = 0; versuch < 4; versuch++) {
-      const doc = await nachrichtenDocLesenIn(UPLOAD_FS_COLLECTION, key, token);
+      const doc = await nachrichtenDocLesenIn(sammlung, key, token);
       if (!doc) break;
       const anzahl = Math.max(0, parseInt(doc.fields?.anzahl?.integerValue || '0', 10) - 1);
-      const res = await fetch(`${NACHRICHT_FS}/${UPLOAD_FS_COLLECTION}/${encodeURIComponent(key)}?updateMask.fieldPaths=anzahl&currentDocument.updateTime=${encodeURIComponent(doc.updateTime)}`, {
+      const res = await fetch(`${NACHRICHT_FS}/${sammlung}/${encodeURIComponent(key)}?updateMask.fieldPaths=anzahl&currentDocument.updateTime=${encodeURIComponent(doc.updateTime)}`, {
         method: 'PATCH', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ fields: { anzahl: { integerValue: String(anzahl) } } })
       });
       if (res.ok) break;
       if (!(res.status === 400 || res.status === 409 || res.status === 412)) break;
     }
-  } catch (e) { console.warn('gibUploadZurueck (Firestore):', e.message); }
-  try { // KV-Zähler: der Aufrufer hat ihn vorab hochgezählt, ein gescheiterter Aufruf zählt nicht
-    const kvKey = uploadLimitKey(userId, bezug);
-    const val = await env.PROFIL_KV.get(kvKey);
-    const n = val ? parseInt(val) : 0;
-    if (n > 0) await env.PROFIL_KV.put(kvKey, String(n - 1), { expirationTtl: 35 * 86400 });
-  } catch (_) { /* im Zweifel stehen lassen */ }
+  } catch (e) { console.warn('gibZaehlerZurueck:', e.message); }
 }
-// Ersetzt fetch() an den Anthropic-Aufrufen mit Datei: reserviert vorher atomar, gibt bei Fehler (Netz, 4xx/5xx) zurück.
-// kontoUid = null: ohne Reservierung (Chat ohne Anhang). Gesperrt: 429-Antwort im Textformat, ohne Anthropic-Aufruf.
-export async function anthropicFetchMitKontingent(kontoUid, env, url, init, optionen = {}) {
+// Anthropic-Aufruf mit Datei. Früher mit atomarer Monats-Reservierung; jetzt ohne Kontingent ein reiner Durchreicher (das Tageslimit der KI-Aktionen prüfen die
+// Aufrufer vorher über checkNachrichtenLimit). Der Name und die Signatur bleiben, damit weitere KI-Aufrufstellen (Z-Bon lesen, KI-Paket W) nicht brechen;
+// optionen.fetchFn für Tests. kontoUid und env sind ohne Kontingent ohne Wirkung.
+export async function anthropicFetchMitKontingent(kontoUid, env, url, init, optionen = {}) { // eslint-disable-line no-unused-vars
   const fetchFn = optionen.fetchFn || fetch;
-  if (!kontoUid) return fetchFn(url, init);
-  const reserviertAm = new Date(); // NL-F: Monat der Reservierung merken
-  const r = await reserviereUpload(kontoUid, env, { ...optionen, jetzt: reserviertAm });
-  if (!r.erlaubt) {
-    await gibKvZaehlerZurueck(kontoUid, env);
-    const text = r.grund === 'limit'
-      ? 'Du hast dein monatliches Upload-Limit erreicht. Du kannst Kontolux AI weiterhin vollständig nutzen — Chat, Finanzkalender und manuelle Monatsabschlüsse funktionieren wie gewohnt.'
-      : r.grund === 'ausgelastet'
-        ? 'Zu viele Uploads gerade, bitte kurz warten und noch einmal versuchen.'
-        : 'Kontolux ist gerade nicht erreichbar. Bitte versuche es in ein paar Minuten noch einmal.';
-    // N3: X-Kx-Sperre kennzeichnet die Antwort als Nutzertext; die Aufrufer geben ihn weiter statt "Claude API Error: 429"
-    return new Response(text, { status: r.grund === 'limit' || r.grund === 'ausgelastet' ? 429 : 503, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'X-Kx-Sperre': r.grund } });
-  }
-  let res;
-  try { res = await fetchFn(url, init); } catch (e) { await gibUploadZurueck(kontoUid, env, reserviertAm); throw e; }
-  if (!res.ok) await gibUploadZurueck(kontoUid, env, reserviertAm);
-  return res;
-}
-async function gibKvZaehlerZurueck(userId, env) {
-  try {
-    const kvKey = uploadLimitKey(userId, new Date());
-    const val = await env.PROFIL_KV.get(kvKey);
-    const n = val ? parseInt(val) : 0;
-    if (n > 0) await env.PROFIL_KV.put(kvKey, String(n - 1), { expirationTtl: 35 * 86400 });
-  } catch (_) { /* im Zweifel stehen lassen */ }
+  return fetchFn(url, init);
 }
 
 // ── Datei-Upload serverseitig validieren (Größe + Typ) ────
@@ -2509,15 +2445,7 @@ async function handleChat(body, env, cors = {}, ctx) {
     if (!dateiCheck.ok) {
       return new Response(dateiCheck.error, { status: 400, headers: { ...cors, 'Content-Type': 'text/plain' } });
     }
-    // Anhänge zählen gegen das monatliche Upload-Limit wie bei /image und /document
-    // (Security-Audit 2026-10-16: vorher umging ein Chat-PDF das Limit).
-    const uploadLimit = await peekUploadLimit(userId, env);
-    if (!uploadLimit.erlaubt) {
-      return new Response('Du hast dein monatliches Upload-Limit erreicht. Chat ohne Anhang funktioniert weiterhin.', {
-        status: 429, headers: { ...cors, 'Content-Type': 'text/plain' }
-      });
-    }
-    await incrementUploadLimit(userId, env);
+    // Anhänge zählen als Chat-Nachricht im Tageslimit (checkNachrichtenLimit weiter oben), ein monatliches Upload-Limit gibt es nicht mehr (Kap. 6 Nr. 28)
     const mediaType = Datei.type === 'application/pdf' ? 'application/pdf' : Datei.type;
     const userContent = [];
     if (mediaType === 'application/pdf') {
@@ -2771,22 +2699,13 @@ async function handleImage(body, env, cors = {}, ctx) {
 
   // KX-SPEED: Wissensbasis und Feature-Stand (reine Lesezugriffe, werfen nie) laufen parallel zu den Limit-Prüfungen statt danach.
   const kxSpeedVorab = Promise.all([loadSteuerrechtContext(env), kiFeatureStandFuer(env, userId)]);
-  // Upload Limit prüfen
-  const uploadLimit = await peekUploadLimit(userId, env);
-  if (!uploadLimit.erlaubt) {
-    return new Response('Du hast dein monatliches Upload-Limit erreicht. Du kannst Kontolux AI weiterhin vollständig nutzen — Chat, Finanzkalender und manuelle Monatsabschlüsse funktionieren wie gewohnt. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand. 📊', {
-      headers: { ...cors, 'Content-Type': 'text/plain' }
-    });
-  }
-
+  // Kein monatliches Upload-Limit mehr (Kap. 6 Nr. 28): das Tageslimit der KI-Aktionen begrenzt
   const limit = await checkNachrichtenLimit(Nutzername, env, userId, ctx);
   if (!limit.erlaubt) {
     return new Response(limit.grund === 'infra' ? 'Kontolux ist gerade nicht erreichbar. Bitte versuche es in ein paar Minuten noch einmal.' : 'Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
       headers: { ...cors, 'Content-Type': 'text/plain' }
     });
   }
-  // Erst zählen, wenn die Anfrage tatsächlich bearbeitet wird (vorher kostete eine abgelehnte Anfrage ein Upload)
-  await incrementUploadLimit(userId, env);
 
   const dynamicContext = buildDynamicContext(Profil, Datum);
   const [kbText, kiStand] = await kxSpeedVorab; // BP-22B; KX-SPEED: oben gestartet
@@ -3264,13 +3183,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
     }
 
     try {
-      const uploadLimit = await peekUploadLimit(userId, env);
-      if (!uploadLimit.erlaubt) {
-        return new Response(JSON.stringify({ error: 'Upload-Limit erreicht' }), {
-          status: 429,
-          headers: { ...cors, 'Content-Type': 'application/json' }
-        });
-      }
+      // Kein monatliches Upload-Limit mehr (Kap. 6 Nr. 28): Speichern ohne KI kostet nichts und zählt nirgends.
 
       // Enges 10-Minuten-Fenster als serverseitiges Backstop gegen Doppel-Klick/Netzwerk-Retry
       // (Race Condition — der eigentliche, umfassende Duplikat-Check läuft bereits client-seitig
@@ -3388,8 +3301,6 @@ async function handleDocument(body, env, cors = {}, ctx) {
         });
       }
 
-      // Erst jetzt zählen — Beleg ist tatsächlich gespeichert
-      await incrementUploadLimit(userId, env);
       // Steuerkern-Warnmodus (AP1.8): nur zählen/loggen, ändert nichts (fail-open, bei 'aus' ohne Kernaufruf)
       steuerkernWarnung(env, 'beleg_manuell', { typ, betrag, mwst_satz, datum, bezahlt, bezahlt_am: bezahlt_am_client }, v2 ? (v2.profil || null) : await steuerkernProfilLaden(env, userId, token));
 
@@ -3465,14 +3376,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
     }
 
     try {
-      // Upload Limit prüfen
-      const uploadLimit = await peekUploadLimit(userId, env);
-      if (!uploadLimit.erlaubt) {
-        return new Response(JSON.stringify({ error: 'Upload-Limit erreicht' }), {
-          status: 429,
-          headers: { ...cors, 'Content-Type': 'application/json' }
-        });
-      }
+      // Kein monatliches Upload-Limit mehr (Kap. 6 Nr. 28)
 
       // Enges 10-Minuten-Fenster als serverseitiges Backstop (gleiche Begründung wie bei
       // BELEG_MANUELL oben) — client-seitig läuft bereits der umfassende Duplikat-Check über
@@ -3608,8 +3512,6 @@ async function handleDocument(body, env, cors = {}, ctx) {
         });
       }
 
-      // Erst jetzt zählen — Beleg ist tatsächlich gespeichert
-      await incrementUploadLimit(userId, env);
       // Steuerkern-Warnmodus (AP1.8): nur zählen/loggen, ändert nichts (fail-open, bei 'aus' ohne Kernaufruf)
       steuerkernWarnung(env, 'beleg_speichern', { typ, betrag, mwst_satz, datum, bezahlt, bezahlt_am: bezahlt_am_client }, v2 ? (v2.profil || null) : await steuerkernProfilLaden(env, userId, token));
 
@@ -3675,14 +3577,13 @@ async function handleDocument(body, env, cors = {}, ctx) {
     if (!dateiCheckMa.ok) {
       return new Response(dateiCheckMa.error, { status: 400, headers: { ...cors, 'Content-Type': 'text/plain' } });
     }
-    // Upload Limit prüfen
-    const uploadLimitMa = await peekUploadLimit(userId, env);
-    if (!uploadLimitMa.erlaubt) {
-      return new Response('Du hast dein monatliches Upload-Limit erreicht. Du kannst Kontolux AI weiterhin vollständig nutzen — Chat, Finanzkalender und manuelle Monatsabschlüsse funktionieren wie gewohnt. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand. 📊', {
+    // Kein monatliches Upload-Limit mehr (Kap. 6 Nr. 28): die KI-Extraktion zählt als Aktion im Tageslimit (vorher begrenzte sie nur das Monatskontingent)
+    const limitMa = await checkNachrichtenLimit(Nutzername, env, userId, ctx);
+    if (!limitMa.erlaubt) {
+      return new Response(limitMa.grund === 'infra' ? 'Kontolux ist gerade nicht erreichbar. Bitte versuche es in ein paar Minuten noch einmal.' : 'Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
         headers: { ...cors, 'Content-Type': 'text/plain' }
       });
     }
-    await incrementUploadLimit(userId, env);
     const systemPrompt = `Du bist ein Datenextraktions-Assistent. Extrahiere aus dem Dokument die Finanzdaten und antworte NUR mit einem JSON-Objekt ohne Backticks oder Markdown, in diesem Format: {"monat": "Januar", "jahr": ${berlinDatumAlsString().slice(0, 4)}, "einnahmen_gesamt": 0, "ausgaben_gesamt": 0, "einnahmen_positionen": [{"bezeichnung": "...", "betrag": 0}], "ausgaben_positionen": [{"bezeichnung": "...", "betrag": 0}]}`;
 
     const messages = [{
@@ -3739,14 +3640,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
   }
   // KX-SPEED: Wissensbasis und Feature-Stand (reine Lesezugriffe, werfen nie) laufen parallel zu den Limit-Prüfungen statt danach.
   const kxSpeedVorab = Promise.all([loadSteuerrechtContext(env), kiFeatureStandFuer(env, userId)]);
-  const uploadLimit = await peekUploadLimit(userId, env);
-  if (!uploadLimit.erlaubt) {
-    return new Response('Du hast dein monatliches Upload-Limit erreicht. Du kannst Kontolux AI weiterhin vollständig nutzen — Chat, Finanzkalender und manuelle Monatsabschlüsse funktionieren wie gewohnt. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand. 📊', {
-      headers: { ...cors, 'Content-Type': 'text/plain' }
-    });
-  }
-  await incrementUploadLimit(userId, env);
-
+  // Kein monatliches Upload-Limit mehr (Kap. 6 Nr. 28): das Tageslimit der KI-Aktionen begrenzt
   const limit = await checkNachrichtenLimit(Nutzername, env, userId, ctx);
   if (!limit.erlaubt) {
     return new Response(limit.grund === 'infra' ? 'Kontolux ist gerade nicht erreichbar. Bitte versuche es in ein paar Minuten noch einmal.' : 'Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
@@ -3893,15 +3787,6 @@ async function handleKontakt(body, env, cors) {
 async function handleUsage(body, env, cors) {
   const { userId, nutzername } = body;
 
-  // Uploads aus KV (monatlich)
-  let uploads = 0;
-  try {
-    if (userId && env.PROFIL_KV) {
-      const val = await env.PROFIL_KV.get(uploadLimitKey(userId, new Date()));
-      uploads = val ? parseInt(val) : 0;
-    }
-  } catch(e) { uploads = 0; }
-
   // Nachrichten-Zähler aus Firestore (nur lesen)
   let nachrichten = 0;
   try {
@@ -3918,7 +3803,8 @@ async function handleUsage(body, env, cors) {
 
   return new Response(JSON.stringify({
     nachrichten: { used: nachrichten, limit: 15, pct: Math.min(100, Math.round((nachrichten / 15) * 100)) },
-    uploads: { used: uploads, limit: UPLOAD_LIMIT, pct: Math.min(100, Math.round(uploads * 100 / UPLOAD_LIMIT)) }
+    // Kein Upload-Kontingent mehr (Kap. 6 Nr. 28). Die Form bleibt für ältere App-Stände, die den Balken noch zeichnen (limit 0, pct 0 = nichts begrenzt).
+    uploads: { used: 0, limit: 0, pct: 0, unbegrenzt: true }
   }), { headers: { ...cors, 'Content-Type': 'application/json' } });
 }
 
@@ -6739,6 +6625,7 @@ function regelAbhaengigkeiten(env) {
     adminLog: (email, aktion, details) => adminLogEintragen(env, email, aktion, '-', details),
     storageUrlOk: storageUrlGehoertDemNutzer,
     heute: () => berlinDatumAlsString(),
+    kassenAusgabeBeleg, // KASSE-P1b-4 (2.12 M16): Eingangsbeleg zur Kassenausgabe (v2Entscheiden, Altfelder, legacy_hash, Duplikat-Backstop), schreibt nichts
   };
 }
 
@@ -6841,52 +6728,10 @@ async function handleMigrationAusfuehren(body, env, cors) {
   return regelMigration(body, env, cors, regelAbhaengigkeiten(env));
 }
 
-// R1 (Zuruf E2, Upload-Monatslimit): Der Ist-Nachweis aus dem Steuerprofil wird von der App hochgeladen (kxHochladen prüft vorher
-// GET /check-upload-limit); hochzählen kann nur der Worker. Gezählt wird je NEUER Nachweis-Adresse (genehmigung.storage_url), wenn
-// POST /steuerprofil sie angenommen hat (200, ok, nicht idempotent). Nicht gezählt: unveränderte Adresse (steht schon im Profil),
-// Wiederholung derselben anfrage_id, abgelehnte Anfragen. Der zusätzliche Lesezugriff passiert nur, wenn die Anfrage eine Adresse trägt.
-// Lesefehler: zählen (Kostengrenze, im Zweifel streng). Logik bleibt in regel/steuerprofil.js unverändert.
-function nachweisUrlsSammeln(verlauf, ziel) {
-  if (!Array.isArray(verlauf)) return ziel;
-  for (const e of verlauf.slice(0, 50)) {
-    const u = e && typeof e === 'object' && e.genehmigung && typeof e.genehmigung === 'object' ? e.genehmigung.storage_url : null;
-    if (typeof u === 'string' && u) ziel.add(u);
-  }
-  return ziel;
-}
-export function steuerprofilNachweisUrls(body) {
-  const s = new Set();
-  if (!body || typeof body !== 'object') return s;
-  if (body.aktion === 'eintrag' && body.bereich === 'versteuerung') nachweisUrlsSammeln([body.eintrag], s);
-  if (body.aktion === 'anlegen' && body.profil && typeof body.profil === 'object') nachweisUrlsSammeln(body.profil.versteuerung_verlauf, s);
-  return s;
-}
-export function steuerprofilNeueNachweise(body, altProfil) {
-  const alt = nachweisUrlsSammeln(altProfil && typeof altProfil === 'object' ? altProfil.versteuerung_verlauf : null, new Set());
-  return [...steuerprofilNachweisUrls(body)].filter((u) => !alt.has(u));
-}
+// R1 (Zuruf E2) zählte den Ist-Nachweis aus dem Steuerprofil gegen das Upload-Monatslimit. Das Kontingent gibt es nicht mehr (Kassenbuch P1b-4, Kap. 6 Nr. 28).
 async function handleSteuerprofil(body, env, cors) {
-  const deps = regelAbhaengigkeiten(env);
-  const urls = steuerprofilNachweisUrls(body);
-  let alt = null;
-  let altGelesen = false;
-  if (urls.size && body && typeof body.userId === 'string') {
-    try {
-      const d = await firestoreGetDoc(`users/${encodeURIComponent(body.userId)}/steuerprofil/aktuell`, await deps.adminToken());
-      alt = d && d.fields ? firestoreFieldsToObject(d.fields) : null;
-      altGelesen = true;
-    } catch { altGelesen = false; }
-  }
-  const antwortSp = await regelSteuerprofil(body, env, cors, deps);
-  if (!urls.size || antwortSp.status !== 200) return antwortSp;
-  try {
-    const j = await antwortSp.clone().json();
-    if (j && j.ok === true && j.idempotent !== true) {
-      const neu = altGelesen ? steuerprofilNeueNachweise(body, alt) : [...urls];
-      for (let i = 0; i < Math.min(neu.length, 5); i++) await incrementUploadLimit(body.userId, env);
-    }
-  } catch { /* Antwort unverändert zurückgeben */ }
-  return antwortSp;
+  // Nachweis-Dateien der Steuerprofil-Versteuerung zählten früher gegen das Upload-Kontingent; das gibt es nicht mehr (Kap. 6 Nr. 28)
+  return regelSteuerprofil(body, env, cors, regelAbhaengigkeiten(env));
 }
 
 // ── R2: Zustimmung zu den Nutzungsbedingungen beweisbar speichern (Anwaltsfragen Frage 5, Bedingung 3) ─────────────────────────────────
@@ -7206,10 +7051,9 @@ async function markAsProcessed(userId, externalEventId, adminToken) {
 
 /**
  * Rein informativer Zähler für webhook-erzeugte Belege — läuft bewusst NICHT über
- * PROFIL_KV/UPLOAD_LIMIT (siehe peekUploadLimit/incrementUploadLimit oben): dieser Zähler
+ * PROFIL_KV (früher gab es daneben ein Upload-Kontingent, seit Kap. 6 Nr. 28 nicht mehr): dieser Zähler
  * blockiert NIE. Ein Nutzer mit vielen Bestellungen/Monat darf nicht plötzlich keine
- * automatischen Belege mehr bekommen, nur weil sein manuelles Upload-Kontingent (OCR/Foto-
- * Belege) ausgeschöpft ist. Fehler werden bewusst verschluckt (best effort, nie kritischer Pfad).
+ * automatischen Belege mehr bekommen. Fehler werden bewusst verschluckt (best effort, nie kritischer Pfad).
  */
 async function incrementWebhookBelegCount(userId, env) {
   if (!userId) return;

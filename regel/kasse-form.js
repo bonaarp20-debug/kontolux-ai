@@ -5,7 +5,7 @@
 import * as Steuerkern from '../steuerkern/index.js';
 import { istObjekt, istDatum, nurSchluessel } from './gemeinsam.js';
 
-export const KASSE_PFADE = Object.freeze(['/kasse', '/kassentag']); // '/kassenbewegung' kommt mit Teilschritt 4, '/kassenmeldung' mit P4
+export const KASSE_PFADE = Object.freeze(['/kasse', '/kassentag', '/kassenbewegung']); // '/kassenmeldung' kommt mit P4
 export const FEATURE = 'kasse';
 export const CENT_MAX = 1e11; // 1 Mrd. EUR in Cent, weit über jedem Tagesumsatz, sicher ganzzahlig und summierbar
 export const KASSE_ID_MUSTER = /^k[a-z0-9]{8}$/;
@@ -329,4 +329,62 @@ export function pruefeKasse(body, aktion, { heute }) {
   return fehl('aktion', 'AKTION_UNBEKANNT');
 }
 
-// /kassenbewegung wird mit Teilschritt 4 ergänzt (pruefeBewegung)
+
+// ---------------------------------------------------------------------------------------------
+// /kassenbewegung anlegen | stornieren (2.1, 2.3 Nr. 1 Positivliste, 2.11 C.2, C.12)
+// ---------------------------------------------------------------------------------------------
+export const BEWEGUNG_ARTEN_NEU = Object.freeze(['ausgabe', 'entnahme', 'einlage', 'wechselgeld_einlage', 'geldtransit_bank_ein', 'geldtransit_bank_aus',
+  'geldtransit_kasse_ein', 'geldtransit_kasse_aus', 'trinkgeld_ma_auszahlung']); // 'storno' entsteht nur über stornieren
+export const PRIVAT_ARTEN = Object.freeze(['entnahme', 'einlage', 'wechselgeld_einlage']); // erzeugen einen Privatvorgang (zahlweg 'kasse') und brauchen den Eigenbeleg
+const BEWEGUNG_ANLEGEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'geschaeftstag', 'art', 'betrag_cent', 'text', 'beleg', 'gegenkasse_id', 'eigenbeleg_pfad']);
+const BEWEGUNG_STORNO_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'bewegung_id', 'grund']);
+export const BEWEGUNG_ID_MUSTER = /^(k[a-z0-9]{8})_(\d{4}-\d{2}-\d{2})_(\d{3})$/;
+// Kern-Eingabe des Beleg-Formulars v2 (Richtung Eingang): nur diese Schlüssel. Nie vom Nutzer: id, weg, herkunft, zahlungen (der Worker setzt Zahlung bar am
+// Geschäftstag), wirkdatum, bezug, korrektur_grund, rueckzahlung, sperrgrund, fa_*, bestaetigt.
+export const AUSGABE_BELEG_SCHLUESSEL = Object.freeze(['beleg_art', 'richtung', 'steuerwahl', 'satz_bp', 'betrag', 'positionen', 'rechnungsdatum', 'leistung', 'leistungsdatum', 'erhalt',
+  'kategorie', 'gegenpartei', 'rechnungsnr', 'waehrung', 'bewirtung', 'geschenk', 'kein_vorsteuerabzug', 'kein_anlagegut', 'anlagegut', 'ohne_ust_grund', 'ohne_rechnung',
+  'bewirtungsnachweis_vollstaendig', 'bestaetigung_12_abs_3', 'empfaenger', 'bezeichnung']);
+
+export function eigenbelegPfadPruefen(pfad, { uid, kasseId, tag }) {
+  const praefix = ANHANG_PRAEFIX(uid, kasseId, tag);
+  if (typeof pfad !== 'string' || pfad.length > 300 || !pfad.startsWith(praefix) || pfad.length === praefix.length || pfad.includes('..') || pfad.slice(praefix.length).includes('/')) return false;
+  return true;
+}
+
+export function pruefeBewegung(body, aktion, { uid, heute }) {
+  if (aktion === 'stornieren') {
+    if (!istObjekt(body) || !nurSchluessel(body, BEWEGUNG_STORNO_SCHLUESSEL)) return fehl(istObjekt(body) ? Object.keys(body).find((x) => !BEWEGUNG_STORNO_SCHLUESSEL.includes(x)) || 'body' : 'body');
+    if (typeof body.kasse_id !== 'string' || !KASSE_ID_MUSTER.test(body.kasse_id)) return fehl('kasse_id');
+    const m = typeof body.bewegung_id === 'string' ? BEWEGUNG_ID_MUSTER.exec(body.bewegung_id) : null;
+    if (!m || m[1] !== body.kasse_id || !geschaeftstagOk(m[2], '2100-12-31')) return fehl('bewegung_id');
+    if (typeof body.grund !== 'string' || body.grund.trim().length < 5 || body.grund.trim().length > 300) return fehl('grund');
+    return ok({ kasse_id: body.kasse_id, bewegung_id: body.bewegung_id, geschaeftstag: m[2], grund: body.grund.trim() });
+  }
+  if (!istObjekt(body) || !nurSchluessel(body, BEWEGUNG_ANLEGEN_SCHLUESSEL)) return fehl(istObjekt(body) ? Object.keys(body).find((x) => !BEWEGUNG_ANLEGEN_SCHLUESSEL.includes(x)) || 'body' : 'body');
+  if (typeof body.kasse_id !== 'string' || !KASSE_ID_MUSTER.test(body.kasse_id)) return fehl('kasse_id');
+  if (!geschaeftstagOk(body.geschaeftstag, heute)) return fehl('geschaeftstag');
+  if (!BEWEGUNG_ARTEN_NEU.includes(body.art)) return fehl('art');
+  if (!centOk(body.betrag_cent) || body.betrag_cent <= 0) return fehl('betrag_cent');
+  if (!textOk(body.text, 1, 200)) return fehl('text');
+  const w = { kasse_id: body.kasse_id, geschaeftstag: body.geschaeftstag, art: body.art, betrag_cent: body.betrag_cent, text: body.text.trim(), beleg: null, gegenkasse_id: null, eigenbeleg_pfad: null };
+  if (body.art === 'ausgabe') {
+    const b = body.beleg;
+    if (!istObjekt(b) || !nurSchluessel(b, AUSGABE_BELEG_SCHLUESSEL)) return fehl(istObjekt(b) ? `beleg.${Object.keys(b).find((x) => !AUSGABE_BELEG_SCHLUESSEL.includes(x))}` : 'beleg');
+    if (b.richtung !== undefined && b.richtung !== 'eingang') return fehl('beleg.richtung'); // Ausgabe aus der Kasse ist immer ein Eingangsbeleg (2.11 C.12)
+    if (b.beleg_art !== undefined && !['rechnung', 'quittung'].includes(b.beleg_art)) return fehl('beleg.beleg_art');
+    if (!istDatum(b.rechnungsdatum)) return fehl('beleg.rechnungsdatum');
+    if (!istObjekt(b.gegenpartei) || !textOk(b.gegenpartei.name, 1, 100)) return fehl('beleg.gegenpartei.name');
+    w.beleg = b;
+  } else if (body.beleg !== undefined && body.beleg !== null) return fehl('beleg');
+  if (body.art === 'geldtransit_kasse_ein' || body.art === 'geldtransit_kasse_aus') {
+    if (typeof body.gegenkasse_id !== 'string' || !KASSE_ID_MUSTER.test(body.gegenkasse_id) || body.gegenkasse_id === body.kasse_id) return fehl('gegenkasse_id');
+    w.gegenkasse_id = body.gegenkasse_id;
+  } else if (body.gegenkasse_id !== undefined && body.gegenkasse_id !== null) return fehl('gegenkasse_id');
+  if (PRIVAT_ARTEN.includes(body.art)) {
+    // Eigenbeleg (PDF aus dem Browser) liegt vorher unter kasse/{kasse_id}/{tag}/ (Pflicht, 2.3 Privatvorgänge)
+    if (typeof body.eigenbeleg_pfad !== 'string') return fehl('eigenbeleg_pfad');
+    if (!eigenbelegPfadPruefen(body.eigenbeleg_pfad, { uid, kasseId: w.kasse_id, tag: w.geschaeftstag })) return fehl('eigenbeleg_pfad', 'ANHANG_FREMD');
+    w.eigenbeleg_pfad = body.eigenbeleg_pfad;
+  } else if (body.eigenbeleg_pfad !== undefined && body.eigenbeleg_pfad !== null) return fehl('eigenbeleg_pfad');
+  return ok(w);
+}

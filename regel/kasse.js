@@ -1,7 +1,7 @@
 // regel/kasse.js (KASSE-P1b, Baukonzept docs/kassenbuch/08-baukonzept.md 2.3 und 2.11 C, Vertrag docs/kassenbuch/stand-kasse.md): Worker-Endpunkte des Kassenbuchs.
 //   POST /kasse        { aktion: 'anlegen' | 'aendern' | 'system_wechseln', ... }
 //   POST /kassentag    { aktion: 'abschliessen' | 'ruhetag' | 'ruhetage' | 'stornieren', ... }
-//   POST /kassenbewegung                                                           (Teilschritt 4)
+//   POST /kassenbewegung { aktion: 'anlegen' | 'stornieren', ... }
 // Alle Kassen-Sammlungen schreibt nur der Worker (Firestore-Regeln: Eigentümer liest). UID nur aus dem Token (setzt der Router).
 // Prüfreihenfolge: grundpruefung (anfrage_id, Größe) -> UID -> Feature kasse (503) -> Steuerprofil bestätigt (403 PROFIL_FEHLT) -> AGB-Mindestfassung
 // (403 AGB_FEHLT) -> aktion bekannt -> Positivliste je aktion (400 FORMAT mit feld) -> Formprüfung -> fachliche Prüfung mit dem Kern (Steuerkern.pruefeKassentag,
@@ -18,17 +18,18 @@ import { auditKette, kopfPfad } from './audit.js';
 import { profilBereit, wirkPerioden, nachFestschreibungAntwort, festPruefungMarkieren } from './schreibweg-v2.js';
 import { legacyHash } from './drift.js';
 import { heuteBerlin } from './oss-meldung.js';
-import { KASSE_PFADE, FEATURE, aufbewahrungBis, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, kernFassung, stammKombination } from './kasse-form.js';
+import { KASSE_PFADE, FEATURE, aufbewahrungBis, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, pruefeBewegung, kernFassung, stammKombination, PRIVAT_ARTEN } from './kasse-form.js';
 import { P, kasseIdAus, kassennummer, letzterAbgeschlossenerTag, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern } from './kasse-daten.js';
 
 export { KASSE_PFADE, FEATURE, aufbewahrungBis, pruefeKasse, pruefeKassentag };
+export const BEWEGUNGEN_MAX_JE_TAG = 999;
 export const KASSEN_MAX = 20; // Missbrauchsgrenze je Konto (Oberfläche: bis 3 Kassen, danach Hinweis)
 export const FASSUNGEN_MAX = 3; // Original und zwei Neuerfassungen (Kap. 6 Nr. 18)
 export const WIEDERHOLUNGEN_MAX = 3; // Wiederholungen bei gleichzeitiger Änderung (2.3 Atomarer Commit, Zähler)
 const BODY_MAX_ZEICHEN = 30000;
 const VERLAUF_MAX = 200;
 const SPERRENDE = ['festgeschrieben', 'sperre_laeuft'];
-const AKTIONEN = { '/kasse': ['anlegen', 'aendern', 'system_wechseln'], '/kassentag': ['abschliessen', 'ruhetag', 'ruhetage', 'stornieren'] };
+const AKTIONEN = { '/kasse': ['anlegen', 'aendern', 'system_wechseln'], '/kassentag': ['abschliessen', 'ruhetag', 'ruhetage', 'stornieren'], '/kassenbewegung': ['anlegen', 'stornieren'] };
 // Abbildung der Kern-Prüfcodes auf HTTP (stand-kasse.md 5): FORMAT-Gruppe 400 mit code FORMAT (kern_code nennt den Kern-Code), die übrigen gleichnamig
 const FORMAT_GRUPPE = ['FORMAT', 'STEUERFALL_UNZULAESSIG', 'KU_MEHRERE_SAETZE', 'DIFFERENZ_OHNE_GRUND', 'ZBON_SUMME_ABWEICHUNG', 'RETROGRAD_DIFFERENZ'];
 const KERN_STATUS = { ANHANG_ODER_BESTAETIGUNG: [422, 'ANHANG_FEHLT'], TAGESSALDO_NEGATIV: [422], BESTAND_NEGATIV: [422], DATENQUELLE_SUMUP: [422], KARTE_UEBER_INTEGRATION: [422],
@@ -100,6 +101,7 @@ export async function regelKasse(pfad, body, env, cors = {}, deps = {}) {
       if (aktion === 'stornieren') return await stornieren(c);
       return await ruhetage(c, aktion);
     }
+    if (pfad === '/kassenbewegung') return aktion === 'anlegen' ? await bewegungAnlegen(c) : await bewegungStornieren(c);
     return fehlerAntwort(404, 'PFAD_UNBEKANNT', cors);
   } catch (e) {
     return regelFehler(e, 'kasse', cors);
@@ -604,6 +606,190 @@ async function stornieren(c) {
       erfolg: async () => {
         if (gesperrt.length) await festPruefungMarkieren({ uid, token: await deps.adminToken(), fetchFn: deps.fetchFn, perioden: gesperrt, zeit });
         return antwort({ ok: true, kassentag_id: tagId, fassung: n, storno_kassennummer: nr, storno_beleg_id: kurzNeu.storno_beleg_id, storno_beleg_ids: storni.map((x) => x.id), ...nachFestschreibungAntwort({ nach_festschreibung: gesperrt }) }, 200, cors);
+      },
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// /kassenbewegung (2.1, 2.3, 2.11 C.2, C.5, C.12): Ausgabe (mit Beleg über deps.kassenAusgabeBeleg, Kanal bar), Entnahme, Einlage, Wechselgeld-Einlage (Privatvorgang
+// zahlweg 'kasse' mit Eigenbeleg), Geldtransit, Trinkgeld-Auszahlung. Nur an offenen Tagen (409 TAG_ABGESCHLOSSEN), nur nach dem letzten abgeschlossenen Tag
+// (409 SPAETERE_TAGE: eine Bewegung in einer Lücke fehlte in jeder Soll-Rechnung). Bewegungen sind unveränderlich; ein Storno ist eine eigene Bewegung mit Bezug.
+// Eine Kassennummer je Bewegung aus dem Zähler der Kasse und des Jahres (lückenlos, zusammen mit Fassungen und Stornos).
+// ---------------------------------------------------------------------------------------------
+async function offenerTag(c, kasseDok, tagDok, tag, tagId) {
+  const { fs, uid, cors } = c;
+  const kasse = kasseDok.daten;
+  if (kasse.kassenbuch === false) return { antwort: fehlerAntwort(422, 'KASSE_OHNE_KASSENBUCH', cors) };
+  if (kasse.aktiv === false) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors) };
+  if (tagDok && istObjekt(tagDok.daten) && (tagDok.daten.status === 'abgeschlossen' || tagDok.daten.status === 'ruhetag')) return { antwort: fehlerAntwort(409, 'TAG_ABGESCHLOSSEN', cors, { kassentag_id: tagId, status: tagDok.daten.status }) };
+  if (tag < kasse.anfangsbestand_am) return { antwort: fehlerAntwort(422, 'VOR_ANFANGSBESTAND', cors, { anfangsbestand_am: kasse.anfangsbestand_am }) };
+  const letzter = await letzterAbgeschlossenerTag(fs, uid, idVon(kasseDok));
+  if (letzter && tag < letzter.daten.geschaeftstag) return { antwort: fehlerAntwort(409, 'SPAETERE_TAGE', cors, { letzter_tag: letzter.daten.geschaeftstag }) };
+  return null;
+}
+const naechsteNr = (liste) => liste.reduce((m, d) => Math.max(m, Number(String(d.pfad).split('_').pop()) || 0), 0) + 1;
+
+async function bewegungAnlegen(c) {
+  const { fs, uid, body, cors, zeit, heute, profil, config, deps } = c;
+  const f = pruefeBewegung(body, 'anlegen', { uid, heute });
+  if (f.fehler) return formFehler(f.fehler, cors);
+  const w = f.wert;
+  const kasseId = w.kasse_id;
+  const tag = w.geschaeftstag;
+  const tagId = Steuerkern.kassentagId(kasseId, tag);
+  const jahr = tag.slice(0, 4);
+  let kernOptionen = null;
+  let festPerioden = [];
+  if (w.art === 'ausgabe') {
+    if (typeof deps.kassenAusgabeBeleg !== 'function') return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
+    kernOptionen = await kernOptionenFuerKontoLaden(uid, config, { fs, streng: true });
+    festPerioden = (await listeAlle(fs, P.festschreibungen(uid))).dokumente.filter((d) => SPERRENDE.includes(d.daten && d.daten.status)).map(idVon);
+  }
+  return mitWiederholung(fs, async () => {
+    const docs = await fs.batchGet([P.kasse(uid, kasseId), P.kassentag(uid, tagId), P.zaehler(uid, kasseId, jahr), kopfPfad(uid), ...(w.gegenkasse_id ? [P.kasse(uid, w.gegenkasse_id)] : [])]);
+    const kasseDok = docs.get(P.kasse(uid, kasseId));
+    if (!kasseDok || !istObjekt(kasseDok.daten)) return { antwort: fehlerAntwort(404, 'KASSE_UNBEKANNT', cors) };
+    if (w.gegenkasse_id && !docs.get(P.kasse(uid, w.gegenkasse_id))) return { antwort: fehlerAntwort(404, 'KASSE_UNBEKANNT', cors, { feld: 'gegenkasse_id' }) };
+    const bisher = await bewegungenDesTages(fs, uid, kasseId, tag);
+    // Wiederholung derselben Anfrage (Netzabbruch): bestätigen, nie ein zweites Mal schreiben
+    const gleiche = bisher.find((d) => d.daten.anfrage_id === body.anfrage_id);
+    if (gleiche) return { antwort: antwort({ ok: true, idempotent: true, bewegung_id: idVon(gleiche), kassennummer: gleiche.daten.kassennummer, beleg_id: gleiche.daten.beleg_id ?? null, privatvorgang_id: gleiche.daten.privatvorgang_id ?? null }, 200, cors) };
+    const sperre = await offenerTag(c, kasseDok, docs.get(P.kassentag(uid, tagId)), tag, tagId);
+    if (sperre) return sperre;
+    const kasse = kasseDok.daten;
+    const nr = naechsteNr(bisher);
+    if (nr > BEWEGUNGEN_MAX_JE_TAG) return { antwort: fehlerAntwort(422, 'BEWEGUNGEN_MAX', cors, { max: BEWEGUNGEN_MAX_JE_TAG }) };
+    const bewegungId = `${kasseId}_${tag}_${String(nr).padStart(3, '0')}`;
+    const zaehlerDok = docs.get(P.zaehler(uid, kasseId, jahr));
+    const nummerNeu = (Number.isSafeInteger(zaehlerDok?.daten?.letzte) ? zaehlerDok.daten.letzte : 0) + 1;
+    const nummer = kassennummer(kasse.kuerzel, jahr, nummerNeu);
+    const ts = zeitstempel(zeit);
+    const writes = [];
+    let belegId = null;
+    let privatId = null;
+    let warnung = null;
+    let gesperrt = [];
+    let belegAntwort = null;
+    if (w.art === 'ausgabe') {
+      belegId = `kasse_${bewegungId}_beleg`;
+      const a = await deps.kassenAusgabeBeleg(w.beleg, { fs, uid, profil, kernOptionen, festPerioden, heute, zeit, tag, belegId, kasseId, bewegungId, nummer, text: w.text });
+      if (a.fehler) return { antwort: formFehler(a.fehler, cors) };
+      if (a.ablehnen) {
+        const gesperrtP = (a.perioden || []).filter((p) => festPerioden.includes(p));
+        if (a.codes.includes('PF_ZAHLUNG_GESPERRT')) return { antwort: fehlerAntwort(409, 'MONAT_FESTGESCHRIEBEN', cors, { perioden: gesperrtP }) };
+        return { antwort: fehlerAntwort(422, 'BELEG_UNGUELTIG', cors, { codes: a.codes.filter((x) => /^[A-Za-z0-9_]{1,64}$/.test(x)).slice(0, 10) }) };
+      }
+      // Die Bewegung ist die Barzahlung des ganzen Belegs: gleicher Betrag (sonst stimmt der Kassenbestand nicht mit der Buchung überein)
+      if (a.brutto_cent !== w.betrag_cent) return { antwort: formFehler({ code: 'FORMAT', feld: 'betrag_cent', grund: 'beleg_summe', beleg_brutto_cent: a.brutto_cent }, cors) };
+      gesperrt = a.nach_festschreibung || [];
+      warnung = a.warnung || null;
+      writes.push(schreibe.anlegen(P.beleg(uid, belegId), a.dok));
+      belegAntwort = a;
+    }
+    if (PRIVAT_ARTEN.includes(w.art)) {
+      // Entnahme, Einlage, Wechselgeld-Einlage: Privatvorgang gegen die Kasse (DATEV bucht gegen das Kassenkonto), Eigenbeleg Pflicht
+      privatId = `kasse_${bewegungId}`;
+      writes.push(schreibe.anlegen(P.privat(uid, privatId), {
+        art: w.art === 'entnahme' ? 'entnahme' : 'einlage', datum: tag, betrag: w.betrag_cent / 100, notiz: w.text, storniert: false, erstellt: zeit,
+        konto: w.art === 'entnahme' ? '1800' : '1890', zahlweg: 'kasse', kasse_id: kasseId, kassenbewegung_id: bewegungId, eigenbeleg_pfad: w.eigenbeleg_pfad, quelle: 'kasse',
+        ...(w.art === 'wechselgeld_einlage' ? { wechselgeld: true } : {}),
+      }));
+    }
+    const bewegung = {
+      kasse_id: kasseId, geschaeftstag: tag, art: w.art, betrag_cent: w.betrag_cent, text: w.text, beleg_id: belegId, eigenbeleg_pfad: w.eigenbeleg_pfad,
+      privatvorgang_id: privatId, gegenkasse_id: w.gegenkasse_id, storno_von: null, storno_art: null, storno_grund: null, kontoauszug_abgleich: null,
+      kassennummer: nummer, erfasst_am: ts, anfrage_id: body.anfrage_id, aufbewahrung_bis: aufbewahrungBis(tag),
+    };
+    writes.unshift(schreibe.anlegen(P.bewegung(uid, bewegungId), bewegung), schreibe.setzen(P.zaehler(uid, kasseId, jahr), { letzte: nummerNeu, aktualisiert_am: ts }, zaehlerDok ? { updateTime: zaehlerDok.updateTime } : { exists: false }));
+    const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{
+      aktion: 'kassenbewegung', ziel: `kassenbewegungen/${bewegungId}`, vorher: null, nachher: bewegung,
+      details: { kasse_id: kasseId, bewegung_id: bewegungId, art: w.art, beleg: Boolean(belegId), privatvorgang: Boolean(privatId), nach_festschreibung: gesperrt.length > 0 },
+    }], zeit);
+    writes.push(...audit.writes);
+    return {
+      writes,
+      erfolg: async () => {
+        if (gesperrt.length) await festPruefungMarkieren({ uid, token: await deps.adminToken(), fetchFn: deps.fetchFn, perioden: gesperrt, zeit });
+        return antwort({ ok: true, bewegung_id: bewegungId, kassennummer: nummer, beleg_id: belegId, privatvorgang_id: privatId, ...(warnung ? { warning: warnung, duplikat_warnung: true } : {}), ...(belegAntwort && belegAntwort.codes && belegAntwort.codes.length ? { beleg_hinweise: belegAntwort.codes.slice(0, 10) } : {}), ...nachFestschreibungAntwort({ nach_festschreibung: gesperrt }) }, 200, cors);
+      },
+    };
+  });
+}
+
+async function bewegungStornieren(c) {
+  const { fs, uid, body, cors, zeit, heute, profil, config, deps } = c;
+  const f = pruefeBewegung(body, 'stornieren', { uid, heute });
+  if (f.fehler) return formFehler(f.fehler, cors);
+  const { kasse_id: kasseId, bewegung_id: origId, geschaeftstag: tag, grund } = f.wert;
+  const tagId = Steuerkern.kassentagId(kasseId, tag);
+  const jahr = tag.slice(0, 4);
+  const kernOptionen = await kernOptionenFuerKontoLaden(uid, config, { fs, streng: true });
+  const festPerioden = (await listeAlle(fs, P.festschreibungen(uid))).dokumente.filter((d) => SPERRENDE.includes(d.daten && d.daten.status)).map(idVon);
+  return mitWiederholung(fs, async () => {
+    const docs = await fs.batchGet([P.kasse(uid, kasseId), P.kassentag(uid, tagId), P.zaehler(uid, kasseId, jahr), kopfPfad(uid), P.bewegung(uid, origId)]);
+    const kasseDok = docs.get(P.kasse(uid, kasseId));
+    if (!kasseDok || !istObjekt(kasseDok.daten)) return { antwort: fehlerAntwort(404, 'KASSE_UNBEKANNT', cors) };
+    const origDok = docs.get(P.bewegung(uid, origId));
+    if (!origDok || !istObjekt(origDok.daten)) return { antwort: fehlerAntwort(404, 'BEWEGUNG_UNBEKANNT', cors) };
+    const orig = origDok.daten;
+    const bisher = await bewegungenDesTages(fs, uid, kasseId, tag);
+    const gleiche = bisher.find((d) => d.daten.anfrage_id === body.anfrage_id);
+    if (gleiche) return { antwort: antwort({ ok: true, idempotent: true, bewegung_id: idVon(gleiche), kassennummer: gleiche.daten.kassennummer }, 200, cors) };
+    if (orig.art === 'storno') return { antwort: fehlerAntwort(409, 'STORNO_VON_STORNO', cors) };
+    if (bisher.some((d) => d.daten.storno_von === origId)) return { antwort: fehlerAntwort(409, 'BEWEGUNG_STORNIERT', cors, { bewegung_id: origId }) };
+    const sperre = await offenerTag(c, kasseDok, docs.get(P.kassentag(uid, tagId)), tag, tagId);
+    if (sperre) return sperre;
+    const kasse = kasseDok.daten;
+    const nr = naechsteNr(bisher);
+    if (nr > BEWEGUNGEN_MAX_JE_TAG) return { antwort: fehlerAntwort(422, 'BEWEGUNGEN_MAX', cors, { max: BEWEGUNGEN_MAX_JE_TAG }) };
+    const stornoId = `${kasseId}_${tag}_${String(nr).padStart(3, '0')}`;
+    const zaehlerDok = docs.get(P.zaehler(uid, kasseId, jahr));
+    const nummerNeu = (Number.isSafeInteger(zaehlerDok?.daten?.letzte) ? zaehlerDok.daten.letzte : 0) + 1;
+    const nummer = kassennummer(kasse.kuerzel, jahr, nummerNeu);
+    const ts = zeitstempel(zeit);
+    const writes = [];
+    let gesperrt = [];
+    // Ausgabe mit Beleg: der Eingangsbeleg wird storniert (Kennzeichen storniert wie im Belegarchiv: der Kern rechnet ihn danach als wirkungslos, 'v2_zahlung').
+    // Es gibt für Ausgaben keinen Kassen-Storno-Zweig im Kern (-26): die Gegenwirkung ist die Wirkungslosigkeit des Originals im Zeitraum des Belegs.
+    // Liegt ein EÜR-Monat des Belegs fest: 409 MONAT_FESTGESCHRIEBEN (Nr. 21); nur USt-Zeitraum: speichern mit nach_festschreibung.
+    const lesen = [];
+    if (orig.beleg_id) lesen.push(P.beleg(uid, orig.beleg_id));
+    if (orig.privatvorgang_id) lesen.push(P.privat(uid, orig.privatvorgang_id));
+    const refs = lesen.length ? await fs.batchGet(lesen) : new Map();
+    if (orig.beleg_id) {
+      const bd = refs.get(P.beleg(uid, orig.beleg_id));
+      if (!bd || !istObjekt(bd.daten)) throw new Error('Ausgabebeleg der Bewegung fehlt');
+      if (bd.daten.storniert === true) return { antwort: fehlerAntwort(409, 'BEWEGUNG_STORNIERT', cors, { bewegung_id: origId }) };
+      const kb = Steuerkern.belegFuerKern({ ...bd.daten, id: orig.beleg_id }, profil).beleg;
+      const perioden = kb ? wirkPerioden(kb, profil, kernOptionen) : [];
+      gesperrt = perioden.filter((p) => festPerioden.includes(p));
+      if (gesperrt.some((p) => p.startsWith('euer-'))) return { antwort: fehlerAntwort(409, 'MONAT_FESTGESCHRIEBEN', cors, { perioden: gesperrt }) };
+      writes.push(schreibe.aendern(P.beleg(uid, orig.beleg_id), {
+        storniert: true, storniert_am: ts, storno_grund: grund, ...(gesperrt.length ? { nach_festschreibung: { perioden: gesperrt, erkannt_am: zeit } } : {}),
+      }, ['storniert', 'storniert_am', 'storno_grund', ...(gesperrt.length ? ['nach_festschreibung'] : [])], { updateTime: bd.updateTime }));
+    }
+    if (orig.privatvorgang_id) {
+      const pd = refs.get(P.privat(uid, orig.privatvorgang_id));
+      if (!pd || !istObjekt(pd.daten)) throw new Error('Privatvorgang der Bewegung fehlt');
+      writes.push(schreibe.aendern(P.privat(uid, orig.privatvorgang_id), { storniert: true, storniert_am: zeit }, ['storniert', 'storniert_am'], { updateTime: pd.updateTime }));
+    }
+    const bewegung = {
+      kasse_id: kasseId, geschaeftstag: tag, art: 'storno', betrag_cent: orig.betrag_cent, text: `Storno: ${orig.text || ''}`.slice(0, 200), beleg_id: orig.beleg_id ?? null, eigenbeleg_pfad: null,
+      privatvorgang_id: orig.privatvorgang_id ?? null, gegenkasse_id: orig.gegenkasse_id ?? null, storno_von: origId, storno_art: orig.art, storno_grund: grund, kontoauszug_abgleich: null,
+      kassennummer: nummer, erfasst_am: ts, anfrage_id: body.anfrage_id, aufbewahrung_bis: aufbewahrungBis(tag),
+    };
+    writes.unshift(schreibe.anlegen(P.bewegung(uid, stornoId), bewegung), schreibe.setzen(P.zaehler(uid, kasseId, jahr), { letzte: nummerNeu, aktualisiert_am: ts }, zaehlerDok ? { updateTime: zaehlerDok.updateTime } : { exists: false }));
+    const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{
+      aktion: 'kassenbewegung_storno', ziel: `kassenbewegungen/${stornoId}`, vorher: orig, nachher: bewegung,
+      details: { kasse_id: kasseId, bewegung_id: stornoId, storno_von: origId, art: orig.art, nach_festschreibung: gesperrt.length > 0 },
+    }], zeit);
+    writes.push(...audit.writes);
+    return {
+      writes,
+      erfolg: async () => {
+        if (gesperrt.length) await festPruefungMarkieren({ uid, token: await deps.adminToken(), fetchFn: deps.fetchFn, perioden: gesperrt, zeit });
+        return antwort({ ok: true, bewegung_id: stornoId, storno_von: origId, kassennummer: nummer, ...nachFestschreibungAntwort({ nach_festschreibung: gesperrt }) }, 200, cors);
       },
     };
   });

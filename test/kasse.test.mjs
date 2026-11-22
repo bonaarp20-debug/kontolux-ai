@@ -11,6 +11,7 @@ import { fakeFirestore } from './regel-fake-firestore.mjs';
 import { erzeugeTestEnv, anfrage } from './harness.mjs';
 import { createHash } from 'node:crypto';
 import { kassenPrueferDaten } from '../regel/kasse-daten.js';
+import { kassenAusgabeBeleg } from '../regel/kasse-ausgabe.js';
 import { REGEL_SAMMLUNGEN, REGEL_UNTERSAMMLUNGEN, UNTERSAMMLUNGEN } from '../regel/archiv.js';
 import { AUFBEWAHRUNG_SAMMLUNGEN, AUFBEWAHRUNG_ORDNER } from '../regel/loeschlaeufe.js';
 
@@ -53,23 +54,24 @@ function umgebung({ config = AN, profil = REGEL, agb = true, heute = HEUTE, budg
   let heuteAkt = heute;
   const deps = {
     fetchFn: fs.fetchFn, adminToken: async () => 't', heute: () => heuteAkt, jetzt: () => new Date(Date.parse(`${heuteAkt}T09:00:00Z`) + (t++) * 1000).toISOString(),
-    storageUrlOk, ...(budget ? { budget } : {}),
+    storageUrlOk, kassenAusgabeBeleg, ...(budget ? { budget } : {}),
   };
   const rufeRoh = async (pfad, body, d = deps, optionen = {}) => {
-    const tagWert = body.geschaeftstag || (Array.isArray(body.tage) ? body.tage[body.tage.length - 1] : null);
+    const tagWert = body.geschaeftstag || (Array.isArray(body.tage) ? body.tage[body.tage.length - 1] : null) || (typeof body.bewegung_id === 'string' ? body.bewegung_id.slice(10, 20) : null);
     heuteAkt = optionen.heute || (typeof tagWert === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(tagWert) && tagWert > '2020-01-01' && tagWert <= heute && K.istDatum(tagWert) ? tagWert : heute);
     const r = await regelKasse(pfad, { userId: UID, ...(token ? { token: 'tok' } : {}), anfrage_id: aid(), ...body }, {}, {}, d);
     return { status: r.status, json: await r.json() };
   };
   const kasse = (body) => rufeRoh('/kasse', body);
   const tagRufe = (body, optionen) => rufeRoh('/kassentag', body, deps, optionen);
+  const bewRufe = (body, optionen) => rufeRoh('/kassenbewegung', body, deps, optionen);
   const legeKasseAn = async (extra = {}) => {
     const r = await kasse({ ...KASSE_ANLEGEN, ...extra });
     assert.equal(r.status, 200, JSON.stringify(r.json));
     return r.json.kasse_id;
   };
   const audit = () => fs.pfade(P('audit_v2/e')).map((p) => fs.lies(p));
-  return { fs, deps, kasse, tagRufe, rufeRoh, legeKasseAn, audit };
+  return { fs, deps, kasse, tagRufe, bewRufe, rufeRoh, legeKasseAn, audit };
 }
 
 // Tagesabschluss-Körper: 19 % bar 500,00 + Karte 300,00 (brutto), 7 % bar 107,00; Soll = 100,00 + 607,00 = 707,00
@@ -84,8 +86,8 @@ const ohneUmsatz = (kasseId, tag, extra = {}) => abschluss(kasseId, tag, { umsae
 // ---------------------------------------------------------------------------------------------
 // Router-Listen, Feature, Zugang
 // ---------------------------------------------------------------------------------------------
-test('Pfade: /kasse und /kassentag (Teilschritt 1); Feature-Namen kasse und kasse_ki, Standard aus (fehlender Name = aus), kasse hängt am Kern', () => {
-  assert.deepEqual([...KASSE_PFADE], ['/kasse', '/kassentag']);
+test('Pfade: /kasse, /kassentag und /kassenbewegung; Feature-Namen kasse und kasse_ki, Standard aus (fehlender Name = aus), kasse hängt am Kern', () => {
+  assert.deepEqual([...KASSE_PFADE], ['/kasse', '/kassentag', '/kassenbewegung']);
   assert.deepEqual([...FEATURES_KASSE], ['kasse', 'kasse_ki']);
   for (const name of FEATURES_KASSE) {
     assert.equal(featureAktiv(null, name), false, `${name}: ohne Konfiguration aus`);
@@ -899,12 +901,12 @@ function installiere(fs) {
 }
 const heuteEcht = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 
-test('Router: /kasse und /kassentag ohne Token 401, ungültiger Token 401, E-Mail nicht bestätigt 403; vorher war es 404 (Deploy-Prüfung)', async () => {
+test('Router: /kasse, /kassentag und /kassenbewegung ohne Token 401, ungültiger Token 401, E-Mail nicht bestätigt 403; vorher war es 404 (Deploy-Prüfung)', async () => {
   const fs = fakeFirestore();
   const zurueck = installiere(fs);
   try {
     const env = await erzeugeTestEnv();
-    for (const path of ['/kasse', '/kassentag']) {
+    for (const path of ['/kasse', '/kassentag', '/kassenbewegung']) {
       assert.equal((await anfrage(env, { path, body: {} })).status, 401, path);
       assert.equal((await anfrage(env, { path, body: {}, headers: { Authorization: 'Bearer falsch' } })).status, 401, path);
       assert.equal((await anfrage(env, { path, body: {}, headers: { Authorization: 'Bearer tok-u' } })).status, 403, path);
@@ -940,13 +942,13 @@ test('Router: Feature kasse aus (Standard) 503, nichts geschrieben; an: Kasse un
   } finally { zurueck(); }
 });
 
-test('Router: Ratenlimit je Nutzer (UID_LIMITS): /kasse 30, /kassentag 60 je 10 Minuten, danach 429', async () => {
+test('Router: Ratenlimit je Nutzer (UID_LIMITS): /kasse 30, /kassentag 60, /kassenbewegung 120 je 10 Minuten, danach 429', async () => {
   const fs = fakeFirestore();
   fs.setze('config/features', { kern_max: 'an', features: { steuerprofil: 'an' } }); // Feature aus: billige 503
   const zurueck = installiere(fs);
   try {
     const env = await erzeugeTestEnv();
-    for (const [path, limit] of [['/kasse', 30], ['/kassentag', 60]]) {
+    for (const [path, limit] of [['/kasse', 30], ['/kassentag', 60], ['/kassenbewegung', 120]]) {
       let letzte = 0;
       for (let i = 0; i < limit + 1; i += 1) letzte = (await anfrage(env, { path, body: { anfrage_id: aid() }, headers: { Authorization: 'Bearer tok-b' }, ip: `203.0.113.${60 + (i % 40)}` })).status;
       assert.equal(letzte, 429, path);
@@ -1330,4 +1332,441 @@ test('Mehrzweck-Gutschein-Verkauf (SB-3): eigener Beleg _gm (A_GUTSCHEIN_MEHRZWE
   assert.deepEqual(s.json.storno_beleg_ids, [`kasse_${id}_${tag}_f1_storno_gm`]);
   assert.deepEqual(K.euerFuer(kernSumme([gm.id, `kasse_${id}_${tag}_f1_storno_gm`], u), REGEL, 2026).zeilen.filter((z) => z.betrag_cent !== 0), []);
   assert.equal(u.fs.lies(P(`tagesdaten/${tag}`)).einnahmen, 0);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Teilschritt 4: /kassenbewegung (Ausgabe über den Beleg-Schreibweg, Privatvorgang, Geldtransit), nur an offenen Tagen
+// ---------------------------------------------------------------------------------------------
+const bewegung = (id, tag, art, betrag, extra = {}) => ({ aktion: 'anlegen', kasse_id: id, geschaeftstag: tag, art, betrag_cent: betrag, text: `Test ${art}`, ...extra });
+const eigen = (id, tag, name = 'eigenbeleg.pdf') => `users/${UID}/kasse/${id}/${tag}/1700000001_${name}`;
+const AUSGABE_BELEG = (extra = {}) => ({
+  beleg_art: 'rechnung', steuerwahl: 'inland_19', rechnungsdatum: '2026-11-02', gegenpartei: { name: 'Bürobedarf GmbH' }, kategorie: 'Bürobedarf',
+  positionen: [{ bez: 'Kopierpapier', brutto_cent: 11900, satz_bp: 1900 }], ...extra,
+});
+const stornoBew = (id, bewId, extra = {}) => ({ aktion: 'stornieren', kasse_id: id, bewegung_id: bewId, grund: 'falsch erfasst', ...extra });
+
+test('Bewegungen anlegen: Entnahme, Einlage, Wechselgeld-Einlage (Privatvorgang zahlweg kasse mit Eigenbeleg), Geldtransit und Trinkgeld-Auszahlung; Kassennummern fortlaufend mit den Abschlüssen', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const tag = '2026-11-02';
+  const e = await u.bewRufe(bewegung(id, tag, 'entnahme', 2000, { eigenbeleg_pfad: eigen(id, tag) }));
+  assert.equal(e.status, 200, JSON.stringify(e.json));
+  assert.deepEqual([e.json.bewegung_id, e.json.kassennummer, e.json.privatvorgang_id, e.json.beleg_id], [`${id}_${tag}_001`, 'K-THK-2026-0001', `kasse_${id}_${tag}_001`, null]);
+  const b = u.fs.lies(P(`kassenbewegungen/${id}_${tag}_001`));
+  assert.deepEqual([b.kasse_id, b.geschaeftstag, b.art, b.betrag_cent, b.text, b.privatvorgang_id, b.eigenbeleg_pfad, b.kassennummer, b.aufbewahrung_bis, b.kontoauszug_abgleich, b.storno_von], [id, tag, 'entnahme', 2000, 'Test entnahme', `kasse_${id}_${tag}_001`, eigen(id, tag), 'K-THK-2026-0001', '2036-12-31', null, null]);
+  const pv = u.fs.lies(P(`privatvorgaenge/kasse_${id}_${tag}_001`));
+  assert.deepEqual([pv.art, pv.zahlweg, pv.kasse_id, pv.kassenbewegung_id, pv.betrag, pv.datum, pv.storniert, pv.konto, pv.eigenbeleg_pfad], ['entnahme', 'kasse', id, `${id}_${tag}_001`, 20, tag, false, '1800', eigen(id, tag)]);
+  const ei = await u.bewRufe(bewegung(id, tag, 'einlage', 5050, { eigenbeleg_pfad: eigen(id, tag, 'e2.pdf') }));
+  assert.equal(u.fs.lies(P(`privatvorgaenge/kasse_${id}_${tag}_002`)).art, 'einlage');
+  assert.equal(u.fs.lies(P(`privatvorgaenge/kasse_${id}_${tag}_002`)).betrag, 50.5);
+  assert.equal(ei.json.kassennummer, 'K-THK-2026-0002');
+  const wg = await u.bewRufe(bewegung(id, tag, 'wechselgeld_einlage', 10000, { eigenbeleg_pfad: eigen(id, tag, 'e3.pdf') }));
+  assert.equal(u.fs.lies(P(`privatvorgaenge/kasse_${id}_${tag}_003`)).art, 'einlage');
+  assert.equal(u.fs.lies(P(`kassenbewegungen/${id}_${tag}_003`)).art, 'wechselgeld_einlage');
+  for (const [art, nr] of [['geldtransit_bank_ein', 4], ['geldtransit_bank_aus', 5], ['trinkgeld_ma_auszahlung', 6]]) {
+    const r = await u.bewRufe(bewegung(id, tag, art, 700));
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.deepEqual([r.json.privatvorgang_id, r.json.beleg_id], [null, null], art);
+    assert.equal(u.fs.lies(P(`kassenbewegungen/${id}_${tag}_${String(nr).padStart(3, '0')}`)).art, art);
+  }
+  assert.equal(u.fs.pfade(P('privatvorgaenge/')).length, 3, 'nur Entnahme und Einlagen erzeugen Privatvorgänge');
+  assert.equal(u.fs.lies(P(`zaehler/K_${id}_2026`)).letzte, 6);
+  assert.deepEqual(u.audit().map((x) => x.aktion), ['kasse_anlegen', ...Array(6).fill('kassenbewegung')]);
+  // der Abschluss rechnet mit den Bewegungen: 100,00 - 20,00 + 50,50 + 100,00 + 7,00 - 7,00 - 7,00 = 223,50; Kassennummer des Abschlusses danach 0007
+  const a = await u.tagRufe(abschluss(id, tag, { umsaetze: [], gezaehlt_cent: 22350 }));
+  assert.equal(a.status, 200, JSON.stringify(a.json));
+  assert.deepEqual([a.json.soll_endbestand_cent, a.json.kassennummer], [22350, 'K-THK-2026-0007']);
+  assert.equal(u.fs.lies(P(`kassentage/${id}_${tag}/fassungen/1`)).bewegungen_saldo_cent, 12350);
+});
+
+test('Bewegung: Positivliste und Form (400 FORMAT mit feld), Eigenbeleg Pflicht und nur eigener Pfad, Geldtransit zwischen Kassen mit bekannter Gegenkasse', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const tag = '2026-11-02';
+  const vor = u.fs.log.commits;
+  const faelle = [
+    [bewegung(id, tag, 'entnahme', 100, { eigenbeleg_pfad: eigen(id, tag), geheim: 1 }), 'geheim', 'FORMAT'],
+    [bewegung(id, tag, 'storno', 100), 'art', 'FORMAT'],
+    [bewegung(id, tag, 'entnahme', 0, { eigenbeleg_pfad: eigen(id, tag) }), 'betrag_cent', 'FORMAT'],
+    [bewegung(id, tag, 'entnahme', 10.5, { eigenbeleg_pfad: eigen(id, tag) }), 'betrag_cent', 'FORMAT'],
+    [bewegung(id, tag, 'entnahme', -5, { eigenbeleg_pfad: eigen(id, tag) }), 'betrag_cent', 'FORMAT'],
+    [bewegung(id, tag, 'entnahme', 100, { eigenbeleg_pfad: eigen(id, tag), text: '' }), 'text', 'FORMAT'],
+    [bewegung(id, tag, 'entnahme', 100, { eigenbeleg_pfad: eigen(id, tag), text: 'x'.repeat(201) }), 'text', 'FORMAT'],
+    [bewegung(id, tag, 'entnahme', 100), 'eigenbeleg_pfad', 'FORMAT'],
+    [bewegung(id, tag, 'entnahme', 100, { eigenbeleg_pfad: eigen(id, '2026-11-03') }), 'eigenbeleg_pfad', 'ANHANG_FREMD'],
+    [bewegung(id, tag, 'entnahme', 100, { eigenbeleg_pfad: eigen('kandere99', tag) }), 'eigenbeleg_pfad', 'ANHANG_FREMD'],
+    [bewegung(id, tag, 'entnahme', 100, { eigenbeleg_pfad: `users/anderer0Nutzer000001/kasse/${id}/${tag}/x.pdf` }), 'eigenbeleg_pfad', 'ANHANG_FREMD'],
+    [bewegung(id, tag, 'entnahme', 100, { eigenbeleg_pfad: `users/${UID}/kasse/${id}/${tag}/../x.pdf` }), 'eigenbeleg_pfad', 'ANHANG_FREMD'],
+    [bewegung(id, tag, 'geldtransit_bank_ein', 100, { eigenbeleg_pfad: eigen(id, tag) }), 'eigenbeleg_pfad', 'FORMAT'],
+    [bewegung(id, tag, 'geldtransit_bank_ein', 100, { beleg: AUSGABE_BELEG() }), 'beleg', 'FORMAT'],
+    [bewegung(id, tag, 'geldtransit_bank_ein', 100, { gegenkasse_id: 'kandere99' }), 'gegenkasse_id', 'FORMAT'],
+    [bewegung(id, tag, 'geldtransit_kasse_aus', 100), 'gegenkasse_id', 'FORMAT'],
+    [bewegung(id, tag, 'geldtransit_kasse_aus', 100, { gegenkasse_id: id }), 'gegenkasse_id', 'FORMAT'],
+    [bewegung(id, tag, 'ausgabe', 100), 'beleg', 'FORMAT'],
+    [bewegung(id, '2026-02-30', 'geldtransit_bank_ein', 100), 'geschaeftstag', 'FORMAT'],
+    [bewegung(id, '2026-11-21', 'geldtransit_bank_ein', 100), 'geschaeftstag', 'FORMAT'],
+  ];
+  for (const [body, feld, code] of faelle) {
+    const r = await u.bewRufe(body, { heute: HEUTE });
+    assert.equal(r.status, 400, `${feld}: ${JSON.stringify(r.json)}`);
+    assert.equal(r.json.fehler[0].code, code, feld);
+    assert.equal(r.json.feld, feld);
+  }
+  assert.equal(u.fs.log.commits, vor);
+  assert.equal((await u.bewRufe(bewegung(id, tag, 'geldtransit_kasse_aus', 100, { gegenkasse_id: 'kzzzzzzzz' }))).json.fehler[0].code, 'KASSE_UNBEKANNT');
+  const zweite = await u.legeKasseAn({ kuerzel: 'ZWE', bezeichnung: 'Lager' });
+  const ok = await u.bewRufe(bewegung(id, tag, 'geldtransit_kasse_aus', 1500, { gegenkasse_id: zweite }));
+  assert.equal(ok.status, 200, JSON.stringify(ok.json));
+  assert.equal(u.fs.lies(P(`kassenbewegungen/${id}_${tag}_001`)).gegenkasse_id, zweite);
+  assert.equal((await u.bewRufe(bewegung('kzzzzzzzz', tag, 'geldtransit_bank_ein', 100))).json.fehler[0].code, 'KASSE_UNBEKANNT');
+});
+
+test('Bewegungen nur an offenen Tagen (2.11 C.2): abgeschlossener Tag und Ruhetag 409 TAG_ABGESCHLOSSEN, Lücke vor dem letzten Abschluss 409 SPAETERE_TAGE, vor dem Anfangsbestand 422, stornierter Tag wieder offen', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const b = (tag) => bewegung(id, tag, 'geldtransit_bank_ein', 100);
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200);
+  const zu = await u.bewRufe(b('2026-11-02'));
+  assert.equal(zu.status, 409);
+  assert.deepEqual([zu.json.fehler[0].code, zu.json.kassentag_id, zu.json.status], ['TAG_ABGESCHLOSSEN', `${id}_2026-11-02`, 'abgeschlossen']);
+  assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-03' })).status, 200);
+  assert.equal((await u.bewRufe(b('2026-11-03'))).json.status, 'ruhetag');
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-06', { gezaehlt_cent: 70700 + 60700 }))).status, 200);
+  const luecke = await u.bewRufe(b('2026-11-05'));
+  assert.equal(luecke.status, 409);
+  assert.deepEqual([luecke.json.fehler[0].code, luecke.json.letzter_tag], ['SPAETERE_TAGE', '2026-11-06']);
+  assert.equal((await u.bewRufe(b('2026-11-07'))).status, 200, 'nach dem letzten Abschluss geht es');
+  const vorAnfang = await u.bewRufe(b('2026-10-31'));
+  assert.equal(vorAnfang.status, 422);
+  assert.equal(vorAnfang.json.fehler[0].code, 'VOR_ANFANGSBESTAND');
+  // Storno des letzten Tages macht ihn und die Lücke davor wieder offen
+  assert.equal((await u.tagRufe(stornoBody(id, '2026-11-06'))).status, 200);
+  assert.equal((await u.bewRufe(b('2026-11-06'))).status, 200);
+  assert.equal((await u.bewRufe(b('2026-11-05'))).status, 200, 'der Abschluss vom 06.11. ist storniert, der letzte ist wieder der 02.11.');
+});
+
+test('Wiederholung derselben anfrage_id (Netzabbruch): idempotent, keine zweite Bewegung, kein zweiter Privatvorgang', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const tag = '2026-11-02';
+  const body = bewegung(id, tag, 'entnahme', 2000, { eigenbeleg_pfad: eigen(id, tag), anfrage_id: 'bew-0001' });
+  const erst = await u.bewRufe(body);
+  assert.equal(erst.status, 200);
+  const commits = u.fs.log.commits;
+  const wieder = await u.bewRufe(body);
+  assert.equal(wieder.status, 200);
+  assert.deepEqual([wieder.json.idempotent, wieder.json.bewegung_id, wieder.json.kassennummer], [true, erst.json.bewegung_id, 'K-THK-2026-0001']);
+  assert.equal(u.fs.log.commits, commits);
+  assert.equal(u.fs.pfade(P('kassenbewegungen/')).length, 1);
+  assert.equal(u.fs.pfade(P('privatvorgaenge/')).length, 1);
+});
+
+test('Atomizität der Bewegung: scheitert der Commit, entsteht weder Bewegung noch Privatvorgang noch Beleg noch Zählerstand', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const tag = '2026-11-02';
+  const stand = JSON.stringify([...u.fs.docs.entries()].map(([k, v]) => [k, v.fields]).sort());
+  u.fs.haken.fehler = (url) => (url.endsWith(':commit') ? new Response('{}', { status: 500 }) : null);
+  assert.equal((await u.bewRufe(bewegung(id, tag, 'entnahme', 2000, { eigenbeleg_pfad: eigen(id, tag) }))).status, 500);
+  assert.equal((await u.bewRufe(bewegung(id, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG() }))).status, 500);
+  u.fs.haken.fehler = null;
+  assert.equal(JSON.stringify([...u.fs.docs.entries()].map(([k, v]) => [k, v.fields]).sort()), stand);
+});
+
+test('5 gleichzeitige Bewegungen: Kassennummern lückenlos 1..4 und doppelte Bewegungs-IDs unmöglich; die fünfte kommt nach 3 Wiederholungen mit 409 KONFLIKT zurück', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const antworten = await Promise.all(Array.from({ length: 5 }, (_, i) => u.bewRufe(bewegung(id, '2026-11-02', 'geldtransit_bank_ein', 100 + i))));
+  const erfolge = antworten.filter((a) => a.status === 200);
+  assert.equal(erfolge.length, 4, JSON.stringify(antworten.map((a) => a.json)));
+  assert.equal(antworten.filter((a) => a.status !== 200).length, 1);
+  assert.equal(antworten.find((a) => a.status !== 200).json.fehler[0].code, 'KONFLIKT');
+  assert.deepEqual(erfolge.map((a) => Number(a.json.kassennummer.slice(-4))).sort(), [1, 2, 3, 4]);
+  assert.deepEqual(erfolge.map((a) => a.json.bewegung_id).sort(), [1, 2, 3, 4].map((n) => `${id}_2026-11-02_00${n}`));
+  assert.equal(u.fs.lies(P(`zaehler/K_${id}_2026`)).letzte, 4);
+  assert.equal(u.fs.pfade(P('kassenbewegungen/')).length, 4);
+});
+
+test('Zähler der Bewegungen: gleichzeitige Änderung am Zähler wird wiederholt, die Kassennummer folgt dem neuen Stand', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  let einmal = true;
+  u.fs.haken.vorCommit = async (writes, api) => { if (einmal && writes.some((x) => String(x.update && x.update.name).includes('/kassenbewegungen/'))) { einmal = false; api.setze(P(`zaehler/K_${id}_2026`), { letzte: 9 }); } };
+  const r = await u.bewRufe(bewegung(id, '2026-11-02', 'geldtransit_bank_ein', 100));
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.kassennummer, 'K-THK-2026-0010');
+  assert.equal(u.fs.lies(P(`zaehler/K_${id}_2026`)).letzte, 10);
+});
+
+test('Ausgabe über den Beleg-Schreibweg (2.12 M16): Eingangsbeleg mit Zahlung kanal bar am Geschäftstag, Altfelder, legacy_hash, gesperrt; Bewegung und Beleg in EINEM Commit; Vorsteuer Kz 66 aus dem Kern', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const tag = '2026-11-02';
+  const vor = u.fs.log.commits;
+  const r = await u.bewRufe(bewegung(id, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG({ rechnungsnr: 'RE-77' }) }));
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(u.fs.log.commits - vor, 1);
+  const belegId = `kasse_${id}_${tag}_001_beleg`;
+  assert.deepEqual([r.json.beleg_id, r.json.privatvorgang_id], [belegId, null]);
+  const b = u.fs.lies(P(`dokumente/${belegId}`));
+  assert.deepEqual([b.quelle, b.typ, b.gesperrt, b.gesperrt_durch, b.bezahlt, b.bezahlt_am, b.datum, b.betrag, b.betrag_netto, b.mwst_satz, b.absender, b.rechnungsnr, b.kategorie, b.schema_version, b.kassennummer, b.bewegung_id], ['kasse', 'rechnung_eingehend', true, ['kasse'], true, tag, '2026-11-02', 119, 100, '19', 'Bürobedarf GmbH', 'RE-77', 'Bürobedarf', 2, 'K-THK-2026-0001', `${id}_${tag}_001`]);
+  assert.deepEqual(b.steuer.zahlungen.map((z) => [z.kanal, z.betrag_cent, z.datum, z.art]), [['bar', 11900, tag, 'zahlung']]);
+  assert.deepEqual([b.steuer.herkunft.weg, b.steuer.steuerfall, b.steuer.beleg_art, b.steuer.richtung], ['kasse_ausgabe', 'E_INLAND_VORSTEUER', 'rechnung', 'eingang']);
+  const dok = { ...b, id: belegId };
+  assert.equal(K.driftStatus(dok), 'ok');
+  assert.equal(K.belegFuerKern(dok, REGEL).quelle, 'v2');
+  assert.ok('timestampValue' in u.fs.roheFelder(P(`dokumente/${belegId}`)).createdAt);
+  const kz = K.ustvaFuer(K.alleWirkungen([K.belegFuerKern(dok, REGEL).beleg], REGEL), REGEL, '2026-11').kennzahlen;
+  assert.equal(kz['66'], 1900, 'Vorsteuer 19,00');
+  const bw = u.fs.lies(P(`kassenbewegungen/${id}_${tag}_001`));
+  assert.deepEqual([bw.art, bw.betrag_cent, bw.beleg_id], ['ausgabe', 11900, belegId]);
+  // eine Ausgabe ist kein Umsatz: keine tagesdaten-Einnahme
+  assert.equal(u.fs.lies(P(`tagesdaten/${tag}`)), null);
+  // der Abschluss zieht die Ausgabe vom Soll ab: 100,00 + 20,00 - 119,00 = 1,00
+  const a = await u.tagRufe(abschluss(id, tag, { umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 2000, unbar_cent: 0 }], gezaehlt_cent: 100 }));
+  assert.equal(a.status, 200, JSON.stringify(a.json));
+  assert.equal(a.json.soll_endbestand_cent, 100);
+  assert.deepEqual(u.audit().filter((x) => x.aktion === 'kassenbewegung').map((x) => x.details), [{ kasse_id: id, bewegung_id: `${id}_${tag}_001`, art: 'ausgabe', beleg: true, privatvorgang: false, nach_festschreibung: false }]);
+});
+
+test('Ausgabe-Prüfungen: Betrag muss zur Belegsumme passen, Richtung Ausgang und fremde Schlüssel (id, zahlungen, weg) 400, Pflichtangaben, Zahlungen aus der Eingabe werden ignoriert (immer bar am Geschäftstag), ohne deps.kassenAusgabeBeleg 503', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const tag = '2026-11-02';
+  const vor = u.fs.log.commits;
+  const summe = await u.bewRufe(bewegung(id, tag, 'ausgabe', 10000, { beleg: AUSGABE_BELEG() }));
+  assert.equal(summe.status, 400);
+  assert.deepEqual([summe.json.feld, summe.json.grund, summe.json.beleg_brutto_cent], ['betrag_cent', 'beleg_summe', 11900]);
+  for (const [beleg, feld] of [
+    [AUSGABE_BELEG({ richtung: 'ausgang' }), 'beleg.richtung'],
+    [AUSGABE_BELEG({ id: 'fremd' }), 'beleg.id'],
+    [AUSGABE_BELEG({ zahlungen: [{ kanal: 'bar' }] }), 'beleg.zahlungen'],
+    [AUSGABE_BELEG({ weg: 'webhook' }), 'beleg.weg'],
+    [AUSGABE_BELEG({ beleg_art: 'tagesabschluss' }), 'beleg.beleg_art'],
+    [AUSGABE_BELEG({ rechnungsdatum: undefined }), 'beleg.rechnungsdatum'],
+    [AUSGABE_BELEG({ gegenpartei: { name: ' ' } }), 'beleg.gegenpartei.name'],
+    [AUSGABE_BELEG({ gegenpartei: undefined }), 'beleg.gegenpartei.name'],
+  ]) {
+    const r = await u.bewRufe(bewegung(id, tag, 'ausgabe', 11900, { beleg }));
+    assert.equal(r.status, 400, feld);
+    assert.equal(r.json.feld, feld);
+  }
+  assert.equal(u.fs.log.commits, vor);
+  // Betrag 0 im Beleg: kein Beleg
+  const leer = await u.bewRufe(bewegung(id, tag, 'ausgabe', 100, { beleg: AUSGABE_BELEG({ positionen: [{ bez: 'x', brutto_cent: 0, satz_bp: 1900 }] }) }));
+  assert.equal(leer.status, 400);
+  // ohne die Abhängigkeit: 503, nichts geschrieben
+  const ohne = await u.rufeRoh('/kassenbewegung', bewegung(id, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG() }), { ...u.deps, kassenAusgabeBeleg: undefined });
+  assert.equal(ohne.status, 503);
+  assert.equal(u.fs.log.commits, vor);
+});
+
+test('Ausgabe im festgeschriebenen EÜR-Monat: 409 MONAT_FESTGESCHRIEBEN (Zahlung am Geschäftstag), nichts geschrieben; nur USt-Zeitraum: gespeichert mit nach_festschreibung; Duplikat-Backstop nur Warnung', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const tag = '2026-11-02';
+  u.fs.setze(P('festschreibung/euer-2026-11'), { status: 'festgeschrieben', periode: '2026-11' });
+  const vor = u.fs.log.commits;
+  const r = await u.bewRufe(bewegung(id, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG() }));
+  assert.equal(r.status, 409, JSON.stringify(r.json));
+  assert.equal(r.json.fehler[0].code, 'MONAT_FESTGESCHRIEBEN');
+  assert.ok(r.json.perioden.includes('euer-2026-11'));
+  assert.equal(u.fs.log.commits, vor);
+  const v = umgebung();
+  const vid = await v.legeKasseAn();
+  v.fs.setze(P('festschreibung/ust-2026-11'), { status: 'festgeschrieben', periode: '2026-11', pruefung: { am: '2026-11-10T00:00:00Z', unveraendert: true } });
+  v.fs.setze(P('dokumente/alt1'), { typ: 'rechnung_eingehend', absender: 'Bürobedarf GmbH', rechnungsnr: 'RE-77', mwst_satz: '19', betrag: 5 });
+  const ok = await v.bewRufe(bewegung(vid, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG({ rechnungsnr: 'RE-77' }) }));
+  assert.equal(ok.status, 200, JSON.stringify(ok.json));
+  assert.equal(ok.json.nach_festschreibung, true);
+  assert.deepEqual(ok.json.nach_festschreibung_perioden, ['ust-2026-11']);
+  assert.equal(ok.json.duplikat_warnung, true, 'gleiche Rechnungsnummer vom selben Absender: Warnung, aber gespeichert');
+  assert.equal(v.fs.lies(P('festschreibung/ust-2026-11')).pruefung.belege_geaendert, true);
+  assert.deepEqual(v.fs.lies(P(`dokumente/kasse_${vid}_${tag}_001_beleg`)).nach_festschreibung.perioden, ['ust-2026-11']);
+});
+
+test('Bewegung stornieren: eigene Bewegung mit Bezug (storno_von, storno_art, Grund), Gegenvorzeichen im Soll, Privatvorgang storniert; doppelt, Storno vom Storno, abgeschlossener Tag und Grund 400/409', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const tag = '2026-11-02';
+  const e = await u.bewRufe(bewegung(id, tag, 'entnahme', 2000, { eigenbeleg_pfad: eigen(id, tag) }));
+  const s = await u.bewRufe(stornoBew(id, e.json.bewegung_id));
+  assert.equal(s.status, 200, JSON.stringify(s.json));
+  assert.deepEqual([s.json.bewegung_id, s.json.storno_von, s.json.kassennummer], [`${id}_${tag}_002`, `${id}_${tag}_001`, 'K-THK-2026-0002']);
+  const sb = u.fs.lies(P(`kassenbewegungen/${id}_${tag}_002`));
+  assert.deepEqual([sb.art, sb.betrag_cent, sb.storno_von, sb.storno_art, sb.storno_grund, sb.privatvorgang_id], ['storno', 2000, `${id}_${tag}_001`, 'entnahme', 'falsch erfasst', `kasse_${id}_${tag}_001`]);
+  assert.equal(u.fs.lies(P(`kassenbewegungen/${id}_${tag}_001`)).storno_von, null, 'das Original bleibt unverändert');
+  const pv = u.fs.lies(P(`privatvorgaenge/kasse_${id}_${tag}_001`));
+  assert.equal(pv.storniert, true);
+  assert.match(pv.storniert_am, /^2026-11-02T/);
+  assert.equal(u.audit().at(-1).aktion, 'kassenbewegung_storno');
+  assert.equal(u.audit().at(-1).details.storno_von, `${id}_${tag}_001`);
+  // Soll: Entnahme und Storno heben sich auf: 100,00 + 10,00 = 110,00
+  const a = await u.tagRufe(abschluss(id, tag, { umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 1000, unbar_cent: 0 }], gezaehlt_cent: 11000 }));
+  assert.equal(a.status, 200, JSON.stringify(a.json));
+  // Fehlerfälle
+  const v = umgebung();
+  const vid = await v.legeKasseAn();
+  const x = await v.bewRufe(bewegung(vid, tag, 'geldtransit_bank_ein', 500));
+  assert.equal((await v.bewRufe(stornoBew(vid, x.json.bewegung_id, { grund: 'kurz' }))).json.feld, 'grund');
+  assert.equal((await v.bewRufe(stornoBew(vid, `${vid}_${tag}_077`))).json.fehler[0].code, 'BEWEGUNG_UNBEKANNT');
+  assert.equal((await v.bewRufe(stornoBew(vid, `kandere99_${tag}_001`))).json.feld, 'bewegung_id');
+  assert.equal((await v.bewRufe(stornoBew(vid, x.json.bewegung_id, { extra: 1 }))).json.feld, 'extra');
+  const st = await v.bewRufe(stornoBew(vid, x.json.bewegung_id));
+  assert.equal(st.status, 200);
+  assert.equal((await v.bewRufe(stornoBew(vid, x.json.bewegung_id))).json.fehler[0].code, 'BEWEGUNG_STORNIERT');
+  assert.equal((await v.bewRufe(stornoBew(vid, st.json.bewegung_id))).json.fehler[0].code, 'STORNO_VON_STORNO');
+  const y = await v.bewRufe(bewegung(vid, tag, 'geldtransit_bank_ein', 600));
+  const gleich = stornoBew(vid, y.json.bewegung_id, { anfrage_id: 'bs-00001' });
+  assert.equal((await v.bewRufe(gleich)).status, 200);
+  assert.equal((await v.bewRufe(gleich)).json.idempotent, true);
+  // nach dem Abschluss des Tages nicht mehr
+  assert.equal((await v.tagRufe(abschluss(vid, tag, { umsaetze: [], gezaehlt_cent: 10000 }))).status, 200);
+  const spaet = await v.bewRufe(stornoBew(vid, y.json.bewegung_id));
+  assert.equal(spaet.status, 409);
+  assert.ok(['TAG_ABGESCHLOSSEN', 'BEWEGUNG_STORNIERT'].includes(spaet.json.fehler[0].code));
+  const z = await v.bewRufe(bewegung(vid, '2026-11-03', 'geldtransit_bank_ein', 100));
+  assert.equal((await v.tagRufe(abschluss(vid, '2026-11-03', { umsaetze: [], gezaehlt_cent: 10100 }))).status, 200);
+  assert.equal((await v.bewRufe(stornoBew(vid, z.json.bewegung_id))).json.fehler[0].code, 'TAG_ABGESCHLOSSEN');
+});
+
+test('Ausgabe stornieren: der Eingangsbeleg wird storniert (Kern: wirkungslos, Kz 66 = 0), Beleg sonst unverändert; EÜR-Monat festgeschrieben 409, nur USt: nach_festschreibung', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const tag = '2026-11-02';
+  const r = await u.bewRufe(bewegung(id, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG() }));
+  const belegId = r.json.beleg_id;
+  const vorher = u.fs.lies(P(`dokumente/${belegId}`));
+  const s = await u.bewRufe(stornoBew(id, r.json.bewegung_id));
+  assert.equal(s.status, 200, JSON.stringify(s.json));
+  const nachher = u.fs.lies(P(`dokumente/${belegId}`));
+  assert.deepEqual([nachher.storniert, nachher.storno_grund], [true, 'falsch erfasst']);
+  const { storniert, storniert_am, storno_grund, ...rest } = nachher;
+  assert.deepEqual(rest, vorher, 'sonst unverändert');
+  const kb = K.belegFuerKern({ ...nachher, id: belegId }, REGEL);
+  assert.equal(kb.quelle, 'v2_zahlung');
+  const w = K.alleWirkungen([kb.beleg], REGEL);
+  assert.equal(K.ustvaFuer(w, REGEL, '2026-11').kennzahlen['66'] ?? 0, 0, 'Vorsteuer weg');
+  assert.deepEqual(K.euerFuer(w, REGEL, 2026).zeilen.filter((z) => z.betrag_cent !== 0), []);
+  assert.equal(u.fs.lies(P(`kassenbewegungen/${id}_${tag}_002`)).beleg_id, belegId);
+  // EÜR-Monat festgeschrieben
+  const v = umgebung();
+  const vid = await v.legeKasseAn();
+  const r2 = await v.bewRufe(bewegung(vid, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG() }));
+  v.fs.setze(P('festschreibung/euer-2026-11'), { status: 'festgeschrieben', periode: '2026-11' });
+  const vorher2 = [...v.fs.docs.keys()].sort();
+  const f = await v.bewRufe(stornoBew(vid, r2.json.bewegung_id));
+  assert.equal(f.status, 409, JSON.stringify(f.json));
+  assert.equal(f.json.fehler[0].code, 'MONAT_FESTGESCHRIEBEN');
+  assert.deepEqual([...v.fs.docs.keys()].sort(), vorher2);
+  assert.equal(v.fs.lies(P(`dokumente/${r2.json.beleg_id}`)).storniert, undefined);
+  // nur USt
+  const x = umgebung();
+  const xid = await x.legeKasseAn();
+  const r3 = await x.bewRufe(bewegung(xid, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG() }));
+  x.fs.setze(P('festschreibung/ust-2026-11'), { status: 'festgeschrieben', periode: '2026-11', pruefung: { am: '2026-11-10T00:00:00Z', unveraendert: true } });
+  const ok = await x.bewRufe(stornoBew(xid, r3.json.bewegung_id));
+  assert.equal(ok.status, 200, JSON.stringify(ok.json));
+  assert.deepEqual(ok.json.nach_festschreibung_perioden, ['ust-2026-11']);
+  assert.deepEqual(x.fs.lies(P(`dokumente/${r3.json.beleg_id}`)).nach_festschreibung.perioden, ['ust-2026-11']);
+});
+
+test('Bewegung stornieren ohne Beleg und Privatvorgang berührt keine Dokumente; Kern-Saldo: Geldtransit und Storno heben sich auf', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const tag = '2026-11-02';
+  const x = await u.bewRufe(bewegung(id, tag, 'geldtransit_bank_aus', 5000));
+  assert.equal((await u.bewRufe(stornoBew(id, x.json.bewegung_id))).status, 200);
+  assert.deepEqual(u.fs.pfade(P('dokumente/')), []);
+  assert.deepEqual(u.fs.pfade(P('privatvorgaenge/')), []);
+  const a = await u.tagRufe(abschluss(id, tag, { umsaetze: [], gezaehlt_cent: 10000 }));
+  assert.equal(a.status, 200, JSON.stringify(a.json));
+  assert.equal(a.json.soll_endbestand_cent, 10000);
+});
+
+test('Router: /kassenbewegung mit Ausgabe (kassenAusgabeBeleg aus regelAbhaengigkeiten) und Entnahme unter der UID aus dem Token; Eigenbeleg und Anhänge nur im eigenen Ordner', async () => {
+  const fs = fakeFirestore();
+  fs.setze('config/features', AN);
+  fs.setze(`users/${A}/steuerprofil/aktuell`, REGEL);
+  fs.setze(`users/${A}/agb_zustimmung/z1`, { version: AGB_MINDESTFASSUNG_KASSE });
+  const zurueck = installiere(fs);
+  try {
+    const env = await erzeugeTestEnv();
+    const post = (path, body) => anfrage(env, { path, body: { userId: B, anfrage_id: aid(), ...body }, headers: { Authorization: 'Bearer tok-a' }, ip: '203.0.113.77' });
+    const k = await (await post('/kasse', { ...KASSE_ANLEGEN, anfangsbestand_am: '2026-01-01' })).json();
+    assert.ok(k.kasse_id, JSON.stringify(k));
+    const r = await post('/kassenbewegung', { aktion: 'anlegen', kasse_id: k.kasse_id, geschaeftstag: heuteEcht, art: 'ausgabe', betrag_cent: 11900, text: 'Papier', beleg: AUSGABE_BELEG({ rechnungsdatum: heuteEcht }) });
+    const j = await r.json();
+    assert.equal(r.status, 200, JSON.stringify(j));
+    const b = fs.lies(`users/${A}/dokumente/${j.beleg_id}`);
+    assert.deepEqual([b.quelle, b.typ, b.steuer.zahlungen[0].kanal, b.steuer.zahlungen[0].datum], ['kasse', 'rechnung_eingehend', 'bar', heuteEcht]);
+    assert.equal(K.driftStatus({ ...b, id: j.beleg_id }), 'ok');
+    assert.deepEqual(fs.pfade(`users/${B}/`), []);
+    const pfad = `users/${A}/kasse/${k.kasse_id}/${heuteEcht}/1_e.pdf`;
+    const e = await post('/kassenbewegung', { aktion: 'anlegen', kasse_id: k.kasse_id, geschaeftstag: heuteEcht, art: 'entnahme', betrag_cent: 1000, text: 'privat', eigenbeleg_pfad: pfad });
+    assert.equal(e.status, 200, await e.clone().text());
+    assert.equal(fs.lies(`users/${A}/privatvorgaenge/kasse_${k.kasse_id}_${heuteEcht}_002`).zahlweg, 'kasse');
+    const fremd = await post('/kassenbewegung', { aktion: 'anlegen', kasse_id: k.kasse_id, geschaeftstag: heuteEcht, art: 'entnahme', betrag_cent: 1000, text: 'privat', eigenbeleg_pfad: `users/${B}/kasse/${k.kasse_id}/${heuteEcht}/1_e.pdf` });
+    assert.equal(fremd.status, 400);
+    assert.equal((await fremd.json()).fehler[0].code, 'ANHANG_FREMD');
+    const s = await post('/kassenbewegung', { aktion: 'stornieren', kasse_id: k.kasse_id, bewegung_id: j.bewegung_id, grund: 'falsch gebucht' });
+    assert.equal(s.status, 200, await s.clone().text());
+    assert.equal(fs.lies(`users/${A}/dokumente/${j.beleg_id}`).storniert, true);
+  } finally { zurueck(); }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Kap. 6 Nr. 28: kein monatliches Upload-Kontingent mehr, das Tageslimit der KI-Aktionen bleibt
+// ---------------------------------------------------------------------------------------------
+test('Nr. 28: KI-Aktionen mit Datei (Chat, /image, /document, Monatsabschluss-PDF) zählen ins Tageslimit (15) und stoppen dort ohne Anthropic-Aufruf; ein Altzähler 50 sperrt nichts; Belegarchiv ohne KI bleibt auch bei erreichtem Tageslimit offen', async () => {
+  const env = await erzeugeTestEnv();
+  const original = globalThis.fetch;
+  const log = { anthropic: 0, patch: 0, uploadlimit: 0 };
+  let stand = 15;
+  const heute = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input.url;
+    const json = (o, st = 200) => new Response(JSON.stringify(o), { status: st, headers: { 'Content-Type': 'application/json' } });
+    if (url.startsWith('https://oauth2.googleapis.com/token')) return json({ access_token: 't', expires_in: 3600 });
+    if (url.startsWith('https://identitytoolkit.googleapis.com/v1/accounts:lookup')) return json({ users: [{ localId: A, email: 'a@beispiel.de', emailVerified: true, providerUserInfo: [], createdAt: String(Date.parse('2026-01-01')) }] });
+    if (url.includes('/uploadlimit')) { log.uploadlimit++; return json({}); }
+    if (url.includes('/nachrichtenlimit/')) {
+      if ((init.method || 'GET') === 'GET') return json({ name: 'x', fields: { nachrichten_heute: { integerValue: String(stand) }, letztes_datum: { stringValue: heute } }, updateTime: '2026-11-20T00:00:00Z' });
+      log.patch++; return json({});
+    }
+    if (url.startsWith('https://api.anthropic.com/')) { log.anthropic++; return new Response('mock', { status: 500 }); }
+    if (url.startsWith('https://firestore.googleapis.com/')) return json({});
+    return json({}, 200);
+  };
+  try {
+    await env.PROFIL_KV.put(`uploads:${A}:${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`, '50'); // Altlast
+    const datei = { type: 'application/pdf', base64: 'JVBERi0xLjQK' };
+    const faelle = [
+      ['/chat', { Nachricht: 'Hallo', Nutzername: 'a', Profil: '', Datum: heute, Datei: datei }],
+      ['/image', { Nachricht: 'Bild', Nutzername: 'a', Profil: '', Datum: heute, Datei: { type: 'image/png', base64: 'iVBORw0KGgo=' } }],
+      ['/document', { Nachricht: 'Bitte prüfen', Nutzername: 'a', Profil: '', Datum: heute, Datei: datei }],
+      ['/document', { Nachricht: 'MONATSABSCHLUSS_PDF', Nutzername: 'a', Profil: '', Datum: heute, Datei: datei }],
+    ];
+    let ip = 100;
+    for (const [path, body] of faelle) {
+      stand = 15;
+      const vorAnthropic = log.anthropic;
+      const r = await anfrage(env, { path, body, headers: { Authorization: 'Bearer tok-a' }, ip: `203.0.113.${ip++}` });
+      const text = await r.text();
+      assert.match(text, /Nachrichtenlimit/, `${path} ${body.Nachricht}: Tageslimit erreicht`);
+      assert.equal(log.anthropic, vorAnthropic, `${path} ${body.Nachricht}: kein Anthropic-Aufruf`);
+      stand = 3;
+      const vorPatch = log.patch;
+      await anfrage(env, { path, body, headers: { Authorization: 'Bearer tok-a' }, ip: `203.0.113.${ip++}` });
+      assert.equal(log.anthropic, vorAnthropic + 1, `${path} ${body.Nachricht}: unter dem Tageslimit wird aufgerufen (Altzähler 50 sperrt nicht)`);
+      assert.equal(log.patch, vorPatch + 1, `${path} ${body.Nachricht}: zählt als eine Aktion im Tageslimit`);
+    }
+    // Belegarchiv ohne KI: weder Upload-Zähler noch Tageslimit
+    stand = 15;
+    const manuell = await anfrage(env, { path: '/document', body: { Nachricht: 'BELEG_MANUELL', betrag: '12.50', absender: 'Test GmbH', Nutzername: 'a' }, headers: { Authorization: 'Bearer tok-a' }, ip: '203.0.113.150' });
+    assert.ok(manuell.status < 500, `BELEG_MANUELL Status ${manuell.status}`);
+    assert.notEqual(manuell.status, 429);
+    assert.equal(log.uploadlimit, 0, 'keine Upload-Reservierung in Firestore');
+    assert.equal(env.PROFIL_KV._m.get(`uploads:${A}:${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`), '50', 'der Altzähler wird nicht verändert');
+  } finally { globalThis.fetch = original; }
 });
