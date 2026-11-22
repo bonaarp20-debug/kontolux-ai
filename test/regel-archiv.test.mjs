@@ -99,7 +99,9 @@ test('Export gesperrter Konten ist vollständig: jede Sammlung aus ARCHIV_SAMMLU
   assert.match(quelle, /const EXPORT_SAMMLUNGEN_OHNE_CHATS = ARCHIV_SAMMLUNGEN\.filter\(c => c !== 'chats'\);/);
   // Prüfer-Zugang zeigt die Festschreibungen (Nachweis), ohne die interne Sperrliste
   assert.match(quelle, /firestoreListAll\(`\$\{base\}\/festschreibung`, adminToken\)\.catch\(\(\) => \[\]\)/);
-  assert.match(quelle, /JSON\.stringify\(\{ dokumente, monatsabschluesse, sammelbelege, festschreibungen \}\)/);
+  // KASSE-P1b: dazu das Kassenbuch (kassen, kassentage mit allen Fassungen, kassenbewegungen, ...) aus kassenPrueferDaten
+  assert.match(quelle, /JSON\.stringify\(\{ dokumente, monatsabschluesse, sammelbelege, festschreibungen, \.\.\.kasse \}\)/);
+  assert.match(quelle, /const kasse = await kassenPrueferDaten\(uid, adminToken,/);
 });
 
 test('KASSE-P1a: Kassenbuch im Archiv-Register; Export und Löschlauf erfassen Fassungen und verlauf, fremdes Konto bleibt', async () => {

@@ -1,7 +1,8 @@
 // regel/kasse-daten.js (KASSE-P1b): Pfade, ID-Bereichs-Abfragen und Lesehelfer des Kassenbuchs (nur Lesen, keine Schreibvorgänge).
 // Listen laufen über den Dokument-ID-Bereich ({kasseId}_{JJJJ-MM-TT}), damit keine neuen Firestore-Indexe nötig sind (Baukonzept 2.3 „Keine neuen Indexe“).
-import { vollerName } from './firestore.js';
-import { sha256Hex } from './gemeinsam.js';
+import { vollerName, erzeugeSchicht, dekodiereFelder } from './firestore.js';
+import { sha256Hex, listeAlle } from './gemeinsam.js';
+import { untersammlungLesen } from './archiv.js';
 
 export const P = {
   profil: (uid) => `users/${uid}/steuerprofil/aktuell`,
@@ -81,4 +82,64 @@ export function bewegungFuerKern(d) {
   const o = { art: d.art, betrag_cent: d.betrag_cent };
   if (d.art === 'storno') o.storno_art = d.storno_art;
   return o;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Prüfer-Daten (Baukonzept 2.3 Nr. 4, 2.12 H8, 09 #W13): Datenzugriff Z1 auf das Kassenbuch, nur Lesen.
+// kassen mit vollständigem verlauf (Stammdatenfeld plus ausgelagerte Einträge aus kassen/{id}/verlauf), kassentage mit ALLEN Fassungen (auch stornierte,
+// mit Storno-Grund und -Zeitpunkt aus fassungen_kurz; die aktive trägt aktiv: true), kassenbewegungen, betriebsstaetten, kassenmeldungen. Anhänge liegen als
+// { pfad, url } in den Fassungen, der Kassenbeleg trägt storage_url (in dokumente). Fassungen und verlauf über untersammlungLesen: eine Anfrage je 300 Dokumente
+// (nicht eine Liste je Kassentag). Unteranfragen sind begrenzt (Free-Plan 50 je Aufruf, der Prüfer-Handler braucht selbst rund 10): reicht das Budget nicht,
+// kommt das Gelesene mit kassen_unvollstaendig: true statt eines Abbruchs (ein Prüfer sieht dann den Hinweis, nie stillschweigend weniger).
+// ---------------------------------------------------------------------------------------------
+export const PRUEFER_UNTERANFRAGEN_MAX = 30;
+const mitId = (d) => ({ id: idVon(d), ...d.daten });
+const pfadTeile = (rohName) => { const i = String(rohName).indexOf('/documents/'); return (i >= 0 ? rohName.slice(i + '/documents/'.length) : '').split('/'); };
+
+export async function kassenPrueferDaten(uid, token, fetchFn = globalThis.fetch, { max = PRUEFER_UNTERANFRAGEN_MAX } = {}) {
+  let benutzt = 0;
+  const zaehlend = (...a) => { if (benutzt >= max) throw new Error('Prüfer-Kassendaten: Unteranfragen-Budget erschöpft'); benutzt += 1; return fetchFn(...a); };
+  const leer = { kassen: [], kassentage: [], kassenbewegungen: [], betriebsstaetten: [], kassenmeldungen: [], kassen_unvollstaendig: false };
+  const fs = erzeugeSchicht({ token, fetchFn: zaehlend, budget: max });
+  const aus = { ...leer };
+  try {
+    const kassen = (await listeAlle(fs, `users/${uid}/kassen`, { maxSeiten: 5 })).dokumente;
+    if (!kassen.length) return aus;
+    const [tage, bewegungen, stellen, meldungen] = [
+      (await listeAlle(fs, `users/${uid}/kassentage`, { maxSeiten: 30 })).dokumente,
+      (await listeAlle(fs, `users/${uid}/kassenbewegungen`, { maxSeiten: 30 })).dokumente,
+      (await listeAlle(fs, `users/${uid}/betriebsstaetten`, { maxSeiten: 3 })).dokumente,
+      (await listeAlle(fs, `users/${uid}/kassenmeldungen`, { maxSeiten: 3 })).dokumente,
+    ];
+    const fassungen = (await untersammlungLesen(uid, 'fassungen', token, zaehlend)).filter((d) => pfadTeile(d.name)[2] === 'kassentage');
+    const verlauf = (await untersammlungLesen(uid, 'verlauf', token, zaehlend)).filter((d) => pfadTeile(d.name)[2] === 'kassen');
+    const fassungenJeTag = new Map();
+    for (const d of fassungen) {
+      const t = pfadTeile(d.name);
+      if (!fassungenJeTag.has(t[3])) fassungenJeTag.set(t[3], []);
+      fassungenJeTag.get(t[3]).push({ n: Number(t[5]), ...dekodiereFelder(d.fields) });
+    }
+    const verlaufJeKasse = new Map();
+    for (const d of verlauf) {
+      const t = pfadTeile(d.name);
+      if (!verlaufJeKasse.has(t[3])) verlaufJeKasse.set(t[3], []);
+      verlaufJeKasse.get(t[3]).push({ n: Number(String(t[5]).replace(/^v/, '')), ...dekodiereFelder(d.fields) });
+    }
+    aus.kassen = kassen.map((d) => {
+      const archiv = (verlaufJeKasse.get(idVon(d)) || []).sort((a, b) => a.n - b.n).map(({ n, ...rest }) => rest);
+      const inline = Array.isArray(d.daten.verlauf) ? d.daten.verlauf : [];
+      return { id: idVon(d), ...d.daten, verlauf: [...archiv, ...inline] };
+    });
+    aus.kassentage = tage.map((d) => {
+      const alle = (fassungenJeTag.get(idVon(d)) || []).sort((a, b) => a.n - b.n).map((f) => ({ ...f, aktiv: f.n === d.daten.fassung_aktiv }));
+      return { ...mitId(d), fassungen: alle };
+    });
+    aus.kassenbewegungen = bewegungen.map(mitId);
+    aus.betriebsstaetten = stellen.map(mitId);
+    aus.kassenmeldungen = meldungen.map(mitId);
+  } catch (e) {
+    aus.kassen_unvollstaendig = true;
+    console.warn('pruefer_kasse_unvollstaendig ' + JSON.stringify({ art: String(e?.name || 'Error').slice(0, 40) }));
+  }
+  return aus;
 }

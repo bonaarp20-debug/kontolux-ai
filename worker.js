@@ -17,6 +17,7 @@ import { regelZaehler, ZAEHLER_PFADE } from './regel/zaehler.js'; // KX-RB (BP-1
 import { regelAdminFeatures } from './regel/admin-features.js';
 import { regelOssMeldung } from './regel/oss-meldung.js'; // WORKER-C (Release C, BP-29)
 import { regelKasse, KASSE_PFADE } from './regel/kasse.js'; // KASSE-P1b: Kassenbuch (Feature kasse, Standard aus)
+import { kassenPrueferDaten } from './regel/kasse-daten.js'; // KASSE-P1b: Prüfer-Daten Kassenbuch
 import { regelEzbKurs } from './regel/ezb-kurs.js'; // WORKER-C (Release C, BP-29)
 import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // KX-WC2 (Release C, BP-30 DATEV-Teil)
 import { rechnungsnrDuplikat, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c)
@@ -4462,7 +4463,9 @@ async function handlePrueferDaten(body, env, cors = {}, authHeader = null) {
       if (f && f.sperre) delete f.sperre.offen;
       return { id: dokIdAusPfad(d.name), ...f };
     });
-    return new Response(JSON.stringify({ dokumente, monatsabschluesse, sammelbelege, festschreibungen }), {
+    // KASSE-P1b (2.12 H8): Kassenbuch (alle Fassungen, vollständiger verlauf, Bewegungen); nur Lesen, auch bei ausgeschaltetem Feature (Notaus: Daten bleiben lesbar)
+    const kasse = await kassenPrueferDaten(uid, adminToken, (...a) => fetch(...a));
+    return new Response(JSON.stringify({ dokumente, monatsabschluesse, sammelbelege, festschreibungen, ...kasse }), {
       status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
     });
   } catch (e) {

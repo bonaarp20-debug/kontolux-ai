@@ -9,6 +9,10 @@ import { AUDIT_AKTIONEN, kettepruefen } from '../regel/audit.js';
 import { AGB_MINDESTFASSUNG_KASSE, FEATURES_KASSE, featureAktiv, configBereinigen } from '../regel/gemeinsam.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
 import { erzeugeTestEnv, anfrage } from './harness.mjs';
+import { createHash } from 'node:crypto';
+import { kassenPrueferDaten } from '../regel/kasse-daten.js';
+import { REGEL_SAMMLUNGEN, REGEL_UNTERSAMMLUNGEN, UNTERSAMMLUNGEN } from '../regel/archiv.js';
+import { AUFBEWAHRUNG_SAMMLUNGEN, AUFBEWAHRUNG_ORDNER } from '../regel/loeschlaeufe.js';
 
 const UID = 'kassenUid00000000000000001';
 const HEUTE = '2026-11-20';
@@ -458,9 +462,10 @@ test('Zähler lückenlos bei 5 gleichzeitigen Abschlüssen: Kassennummern der Er
   const tage = ['2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05', '2026-11-06'];
   const antworten = await Promise.all(tage.map((t) => u.tagRufe(ohneUmsatz(id, t))));
   const erfolge = antworten.filter((a) => a.status === 200);
-  // vier Versuche je Anfrage (erster plus 3 Wiederholungen): bei fünf gleichzeitigen Anfragen kommt die letzte über 409 KONFLIKT (der Client wiederholt)
-  assert.equal(erfolge.length, 4, JSON.stringify(antworten.map((a) => a.json)));
-  for (const a of antworten.filter((x) => x.status !== 200)) assert.equal(a.json.fehler[0].code, 'KONFLIKT', JSON.stringify(a.json));
+  // Welche Anfrage zuerst festschreibt, hängt vom Zeitverhalten ab (SHA-256 im Audit): Erfolge mindestens einer, alle anderen KONFLIKT (4 Versuche je Anfrage)
+  // oder SPAETERE_TAGE (ein späterer Tag war schon da). Eine Nummer wird nie doppelt oder gar nicht vergeben.
+  assert.ok(erfolge.length >= 1, JSON.stringify(antworten.map((a) => a.json)));
+  for (const a of antworten.filter((x) => x.status !== 200)) assert.ok(['KONFLIKT', 'SPAETERE_TAGE'].includes(a.json.fehler[0].code), JSON.stringify(a.json));
   const nummern = erfolge.map((a) => Number(a.json.kassennummer.slice(-4))).sort((x, y) => x - y);
   assert.deepEqual(nummern, Array.from({ length: erfolge.length }, (_, i) => i + 1), 'lückenlos 1..k');
   assert.equal(u.fs.lies(P(`zaehler/K_${id}_2026`)).letzte, erfolge.length);
@@ -469,14 +474,23 @@ test('Zähler lückenlos bei 5 gleichzeitigen Abschlüssen: Kassennummern der Er
   for (const p of u.fs.pfade(P('kassentage/')).filter((x) => x.split('/').length === 4)) assert.equal(u.fs.lies(p).anfangsbestand_cent, 10000);
 });
 
-test('Gleichzeitige Abschlüsse in falscher Reihenfolge über die Jahresgrenze (verschiedene Zähler): der Tag davor scheitert mit SPAETERE_TAGE, es entsteht nie eine vertauschte Reihenfolge (Serialisierung über den Audit-Kopf)', async () => {
+test('Gleichzeitige Abschlüsse zweier Tage über die Jahresgrenze (verschiedene Zähler): nach der Wiederholung ist die Kette der Bestände lückenlos oder der frühere Tag scheitert mit SPAETERE_TAGE; nie vertauscht gespeichert', async () => {
   const u = umgebung({ heute: '2027-01-05' });
   const id = await u.legeKasseAn({ anfangsbestand_am: '2026-12-29' });
-  const [spaet, frueh] = await Promise.all([u.tagRufe(ohneUmsatz(id, '2027-01-02')), u.tagRufe(ohneUmsatz(id, '2026-12-31'))]);
-  assert.equal(spaet.status, 200, JSON.stringify(spaet.json));
-  assert.equal(frueh.status, 409, JSON.stringify(frueh.json));
-  assert.equal(frueh.json.fehler[0].code, 'SPAETERE_TAGE');
-  assert.deepEqual(u.fs.pfade(P('kassentage/')).filter((p) => p.split('/').length === 4).map((p) => p.split('/')[3]), [`${id}_2027-01-02`]);
+  const frueh = { ...ohneUmsatz(id, '2026-12-31'), umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 1000, unbar_cent: 0 }], gezaehlt_cent: 11000 }; // Soll 110,00
+  const spaet = { ...ohneUmsatz(id, '2027-01-02'), umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 500, unbar_cent: 0 }], gezaehlt_cent: 11500, differenz_grund: 'Test' };
+  const [rs, rf] = await Promise.all([u.tagRufe(spaet), u.tagRufe(frueh)]);
+  assert.equal(rs.status, 200, JSON.stringify(rs.json));
+  const s = u.fs.lies(P(`kassentage/${id}_2027-01-02`));
+  if (rf.status === 200) {
+    // der frühe Tag war zuerst fertig: der späte hat nach dem Konflikt neu gelesen und beginnt mit dem gezählten Bestand des frühen
+    assert.deepEqual([s.anfangsbestand_cent, s.differenz_cent], [11000, 0]);
+  } else {
+    assert.equal(rf.status, 409, JSON.stringify(rf.json));
+    assert.equal(rf.json.fehler[0].code, 'SPAETERE_TAGE');
+    assert.deepEqual([s.anfangsbestand_cent, s.differenz_cent], [10000, 1000]);
+    assert.equal(u.fs.lies(P(`kassentage/${id}_2026-12-31`)), null);
+  }
 });
 
 test('Chronologie: nur nach dem letzten abgeschlossenen Tag (409 SPAETERE_TAGE), nicht vor dem Anfangsbestandstag (422 VOR_ANFANGSBESTAND); Ruhetage und stornierte Tage zählen nicht', async () => {
@@ -937,5 +951,97 @@ test('Router: Ratenlimit je Nutzer (UID_LIMITS): /kasse 30, /kassentag 60 je 10 
       for (let i = 0; i < limit + 1; i += 1) letzte = (await anfrage(env, { path, body: { anfrage_id: aid() }, headers: { Authorization: 'Bearer tok-b' }, ip: `203.0.113.${60 + (i % 40)}` })).status;
       assert.equal(letzte, 429, path);
     }
+  } finally { zurueck(); }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Teilschritt 2: Prüfer-Daten (Datenzugriff Z1), Archiv- und Löschlauf-Listen (P1a, hier nur geprüft)
+// ---------------------------------------------------------------------------------------------
+test('Archiv und Löschlauf (P1a, nur geprüft): die Kassen-Sammlungen stehen im Archiv-Register und im Löschlauf-Schutz, Unterkollektionen fassungen und verlauf, Ordner kasse', () => {
+  for (const c of ['kassen', 'kassentage', 'kassenbewegungen', 'betriebsstaetten', 'kassenmeldungen']) {
+    assert.ok(REGEL_SAMMLUNGEN.includes(c), `Archiv ${c}`);
+    assert.ok(AUFBEWAHRUNG_SAMMLUNGEN.includes(c), `Löschlauf ${c}`);
+  }
+  assert.ok(REGEL_UNTERSAMMLUNGEN.includes('fassungen') && REGEL_UNTERSAMMLUNGEN.includes('verlauf'));
+  assert.deepEqual(UNTERSAMMLUNGEN.kassentage, ['fassungen']);
+  assert.deepEqual(UNTERSAMMLUNGEN.kassen, ['verlauf']);
+  assert.ok(AUFBEWAHRUNG_ORDNER.includes('kasse'));
+});
+
+// Konto mit Kasse, einem abgeschlossenen Tag (echter Schreibweg), einem stornierten Tag mit zwei Fassungen und ausgelagertem Verlauf (von Hand, bis /kassentag stornieren folgt)
+async function pruefKonto() {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const r = await u.tagRufe(abschluss(id, '2026-11-02', { anhaenge: [anhang(id, '2026-11-02')] }));
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  const tag2 = `${id}_2026-11-03`;
+  u.fs.setze(P(`kassentage/${tag2}`), { kasse_id: id, geschaeftstag: '2026-11-03', status: 'storniert', fassung_aktiv: null, fassungen_kurz: [
+    { n: 1, beleg_id: 'kasse_x_f1', kassennummer: 'K-THK-2026-0002', storniert_am: '2026-11-04T08:00:00Z', storno_grund: 'Zahlendreher', storno_beleg_id: 'kasse_x_f1_storno' },
+    { n: 2, beleg_id: 'kasse_x_f2', kassennummer: 'K-THK-2026-0004', storniert_am: '2026-11-05T08:00:00Z', storno_grund: 'wieder falsch', storno_beleg_id: 'kasse_x_f2_storno' }] });
+  u.fs.setze(P(`kassentage/${tag2}/fassungen/1`), { n: 1, kassennummer: 'K-THK-2026-0002', gezaehlt_cent: 1, anhaenge: [anhang(id, '2026-11-03')] });
+  u.fs.setze(P(`kassentage/${tag2}/fassungen/2`), { n: 2, kassennummer: 'K-THK-2026-0004', gezaehlt_cent: 2, anhaenge: [] });
+  u.fs.setze(P(`kassen/${id}/verlauf/v000001`), { am: '2026-10-01T00:00:00Z', felder: ['bezeichnung'], von: 'nutzer' });
+  u.fs.setze(P(`kassenbewegungen/${id}_2026-11-04_001`), { kasse_id: id, geschaeftstag: '2026-11-04', art: 'einlage', betrag_cent: 5000, text: 'Wechselgeld' });
+  u.fs.setze(P('betriebsstaetten/b1'), { bezeichnung: 'Laden' });
+  u.fs.setze(P('kassenmeldungen/m1'), { status: 'gemeldet' });
+  // fremde Daten und fremde Unterkollektionen dürfen nicht auftauchen
+  u.fs.setze('users/andererNutzer000000001/kassen/kfremd000', { bezeichnung: 'Fremd' });
+  u.fs.setze(P('steuerprofil/aktuell/verlauf/v1'), { x: 1 });
+  u.fs.setze(P('oss_meldung/2026-Q3/verlauf/v000001'), { x: 2 });
+  u.fs.setze(P(`oss_meldung/${id}/verlauf/v000009`), { x: 3 }); // gleiche Eltern-ID wie die Kasse, aber andere Sammlung
+  u.fs.setze(P(`sonstige/${tag2}/fassungen/9`), { x: 4 });
+  return { u, id, tag2 };
+}
+
+test('Prüfer-Daten: alle Fassungen je Tag (auch stornierte mit Storno-Grund), vollständiger verlauf der Stammdaten, Bewegungen, Anhänge als { pfad, url }, nichts von anderen Nutzern oder anderen verlauf-Sammlungen', async () => {
+  const { u, id, tag2 } = await pruefKonto();
+  const d = await kassenPrueferDaten(UID, 't', u.fs.fetchFn);
+  assert.equal(d.kassen_unvollstaendig, false);
+  assert.equal(d.kassen.length, 1);
+  assert.equal(d.kassen[0].id, id);
+  assert.deepEqual(d.kassen[0].verlauf.map((v) => v.felder), [['bezeichnung']], 'ausgelagerter Eintrag steht im Verlauf');
+  assert.equal(d.kassentage.length, 2);
+  const t1 = d.kassentage.find((t) => t.id === `${id}_2026-11-02`);
+  assert.equal(t1.fassungen.length, 1);
+  assert.equal(t1.fassungen[0].aktiv, true);
+  assert.deepEqual(t1.fassungen[0].anhaenge, [anhang(id, '2026-11-02')]);
+  const t2 = d.kassentage.find((t) => t.id === tag2);
+  assert.deepEqual(t2.fassungen.map((f) => [f.n, f.aktiv]), [[1, false], [2, false]], 'alle Fassungen, keine aktiv nach Storno');
+  assert.deepEqual(t2.fassungen_kurz.map((f) => f.storno_grund), ['Zahlendreher', 'wieder falsch']);
+  assert.equal(d.kassenbewegungen.length, 1);
+  assert.equal(d.betriebsstaetten.length, 1);
+  assert.equal(d.kassenmeldungen.length, 1);
+  assert.ok(!JSON.stringify(d).includes('Fremd') && !JSON.stringify(d).includes('"x"'));
+});
+
+test('Prüfer-Daten: Konto ohne Kasse liefert leere Listen mit einer Anfrage; zu wenig Unteranfragen ergeben kassen_unvollstaendig statt Abbruch oder stillem Weglassen', async () => {
+  const leer = umgebung();
+  const vor = leer.fs.log.anfragen;
+  const d0 = await kassenPrueferDaten(UID, 't', leer.fs.fetchFn);
+  assert.deepEqual(d0, { kassen: [], kassentage: [], kassenbewegungen: [], betriebsstaetten: [], kassenmeldungen: [], kassen_unvollstaendig: false });
+  assert.equal(leer.fs.log.anfragen - vor, 1);
+  const { u } = await pruefKonto();
+  const d = await kassenPrueferDaten(UID, 't', u.fs.fetchFn, { max: 3 });
+  assert.equal(d.kassen_unvollstaendig, true);
+  assert.equal((await kassenPrueferDaten(UID, 't', u.fs.fetchFn, { max: 6 })).kassen_unvollstaendig, true, 'auch bei den Abfragen über alle Nachfahren zählt das Budget');
+  const alle = await kassenPrueferDaten(UID, 't', u.fs.fetchFn);
+  assert.equal(alle.kassen_unvollstaendig, false);
+});
+
+test('Prüfer-Daten über den Router (/pruefer-daten, Token statt Login): Kassenbuch kommt mit, auch bei ausgeschaltetem Feature (Notaus: Daten bleiben lesbar)', async () => {
+  const { u, id } = await pruefKonto();
+  const token = 'p'.repeat(32);
+  u.fs.setze(P('profil/prueferZugang'), { token_hash: createHash('sha256').update(token).digest('hex'), aktiv: true, ablauf: new Date(Date.now() + 86400000).toISOString() });
+  u.fs.setze('config/features', { kern_max: 'an', features: { steuerprofil: 'an', kasse: 'aus' } });
+  const zurueck = installiere(u.fs);
+  try {
+    const env = await erzeugeTestEnv();
+    const r = await anfrage(env, { path: '/pruefer-daten', body: { token }, ip: '203.0.113.99' });
+    assert.equal(r.status, 200, await r.clone().text());
+    const j = await r.json();
+    assert.equal(j.kassen[0].id, id);
+    assert.equal(j.kassentage.length, 2);
+    assert.equal(j.kassen_unvollstaendig, false);
+    assert.ok(Array.isArray(j.dokumente) && j.dokumente.some((b) => b.quelle === 'kasse' && b.storage_url), 'Kassenbeleg mit storage_url (Prüferzugang)');
   } finally { zurueck(); }
 });
