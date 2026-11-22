@@ -613,3 +613,18 @@ test('Dritte Lesung G3-4: Vorab-Scan nutzt ein direktes /Length wie pdf-lib (Str
   const verweis = KATALOG + '3 0 obj\n<< /Length 5 0 R >>\nstream\nx\nendstream\nendobj\n4 0 obj\n' + '1'.repeat(65) + '\nendobj\n';
   assert.equal(pdfVorabScan(new Uint8Array(Buffer.from(verweis))).grund, 'Zahl zu lang');
 });
+
+test('Vierte Lesung M1: Leerraum in der Kopf-Vorprüfung begrenzt (Ziffern gefolgt von langem Leerraum im Datenmüll linear)', async () => {
+  const p = mit128MB(`import { ladePdfBegrenzt } from './regel/pdf-sicher.js'; console.warn = () => {};
+    const block = '1'.repeat(64) + ' '.repeat(13000); const b = new Uint8Array(Buffer.from('%PDF-1.7\\n1 0 obj null endobj\\nx' + block.repeat(Math.floor(3 * 1048576 / block.length)) + '\\n'));
+    const c = process.cpuUsage(); const r = await ladePdfBegrenzt(b); const d = process.cpuUsage(c);
+    console.log(JSON.stringify({ r: r.zuGross ? 'zuGross' : 'pdf', cpuMs: Math.round((d.user + d.system) / 1000) }));`);
+  assert.equal(p.status, 0, p.err);
+  const e = JSON.parse(p.out);
+  if (process.env.PDF_MESSWERTE) console.log(JSON.stringify(e));
+  assert.ok(e.cpuMs < 150, `3 MB Ziffern+Leerraum: ${JSON.stringify(e)}`); // vorher rund 330 ms (10 MB: 1,1 s)
+  // echter Kopf mit 256 Leerzeichen wird weiter erkannt
+  const datei = Buffer.from(KATALOG + `x 3${' '.repeat(256)}0${' '.repeat(256)}obj\n<< /A 1 >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n`);
+  const r = await ladePdfBegrenzt(new Uint8Array(datei), { updateMetadata: true });
+  assert.equal(objektBild(r.pdf), objektBild(await ALT(datei)));
+});

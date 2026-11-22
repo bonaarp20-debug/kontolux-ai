@@ -55,6 +55,7 @@ export const PDF_ZAHL_MAX = 64;
 // PDF_KOPFVERSUCHE_GRUND + 2 je „obj“, höchstens PDF_KOPFVERSUCHE_MAX (je Versuch rund 4 µs: angehängter Datenmüll bis rund 130 KB bleibt erlaubt).
 export const PDF_KOPFVERSUCHE_MAX = 400000;
 export const PDF_KOPFVERSUCHE_GRUND = 50000;
+export const PDF_KOPF_LEER_MAX = 256;
 
 // ---- Vorab-Scan: erste Verteidigung, ein linearer Durchlauf über die Rohbytes vor jedem pdf-lib-Aufruf ----
 // Ohne Allokation proportional zur Eingabe. Übersprungen werden Kommentare, Literal- und Hex-Strings (dort sind lange Ziffernfolgen legitim, z. B. mit
@@ -431,7 +432,11 @@ export async function ladePdfBegrenzt(bytes, { budget = pdfBudget(), ignoreEncry
   //   39 KB '%' 1,3 s, Leerraum 2,3 s); die Ziffer dahinter wird im nächsten Schritt ohnehin versucht.
   // - sonst nur an einer Ziffer, und nur bei der Form „Ziffern Leerraum Ziffern Leerraum obj“ (ohne Kommentar, je Zahl höchstens PDF_ZAHL_MAX);
   //   jede andere Stelle scheitert in pdf-lib ohnehin (mit einer teuren Ausnahme je Byte). Gezählt wird vor der Vorprüfung.
-  // Abweichung von pdf-lib nur bei einem Objektkopf mit Kommentar zwischen Nummer und obj direkt hinter Datenmüll (Korpus: 0).
+  // Leerraum im Kopf höchstens PDF_KOPF_LEER_MAX Byte je Lücke (echte Köpfe: 1 Leerzeichen); sonst liest die Vorprüfung ab jeder Ziffer den ganzen
+  // Leerraum (Muster "1"×64 + 13.000 Leerzeichen, 10 MB: 1,1 s CPU).
+  // Abweichung von pdf-lib: ein Objektkopf mit Kommentar zwischen Nummer und obj (z. B. „2 0 %c\nobj“) oder mit mehr Leerraum wird hier nicht erkannt.
+  // skipJibberish sucht nach jedem Objekt, also verschwindet ein solches Objekt an jeder Stelle außer der ersten eines Abschnitts (nicht nur hinter
+  // Datenmüll). Korpus: 0 Fälle; folgt höchstens, dass die eingebettete XML nicht gefunden wird (normale Erfassung).
   const kopfSuche = parser.matchIndirectObjectHeader;
   parser.matchIndirectObjectHeader = function begrenzteKopfsuche(...a) {
     if (zaehler.zuGross || ueber(zaehler)) { this.bytes.moveTo(this.bytes.length); return false; }
@@ -440,11 +445,12 @@ export async function ladePdfBegrenzt(bytes, { budget = pdfBudget(), ignoreEncry
     zaehler.kopfVersuche -= 1;
     if (zaehler.kopfVersuche < 0) { zaehler.zuGross = true; by.moveTo(n); return false; }
     let k = i; while (k < n && k - i <= PDF_ZAHL_MAX && ZIFFER[by.peekAt(k)]) k += 1;
-    let w = k; while (w < n && LEER[by.peekAt(w)]) w += 1;
-    if (w === k) return false;
+    let w = k; while (w < n && w - k <= PDF_KOPF_LEER_MAX && LEER[by.peekAt(w)]) w += 1;
+    if (w === k || w - k > PDF_KOPF_LEER_MAX) return false;
     let k2 = w; while (k2 < n && k2 - w <= PDF_ZAHL_MAX && ZIFFER[by.peekAt(k2)]) k2 += 1;
     if (k2 === w) return false;
-    let w2 = k2; while (w2 < n && LEER[by.peekAt(w2)]) w2 += 1;
+    let w2 = k2; while (w2 < n && w2 - k2 <= PDF_KOPF_LEER_MAX && LEER[by.peekAt(w2)]) w2 += 1;
+    if (w2 - k2 > PDF_KOPF_LEER_MAX) return false;
     if (by.peekAt(w2) !== 0x6f || by.peekAt(w2 + 1) !== 0x62 || by.peekAt(w2 + 2) !== 0x6a) return false;
     return kopfSuche.apply(this, a);
   };
