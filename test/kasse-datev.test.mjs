@@ -79,7 +79,7 @@ async function welt({ skr = 'SKR03', profil = REGEL, settings = {}, kasseExtra =
   };
   const a = await ruf('/kasse', { ...KASSE_ANLEGEN, ...kasseExtra });
   assert.equal(a.status, 200, JSON.stringify(a.json));
-  return { fs, id: a.json.kasse_id, tag: (b) => ruf('/kassentag', b), bew: (b) => ruf('/kassenbewegung', b), exp: (jahr) => exportiere(fs, jahr) };
+  return { fs, id: a.json.kasse_id, kasse: (b) => ruf('/kasse', b), tag: (b) => ruf('/kassentag', b), bew: (b) => ruf('/kassenbewegung', b), exp: (jahr) => exportiere(fs, jahr) };
 }
 const abschluss = (kasseId, tag, extra = {}) => ({
   aktion: 'abschliessen', kasse_id: kasseId, geschaeftstag: tag, z_nummern: ['Z-17'],
@@ -141,7 +141,8 @@ test('Profilfelder datev_kassenkonto und datev_geldtransitkonto, DATEV-Konto der
   assert.deepEqual(kurz(r3.zeilen, 'K-THK-2026-0001').map((x) => x.slice(0, 4)), [['500,00', 'S', '1000', '8400'], ['300,00', 'S', '1360', '8400']]);
   assert.match(r3.warnung, /Kassenkonto in den Einstellungen ist keine vierstellige Kontonummer/);
   assert.match(r3.warnung, /Geldtransitkonto in den Einstellungen ist keine vierstellige Kontonummer/);
-  const w4 = await welt({ kasseExtra: { datev_konto: '1000123' } });
+  const w4 = await welt();
+  w4.fs.setze(P(`kassen/${w4.id}`), { ...w4.fs.lies(P(`kassen/${w4.id}`)), datev_konto: '1000123' }); // Altbestand: die Eingabe lässt nur noch vier Stellen zu (A-N2 c), der Export fängt andere Werte weiter ab
   ok200(await w4.tag(nur19(w4.id, '2026-11-02')));
   const r4 = await w4.exp();
   assert.equal(kurz(r4.zeilen, 'K-THK-2026-0001')[0][2], '1000');
@@ -552,6 +553,21 @@ test('A-M2: Karten-Rückerstattung bei Barumsätzen (Karte negativ): Kasse Soll 
   assert.deepEqual(kasseTagesPosten(f(100, 200)).posten, []);
   assert.deepEqual(kasseTagesPosten({ umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 10000, unbar_cent: 30000 }], korrekturen: [{ steuerfall: 'A_INLAND_19', art: 'retoure', bar_cent: 15000, unbar_cent: 0 }] }).posten.map((p) => [p.konto, p.gegen, p.sollHaben, p.betrag_cent]), [['kasse', 'transit', 'H', 5000]]);
   assert.deepEqual(kasseTagesPosten({ umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 10000, unbar_cent: 30000 }], korrekturen: [{ steuerfall: 'A_INLAND_19', art: 'retoure', bar_cent: 15000, unbar_cent: 0 }] }, { datenquelle: 'sumup_integration' }).posten, []);
+});
+
+// A-N2 (c): datev_konto der Kasse nur vierstellig (wie der Export und die Sachkontenlänge im DATEV-Kopf)
+test('A-N2 (c): datev_konto der Kasse: vierstellig wird angenommen, 3, 5 und 8 Stellen und Text ergeben 400 FORMAT (Anlegen und Ändern)', async () => {
+  const w = await welt({ kasseExtra: { datev_konto: '1010' } });
+  assert.equal(w.fs.lies(P(`kassen/${w.id}`)).datev_konto, '1010');
+  for (const falsch of ['101', '10100', '10100000', 'Kasse']) {
+    const a = await w.kasse({ ...KASSE_ANLEGEN, kuerzel: 'NEU', bezeichnung: 'Neu', anfangsbestand_am: '2026-11-01', datev_konto: falsch });
+    assert.equal(a.status, 400, `anlegen ${falsch}`);
+    assert.equal(a.json.feld, 'datev_konto');
+    const c = await w.kasse({ aktion: 'aendern', kasse_id: w.id, datev_konto: falsch });
+    assert.equal(c.status, 400, `ändern ${falsch}`);
+  }
+  assert.equal((await w.kasse({ aktion: 'aendern', kasse_id: w.id, datev_konto: '1020' })).status, 200);
+  assert.equal(w.fs.lies(P(`kassen/${w.id}`)).datev_konto, '1020');
 });
 
 // ── 6. Bestandsnutzer unverändert, Jahr, Hinweis ─────────────────────────────────────────────────
