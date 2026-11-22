@@ -353,6 +353,34 @@ function kurz(id) {
   return s.length > 6 ? s.slice(0, 6) + '…' : s;
 }
 
+// L1-Fix F-1: Schlüssel für Limits je IP. IPv6 zählt je /64-Netz (ein Anschluss hat das ganze Netz und könnte sonst je Anfrage die Adresse wechseln),
+// IPv4 und IPv4-mapped IPv6 (::ffff:a.b.c.d) je Adresse. Normiert (Kleinschreibung, ::-Auflösung, Zone-ID weg); Fehlendes/Ungültiges bleibt unverändert.
+export function ipLimitSchluessel(ip) {
+  const roh = String(ip == null ? '' : ip).trim();
+  if (!roh.includes(':')) return roh;
+  let a = roh.toLowerCase().replace(/^\[|\]$/g, '').split('%')[0];
+  // IPv4-Ende in zwei Hex-Gruppen umrechnen
+  const v4 = a.match(/^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const o = v4.slice(2).map(Number);
+    if (o.some((n) => n > 255)) return roh;
+    a = v4[1] + ((o[0] << 8) | o[1]).toString(16) + ':' + ((o[2] << 8) | o[3]).toString(16);
+  }
+  if (!/^[0-9a-f:]+$/.test(a) || (a.match(/::/g) || []).length > 1) return roh;
+  let teile;
+  if (a.includes('::')) {
+    const [l, r] = a.split('::');
+    const links = l ? l.split(':') : [], rechts = r ? r.split(':') : [];
+    const fehlt = 8 - links.length - rechts.length;
+    if (fehlt < 1) return roh;
+    teile = [...links, ...Array(fehlt).fill('0'), ...rechts];
+  } else teile = a.split(':');
+  if (teile.length !== 8 || teile.some((t) => !/^[0-9a-f]{1,4}$/.test(t))) return roh;
+  const g = teile.map((t) => parseInt(t, 16));
+  if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) return `${g[6] >> 8}.${g[6] & 255}.${g[7] >> 8}.${g[7] & 255}`;
+  return g.slice(0, 4).map((x) => x.toString(16)).join(':') + '::/64';
+}
+
 // ── In-Memory Rate Limiting ──────────────────
 const rateLimitMap = new Map();
 
@@ -470,6 +498,8 @@ export default {
     // Format wird zwar sofort lokal abgelehnt, aber auch das ist ohne Limit ein
     // günstiger Vektor, um den Worker mit Requests zu fluten.
     const clientIP = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || 'unknown';
+    // L1-Fix F-1: Limits je IP zählen IPv6 je /64 (clientIP bleibt die volle Adresse für Konten-Zähler und VPN-Prüfung, Webhooks bleiben je Adresse)
+    const limitIP = ipLimitSchluessel(clientIP);
     // Webhooks (Integrations-Audit 2026-09-26): Stripe, PayPal, Shopify & Co. schicken die
     // Zustellungen ALLER Kontolux-Nutzer von denselben wenigen Server-IPs — ein gemeinsames
     // 20er-Limit pro IP hätte bei mehreren Kunden oder einem Verkaufs-Peak echte Zahlungen mit 429
@@ -479,7 +509,7 @@ export default {
     const webhookPlattform = url.pathname.split('/')[2] || '';
     // Plus Nutzer-ID (nur wenn sie wie eine echte aussieht): Stripe, PayPal & Co. senden die Zustellungen aller Kunden von denselben IPs, ein Verkaufspeak eines Kunden darf andere nicht drosseln. Die LRU-Begrenzung hält den Speicher klein.
     const webhookNutzer = url.pathname.split('/')[3] || '';
-    const limitSchluessel = istWebhook ? `${clientIP}|webhook|${/^[a-z0-9]{2,20}$/.test(webhookPlattform) ? webhookPlattform : 'x'}|${/^[A-Za-z0-9]{20,40}$/.test(webhookNutzer) ? webhookNutzer : 'x'}` : clientIP;
+    const limitSchluessel = istWebhook ? `${clientIP}|webhook|${/^[a-z0-9]{2,20}$/.test(webhookPlattform) ? webhookPlattform : 'x'}|${/^[A-Za-z0-9]{20,40}$/.test(webhookNutzer) ? webhookNutzer : 'x'}` : limitIP;
     if (!checkRateLimit(limitSchluessel, istWebhook ? 60 : 20)) {
       return new Response('Too Many Requests', { status: 429, headers: cors });
     }
@@ -490,7 +520,7 @@ export default {
     // Strengere Limits für Routen, die Mails versenden, Firestore-Daten ausliefern oder
     // öffentlich erreichbar sind (Security-Audit 2026-10-16). Pro IP und Route.
     const routenLimit = ROUTEN_LIMITS[url.pathname];
-    if (request.method === 'POST' && routenLimit && !checkRateLimit(`${url.pathname}|${clientIP}`, routenLimit.limit, routenLimit.windowMs)) {
+    if (request.method === 'POST' && routenLimit && !checkRateLimit(`${url.pathname}|${limitIP}`, routenLimit.limit, routenLimit.windowMs)) {
       return new Response('Too Many Requests', { status: 429, headers: cors });
     }
 
@@ -788,7 +818,7 @@ export default {
       // Zugriffsnachweis ist der Besitz des Tokens selbst (siehe handlePrueferDaten unten).
       if (url.pathname === '/pruefer-daten') return handlePrueferDaten(body, env, cors, authHeader);
       // H1-Fix: Datei des Prüferzugangs per POST (Token im Header, Pfad im Körper, nichts in der Adresse); gleicher Zugangsnachweis wie /pruefer-daten
-      if (url.pathname === '/pruefer-datei') return handlePrueferDatei(body, env, cors, authHeader, clientIP);
+      if (url.pathname === '/pruefer-datei') return handlePrueferDatei(body, env, cors, authHeader, limitIP);
       if (url.pathname === '/freigabe-status') {
         return new Response(JSON.stringify({ status: (await freigabeStatus(verifiedUid, env)) || 'frei' }), {
           status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
