@@ -15,7 +15,7 @@ import {
   AGB_MINDESTFASSUNG_KASSE, kernOptionenFuerKontoLaden, jetztIso, schichtFuer, regelFehler, listeAlle,
 } from './gemeinsam.js';
 import { schreibe, zeitstempel, FirestoreFehler, vollerName } from './firestore.js';
-import { auditKette, kopfPfad } from './audit.js';
+import { auditKette, kopfPfad, eintragPfad } from './audit.js';
 import { profilBereit, wirkPerioden, nachFestschreibungAntwort, festPruefungMarkieren } from './schreibweg-v2.js';
 import { legacyHash } from './drift.js';
 import { heuteBerlin } from './oss-meldung.js';
@@ -587,8 +587,13 @@ async function ruhetage(c, aktion) {
 // /kassentag ruhetag_aufheben (B-N3, ergänzt O6 M2): ein irrtümlich bestätigter Ruhetag NACH dem letzten Abschluss wird wieder ein offener Tag (Tagesplatz entfernt,
 // Vorbedingung updateTime), damit eine Bewegung erfasst oder der Tag normal abgeschlossen werden kann, ohne Storno-Spur. Ein Ruhetag hat keine Bestandswirkung, keine
 // Kassennummer und keinen Beleg; der Nachweis bleibt in der Audit-Kette (kassentag_ruhetag_aufgehoben mit vorher). Vor dem letzten Abschluss: 409 SPAETERE_TAGE
-// (Weg rückwärts über den Storno, Nr. 13). Eine Wiederholung nach Erfolg findet keinen Tagesplatz mehr (404, nichts geschrieben).
+// (Weg rückwärts über den Storno, Nr. 13). F1-Fix B-1: Gilt ein Stammdatenwechsel (art_ab, grundaufzeichnung_ab, datenquelle_ab) erst nach dem Tag, ließe sich der Tag
+// danach nie abschließen (abschliessen gibt dann 409 STAMMDATEN_WECHSEL_SPAETER): das Aufheben wird mit demselben Code abgelehnt (stammdaten_ab, felder), der Ruhetag
+// bleibt. F1-Fix B-4: Eine Wiederholung derselben anfrage_id nach Erfolg (Netzabbruch) findet keinen Tagesplatz mehr; steht unter den letzten Audit-Einträgen
+// kassentag_ruhetag_aufgehoben für diesen Tag mit dieser anfrage_id, antwortet der Worker 200 mit schon_aufgehoben (nichts geschrieben, kein zweiter Audit-Eintrag).
 // ---------------------------------------------------------------------------------------------
+const AUFHEBEN_AUDIT_RUECKBLICK = 5; // so viele letzte Audit-Einträge prüft die Wiederholung (ein batchGet)
+const STAMMDATEN_AB = Object.freeze(['art_ab', 'grundaufzeichnung_ab', 'datenquelle_ab']);
 async function ruhetagAufheben(c) {
   const { fs, uid, body, cors, zeit, heute } = c;
   const f = pruefeRuhetage(body, 'ruhetag', { heute });
@@ -603,14 +608,32 @@ async function ruhetagAufheben(c) {
     if (kasse.kassenbuch === false) return { antwort: fehlerAntwort(422, 'KASSE_OHNE_KASSENBUCH', cors) };
     if (kasse.aktiv === false) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors) };
     const tagDok = docs.get(P.kassentag(uid, tagId));
-    if (!tagDok || !istObjekt(tagDok.daten)) return { antwort: fehlerAntwort(404, 'KASSENTAG_UNBEKANNT', cors, { kassentag_id: tagId }) };
+    if (!tagDok || !istObjekt(tagDok.daten)) {
+      if (await schonAufgehoben(fs, uid, docs.get(kopfPfad(uid)), tagId, body.anfrage_id)) return { antwort: antwort({ ok: true, idempotent: true, schon_aufgehoben: true, kassentag_id: tagId }, 200, cors) };
+      return { antwort: fehlerAntwort(404, 'KASSENTAG_UNBEKANNT', cors, { kassentag_id: tagId }) };
+    }
     if (tagDok.daten.status !== 'ruhetag') return { antwort: fehlerAntwort(409, 'KEIN_RUHETAG', cors, { kassentag_id: tagId, status: tagDok.daten.status ?? null }) };
     const zeiger = zeigerAus(kasse.letzter_abschluss);
     if (zeiger && tag < zeiger.tag) return { antwort: fehlerAntwort(409, 'SPAETERE_TAGE', cors, { letzter_tag: zeiger.tag }) };
+    const felder = STAMMDATEN_AB.filter((x) => typeof kasse[x] === 'string' && kasse[x] > tag);
+    if (felder.length) return { antwort: fehlerAntwort(409, 'STAMMDATEN_WECHSEL_SPAETER', cors, { kassentag_id: tagId, felder, stammdaten_ab: felder.map((x) => kasse[x]).sort()[0] }) };
     const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{
-      aktion: 'kassentag_ruhetag_aufgehoben', ziel: `kassentage/${tagId}`, vorher: tagDok.daten, nachher: null, details: { kasse_id: kasseId, kassentag_id: tagId, weg: 'aufheben' },
+      aktion: 'kassentag_ruhetag_aufgehoben', ziel: `kassentage/${tagId}`, vorher: tagDok.daten, nachher: null, details: { kasse_id: kasseId, kassentag_id: tagId, weg: 'aufheben', anfrage_id: body.anfrage_id },
     }], zeit);
     return { writes: [schreibe.loeschen(P.kassentag(uid, tagId), { updateTime: tagDok.updateTime }), ...audit.writes], erfolg: () => antwort({ ok: true, kassentag_id: tagId }, 200, cors) };
+  });
+}
+
+// F1-Fix B-4: Wurde dieser Tag mit dieser anfrage_id schon aufgehoben? Liest die letzten AUFHEBEN_AUDIT_RUECKBLICK Einträge der Audit-Kette (ein batchGet).
+async function schonAufgehoben(fs, uid, kopfDok, tagId, anfrageId) {
+  const seq = kopfDok && istObjekt(kopfDok.daten) && Number.isSafeInteger(kopfDok.daten.seq) ? kopfDok.daten.seq : 0;
+  if (seq < 1 || typeof anfrageId !== 'string' || !anfrageId) return false;
+  const pfade = [];
+  for (let i = seq; i >= 1 && pfade.length < AUFHEBEN_AUDIT_RUECKBLICK; i--) pfade.push(eintragPfad(uid, i));
+  const eintraege = await fs.batchGet(pfade);
+  return pfade.some((pf) => {
+    const e = eintraege.get(pf)?.daten;
+    return istObjekt(e) && e.aktion === 'kassentag_ruhetag_aufgehoben' && istObjekt(e.details) && e.details.weg === 'aufheben' && e.details.kassentag_id === tagId && e.details.anfrage_id === anfrageId;
   });
 }
 
