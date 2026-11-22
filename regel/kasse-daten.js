@@ -44,8 +44,17 @@ export function idBereich(uid, sammlung, vonId, bisId, { absteigend = false, lim
 }
 const idVon = (d) => String(d.pfad).split('/').pop();
 
-// Alle Kassentage-Dokumente einer Kasse (Tagesplätze, nicht die Fassungen), absteigend; durchsucht bis maxSeiten Seiten à 40
-async function ruecklaufend(fs, uid, kasseId, passt, { seite = 40, maxSeiten = 3 } = {}) {
+// Fehler, wenn ein Lesevorgang nicht vollständig möglich ist: der Aufrufer antwortet 503 (fail-closed), nie mit einem falschen "nichts gefunden"
+export class KasseLesefehler extends Error {
+  constructor(code, nachricht) { super(nachricht); this.name = 'KasseLesefehler'; this.code = code; }
+}
+export const TAGESPLAETZE_SEITE = 250;
+export const TAGESPLAETZE_MAX_SEITEN = 4; // zusammen 1000 Tagesplätze (O6 H2: mehr als 120 Ruhetage am Stück, z. B. Winterpause, sind normal)
+
+// Alle Kassentage-Dokumente einer Kasse (Tagesplätze, nicht die Fassungen), absteigend, bis zum ersten Treffer. null NUR, wenn alle Tagesplätze der Kasse gelesen
+// wurden und keiner passt. Reicht das Seitenlimit nicht (mehr als 1000 Tagesplätze ohne Treffer), wirft die Funktion (O6 H2): ein stilles null ließe
+// Anfangsbestand, Chronologie (SPAETERE_TAGE) und die Storno-Kette (nur der letzte Tag) entfallen.
+async function ruecklaufend(fs, uid, kasseId, passt, { seite = TAGESPLAETZE_SEITE, maxSeiten = TAGESPLAETZE_MAX_SEITEN } = {}) {
   let ab = null;
   for (let i = 0; i < maxSeiten; i += 1) {
     const r = await fs.runQuery(`users/${uid}`, idBereich(uid, 'kassentage', `${kasseId}_0000-00-00`, `${kasseId}_9999-99-99`, { absteigend: true, limit: seite, ab }));
@@ -53,7 +62,7 @@ async function ruecklaufend(fs, uid, kasseId, passt, { seite = 40, maxSeiten = 3
     if (r.length < seite) return null;
     ab = idVon(r[r.length - 1]);
   }
-  return null;
+  throw new KasseLesefehler('KASSENTAGE_ZU_VIELE', 'Kassentage: mehr Tagesplätze ohne Treffer als lesbar');
 }
 
 // Letzter Tagesplatz der Kasse mit einem der Stati (z. B. ['abgeschlossen', 'ruhetag'])

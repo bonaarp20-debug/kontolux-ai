@@ -19,7 +19,7 @@ import { profilBereit, wirkPerioden, nachFestschreibungAntwort, festPruefungMark
 import { legacyHash } from './drift.js';
 import { heuteBerlin } from './oss-meldung.js';
 import { KASSE_PFADE, FEATURE, aufbewahrungBis, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, pruefeBewegung, kernFassung, stammKombination, PRIVAT_ARTEN } from './kasse-form.js';
-import { P, kasseIdAus, kassennummer, letzterAbgeschlossenerTag, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern } from './kasse-daten.js';
+import { P, kasseIdAus, kassennummer, letzterAbgeschlossenerTag, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern, KasseLesefehler } from './kasse-daten.js';
 
 export { KASSE_PFADE, FEATURE, aufbewahrungBis, pruefeKasse, pruefeKassentag };
 export const BEWEGUNGEN_MAX_JE_TAG = 999;
@@ -104,6 +104,8 @@ export async function regelKasse(pfad, body, env, cors = {}, deps = {}) {
     if (pfad === '/kassenbewegung') return aktion === 'anlegen' ? await bewegungAnlegen(c) : await bewegungStornieren(c);
     return fehlerAntwort(404, 'PFAD_UNBEKANNT', cors);
   } catch (e) {
+    // Lesegrenze erreicht (z. B. mehr als 1000 Tagesplätze ohne Abschluss, mehr als 2000 Belege je Monat bei der KU-Summe): fail-closed, nichts geschrieben
+    if (e instanceof KasseLesefehler) { console.warn(`regel_kasse_lesegrenze ${e.code}`); return fehlerAntwort(503, e.code, cors); }
     return regelFehler(e, 'kasse', cors);
   }
 }

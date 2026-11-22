@@ -1808,3 +1808,56 @@ test('O6 H1: Abschluss eines späteren Tages übergeht keine Bewegung an einem o
   assert.equal((await v.tagRufe(ohneUmsatz(vid, '2026-11-01', { gezaehlt_cent: 9900 }))).status, 200);
   assert.equal((await v.tagRufe(ohneUmsatz(vid, '2026-11-04', { gezaehlt_cent: 9900 }))).status, 200);
 });
+
+// Ruhetage am Stück über die Seitengrenze hinaus (Winterpause): n Ruhetage ab einem Tag in Blöcken zu 31
+async function ruhetageAb(u, id, von, n) {
+  const tage = Array.from({ length: n }, (_, i) => K.addiereTage(von, i));
+  for (let i = 0; i < tage.length; i += 31) {
+    const r = await u.tagRufe({ aktion: 'ruhetage', kasse_id: id, tage: tage.slice(i, i + 31) });
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+  }
+  return tage;
+}
+
+test('O6 H2: mehr als 120 Ruhetage nach dem letzten Abschluss: der letzte Abschluss wird weiter gefunden (Anfangsbestand = gezählt, SPAETERE_TAGE, nur der letzte Tag stornierbar)', async () => {
+  const u = umgebung({ heute: '2027-06-30' });
+  const id = await u.legeKasseAn();
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200); // gezählt 707,00
+  const tage = await ruhetageAb(u, id, '2026-11-03', 150); // 03.11.2026 bis 01.04.2027
+  assert.equal(tage[149], '2027-04-01');
+  // Anfangsbestand ist der gezählte Endbestand vom 02.11. (707,00), nicht der Eröffnungsbestand (100,00): kein Überschuss von 607,00
+  const a = await u.tagRufe(ohneUmsatz(id, '2027-04-02', { gezaehlt_cent: 70700 }));
+  assert.equal(a.status, 200, JSON.stringify(a.json));
+  assert.equal(a.json.differenz_cent, 0);
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2027-04-02`)).anfangsbestand_cent, 70700);
+  assert.deepEqual(u.fs.pfade(P('dokumente/')).filter((p) => p.includes('_dp') || p.includes('_dm')), [], 'kein Differenzbeleg');
+  // nur der letzte Abschluss ist stornierbar: der 02.11. liegt 150 Tagesplätze davor
+  const s = await u.tagRufe(stornoBody(id, '2026-11-02'));
+  assert.equal(s.status, 409, JSON.stringify(s.json));
+  assert.deepEqual([s.json.fehler[0].code, s.json.letzter_tag], ['SPAETERE_TAGE', '2027-04-02']);
+  // Chronologie: ein Abschluss für einen Tag ohne Platz vor dem letzten Abschluss (hier: Anfang der Folgekette, Tag nach einem Abschluss weiter hinten)
+  const v = umgebung({ heute: '2027-06-30' });
+  const vid = await v.legeKasseAn();
+  assert.equal((await v.tagRufe(abschluss(vid, '2026-11-02'))).status, 200);
+  await ruhetageAb(v, vid, '2026-11-04', 150); // 04.11.2026 bis 02.04.2027; der 03.11. bleibt ohne Platz
+  assert.equal((await v.tagRufe(ohneUmsatz(vid, '2027-04-04', { gezaehlt_cent: 70700 }))).status, 200);
+  const frueher = await v.tagRufe(ohneUmsatz(vid, '2026-11-03', { gezaehlt_cent: 70700 }));
+  assert.deepEqual([frueher.status, frueher.json.fehler[0].code, frueher.json.letzter_tag], [409, 'SPAETERE_TAGE', '2027-04-04']);
+});
+
+test('O6 H2: mehr Tagesplätze ohne Treffer als lesbar (1000): fail-closed 503 KASSENTAGE_ZU_VIELE statt stillem „kein Abschluss“, nichts geschrieben', async () => {
+  const u = umgebung({ heute: '2030-12-31' });
+  const id = await u.legeKasseAn();
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200);
+  for (let i = 0; i < 1100; i += 1) {
+    const t = K.addiereTage('2026-11-03', i);
+    u.fs.setze(P(`kassentage/${id}_${t}`), { kasse_id: id, geschaeftstag: t, status: 'ruhetag', fassung_aktiv: null, fassungen_kurz: [] });
+  }
+  const vor = u.fs.log.commits;
+  const r = await u.tagRufe(ohneUmsatz(id, '2030-01-01', { gezaehlt_cent: 70700 }));
+  assert.equal(r.status, 503, JSON.stringify(r.json));
+  assert.equal(r.json.fehler[0].code, 'KASSENTAGE_ZU_VIELE');
+  assert.equal(u.fs.log.commits, vor);
+  const s = await u.tagRufe(stornoBody(id, '2026-11-02'));
+  assert.equal(s.status, 503, 'auch der Storno fragt den letzten Abschluss: lieber blockieren als die Kette aushebeln');
+});
