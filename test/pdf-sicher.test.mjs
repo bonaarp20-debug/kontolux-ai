@@ -465,7 +465,8 @@ test('Vorab-Scan: alle Angriffsproben der Gegenlesungen und der Härtung bei 128
   if (process.env.PDF_MESSWERTE) console.log(JSON.stringify(e));
   const grenzen = { '250.000 Objekte': 30, 'Zahl 6 MB': 30, 'Datei 12 MB': 5, 'Ziffern zwischen Objekten': 10, 'Verweisleck über Kopfversuche': 30 }; // früh im Vorab-Scan
   for (const [name, x] of Object.entries(e)) {
-    assert.equal(x.r, 'zuGross', `${name}: ${JSON.stringify(x)}`);
+    // Datenmüll ohne Ziffern lädt seit G3-3 als (leeres) PDF, ohne teure Kopfversuche; sonst überall abgelehnt
+    if (name === 'Datenmüll 10 MB') assert.match(x.r, /^(pdf|zuGross)$/, name); else assert.equal(x.r, 'zuGross', `${name}: ${JSON.stringify(x)}`);
     assert.ok(x.cpuMs < (grenzen[name] ?? 1500) && x.heapMB < 40, `${name}: ${JSON.stringify(x)}`);
   }
 });
@@ -571,4 +572,28 @@ test('Dritte Lesung G3-2: Dicts zählen 2 Einheiten (rund 230 Byte je leeres Dic
   if (process.env.PDF_MESSWERTE) console.log(JSON.stringify(e));
   assert.ok(e.dicts > 50000, `Messung greift (${e.dicts} Dicts)`);
   assert.ok(e.spitzeMB < 35, `Heap-Spitze ${e.spitzeMB} MB`);
+});
+
+test('Dritte Lesung G3-3: Leerraum-, Kommentar- und Zufallsläufe im Datenmüll kosten lineare CPU (vorher quadratisch)', async () => {
+  const p = mit128MB(`import { ladePdfBegrenzt } from './regel/pdf-sicher.js'; console.warn = () => {};
+    const K = '%PDF-1.7\\n1 0 obj null endobj\\n'; const erg = {};
+    let z = 12345; const zufall = () => { z = (z * 1103515245 + 12345) & 0x7fffffff; return 32 + (z % 95); };
+    const zf = Buffer.alloc(3 * 1048576); for (let i = 0; i < zf.length; i += 1) zf[i] = zufall();
+    const faelle = { prozent: 'x' + '%'.repeat(40000), leer: 'x' + ' '.repeat(40000), kommentarLeer: 'x%' + ' '.repeat(40000), zufall3MB: zf.toString('latin1') };
+    for (const [k, v] of Object.entries(faelle)) {
+      const b = new Uint8Array(Buffer.from(K + v + '\\n', 'latin1')); const c = process.cpuUsage(); const r = await ladePdfBegrenzt(b); const d = process.cpuUsage(c);
+      erg[k] = { r: r.zuGross ? 'zuGross' : 'pdf', cpuMs: Math.round((d.user + d.system) / 1000) };
+    }
+    console.log(JSON.stringify(erg));`);
+  assert.equal(p.status, 0, p.err);
+  const e = JSON.parse(p.out);
+  if (process.env.PDF_MESSWERTE) console.log(JSON.stringify(e));
+  // vorher: 39 KB '%' 1,3 s, Leerraum 2,3 s; 10 MB Zufall 10 s
+  for (const k of ['prozent', 'leer', 'kommentarLeer']) assert.ok(e[k].cpuMs < 100, `${k}: ${JSON.stringify(e[k])}`);
+  assert.ok(e.zufall3MB.cpuMs < 500, `Zufall 3 MB: ${JSON.stringify(e.zufall3MB)}`);
+  // Objekte hinter Datenmüll werden weiter gefunden (Kopf direkt, nach Leerraum, nach Kommentar)
+  const datei = KATALOG + 'Muell %Kommentar\n  3 0 obj\n<< /A 1 >>\nendobj\nx y 4 0 obj [1 2]\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n';
+  const r = await ladePdfBegrenzt(new Uint8Array(Buffer.from(datei)), { updateMetadata: true });
+  assert.ok(r.pdf && !r.zuGross);
+  assert.equal(objektBild(r.pdf), objektBild(await ALT(Buffer.from(datei))));
 });

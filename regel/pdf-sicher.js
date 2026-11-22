@@ -203,6 +203,7 @@ function xrefEintraege(st, laenge) {
 const ZAEHLER = Symbol('pdfSicherZaehler');
 const ueber = (z) => z.objekte < 0 || z.namen < 0 || z.verweise < 0 || z.strings < 0 || isolatVoll();
 // Trennzeichen wie pdf-lib (syntax/Whitespace.js, syntax/Delimiters.js): Ende eines Namens
+const LEER = new Uint8Array(256); for (const c of [0, 9, 10, 12, 13, 32]) LEER[c] = 1; // Leerraum wie pdf-lib (syntax/Whitespace.js)
 const NAMENSENDE = new Uint8Array(256);
 for (const c of [0, 9, 10, 12, 13, 32, 0x28, 0x29, 0x3c, 0x3e, 0x5b, 0x5d, 0x7b, 0x7d, 0x2f, 0x25]) NAMENSENDE[c] = 1;
 // Länge des Strings/Namens ab der aktuellen Position (dort steht '<', '(' oder '/'), höchstens bis max + 1 gesucht; > max heißt zu lang.
@@ -404,13 +405,27 @@ export async function ladePdfBegrenzt(bytes, { budget = pdfBudget(), ignoreEncry
   const xref = parser.maybeParseCrossRefSection; const kopf = parser.parseIndirectObjectHeader;
   parser.maybeParseCrossRefSection = function begrenzteXref(...a) { zaehler.imXref = true; try { return imRahmen(zaehler, xref, this, a); } finally { zaehler.imXref = false; } };
   parser.parseIndirectObjectHeader = function begrenzterKopf(...a) { return imRahmen(zaehler, kopf, this, a); };
-  // Kopfversuche aus skipJibberish/skipBinaryHeaderComment: nach einer Überschreitung ans Dateiende springen (skipJibberish endet dann sofort),
-  // sonst zählen; so bleibt die Laufzeit linear und kein verschluckter Fehler legt weitere Verweise an
+  // Kopfversuche aus skipJibberish (je druckbares Byte zwischen Objekten): nach einer Überschreitung ans Dateiende springen (skipJibberish endet dann
+  // sofort), kein verschluckter Fehler legt weitere Verweise an. Damit die Laufzeit linear bleibt, wird vor dem teuren Versuch billig vorgeprüft:
+  // - Leerraum und '%': sofort nein. pdf-lib würde von hier aus den ganzen Lauf bzw. Kommentar überspringen, an jeder Position erneut (quadratisch:
+  //   39 KB '%' 1,3 s, Leerraum 2,3 s); die Ziffer dahinter wird im nächsten Schritt ohnehin versucht.
+  // - sonst nur an einer Ziffer, und nur bei der Form „Ziffern Leerraum Ziffern Leerraum obj“ (ohne Kommentar, je Zahl höchstens PDF_ZAHL_MAX);
+  //   jede andere Stelle scheitert in pdf-lib ohnehin (mit einer teuren Ausnahme je Byte). Gezählt wird vor der Vorprüfung.
+  // Abweichung von pdf-lib nur bei einem Objektkopf mit Kommentar zwischen Nummer und obj direkt hinter Datenmüll (Korpus: 0).
   const kopfSuche = parser.matchIndirectObjectHeader;
   parser.matchIndirectObjectHeader = function begrenzteKopfsuche(...a) {
-    zaehler.kopfVersuche -= 1;
-    if (zaehler.kopfVersuche < 0) zaehler.zuGross = true;
     if (zaehler.zuGross || ueber(zaehler)) { this.bytes.moveTo(this.bytes.length); return false; }
+    const by = this.bytes; const i = by.offset(); const n = by.length;
+    if (i >= n || !ZIFFER[by.peekAt(i)]) return false;
+    zaehler.kopfVersuche -= 1;
+    if (zaehler.kopfVersuche < 0) { zaehler.zuGross = true; by.moveTo(n); return false; }
+    let k = i; while (k < n && k - i <= PDF_ZAHL_MAX && ZIFFER[by.peekAt(k)]) k += 1;
+    let w = k; while (w < n && LEER[by.peekAt(w)]) w += 1;
+    if (w === k) return false;
+    let k2 = w; while (k2 < n && k2 - w <= PDF_ZAHL_MAX && ZIFFER[by.peekAt(k2)]) k2 += 1;
+    if (k2 === w) return false;
+    let w2 = k2; while (w2 < n && LEER[by.peekAt(w2)]) w2 += 1;
+    if (by.peekAt(w2) !== 0x6f || by.peekAt(w2 + 1) !== 0x62 || by.peekAt(w2 + 2) !== 0x6a) return false;
     return kopfSuche.apply(this, a);
   };
   let context;
