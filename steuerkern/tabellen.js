@@ -554,6 +554,10 @@ export const STEUERFAELLE = frieren({
   A_NICHT_STEUERBAR_EU_B2B_DL: sf('A_NICHT_STEUERBAR_EU_B2B_DL', 'ausgang', '3b', { basis_kz: 21, steuer_zeile: null }, { netto_kz: 103 }, ['gegenpartei.land', 'gegenpartei.ust_id', 'rechnungstext'], '§ 3a Abs. 2, § 18b S. 1 Nr. 2, § 14a Abs. 1 UStG', 'ZM-Hilfsliste; K10'),
   A_NICHT_STEUERBAR_DRITTLAND_B2B_DL: sf('A_NICHT_STEUERBAR_DRITTLAND_B2B_DL', 'ausgang', '3b', { basis_kz: 45, steuer_zeile: null }, { netto_kz: 103 }, ['gegenpartei.land'], '§ 3a Abs. 2 UStG', 'Hinweispflicht offen (K9)'),
   A_WERTABGABE: sf('A_WERTABGABE', 'ausgang', '3c', { basis_kz: 81, basis_kz_ermaessigt: 86, steuer_zeile: 13 }, { netto_kz: 108, netto_kz_pkw: 106, ust_kz: 140 }, ['wert_netto_nutzer'], '§ 3 Abs. 1b, § 9a, § 10 Abs. 4 UStG'),
+  // KERN-26 (Kassenbuch, 12-steuer-vertiefung SB-3): Verkauf eines Mehrzweck-Gutscheins (§ 3 Abs. 15 UStG): nicht steuerbar, keine UStVA-Kennzahl; EÜR beim
+  // Zufluss (§ 11 Abs. 1 EStG) Zeile 16 Kz 103, beim Kleinunternehmer Zeile 12 Kz 111 und nachrichtlich Zeile 13 Kz 119 (Anlage EÜR 2026). Zählt nicht zum
+  // Gesamtumsatz nach § 19 Abs. 2 UStG. Die Umsatzsteuer entsteht erst bei der Einlösung (Zahlung kanal 'gutschein_mehrzweck' im Tagesabschluss).
+  A_GUTSCHEIN_MEHRZWECK: sf('A_GUTSCHEIN_MEHRZWECK', 'ausgang', '1', { basis_kz: null, steuer_zeile: null }, { netto_kz: 103, ku_brutto_kz: 111, ku_vermerk_kz: 119 }, [], '§ 3 Abs. 15 UStG; § 11 Abs. 1 EStG', 'Verkauf eines Mehrzweck-Gutscheins (Kassenbuch): nicht steuerbar, Einnahme beim Zufluss; Umsatzsteuer erst bei der Einlösung'),
   E_INLAND_VORSTEUER: sf('E_INLAND_VORSTEUER', 'eingang', '1', { vorsteuer_kz: 66, vorsteuer_zeile: 38 }, { ausgabe: 'netto', vorsteuer_kz: 185 }, ['rechnungsdatum'], '§ 15 Abs. 1 Nr. 1 UStG'),
   E_INLAND_OHNE_VORSTEUER: sf('E_INLAND_OHNE_VORSTEUER', 'eingang', '1', { vorsteuer_kz: null }, { ausgabe: 'brutto' }, [], '§ 15 Abs. 2 UStG', 'Bankgebühren (§ 4 Nr. 8), Versicherung, Kleinunternehmer-Lieferant, Reisepauschalen'),
   E_VORSTEUER_NICHT_ABZIEHBAR: sf('E_VORSTEUER_NICHT_ABZIEHBAR', 'eingang', '2', { vorsteuer_kz: null }, { ausgabe: 'brutto', geschenk_kz: 164 }, ['ausschluss.grund'], '§ 15 Abs. 1a, Abs. 1 S. 2 UStG; ausländische USt'),
@@ -575,7 +579,16 @@ export const SPERRGRUENDE = Object.freeze(['ig_lieferung', 'ausfuhr', 'dreieck',
 
 export const UNBEKANNT_GRUENDE = Object.freeze(['satz_fehlt', 'mwst_keine_mehrdeutig', 'reverse_charge_herkunft', 'auslandskunde', 'datum_fehlt', 'netto_fehlt', 'steuerfall_nicht_gewaehlt', 'land_widerspruch', 'b2b_status_unklar']);
 
-export const BELEG_ARTEN = Object.freeze(['rechnung', 'kleinbetrag', 'anzahlung', 'schlussrechnung', 'gutschrift_erteilt', 'gutschrift_erhalten', 'korrektur', 'storno', 'quittung', 'fa_zahlung', 'privat', 'sonstig']);
+// KERN-26 (Kassenbuch P2a, Baukonzept 08 2.4 Nr. 1): 'tagesabschluss' = Tagessumme einer Kasse (Z-Bon, Kassenbuchseite), vom Worker geschrieben
+// (steuerkern/kasse.js kassentagZuBelegEingabe). Rechnet wie eine bezahlte Ausgangsrechnung (Leistung = Zahlung = Geschäftstag), Sätze je Position.
+export const BELEG_ARTEN = Object.freeze(['rechnung', 'kleinbetrag', 'anzahlung', 'schlussrechnung', 'gutschrift_erteilt', 'gutschrift_erhalten', 'korrektur', 'storno', 'quittung', 'fa_zahlung', 'privat', 'sonstig', 'tagesabschluss']);
+
+// KERN-26 (Kassenbuch): Präfix der vom Worker vergebenen Beleg-IDs der Kasse ('kasse_' + kassentag-ID + '_f' + n [+ '_dm' | '_dp' | '_storno...']) und die
+// Kategorien der Kassendifferenz (Baukonzept 08 Kap. 6 Nr. 19). Der Kassen-Storno-Zweig (wirkung.js) erkennt ein Kassen-Original nur an Präfix UND
+// Belegart 'tagesabschluss' bzw. einer dieser Kategorien.
+export const KASSEN_BELEG_PRAEFIX = 'kasse_';
+export const KASSEN_KATEGORIEN = Object.freeze({ fehlbetrag: 'Kassendifferenz (Fehlbetrag)', ueberschuss: 'Kassendifferenz (Überschuss)' });
+export const KASSEN_KATEGORIEN_LISTE = Object.freeze([KASSEN_KATEGORIEN.fehlbetrag, KASSEN_KATEGORIEN.ueberschuss]);
 
 export const KORREKTUR_GRUENDE = Object.freeze(['rueckabwicklung', 'leistung_nicht_erbracht', 'preisnachlass', 'skonto', 'bonus', 'uneinbringlich', 'geschenk_nachtraeglich', 'tippfehler_berichtigung', 'ust_falsch_ausgewiesen']);
 
@@ -651,6 +664,11 @@ export const KATEGORIEN = frieren([
   // kommen aus dem Steuerfall (wirkung.js ossWirkungen: Kz 45, EÜR netto Kz 112, Steuer Kz 140, Konfidenz C); die Kategorie ordnet nur und trägt dieselbe
   // EÜR-Kennzahl wie der Steuerfall. DATEV-Konto 8320/4320 bzw. 8331/4331 nach Leistungsart (KontoluxWorker/regel/datev-oss.js), nicht aus der Kategorie.
   kat('Einnahmen EU-Privatkunden (OSS)', 'einnahme', 112, { euer_kz_kleinunternehmer: 111, hinweis: 'Satz des Kundenlands (OSS); EÜR wie A_OSS_EU_B2C' }),
+  // KERN-26 (Kassenbuch, Baukonzept 08 Kap. 6 Nr. 19, 2.12 B1): Kassendifferenz als echte Steuerbelege. Fehlbetrag = Eingang ohne Vorsteuer (übrige
+  // Betriebsausgaben, Kz 183; auch in beleg.js KATEGORIEN_OHNE_VORSTEUER), Überschuss = Einnahme (Regel Kz 112 netto, Kleinunternehmer Kz 111 brutto).
+  // Die Kennzahlen kommen aus dem Steuerfall (E_INLAND_OHNE_VORSTEUER, A_INLAND_19, A_KU); die Kategorie ordnet ein (DATEV-Sachkonto erst mit Quelle, SB-4).
+  kat('Kassendifferenz (Fehlbetrag)', 'ausgabe', 183, { hinweis: 'Kassenbuch: gezählter Bestand unter dem Soll-Bestand (Zähl-/Wechselgeldfehler, Verlust); ohne Vorsteuer' }),
+  kat('Kassendifferenz (Überschuss)', 'einnahme', 112, { euer_kz_kleinunternehmer: 111, hinweis: 'Kassenbuch: gezählter Bestand über dem Soll-Bestand; als Einnahme 19 % (Kleinunternehmer ohne Umsatzsteuer)' }),
   kat('Vereinnahmte Umsatzsteuer', 'einnahme', 140),
   kat('Umsatzsteuer-Erstattung', 'einnahme', 141),
   kat('Vorsteuer', 'ausgabe', 185),
