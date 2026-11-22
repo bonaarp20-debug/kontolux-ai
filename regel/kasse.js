@@ -186,6 +186,8 @@ async function kasseAktion(c, aktion) {
       }
     }
     if (aktion === 'aendern') {
+      // O6 N2: wie beim Anlegen nur für Kassen ohne Kassenbuch (sonst Doppelzählung des Bestands in der Oberfläche); Entfernen (null) bleibt erlaubt
+      if (w.felder.bestand_in_kasse_id && alt.kassenbuch !== false) return { antwort: formFehler({ code: 'FORMAT', feld: 'bestand_in_kasse_id', grund: 'nur_ohne_kassenbuch' }, cors) };
       for (const [k, v] of Object.entries(w.felder)) {
         if (['art', 'art_ab', 'grundaufzeichnung', 'grundaufzeichnung_ab', 'datenquelle', 'datenquelle_ab'].includes(k)) continue;
         if (JSON.stringify(alt[k] ?? null) !== JSON.stringify(v)) { neu[k] = v; geaendert.push(k); }
@@ -292,6 +294,9 @@ async function kuSummeVorTag(c, tag, kernOptionen) {
 }
 
 // Ähnlicher Beleg (2.11 C.7): Ausgangsrechnung außerhalb der Kasse am Geschäftstag mit Z-Nummer als Rechnungsnummer, Tagesbericht-Name oder gleichem Brutto
+// O6 N1: Die Rules lassen den Client Dokumente mit quelle 'kasse' ohne gesperrt: true anlegen; nur ein vom Worker geschriebener Kassenbeleg trägt alle drei Merkmale.
+// Ein gefälschtes Dokument darf die Ähnlichkeitsprüfung (C.7) nicht umgehen: es zählt als normaler Beleg.
+const istEchterKassenbeleg = (x) => x.quelle === 'kasse' && x.gesperrt === true && Array.isArray(x.gesperrt_durch) && x.gesperrt_durch.includes('kasse');
 const TAGESBERICHT = /\b(z-?bon|z-?bericht|x-?bericht|tages(abschluss|bericht)|kassen(bericht|abschluss)|finanzbericht)\b/i;
 export async function aehnlicheBelege(c, tag, zNummern, bruttoCent) {
   const { fs, uid } = c;
@@ -300,7 +305,7 @@ export async function aehnlicheBelege(c, tag, zNummern, bruttoCent) {
   const treffer = [];
   for (const d of r) {
     const x = d.daten;
-    if (!istObjekt(x) || x.typ !== 'rechnung_ausgehend' || x.quelle === 'kasse' || x.deleted === true || x.storniert === true) continue;
+    if (!istObjekt(x) || x.typ !== 'rechnung_ausgehend' || istEchterKassenbeleg(x) || x.deleted === true || x.storniert === true) continue;
     const nr = typeof x.rechnungsnr === 'string' ? x.rechnungsnr.trim().toLowerCase() : '';
     const gleichBrutto = bruttoCent > 0 && Steuerkern.euroZuCent(Number(x.betrag)) === bruttoCent;
     if ((nr && nummern.has(nr)) || TAGESBERICHT.test(String(x.name || '')) || TAGESBERICHT.test(String(x.buchungstext || '')) || gleichBrutto) treffer.push(idVon(d));
@@ -481,7 +486,10 @@ async function abschliessen(c) {
     for (const b of belege) writes.push(schreibe.anlegen(P.beleg(uid, b.beleg.id), b.dok));
     // Tagesdaten (wie buchTagesBewegung, aber im selben Commit): Brutto aller Einnahmebelege des Tages am Geschäftstag
     const einnahmenCent = belege.filter((b) => b.dok.gebuchter_tag).reduce((s, b) => s + b.beleg.steuer.summe.brutto_cent, 0);
-    if (einnahmenCent > 0) writes.push(schreibe.erhoehen(P.tagesdaten(uid, tag), { datum: tag, beschreibung: `Tagesabschluss ${kassennamen(kasse)}` }, ['datum', 'beschreibung'], { einnahmen: einnahmenCent / 100 }));
+    // O6 N3: eine vorhandene Beschreibung des Tages (z. B. aus dem Chat) bleibt; nur ein leerer oder neuer Tag bekommt „Tagesabschluss …“
+    const tdAlt = docs.get(P.tagesdaten(uid, tag));
+    const hatText = Boolean(tdAlt) && istObjekt(tdAlt.daten) && typeof tdAlt.daten.beschreibung === 'string' && tdAlt.daten.beschreibung.trim() !== '';
+    if (einnahmenCent > 0) writes.push(schreibe.erhoehen(P.tagesdaten(uid, tag), hatText ? { datum: tag } : { datum: tag, beschreibung: `Tagesabschluss ${kassennamen(kasse)}` }, hatText ? ['datum'] : ['datum', 'beschreibung'], { einnahmen: einnahmenCent / 100 }));
     // Gleichzeitige Abschlüsse anderer Tage derselben Kasse (Reihenfolge der Tage, Anfangsbestand) serialisiert der Audit-Kopf (audit_v2/_kopf, updateTime-Vorbedingung
     // in JEDEM Commit mit Audit-Eintrag): der zweite scheitert atomar und rechnet neu. Dazu die Zähler-Vorbedingung für die Kassennummer.
     const art = differenz === 0 ? 'keine' : differenz < 0 ? 'fehlbetrag' : 'ueberschuss';

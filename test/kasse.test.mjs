@@ -2006,3 +2006,43 @@ test('O6 M5: KU-Summe bei mehr als 2.000 Belegen vor dem Tag wird nicht abgeschn
   assert.equal(x.json.fehler[0].code, 'KU_SUMME_ZU_GROSS');
   assert.deepEqual(w.fs.pfade(P('kassentage/')), []);
 });
+
+test('O6 N1: ein vom Client gefälschtes Dokument mit quelle kasse (ohne gesperrt) umgeht die Ähnlichkeitsprüfung nicht; echte Kassenbelege (gesperrt, gesperrt_durch kasse) zählen weiter nicht', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  u.fs.setze(P('dokumente/falsch'), { typ: 'rechnung_ausgehend', quelle: 'kasse', betrag: 908, datum: '2026-11-02', name: 'Ladenverkauf', rechnungsnr: 'Z-17' });
+  const r = await u.tagRufe(abschluss(id, '2026-11-02'));
+  assert.equal(r.status, 409, JSON.stringify(r.json));
+  assert.deepEqual([r.json.fehler[0].code, r.json.belege], ['AEHNLICHER_BELEG', ['falsch']]);
+  // echter Kassenbeleg (Storno und Neuerfassung desselben Tages) löst keine Warnung aus
+  const v = umgebung();
+  const vid = await v.legeKasseAn();
+  assert.equal((await v.tagRufe(abschluss(vid, '2026-11-02'))).status, 200);
+  assert.equal((await v.tagRufe(stornoBody(vid, '2026-11-02'))).status, 200);
+  assert.equal((await v.tagRufe(abschluss(vid, '2026-11-02'))).status, 200);
+});
+
+test('O6 N2: bestand_in_kasse_id lässt sich per aendern nur bei Kassen ohne Kassenbuch setzen (wie beim Anlegen); Entfernen bleibt erlaubt', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const zweite = await u.legeKasseAn({ kuerzel: 'ZWE', bezeichnung: 'Lager' });
+  const r = await u.kasse({ aktion: 'aendern', kasse_id: id, bestand_in_kasse_id: zweite });
+  assert.equal(r.status, 400, JSON.stringify(r.json));
+  assert.deepEqual([r.json.fehler[0].code, r.json.feld, r.json.grund], ['FORMAT', 'bestand_in_kasse_id', 'nur_ohne_kassenbuch']);
+  assert.equal(u.fs.lies(P(`kassen/${id}`)).bestand_in_kasse_id, null);
+  const ohne = await u.legeKasseAn({ kuerzel: 'OHN', bezeichnung: 'Alt', kassenbuch: false });
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: ohne, bestand_in_kasse_id: zweite })).status, 200);
+  assert.equal(u.fs.lies(P(`kassen/${ohne}`)).bestand_in_kasse_id, zweite);
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: ohne, bestand_in_kasse_id: null })).status, 200);
+});
+
+test('O6 N3: eine vorhandene tagesdaten.beschreibung wird beim Abschluss nicht überschrieben; ohne Text setzt der Abschluss „Tagesabschluss …“', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  u.fs.setze(P('tagesdaten/2026-11-02'), { datum: '2026-11-02', einnahmen: 5, beschreibung: 'Marktstand und Ladenverkauf' });
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200);
+  const t = u.fs.lies(P('tagesdaten/2026-11-02'));
+  assert.deepEqual([t.beschreibung, t.einnahmen], ['Marktstand und Ladenverkauf', 912]);
+  assert.equal((await u.tagRufe(abschluss(id, '2026-11-03', { gezaehlt_cent: 70700 + 60700 }))).status, 200);
+  assert.equal(u.fs.lies(P('tagesdaten/2026-11-03')).beschreibung, 'Tagesabschluss Theke');
+});
