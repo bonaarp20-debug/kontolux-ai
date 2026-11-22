@@ -4,7 +4,8 @@
 // ============================================================
 
 import { XMLParser } from 'fast-xml-parser';
-import { PDFDocument, PDFName, PDFDict, PDFStream, PDFRawStream, decodePDFRawStream } from 'pdf-lib';
+import { PDFName, PDFDict, PDFStream, PDFRawStream } from 'pdf-lib';
+import { ladePdfBegrenzt, stromEntpackenBegrenzt, pdfBudget } from './regel/pdf-sicher.js'; // Hotfix E-Rechnung: begrenztes PDF-Laden (Entpack-Bombe)
 import { WEGWERF_DOMAINS } from './wegwerf-domains.js';
 import { VPN_NETZE } from './vpn-netze.js';
 import * as Steuerkern from './steuerkern/index.js';
@@ -3003,7 +3004,8 @@ export async function eingebettetEntpacken(stream, maxBytes = ENTPACKEN_MAX_BYTE
     } catch (_) { return null; }
   }
   if (roh.length > 1024 * 1024) return null;
-  try { return decodePDFRawStream(stream).decode(); } catch (_) { return null; }
+  // Hotfix: auch hier begrenzt entpacken (eine Kette wie [/ASCIIHexDecode /FlateDecode] wurde vorher ohne Grenze entpackt); Filterketten: übergehen
+  try { return stromEntpackenBegrenzt(stream, pdfBudget(maxBytes), { stromMax: maxBytes }); } catch (_) { return null; }
 }
 
 // Sucht im /Names /EmbeddedFiles-Baum eines PDFs nach einer eingebetteten XML-Datei.
@@ -3044,7 +3046,11 @@ export async function detectAndParseERechnung(bytes, filename, mimeType, sellerN
     }
     const isPdf = /\.pdf$/i.test(filename || '') || /pdf/i.test(mimeType || '');
     if (isPdf) {
-      const pdfDoc = await PDFDocument.load(bytes, { ignoreEncryption: true, throwOnInvalidObject: false });
+      // Hotfix: PDFDocument.load entpackt Objekt- und XRef-Ströme ohne Grenze (Entpack-Bombe: 474 Byte -> 200 MB, Isolat-Abbruch).
+      // Gleicher Ladeweg mit Grenze (regel/pdf-sicher.js, je Strom 4 MB, je Datei 16 MB); bei Überschreitung wie jede unlesbare Datei: keine E-Rechnung.
+      const geladen = await ladePdfBegrenzt(bytes, { ignoreEncryption: true, updateMetadata: true });
+      if (geladen.zuGross) { console.warn('detectAndParseERechnung: PDF nicht lesbar (Entpack-Grenze)'); return { format: null }; }
+      const pdfDoc = geladen.pdf;
       const embedded = await findEmbeddedXml(pdfDoc);
       if (!embedded) return { format: null };
       const text = new TextDecoder('utf-8').decode(embedded.bytes);
