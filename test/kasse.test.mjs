@@ -703,6 +703,8 @@ test('J1-Fix N-e: karte_ueber_integration gilt ab dem nächsten freien Tag (Hist
   const e2 = await u.tagRufe(abschluss(id, '2026-11-02'));
   assert.equal(e2.status, 200, JSON.stringify(e2.json));
   assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-02/fassungen/2`)).karte_ueber_integration, 'keine');
+  // K1-Fix N-2: nur die Karte weicht von der Kasse ab (sumup ab 04.11.): die Fassung trägt trotzdem die Markierung stammdaten_aus_verlauf
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-02/fassungen/2`)).stammdaten_aus_verlauf, true);
   const kz = K.ustvaFuer(kernVon(u, tagBelege(u, id, '2026-11-02')), REGEL, '2026-11').kennzahlen;
   // Bemessungsgrundlagen: 19 % 500,00 bar + 300,00 Karte = 420,17 + 252,10 netto = 672,27 (ohne Karte wären es 420,17); 7 % 107,00 = 100,00 netto
   assert.deepEqual([kz['81'], kz['86']], [67227, 10000], JSON.stringify(kz));
@@ -711,6 +713,7 @@ test('J1-Fix N-e: karte_ueber_integration gilt ab dem nächsten freien Tag (Hist
   const t4 = await u.tagRufe(abschluss(id, '2026-11-04', { gezaehlt_cent: 131400 + 60700 }));
   assert.deepEqual([t4.status, t4.json.fehler[0].code], [422, 'KARTE_UEBER_INTEGRATION'], JSON.stringify(t4.json));
   assert.equal((await u.tagRufe(abschluss(id, '2026-11-04', { umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 50000, unbar_cent: 0 }], gezaehlt_cent: 131400 + 50000 }))).status, 200);
+  assert.equal(u.fs.lies(P(`kassentage/${id}_2026-11-04/fassungen/1`)).stammdaten_aus_verlauf, undefined, 'Werte wie die der Kasse: keine Markierung');
   // zweite Kasse: nach dem Storno denselben Wert (sumup) früher setzen: gilt dann auch am stornierten Tag
   const v = umgebung();
   const id2 = await v.legeKasseAn();

@@ -462,6 +462,8 @@ async function abschliessen(c) {
       if (am.fehlend.length) return sperre('stammdaten_unbekannt', am.fehlend);
       stamm = am.werte;
     }
+    const stammAusVerlauf = stammSpaeter.length > 0 || (typeof kasse.karte_ueber_integration_ab === 'string' && kasse.karte_ueber_integration_ab > tag)
+      || STAMM_FELDER.some((x) => stamm[x] !== (x === 'karte_ueber_integration' ? (kasse.karte_ueber_integration || 'keine') : kasse[x]));
     const unplausibel = Steuerkern.kassenStammPlausibel(stamm.art, stamm.grundaufzeichnung, stamm.datenquelle);
     if (unplausibel) return { antwort: fehlerAntwort(409, 'STAMMDATEN_UNPLAUSIBEL', cors, { kassentag_id: tagId, feld: unplausibel }) };
     // Letzter Abschluss aus dem Zeiger der Kasse (hyg H2/N4): keine Suche, die Zahl der Unteranfragen hängt nicht von Pausen ab. Der Tagesplatz, auf den er zeigt,
@@ -559,7 +561,8 @@ async function abschliessen(c) {
       n, kasse_id: kasseId, geschaeftstag: tag, z_nummern: w.z_nummern, quelle: stamm.datenquelle, quelle_import_id: null, grundaufzeichnung: stamm.grundaufzeichnung, datenquelle: stamm.datenquelle,
       // Momentaufnahme der Stammdaten am Geschäftstag (art ab G1, karte_ueber_integration ab J1); stammdaten_aus_verlauf: Neuerfassung vor einem späteren Wechsel,
       // die Werte stammen aus der Stammdaten-Historie und können von denen der Kasse abweichen (J1-Fix M-1, ersetzt stammdaten_aus_fassung)
-      art: stamm.art, karte_ueber_integration: stamm.karte_ueber_integration, ...(stammSpaeter.length ? { stammdaten_aus_verlauf: true } : {}),
+      // K1-Fix N-2: die Markierung auch, wenn nur karte_ueber_integration abweicht (stammSpaeter kennt nur die drei Felder mit …_ab): jedes der vier Felder zählt
+      art: stamm.art, karte_ueber_integration: stamm.karte_ueber_integration, ...(stammAusVerlauf ? { stammdaten_aus_verlauf: true } : {}),
       modus: w.modus, kassensturz: w.kassensturz,
       umsaetze: w.umsaetze, gutschein_mehrzweck_verkauf: w.gutschein_mehrzweck_verkauf, korrekturen: w.korrekturen, trinkgeld_inhaber: w.trinkgeld_inhaber,
       gutschein_einzweck_verkauf: w.gutschein_einzweck_verkauf, anzahlungen_erhalten: w.anzahlungen_erhalten,
