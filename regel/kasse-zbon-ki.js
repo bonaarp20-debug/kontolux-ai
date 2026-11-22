@@ -23,7 +23,7 @@
 // Vision: Fotos verkleinert der Browser auf höchstens 2000 px lange Kante (2.14 Ablauf 2). Der Höchstwert für Haiku 5.5 ist gegen die
 // Vision-Doku (https://docs.claude.com/en/docs/build-with-claude/vision) vor O4 zu prüfen; der Worker lässt Bilder bis 10 MB durch.
 // Structured Outputs: JSON-Schema ohne maxLength/maxItems/minimum/maximum (die API bildet sie nicht ab); der Worker prüft sie (siehe unten).
-import { PDFDocument, PDFArray, PDFName, PDFNumber, PDFRawStream, PDFParser, decodePDFRawStream } from 'pdf-lib';
+import { PDFDocument, PDFArray, PDFDict, PDFName, PDFNumber, PDFRawStream, PDFParser, decodePDFRawStream } from 'pdf-lib';
 import * as Steuerkern from '../steuerkern/index.js';
 import {
   antwort, fehlerAntwort, featureAusAntwort, grundpruefung, istObjekt, istDatum, nurSchluessel, CONFIG_PFAD, configBereinigen, featureAktiv,
@@ -578,9 +578,28 @@ function pdfInhaltBytes(pdf, budget) { // geschätzte Textebene: Seiteninhalte p
       for (const st of strs) if (st) seiteSumme += zaehle(st);
     }
     // alle Form-XObjects des Dokuments (Text kann dort stehen); dasselbe XObject kann auf jeder Seite stehen: mal Seitenzahl gerechnet
+    // G2-Fix N-3: ebenso Kachelmuster (/PatternType 1, Inhaltsstrom wie ein Form) und die Glyphen-Ströme von Type3-Schriften (/CharProcs); /Subtype und
+    // /PatternType auch indirekt angegeben. Type3-Schriften können direkt in Ressourcen stehen: verschachtelte direkte Dicts werden durchsucht (Tiefe begrenzt).
+    const weitere = new Set();
+    const N = (x) => PDFName.of(x);
+    const type3 = (d, tiefe) => {
+      if (tiefe > 8) return;
+      if (d instanceof PDFDict) {
+        if (d.lookup(N('Subtype')) === N('Type3')) {
+          const cp = d.lookup(N('CharProcs'));
+          if (cp instanceof PDFDict) for (const [, v] of cp.entries()) { const st = pdf.context.lookup(v); if (st instanceof PDFRawStream) weitere.add(st); }
+        }
+        for (const [, v] of d.entries()) if (v instanceof PDFDict || v instanceof PDFArray) type3(v, tiefe + 1);
+      } else if (d instanceof PDFArray) for (const v of d.asArray()) if (v instanceof PDFDict || v instanceof PDFArray) type3(v, tiefe + 1);
+    };
     for (const [, o] of pdf.context.enumerateIndirectObjects()) {
-      if (o instanceof PDFRawStream && o.dict.get(PDFName.of('Subtype')) === PDFName.of('Form')) formSumme += zaehle(o);
+      if (o instanceof PDFRawStream) {
+        const pt = o.dict.lookup(N('PatternType'));
+        if (o.dict.lookup(N('Subtype')) === N('Form') || (pt instanceof PDFNumber && pt.asNumber() === 1)) weitere.add(o);
+        type3(o.dict, 0);
+      } else type3(o, 0);
     }
+    for (const st of weitere) formSumme += zaehle(st);
   } catch { return Infinity; }
   return seiteSumme + formSumme * Math.max(1, pdf.getPageCount());
 }

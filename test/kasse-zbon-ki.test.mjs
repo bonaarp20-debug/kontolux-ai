@@ -800,3 +800,27 @@ test('G2-Fix N-2: Z-Nummer als „#123“, „Nr. 123“, „No. 0412“, „№
   // vom Modell als sonstiges eingestuft: weiter der Einzelbon-Text
   assert.equal(pr({ dokumentart: 'sonstiges' }).sperre, 'SPERRE_EINZELBON');
 });
+
+test('G2-Fix N-3: Kachelmuster (/PatternType 1), Type3-Glyphen (/CharProcs, auch in direkt eingebetteter Schrift) und indirektes /Subtype zählen zur Token-Schätzung', async () => {
+  const bau = async (seiten, mach) => {
+    const doc = await PDFDocument.create();
+    const res = mach(doc);
+    for (let i = 0; i < seiten; i += 1) {
+      const p = doc.addPage([200, 200]);
+      p.node.set(PDFName.of('Resources'), doc.context.obj(res));
+      p.node.set(PDFName.of('Contents'), doc.context.register(doc.context.stream('q Q')));
+    }
+    return pruefeZbonDatei({ type: 'application/pdf', base64: Buffer.from(await doc.save()).toString('base64') });
+  };
+  const text = (n) => `BT /F1 6 Tf 0 0 Td (${'A'.repeat(n)}) Tj ET`;
+  const muster = (n) => (doc) => ({ Pattern: { P0: doc.context.register(doc.context.stream(text(n), { Type: 'Pattern', PatternType: 1, PaintType: 1, TilingType: 1, BBox: [0, 0, 200, 200], XStep: 200, YStep: 200 })) } });
+  const typ3 = (n) => (doc) => ({ Font: { T3: { Type: 'Font', Subtype: 'Type3', FontBBox: [0, 0, 1, 1], FontMatrix: [1, 0, 0, 1, 0, 0], CharProcs: { a: doc.context.register(doc.context.stream(text(n))) }, Encoding: { Type: 'Encoding', Differences: [97, 'a'] }, FirstChar: 97, LastChar: 97, Widths: [1] } } });
+  const formIndirekt = (n) => (doc) => ({ XObject: { X0: doc.context.register(doc.context.stream(text(n), { Type: 'XObject', Subtype: doc.context.register(PDFName.of('Form')), BBox: [0, 0, 200, 200] })) } });
+  for (const [name, mach] of [['Kachelmuster', muster], ['Type3', typ3], ['Form mit indirektem Subtype', formIndirekt]]) {
+    // 5 Seiten, 5.000 Zeichen im Strom: 12.500 + 12.500 + 2.000 > 20.000 (vor dem Fix: nur Seiten, angenommen)
+    assert.equal((await bau(5, mach(5000))).code, 'ZBON_ZU_GROSS', name);
+    const klein = await bau(2, mach(200));
+    assert.equal(klein.ok, true, name);
+    assert.ok(klein.token >= 2000 + 2 * 2500 + 200, `${name}: Strom zählt mit (${klein.token})`);
+  }
+});
