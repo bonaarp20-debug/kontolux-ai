@@ -791,6 +791,10 @@ async function offenerTag(c, kasseDok, tagDok, tag, tagId, { neu = false } = {})
   // Zeiger der Kasse (hyg H2): keine Suche. Die Bewegung schreibt die Kasse nicht; einen gleichzeitigen Abschluss fängt der Audit-Kopf (Wiederholung, neu gelesen).
   const zeiger = zeigerAus(kasse.letzter_abschluss);
   if (zeiger && tag < zeiger.tag) return { antwort: fehlerAntwort(409, 'SPAETERE_TAGE', cors, { letzter_tag: zeiger.tag }) };
+  // G1-Fix N-3: wie Abschluss und Storno fail-closed, wenn der lesbare Zeiger nicht zum Tagesplatz passt (sonst landete eine Bewegung evtl. vor dem echten
+  // letzten Abschluss). Eine Unteranfrage mehr.
+  const kasseId = tagId.slice(0, tagId.length - tag.length - 1);
+  if (zeiger && !zeigerPasst(zeiger, (await c.fs.get(P.kassentag(c.uid, Steuerkern.kassentagId(kasseId, zeiger.tag))))?.daten)) throw new KasseLesefehler('KASSENZEIGER_UNGUELTIG', 'Kasse: Zeiger passt nicht zum Tagesplatz');
   return null;
 }
 const naechsteNr = (liste) => liste.reduce((m, d) => Math.max(m, Number(String(d.pfad).split('_').pop()) || 0), 0) + 1;

@@ -2187,11 +2187,11 @@ test('hyg H2: Zeiger unlesbar oder passt nicht zum Tagesplatz: fail-closed 503 K
   await pruefe({ tag: 'gestern', fassung: 1, gezaehlt_cent: 70700 });
   await pruefe({ tag: '2026-11-02', fassung: 1, gezaehlt_cent: -1 });
   await pruefe('2026-11-02');
-  // gültige Form, aber falscher Bestand oder falsche Fassung: Abschluss und Storno prüfen gegen den Tagesplatz
-  await pruefe({ tag: '2026-11-02', fassung: 1, gezaehlt_cent: 70000 }, { bewegung: false });
-  await pruefe({ tag: '2026-11-02', fassung: 2, gezaehlt_cent: 70700 }, { bewegung: false });
-  // Zeiger auf einen früheren Tag als den abgeschlossenen (Storno) bzw. auf einen Tag ohne Abschluss (Abschluss)
-  await pruefe({ tag: '2026-11-01', fassung: 1, gezaehlt_cent: 70700 }, { bewegung: false });
+  // gültige Form, aber falscher Bestand oder falsche Fassung: Abschluss, Storno und (G1-Fix N-3) Bewegung prüfen gegen den Tagesplatz
+  await pruefe({ tag: '2026-11-02', fassung: 1, gezaehlt_cent: 70000 });
+  await pruefe({ tag: '2026-11-02', fassung: 2, gezaehlt_cent: 70700 });
+  // Zeiger auf einen früheren Tag als den abgeschlossenen (Storno) bzw. auf einen Tag ohne Abschluss (Abschluss, Bewegung)
+  await pruefe({ tag: '2026-11-01', fassung: 1, gezaehlt_cent: 70700 });
   // Storno ohne Zeiger, obwohl der Tag abgeschlossen ist: 503 statt eines Stornos, der die Kette bricht
   u.fs.setze(P(`kassen/${id}`), { ...kasse, letzter_abschluss: null });
   assert.equal((await u.tagRufe(stornoBody(id, '2026-11-02'))).json.fehler[0].code, 'KASSENZEIGER_UNGUELTIG');
