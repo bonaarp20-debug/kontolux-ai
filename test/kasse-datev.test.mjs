@@ -470,7 +470,12 @@ test('A-M1 (Szenario S3): Bareingang auf Rechnung 500,00 bar: Kasse an Bank, die
   ok200(await w.tag({ aktion: 'abschliessen', kasse_id: w.id, geschaeftstag: '2026-11-02', z_nummern: ['Z-1'], umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 2000, unbar_cent: 0 }], bareingang_forderungen_cent: 50000,
     gezaehlt_cent: 10000 + 2000 + 50000, bestand_gezaehlt_bestaetigt: true, grundaufzeichnung_bestaetigt: true }));
   ok200(await w.bew(bewegung(w.id, '2026-11-03', 'geldtransit_bank_aus', 50000)));
+  // Die Fassungen liest der Export einzeln nach Name (batchGet), nie über allDescendants: diese Abfrage erlaubt die Regel dem Nutzertoken nicht (403)
+  const bodies = [];
+  const alt = w.fs.fetchFn;
+  w.fs.fetchFn = async (input, init = {}) => { if (typeof init.body === 'string' && /datev-export|runQuery/.test(String(typeof input === 'string' ? input : input.url))) bodies.push(init.body); return alt(input, init); };
   const r = await w.exp();
+  assert.equal(bodies.some((b) => b.includes('allDescendants')), false, 'keine Abfrage über alle Nachfahren');
   assert.equal(r.status, 200, r.text);
   const z = kurz(r.zeilen, 'K-THK-2026-0001-Z');
   assert.deepEqual(z.map((x) => x.slice(0, 4)), [['500,00', 'S', '1000', '1200']]);

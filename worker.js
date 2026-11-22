@@ -5038,17 +5038,34 @@ async function handleDatevExport(body, env, cors = {}) {
       }
       return kasseWahl.konto;
     };
-    // DK-FIX: Tagesplätze und Fassungen des Kassenbuchs (A-H1: Satz der Mehrzweck-Einlösung, A-M1/A-M2: Posten außerhalb des Umsatzbelegs). Eine Anfrage für die Tage,
-    // je 300 Fassungen eine Anfrage über alle Nachfahren (kein Lesen je Tag). Nur bei Kassendaten.
+    // DK-FIX: Tagesplätze und Fassungen des Kassenbuchs (A-H1: Satz der Mehrzweck-Einlösung, A-M1/A-M2: Posten außerhalb des Umsatzbelegs). Die Tagesplätze per Liste (Regeln: Eigentümer
+    // liest), die Fassungen der Tage des Exportjahres einzeln per batchGet nach Name (aus fassungen_kurz, 100 je Anfrage): eine Abfrage über alle Nachfahren (allDescendants) erlaubt
+    // die Regel für den Nutzer nicht (sie braucht eine Collection-Group-Regel), mit dem Nutzertoken käme 403. Nur bei Kassendaten.
     let kassenTageDaten = null; let tageLesefehler = false;
     const kassenTageLesen = async () => {
       if (kassenTageDaten === null) {
         kassenTageDaten = { tage: new Map(), fassungen: new Map() };
         try {
-          for (const t of await firestoreListAll(`${base}/kassentage`, authHeader)) kassenTageDaten.tage.set(String(t.name || '').split('/').pop(), datevDekodiereFelder(t.fields || {}));
-          for (const f of await untersammlungLesen(userId, 'fassungen', authHeader, fetch)) {
-            const seg = String(f.name || '').split('/documents/').pop().split('/');
-            if (seg[2] === 'kassentage' && seg[4] === 'fassungen') kassenTageDaten.fassungen.set(`${seg[3]}|${Number(seg[5])}`, datevDekodiereFelder(f.fields || {}));
+          const gesucht = [];
+          for (const t of await firestoreListAll(`${base}/kassentage`, authHeader)) {
+            const tagId = String(t.name || '').split('/').pop();
+            const d = datevDekodiereFelder(t.fields || {});
+            kassenTageDaten.tage.set(tagId, d);
+            if (String(d.geschaeftstag || '').slice(0, 4) !== String(jahr) || !Array.isArray(d.fassungen_kurz)) continue;
+            for (const k of d.fassungen_kurz) if (k && Number.isSafeInteger(k.n) && k.n > 0) gesucht.push({ tagId, n: k.n });
+          }
+          const wurzel = 'projects/kontolux-ai/databases/(default)/documents';
+          for (let i = 0; i < gesucht.length; i += 100) {
+            const res = await fetch(`https://firestore.googleapis.com/v1/${wurzel}:batchGet`, {
+              method: 'POST', headers: { 'Authorization': `Bearer ${authHeader}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ documents: gesucht.slice(i, i + 100).map((x) => `${wurzel}/users/${userId}/kassentage/${x.tagId}/fassungen/${x.n}`) })
+            });
+            if (!res.ok) throw new Error(`Fassungen lesen fehlgeschlagen (${res.status})`);
+            for (const z of await res.json()) {
+              if (!z || !z.found) continue;
+              const seg = String(z.found.name || '').split('/documents/').pop().split('/');
+              if (seg[2] === 'kassentage' && seg[4] === 'fassungen') kassenTageDaten.fassungen.set(`${seg[3]}|${Number(seg[5])}`, datevDekodiereFelder(z.found.fields || {}));
+            }
           }
         } catch (e) { console.error('DATEV-Export Kassentage:', e?.message); tageLesefehler = true; }
       }
