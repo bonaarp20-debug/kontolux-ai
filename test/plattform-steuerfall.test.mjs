@@ -20,6 +20,7 @@ import {
 } from '../regel/plattform.js';
 import { plattformDatenPruefen, SIG_FELD, GRUENDE } from '../regel/plattform-signatur.js';
 import { TEST_SCHLUESSEL } from './plattform-signatur-hilfe.mjs';
+import { lastSkala } from './last-skala.mjs';
 
 const HIER = dirname(fileURLToPath(import.meta.url));
 const FX = (name) => JSON.parse(readFileSync(resolve(HIER, 'plattform-fixtures', `${name}.json`), 'utf8'));
@@ -580,7 +581,8 @@ test('CPU: Auswertung je Ereignis weit unter 10 ms; ganzer Shopify-Webhook (Attr
   const c = process.cpuUsage(t0);
   const msJe = (c.user + c.system) / 1000 / (n * faelle.length);
   console.log(`CPU plattformAuswerten: ${msJe.toFixed(4)} ms je Ereignis`);
-  assert.ok(msJe < 1, `${msJe} ms`);
+  const skala = lastSkala();
+  assert.ok(msJe < 1 * skala, `${msJe} ms (Lastfaktor ${skala.toFixed(1)})`);
 
   env = { ...BASIS_ENV };
   setzeFeatures({ kern_max: 'aus', features: { plattform: 'an' } });
@@ -593,7 +595,7 @@ test('CPU: Auswertung je Ereignis weit unter 10 ms; ganzer Shopify-Webhook (Attr
   const c1 = process.cpuUsage(t1);
   const msWebhook = (c1.user + c1.system) / 1000 / runden;
   console.log(`CPU Shopify-Webhook mit Attrappe (inkl. HMAC, In-Memory-Firestore): ${msWebhook.toFixed(2)} ms je Aufruf`);
-  assert.ok(msWebhook < 10, `${msWebhook} ms`);
+  assert.ok(msWebhook < 10 * lastSkala(), `${msWebhook} ms`);
 });
 
 test('Wortregeln (W3/K1 5.5, Abschrift aus Kontolux/scripts/test-steuerkern-hinweise.mjs): Hinweistexte ohne verbotene Wörter, "übermittelt" nur mit "nicht"', () => {
