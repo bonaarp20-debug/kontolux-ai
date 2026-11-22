@@ -158,6 +158,12 @@ function stromPruefen(st, z) {
   if (typ !== PDFName.of('ObjStm') && typ !== PDFName.of('XRef')) return;
   try {
     const laenge = stromLaengeBegrenzt(st, z.budget);
+    if (typ === PDFName.of('ObjStm')) {
+      // pdf-lib legt vor dem ersten Objekt je /N ein Paar (Nummer, Offset) an: /N = 1 Mio. aus wenigen KB ergab rund 103 MB Spitze und bei 128 MB 9 s CPU.
+      // Ein Paar braucht mindestens 4 Byte ("1 0 "), jedes Objekt zählt gegen das Objektbudget. Fehlt /N oder ist es keine Zahl, wirft pdf-lib selbst.
+      const n = st.dict.lookup(PDFName.of('N'));
+      if (n instanceof PDFNumber && n.asNumber() > Math.min(z.objekte, laenge / 4)) throw new PdfZuGross('ObjStm /N');
+    }
     if (typ === PDFName.of('XRef')) {
       const n = xrefEintraege(st, laenge);
       if (n < 0) throw new PdfZuGross('XRef');

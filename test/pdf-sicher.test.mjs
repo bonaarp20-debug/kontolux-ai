@@ -333,3 +333,22 @@ test('Härtung H-1c: Namen zählen eindeutig nach Speicher, Obergrenze je Isolat
   assert.ok(e.mb < 45, `bleibend nach 8 Anfragen ${e.mb.toFixed(1)} MB`);
   assert.deepEqual(e.normal, { zuGross: true, isolatVoll: true }, 'danach wird jedes PDF abgelehnt (keine E-Rechnung, kein Absturz)');
 });
+
+test('Härtung M-1: Objektstrom mit großem /N (mehr als Restbudget oder Länge/4) wird vor dem Anlegen der Paare abgelehnt', async () => {
+  const objStm = (n, kopfzeile, rest) => {
+    const d = zlib.deflateSync(Buffer.concat([Buffer.from(kopfzeile), Buffer.from(rest)]));
+    return new Uint8Array(Buffer.concat([Buffer.from(KATALOG + `4 0 obj\n<< /Type /ObjStm /N ${n} /First ${kopfzeile.length} /Filter /FlateDecode /Length ${d.length} >>\nstream\n`), d, Buffer.from('\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n')]));
+  };
+  // 300.000 Paare auf dasselbe null (zählt 1/16, kein neuer Verweis): vorher geladen (Paare und Objekte ohne Grenze), jetzt über dem Objektbudget
+  const n = 300000;
+  const gross = objStm(n, '5 0 '.repeat(n), 'null');
+  assert.ok(gross.length < 64 * 1024, 'klein komprimiert');
+  assert.equal((await ladePdfBegrenzt(gross)).zuGross, true, '/N über dem Restbudget');
+  // /N größer als Länge/4 (Paare passen gar nicht in den Strom)
+  assert.equal((await ladePdfBegrenzt(objStm(100000, '5 0 6 2 ', 'null null'))).zuGross, true, '/N über Länge/4');
+  // normaler Objektstrom: lädt wie PDFDocument.load
+  const klein = objStm(2, '5 0 6 5 ', '<< /A 1 >> [1 2]');
+  const r = await ladePdfBegrenzt(klein, { updateMetadata: true });
+  assert.ok(r.pdf && !r.zuGross);
+  assert.equal(objektBild(r.pdf), objektBild(await ALT(klein)));
+});
