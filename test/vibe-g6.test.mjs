@@ -1,21 +1,22 @@
-// VIBE-G6 (20.11.2026), Worker: M5 (atomare Upload-Reservierung vor dem Anthropic-Aufruf), N1 (Stripe-Gebühr in Berliner Zeit), N2 (Beispieljahr im Prompt).
+// VIBE-G6 (20.11.2026), Worker: M5 (atomarer Zähler mit Obergrenze, früher die Upload-Reservierung; seit Kassenbuch P1b-4 kein Upload-Kontingent mehr, der Baustein heißt
+// reserviereZaehler und dient Limits wie dem Tageslimit „Z-Bon lesen“), N1 (Stripe-Gebühr in Berliner Zeit), N2 (Beispieljahr im Prompt).
 // Firestore ist eine Attrappe mit Vorbedingung currentDocument.updateTime (wie die echte REST-API); kein Netz.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { erzeugeTestEnv } from './harness.mjs';
-import { reserviereUpload, gibUploadZurueck, anthropicFetchMitKontingent, uploadReservierungsKey, stripeGebuehrDokumente } from '../worker.js';
+import { reserviereZaehler, gibZaehlerZurueck, anthropicFetchMitKontingent, stripeGebuehrDokumente } from '../worker.js';
 
 const QUELLE = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
 
-// Firestore-Attrappe nur für die Sammlung uploadlimit; Antworten mit kleinem Zufallsverzug, damit parallele Aufrufe wirklich verschränken
+// Firestore-Attrappe nur für die Sammlung testlimit; Antworten mit kleinem Zufallsverzug, damit parallele Aufrufe wirklich verschränken
 function firestoreAttrappe() {
   const docs = new Map(); let zeit = 0; const log = [];
   const original = globalThis.fetch;
   globalThis.fetch = async (input, init = {}) => {
     const url = typeof input === 'string' ? input : input.url;
     if (url.startsWith('https://oauth2.googleapis.com/token')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }), { status: 200 });
-    const m = /\/uploadlimit(?:\/([^?]+))?(?:\?(.*))?$/.exec(url);
+    const m = /\/testlimit(?:\/([^?]+))?(?:\?(.*))?$/.exec(url);
     if (!m) throw new Error('unerwartet: ' + url);
     await new Promise((r) => setTimeout(r, Math.random() * 3));
     const methode = init.method || 'GET'; log.push(methode);
@@ -40,64 +41,60 @@ function firestoreAttrappe() {
   return { docs, log, restore: () => { globalThis.fetch = original; } };
 }
 
-test('M5: 100 parallele Reservierungen bei Limit 50 lassen genau 50 durch (kein TOCTOU)', async () => {
+test('M5: 100 parallele Reservierungen bei Limit 50 lassen höchstens 50 durch (kein TOCTOU)', async () => {
   const env = await erzeugeTestEnv(); const fs = firestoreAttrappe();
   try {
-    const erg = await Promise.all(Array.from({ length: 100 }, () => reserviereUpload('uid-p', env, { limit: 50 })));
+    const erg = await Promise.all(Array.from({ length: 100 }, () => reserviereZaehler('testlimit', 'uid-p', 50, env)));
     const erlaubt = erg.filter((r) => r.erlaubt).length;
     // Bei erschöpften Wettlauf-Versuchen verweigert der Zähler fail-closed (grund infra): nie mehr als 50, und der Zähler stimmt mit den Erlaubten überein
     assert.ok(erlaubt <= 50, 'nie über dem Limit: ' + erlaubt);
-    assert.equal(fs.docs.get(uploadReservierungsKey('uid-p')).anzahl, erlaubt, 'Zähler = Zahl der Durchgelassenen');
+    assert.equal(fs.docs.get('uid-p').anzahl, erlaubt, 'Zähler = Zahl der Durchgelassenen');
     assert.ok(erlaubt >= 6, 'es kommen Aufrufe durch');
     // sequentiell: genau bis zum Limit
     const env2 = await erzeugeTestEnv();
-    let n = 0; for (let i = 0; i < 60; i++) if ((await reserviereUpload('uid-q', env2, { limit: 50 })).erlaubt) n++;
+    let n = 0; for (let i = 0; i < 60; i++) if ((await reserviereZaehler('testlimit', 'uid-q', 50, env2)).erlaubt) n++;
     assert.equal(n, 50);
-    const letzte = await reserviereUpload('uid-q', env2, { limit: 50 });
+    const letzte = await reserviereZaehler('testlimit', 'uid-q', 50, env2);
     assert.deepEqual([letzte.erlaubt, letzte.grund], [false, 'limit']);
   } finally { fs.restore(); }
 });
 
-test('M5: fehlgeschlagener Anthropic-Aufruf gibt die Reservierung (Firestore und KV) zurück; Erfolg behält sie', async () => {
+test('M5: gibZaehlerZurueck zählt nie unter 0 und berührt nur den genannten Schlüssel; kein Zähler, kein Token: fail-closed ohne Ausnahme', async () => {
   const env = await erzeugeTestEnv(); const fs = firestoreAttrappe();
-  const d = new Date(); const kvKey = `uploads:uid-r:${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
   try {
-    await env.PROFIL_KV.put(kvKey, '3'); // wie incrementUploadLimit vor dem Aufruf
-    const ok = await anthropicFetchMitKontingent('uid-r', env, 'https://api.anthropic.com/v1/messages', {}, { fetchFn: async () => new Response('x', { status: 200 }) });
-    assert.equal(ok.status, 200);
-    assert.equal(fs.docs.get(uploadReservierungsKey('uid-r')).anzahl, 1);
-    const fehl = await anthropicFetchMitKontingent('uid-r', env, 'u', {}, { fetchFn: async () => new Response('x', { status: 529 }) });
-    assert.equal(fehl.status, 529);
-    assert.equal(fs.docs.get(uploadReservierungsKey('uid-r')).anzahl, 1, 'zurückgegeben');
-    assert.equal(await env.PROFIL_KV.get(kvKey), '2', 'KV-Zähler ebenfalls zurück');
-    await assert.rejects(() => anthropicFetchMitKontingent('uid-r', env, 'u', {}, { fetchFn: async () => { throw new Error('timeout'); } }), /timeout/);
-    assert.equal(fs.docs.get(uploadReservierungsKey('uid-r')).anzahl, 1, 'auch bei Netzfehler zurück');
-    // ohne Datei (kontoUid null): kein Zählen
-    await anthropicFetchMitKontingent(null, env, 'u', {}, { fetchFn: async () => new Response('x', { status: 200 }) });
-    assert.equal(fs.docs.get(uploadReservierungsKey('uid-r')).anzahl, 1);
-    // Limit erreicht: 429 ohne Aufruf
-    let aufgerufen = 0;
-    const voll = await anthropicFetchMitKontingent('uid-r', env, 'u', {}, { limit: 1, fetchFn: async () => { aufgerufen++; return new Response('x'); } });
-    assert.equal(voll.status, 429);
-    assert.equal(aufgerufen, 0, 'Anthropic nicht aufgerufen');
-    await gibUploadZurueck('uid-r', env);
-    assert.equal(fs.docs.get(uploadReservierungsKey('uid-r')).anzahl, 0);
-    await gibUploadZurueck('uid-r', env);
-    assert.equal(fs.docs.get(uploadReservierungsKey('uid-r')).anzahl, 0, 'nie unter 0');
+    assert.equal((await reserviereZaehler('testlimit', 'uid-r', 5, env)).erlaubt, true);
+    assert.equal((await reserviereZaehler('testlimit', 'uid-s', 5, env)).erlaubt, true);
+    await gibZaehlerZurueck('testlimit', 'uid-r', env);
+    assert.equal(fs.docs.get('uid-r').anzahl, 0);
+    await gibZaehlerZurueck('testlimit', 'uid-r', env);
+    assert.equal(fs.docs.get('uid-r').anzahl, 0, 'nie unter 0');
+    assert.equal(fs.docs.get('uid-s').anzahl, 1, 'anderer Schlüssel unberührt');
+    await gibZaehlerZurueck('testlimit', 'gibtesnicht', env); // wirft nie
+    assert.deepEqual(await reserviereZaehler('testlimit', '', 5, env), { erlaubt: false, grund: 'infra' });
+    assert.deepEqual(await reserviereZaehler('testlimit', 'uid-t', 'viele', env), { erlaubt: false, grund: 'infra' });
   } finally { fs.restore(); }
 });
 
-test('M5: Firestore nicht erreichbar blockiert fail-closed; alle vier Anthropic-Aufrufe mit Datei laufen über die Reservierung; /image und /document haben UID-Limits', async () => {
+test('Kein Upload-Kontingent mehr (Kap. 6 Nr. 28): anthropicFetchMitKontingent reicht nur durch, ohne Zähler, ohne Sperre, ohne Firestore, auch ohne Konto-ID; Fehler und Netzfehler gehen unverändert zurück', async () => {
   const env = await erzeugeTestEnv();
   const original = globalThis.fetch;
-  globalThis.fetch = async (input) => { const u = typeof input === 'string' ? input : input.url; if (u.startsWith('https://oauth2')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 })); return new Response('{}', { status: 503 }); };
+  let anfragen = 0;
+  globalThis.fetch = async () => { anfragen++; throw new Error('kein Netz erwartet'); };
   try {
-    let aufgerufen = 0;
-    const r = await anthropicFetchMitKontingent('uid-z', env, 'u', {}, { fetchFn: async () => { aufgerufen++; return new Response('x'); } });
-    assert.equal(r.status, 503); assert.equal(aufgerufen, 0);
+    const ok = await anthropicFetchMitKontingent('uid-r', env, 'https://api.anthropic.com/v1/messages', {}, { fetchFn: async () => new Response('x', { status: 200 }) });
+    assert.equal(ok.status, 200);
+    const fehl = await anthropicFetchMitKontingent('uid-r', env, 'u', {}, { fetchFn: async () => new Response('x', { status: 529 }) });
+    assert.equal(fehl.status, 529);
+    await assert.rejects(() => anthropicFetchMitKontingent('uid-r', env, 'u', {}, { fetchFn: async () => { throw new Error('timeout'); } }), /timeout/);
+    assert.equal((await anthropicFetchMitKontingent(null, env, 'u', {}, { fetchFn: async () => new Response('x', { status: 200 }) })).status, 200);
+    // viele Aufrufe hintereinander: nie eine 429 oder 503 aus einem Kontingent
+    for (let i = 0; i < 80; i++) assert.equal((await anthropicFetchMitKontingent('uid-v', env, 'u', {}, { fetchFn: async () => new Response('x', { status: 200 }) })).status, 200);
+    assert.equal(anfragen, 0, 'weder Firestore noch KV noch Token');
+    assert.deepEqual([...env.PROFIL_KV._m.keys()], [], 'kein KV-Zähler');
   } finally { globalThis.fetch = original; }
   assert.equal((QUELLE.match(/await anthropicFetchMitKontingent\(/g) || []).length, 4, 'chat (mit Datei), image, monatsabschluss-pdf, document');
-  assert.equal((QUELLE.match(/await fetch\('https:\/\/api\.anthropic\.com\//g) || []).length, 0, 'kein Anthropic-Aufruf ohne Reservierung');
+  assert.equal((QUELLE.match(/await fetch\('https:\/\/api\.anthropic\.com\//g) || []).length, 0, 'kein Anthropic-Aufruf am Wrapper vorbei');
+  for (const weg of ['peekUploadLimit', 'incrementUploadLimit', 'reserviereUpload', 'gibUploadZurueck', 'UPLOAD_LIMIT =', "error: 'Upload-Limit erreicht'", 'Du hast dein monatliches Upload-Limit erreicht']) assert.ok(!QUELLE.includes(weg), `${weg} gibt es nicht mehr`);
   assert.match(QUELLE, /'\/image':\s+\{ limit: 30/);
   assert.match(QUELLE, /'\/document':\s+\{ limit: 300/);
 });
@@ -115,21 +112,4 @@ test('N1: Stripe-Gebühr am 01.01.2027 um 00:30 Berliner Zeit gehört in 2027 (n
 test('N2: Beispieljahr im Monatsabschluss-Prompt ist nicht fest 2026', () => {
   assert.ok(!QUELLE.includes('"jahr": 2026, "einnahmen_gesamt"'));
   assert.ok(QUELLE.includes('"jahr": ${berlinDatumAlsString().slice(0, 4)}, "einnahmen_gesamt"'));
-});
-
-test('NL-F: Freigabe am Monatswechsel gibt die Reservierung im ALTEN Monat zurück, das neue Monatsdokument bleibt unberührt', async () => {
-  const env = await erzeugeTestEnv(); const fs = firestoreAttrappe();
-  try {
-    const alt = new Date(Date.UTC(2026, 9, 31, 12, 0, 0)); // Oktober
-    const neu = new Date(Date.UTC(2026, 10, 2, 12, 0, 0)); // November
-    const r = await reserviereUpload('uid-mw', env, { limit: 50, jetzt: alt });
-    assert.equal(r.erlaubt, true);
-    const rNeu = await reserviereUpload('uid-mw', env, { limit: 50, jetzt: neu });
-    assert.equal(rNeu.erlaubt, true);
-    assert.equal(fs.docs.get(uploadReservierungsKey('uid-mw', alt)).anzahl, 1);
-    assert.equal(fs.docs.get(uploadReservierungsKey('uid-mw', neu)).anzahl, 1);
-    await gibUploadZurueck('uid-mw', env, alt);
-    assert.equal(fs.docs.get(uploadReservierungsKey('uid-mw', alt)).anzahl, 0, 'alter Monat freigegeben');
-    assert.equal(fs.docs.get(uploadReservierungsKey('uid-mw', neu)).anzahl, 1, 'neuer Monat unberührt');
-  } finally { fs.restore(); }
 });
