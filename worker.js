@@ -5847,7 +5847,10 @@ async function handleDatevExport(body, env, cors = {}) {
     }
     // A-M1: Posten eines Tagesabschlusses außerhalb des Umsatzbelegs (Bareingang auf Rechnung, Durchlaufendes, Trinkgeld der Mitarbeiter), aus der aktiven Fassung des Tages.
     // F2-Fix B-N2: Ein Umsatzbeleg, der storniert wurde, trägt seine Posten weiter: Original aus der Fassung des Belegs (kassentag_id, kassen_fassung) am Tag des Belegs,
-    // gespiegelt (Soll/Haben vertauscht) am Tag des Stornos. Original und Storno ergeben auch für die Posten null, das Kassenkonto entspricht danach wieder dem Kassenbuch (der Tag
+    // gespiegelt (Soll/Haben vertauscht) am wirkdatum des Stornos. G2-Fix N-1: das wirkdatum ist der Geschäftstag des Originals (steuerkern/kasse.js, Storno-Beleg
+    // wirkdatum = o.geschaeftstag), nicht der Kalendertag, an dem storniert wurde: Original und Spiegel stehen also am selben Tag im selben Jahr (wie der Haupt-Storno des
+    // Umsatzbelegs). Ein Spiegel in einem anderen Jahr entsteht nur aus Altdaten oder von Hand gesetztem wirkdatum; dann steht jede Seite in ihrem Jahr.
+    // Original und Storno ergeben auch für die Posten null, das Kassenkonto entspricht danach wieder dem Kassenbuch (der Tag
     // ist weg, ein neu abgeschlossener Tag bucht seine eigene aktive Fassung). Ein stornierter Tag ohne Umsatzbeleg hat keine Posten.
     let kasseTagesPostenGebucht = 0;
     if (kasseAktiv) {
