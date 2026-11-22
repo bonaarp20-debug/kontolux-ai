@@ -512,7 +512,7 @@ test('A-M1: Durchlaufendes (Lotto bar 80,00, Karte 20,00) und Trinkgeld der Mita
   }
 });
 
-test('A-M1: ein stornierter Tag hat keine Posten (nur der aktiven Fassung), die neue Fassung bucht ihre eigenen; kasseTagesPosten (rein): leere Werte ergeben keine Zeile, ungültige Werte einen Grund', async () => {
+test('A-M1/B-N2: Original und Storno tragen die Posten der Fassung des Umsatzbelegs (Original, Spiegel), die neue Fassung bucht ihre eigenen; kasseTagesPosten (rein): leere Werte ergeben keine Zeile, ungültige Werte einen Grund', async () => {
   const w = await welt();
   const mit = (extra) => ({ aktion: 'abschliessen', kasse_id: w.id, geschaeftstag: '2026-11-02', z_nummern: ['Z-1'], umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 2000, unbar_cent: 0 }], bareingang_forderungen_cent: 7000,
     gezaehlt_cent: 10000 + 2000 + 7000, bestand_gezaehlt_bestaetigt: true, grundaufzeichnung_bestaetigt: true, ...extra });
@@ -521,7 +521,8 @@ test('A-M1: ein stornierter Tag hat keine Posten (nur der aktiven Fassung), die 
   ok200(await w.tag(mit({ bareingang_forderungen_cent: 1000, gezaehlt_cent: 10000 + 2000 + 1000 })));
   const r = await w.exp();
   const z = r.zeilen.filter((x) => /Barzahlung auf Rechnung/.test(x[13]));
-  assert.deepEqual(z.map((x) => [ohne(x[10]), x[0], x[1]]), [['K-THK-2026-0003-Z', '10,00', 'S']], 'nur die aktive Fassung 2 (Kassennummer 0003)');
+  assert.deepEqual(z.map((x) => [ohne(x[10]), x[0], x[1]]).sort(), [['K-THK-2026-0001-Z', '70,00', 'S'], ['K-THK-2026-0002-Z', '70,00', 'H'], ['K-THK-2026-0003-Z', '10,00', 'S']], 'Fassung 1 (Original 0001, Spiegel 0002 am Storno) und aktive Fassung 2 (0003)');
+  assert.equal(nachKonto(r.zeilen)['1000'], 3000, 'Kasse = Kassenbuch ohne Anfangsbestand: nur die neue Fassung wirkt (20 + 10 + 0), die Fassung 1 hebt sich auf');
   assert.deepEqual(kasseTagesPosten({}).posten, []);
   assert.equal(kasseTagesPosten({ bareingang_forderungen_cent: -1 }).grund, 'fassung_ungueltig');
   assert.equal(kasseTagesPosten({ durchlaufend: [{ art: 'lotto_toto', bar_cent: 1.5 }] }).grund, 'fassung_ungueltig');
@@ -743,4 +744,117 @@ test('kasseBewegungBuchung und kassenKontoWahl', () => {
   assert.deepEqual(kassenKontoWahl('Kasse', '1000'), { konto: '1000', ungueltig: true });
   assert.deepEqual(DATEV_KASSE_KONTEN, { SKR03: { kasse: '1000', transit: '1360' }, SKR04: { kasse: '1600', transit: '1460' } });
   assert.equal(K.KASSEN_KATEGORIEN.fehlbetrag, 'Kassendifferenz (Fehlbetrag)');
+});
+
+// ── F2-Fix (Gegenlesung o-delta2, Teil B): B-M1 Unteranfragen und stilles Verschlucken, B-N1 Storno im Folgejahr, B-N2 Tagesposten stornierter Belege ──
+// Storno-Beleg eines Tages auf ein anderes Wirkjahr setzen (der Schreibweg setzt wirkdatum = Geschäftstag; wie beim Ausgaben-Storno von Hand)
+function stornoInsFolgejahr(w, wirkdatum, kassennummer) {
+  const pfade = w.fs.pfade(P('dokumente/')).filter((x) => w.fs.lies(x)?.steuer?.beleg_art === 'storno');
+  assert.ok(pfade.length >= 1);
+  for (const x of pfade) { const d = w.fs.lies(x); w.fs.setze(x, { ...d, steuer: { ...d.steuer, wirkdatum }, ...(kassennummer ? { kassennummer } : {}) }); }
+}
+const MIT_BAREINGANG = (w, tag, extra = {}) => ({ aktion: 'abschliessen', kasse_id: w.id, geschaeftstag: tag, z_nummern: ['Z-1'], umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 2000, unbar_cent: 0 }], bareingang_forderungen_cent: 7000,
+  gezaehlt_cent: 10000 + 2000 + 7000, bestand_gezaehlt_bestaetigt: true, grundaufzeichnung_bestaetigt: true, ...extra });
+
+test('B-N2: Tag storniert und nicht neu abgeschlossen: Original (Jahr des Belegs) und Storno (Folgejahr) tragen die Posten, über beide Jahre Summe 0; im selben Jahr heben sich die Posten auf', async () => {
+  const w = await welt();
+  ok200(await w.tag(MIT_BAREINGANG(w, '2026-11-02')));
+  ok200(await w.tag({ aktion: 'stornieren', kasse_id: w.id, geschaeftstag: '2026-11-02', grund: 'Fehler beim Erfassen' }));
+  // gleiches Jahr: Original-Posten und Spiegel, Kasse und Bank je Konto null (Kassenbuch: der Tag ist weg)
+  const gleich = await w.exp(2026);
+  assert.equal(gleich.status, 200, gleich.text);
+  assert.deepEqual(gleich.zeilen.filter((x) => /Barzahlung auf Rechnung/.test(x[13])).map((x) => [ohne(x[10]), x[0], x[1]]).sort(), [['K-THK-2026-0001-Z', '70,00', 'S'], ['K-THK-2026-0002-Z', '70,00', 'H']]);
+  for (const [konto, v] of Object.entries(nachKonto(gleich.zeilen))) assert.equal(v, 0, `Konto ${konto}`);
+  // Storno im Folgejahr: 2026 steht Original samt Posten, 2027 Storno samt gespiegelten Posten
+  stornoInsFolgejahr(w, '2027-01-04');
+  const j26 = await w.exp(2026); const j27 = await w.exp(2027);
+  assert.equal(j26.status, 200, j26.text); assert.equal(j27.status, 200, j27.text);
+  assert.deepEqual(j26.zeilen.filter((x) => /Barzahlung auf Rechnung/.test(x[13])).map((x) => [ohne(x[10]), x[0], x[1], x[9]]), [['K-THK-2026-0001-Z', '70,00', 'S', '0211']], '2026: Posten des Originals (ohne Fix fehlten sie)');
+  assert.deepEqual(j27.zeilen.filter((x) => /Barzahlung auf Rechnung/.test(x[13])).map((x) => [ohne(x[10]), x[0], x[1], x[9]]), [['K-THK-2026-0002-Z', '70,00', 'H', '0401']], '2027: gespiegelte Posten am Tag des Stornos');
+  const summe = {};
+  for (const z of [...j26.zeilen, ...j27.zeilen]) for (const [k, v] of Object.entries(nachKonto([z]))) summe[k] = (summe[k] || 0) + v;
+  for (const [konto, v] of Object.entries(summe)) assert.equal(v, 0, `beide Jahre zusammen, Konto ${konto}`);
+});
+
+test('B-N1: Storno im Folgejahr bei Mehrzweck-Einlösung über zwei Sätze: die Fassung des Originals (anderes Jahr) wird über kassentag_id und kassen_fassung des Belegs gelesen, kein mehrzweck_fassung_fehlt', async () => {
+  const w = await welt();
+  ok200(await w.tag(abschluss(w.id, '2026-11-02', {
+    umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 10000, unbar_cent: 0, mehrzweck_eingeloest_cent: 2000 }, { steuerfall: 'A_INLAND_7', bar_cent: 5000, unbar_cent: 0, mehrzweck_eingeloest_cent: 1000 }], gezaehlt_cent: 25000 })));
+  ok200(await w.tag({ aktion: 'stornieren', kasse_id: w.id, geschaeftstag: '2026-11-02', grund: 'Fehler beim Erfassen' }));
+  stornoInsFolgejahr(w, '2027-01-04');
+  const r27 = await w.exp(2027);
+  assert.equal(r27.status, 200, r27.text);
+  assert.doesNotMatch(r27.warnung, /mehrzweck_fassung_fehlt/);
+  assert.deepEqual(r27.zeilen.filter((x) => x[6] === '8200').map((x) => [x[0], x[1], x[7], x[9]]).sort(), [['10,00', 'H', '8300', '0401'], ['20,00', 'H', '8400', '0401']].sort(), 'Einlösung je Satz im Storno gespiegelt');
+  const r26 = await w.exp(2026);
+  assert.equal(r26.status, 200, r26.text);
+  assert.deepEqual(r26.zeilen.filter((x) => x[6] === '8200').map((x) => [x[0], x[1], x[7]]).sort(), [['10,00', 'S', '8300'], ['20,00', 'S', '8400']].sort());
+});
+
+// 2 Kassen mit je 800 Tagen (2024-11-01 bis 2027-01-09), direkt im Fake-Firestore: Vorlage aus dem echten Schreibweg, danach je Tag kopiert
+async function grossewelt(tageAnzahl = 800) {
+  const w = await welt();
+  const k2 = ok200(await w.kasse({ ...KASSE_ANLEGEN, bezeichnung: 'Bar', kuerzel: 'BAR', anfangsbestand_am: '2026-11-01' }));
+  const vorlage = {};
+  for (const [id, kuerzel] of [[w.id, 'THK'], [k2.kasse_id, 'BAR']]) {
+    ok200(await w.tag(MIT_BAREINGANG({ id }, '2026-11-02')));
+    const tagId = `${id}_2026-11-02`;
+    const dokPfad = w.fs.pfade(P('dokumente/')).find((x) => w.fs.lies(x)?.kassentag_id === tagId);
+    vorlage[id] = { kuerzel, tag: w.fs.lies(P(`kassentage/${tagId}`)), fassung: w.fs.lies(P(`kassentage/${tagId}/fassungen/1`)), dok: w.fs.lies(dokPfad), dokPfad, tagId };
+  }
+  const start = Date.UTC(2024, 10, 1);
+  let nr = 0;
+  for (const [id, v] of Object.entries(vorlage)) {
+    w.fs.docs.delete(v.dokPfad); w.fs.docs.delete(P(`kassentage/${v.tagId}`)); w.fs.docs.delete(P(`kassentage/${v.tagId}/fassungen/1`));
+    for (let i = 0; i < tageAnzahl; i++) {
+      const tag = new Date(start + i * 86400000).toISOString().slice(0, 10);
+      const tagId = `${id}_${tag}`;
+      const nummer = `K-${v.kuerzel}-${tag.slice(0, 4)}-${String(++nr).padStart(4, '0')}`;
+      w.fs.setze(P(`kassentage/${tagId}`), { ...v.tag, geschaeftstag: tag, kasse_id: id });
+      w.fs.setze(P(`kassentage/${tagId}/fassungen/1`), { ...v.fassung, geschaeftstag: tag, kassennummer: nummer });
+      w.fs.setze(P(`dokumente/kasse_${tagId}`), { ...v.dok, kassentag_id: tagId, kassennummer: nummer, bezahlt_am: tag, datum: tag, kasse_id: id, steuer: { ...v.dok.steuer } });
+    }
+  }
+  return { w, vorlage };
+}
+
+test('B-M1: 2 Kassen mit je 800 Tagen: der Export 2026 braucht wenige Anfragen (Tage per Bereichsabfrage, nur gebrauchte Fassungen), alle Buchungen sind da', async () => {
+  const { w } = await grossewelt();
+  const urls = [];
+  const alt = w.fs.fetchFn;
+  w.fs.fetchFn = async (input, init = {}) => { urls.push(`${init.method || 'GET'} ${typeof input === 'string' ? input : input.url}`); return alt(input, init); };
+  const vorher = w.fs.log.anfragen;
+  const r = await w.exp(2026);
+  assert.equal(r.status, 200, r.text);
+  const n = w.fs.log.anfragen - vorher;
+  assert.ok(n <= 30, `Unteranfragen ${n} (Free-Plan: 50)`);
+  assert.equal(urls.filter((u) => /GET .*\/kassentage(\?|$)/.test(u) || /GET .*\/kassenbewegungen(\?|$)/.test(u)).length, 0, 'keine Listen über alle Jahre');
+  // 365 Tage je Kasse: Umsatzbeleg (Bar 20,00) und Bareingang je Tag
+  assert.equal(r.zeilen.filter((x) => !/-Z"?$/.test(x[10])).length, 730, 'Umsatzbeleg je Tag');
+  assert.equal(r.zeilen.filter((x) => /Barzahlung auf Rechnung/.test(x[13])).length, 730, 'Tagesposten aller Tage des Jahres');
+  assert.equal(nachKonto(r.zeilen)['1000'], 730 * 2000 + 730 * 7000);
+  assert.doesNotMatch(r.warnung, /nicht gelesen|NICHT im Stapel/);
+});
+
+test('B-M1: Lesefehler bei Kassendaten brechen den Export ab (503, klare Meldung), statt Buchungen still wegzulassen: Kassentage, Fassungen, Kassenbewegungen, Kassen und Privatvorgänge', async () => {
+  const faelle = [
+    ['Kassentage', (u) => u.endsWith('/documents/users/' + UID + ':runQuery') ? 'kassentage' : null],
+    ['Fassungen', (u, init) => (u.endsWith(':batchGet') && /fassungen/.test(String(init.body || '')) ? 'batch' : null)],
+    ['Privatvorgänge', (u) => (/\/privatvorgaenge\?/.test(u) ? 'privat' : null)],
+    ['Kassen', (u) => (/\/kassen\?/.test(u) ? 'kassen' : null)],
+  ];
+  for (const [name, erkenne] of faelle) {
+    const w = await welt();
+    w.fs.setze(P('privatvorgaenge/p1'), { art: 'entnahme', datum: '2026-11-03', betrag: 50, notiz: 'x' });
+    ok200(await w.tag(MIT_BAREINGANG(w, '2026-11-02')));
+    w.fs.haken.fehler = (url, init) => {
+      if (name === 'Kassentage' && erkenne(url) && /kassentage/.test(String(init.body || ''))) return json(500, { error: { status: 'INTERNAL' } });
+      if (name !== 'Kassentage' && erkenne(url, init)) return json(500, { error: { status: 'INTERNAL' } });
+      return null;
+    };
+    const r = await w.exp(2026);
+    assert.equal(r.status, 503, `${name}: ${r.text.slice(0, 200)}`);
+    assert.match(r.text, /Export vorübergehend nicht möglich/, name);
+    assert.match(r.text, /kein unvollständiger Stapel/, name);
+  }
 });
