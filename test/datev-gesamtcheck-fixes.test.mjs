@@ -245,3 +245,28 @@ test('N1: Emoji in der Belegnummer: Export 200 statt URIError (Warnung zerschnei
   assert.ok(z.warnung.includes('A'.repeat(39) + '😀'), 'das Emoji steht ganz in der Warnung');
   assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(z.warnung), 'kein einzelnes Surrogat in der Warnung');
 });
+
+const IMP = (konto, kat, skr = 'SKR03') => ({ datev_konto: konto, datev_skr: skr, datev_kategorie_import: kat, quelle: 'datev_import' });
+
+test('F1: importierter Bewirtungsbeleg (Konto 4650/6640) wird beim Export 70/30 gebucht (Summe = Brutto, BU auf beiden Teilen)', async () => {
+  let z = await exportiere({ a: beleg('BW-1', 'rechnung_eingehend', 119, '19', 'Bewirtung (70%)', IMP('4650', 'Bewirtung (70%)')) });
+  assert.deepEqual(kurz(z, 'BW-1').sort(), [['1200', '4650', '9', 'H', '83,30'], ['1200', '4654', '9', 'H', '35,70']].sort());
+  z = await exportiere({ a: beleg('BW-1', 'rechnung_eingehend', 119, '19', 'Bewirtung (70%)', IMP('6640', 'Bewirtung (70%)', 'SKR04')) }, { skr: 'SKR04' });
+  assert.deepEqual(kurz(z, 'BW-1').map((x) => [x[1], x[4]]).sort(), [['6640', '83,30'], ['6644', '35,70']]);
+});
+
+test('F3: importierter Beleg ohne Steuersatz (USt unklar, Erstattung): kein BU, nichts als 19 % geraten; Einnahme bleibt draußen, Ausgabe mit [Steuersatz prüfen]', async () => {
+  const z = await exportiere({
+    a: beleg('U-1', 'rechnung_eingehend', 50, undefined, undefined, { ...IMP('4930', ''), ust_unklar: true }),
+    b: beleg('U-2', 'rechnung_ausgehend', 50, undefined, undefined, { ...IMP('4930', ''), ust_unklar: true }),
+    c: beleg('U-3', 'rechnung_eingehend', 20, '19', 'Bürobedarf', IMP('4930', 'Bürobedarf')),
+  });
+  assert.equal(z.status, 200);
+  const u1 = zeileVon(z, 'U-1');
+  assert.equal(u1.length, 1);
+  assert.equal(u1[0][8], '', 'kein Steuerschlüssel');
+  assert.match(u1[0][13], /\[Steuersatz prüfen\]/);
+  assert.equal(zeileVon(z, 'U-2').length, 0, 'Einnahme ohne Satz nicht exportiert');
+  assert.match(z.warnung, /ohne Steuersatz/);
+  assert.equal(zeileVon(z, 'U-3')[0][8], '9', 'importierter Beleg mit Satz unverändert');
+});

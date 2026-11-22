@@ -5080,7 +5080,8 @@ async function handleDatevExport(body, env, cors = {}) {
         const marke = ` ${g.satz === 'keine' ? '0' : g.satz} %${korrektur ? ' [Storno]' : ''}${hinweis}`;
         const sh = istEinnahme === !korrektur ? 'S' : 'H';
         const zeile = (betragCent, kontoZeile, zusatz) => buchungen.push({ betrag: betragCent / 100, sollHaben: sh, konto: bankkonto, gegenkonto: kontoZeile, bu: satzBu, belegDatum, belegfeld1, belegfeld2: '', buchungstext: buchungstextBasisKurz(textBasis, marke + zusatz), diverseAdressnummer });
-        if (!istEinnahme && !importKonto && kategorie === 'Bewirtung (70%)' && String(konto) === bewirtungKonten.abziehbar) {
+        // F1: auch ein importiertes Bewirtungskonto (4650/6640) wird 70/30 gebucht (der Kern rechnet für "Bewirtung (70%)" immer 70/30, der Import fasst das Paar zu einem Beleg zusammen)
+        if (!istEinnahme && kategorie === 'Bewirtung (70%)' && String(konto) === bewirtungKonten.abziehbar) {
           const abz = Math.floor((2 * g.brutto_cent * 70 + 100) / 200);
           if (abz > 0) zeile(abz, bewirtungKonten.abziehbar, '');
           if (g.brutto_cent - abz > 0) zeile(g.brutto_cent - abz, bewirtungKonten.nichtAbziehbar, ' davon nicht abziehbar 30 %');
@@ -5311,7 +5312,8 @@ async function handleDatevExport(body, env, cors = {}) {
       // Erlöskonto mit unbekanntem Satz: sie bleiben draußen und stehen in der Warnung.
       // 'gemischt' (Rechnung v2 mit mehreren Sätzen) ohne verwertbare Aufteilung im Steuerteil: der eine Satz des Altfelds fehlt, nicht als 19 % raten.
       const satzGemischt = !kleinunternehmer && mwstSatz === 'gemischt' && !importKontoGilt;
-      const satzFehlt = (!kleinunternehmer && !mwstSatz && !importKontoGilt && !erstattungsKonto) || satzGemischt;
+      // F3: auch bei importierten Belegen ("USt unklar", Erstattungen) kein Satz geraten: ohne Satz kein BU (buSchluesselExport nähme sonst 19 %)
+      const satzFehlt = (!kleinunternehmer && !mwstSatz && !erstattungsKonto) || satzGemischt;
       if (satzFehlt && istEinnahme) { if (satzGemischt) gemischtAusgelassen.push(`${rechnungsnr}${mischsatzUnklarGrund ? ` (${mischsatzUnklarGrund})` : ''}`); else ohneSatzAusgelassen++; continue; }
       let satzHinweis = '';
       if (satzFehlt) { if (satzGemischt) gemischtMarkiert.push(`${rechnungsnr}${mischsatzUnklarGrund ? ` (${mischsatzUnklarGrund})` : ''}`); else ohneSatzMarkiert++; satzHinweis = ' [Steuersatz prüfen]'; }
@@ -5382,7 +5384,7 @@ async function handleDatevExport(body, env, cors = {}) {
       // Bewirtung (§ 4 Abs. 5 Nr. 2 EStG): 70 % abziehbar, 30 % nicht abziehbar, Vorsteuer voll (BU auf beiden Teilen, gleicher Satz).
       // Cent-genau mit kaufmännischer Rundung wie der Kern (mulDivRund); der Rest geht auf das Konto für nicht abziehbare Bewirtung (TR-euer-004).
       const bewirtungKonten = DATEV_BEWIRTUNG_KONTEN[skr === 'SKR04' ? 'SKR04' : 'SKR03'];
-      if (!istEinnahme && !importKontoGilt && kategorie === 'Bewirtung (70%)' && String(gegenkonto) === bewirtungKonten.abziehbar) {
+      if (!istEinnahme && kategorie === 'Bewirtung (70%)' && String(gegenkonto) === bewirtungKonten.abziehbar) { // F1: auch mit Importkonto
         const cent = Math.round(betrag * 100);
         const abziehbarCent = Math.floor((2 * cent * 70 + 100) / 200);
         const teile = [
