@@ -248,3 +248,29 @@ test('Härtung N-1: jedes Objekt wird nur einmal geparst und gezählt (150.000 Z
   const datei = Buffer.concat([Buffer.from(KATALOG + `3 0 obj\n<< /Type /ObjStm /N 1 /First 0 /Filter [/FlateDecode /FlateDecode] /Length ${bombe.length} >>\nstream\n`), bombe, Buffer.from('\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n')]);
   assert.equal((await ladePdfBegrenzt(new Uint8Array(datei))).zuGross, true);
 });
+
+const MB = 1024 * 1024;
+const bleibend = async (fn) => { gc(); const v = process.memoryUsage().heapUsed; const r = await fn(); gc(); return { r, mb: (process.memoryUsage().heapUsed - v) / MB }; };
+
+test('Härtung H-1a: Verweise aus klassischer XRef-Tabelle und XRef-Strömen zählen (eindeutig, globaler Speicher von pdf-lib), wiederholte Verweise nicht', async () => {
+  // klassische Tabelle: 6 Byte je Eintrag, je Eintrag ein neuer Verweis im globalen Speicher (vorher ungezählt: 1 MB +26 MB bleibend, 4 MB OOM)
+  const n = Math.floor(MB / 6);
+  const tabelle = new Uint8Array(Buffer.from(KATALOG + `xref\n7000000 ${n}\n` + '0 0 n '.repeat(n) + '\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n'));
+  const t = await bleibend(() => ladePdfBegrenzt(tabelle));
+  assert.equal(t.r.zuGross, true, 'XRef-Tabelle 1 MB');
+  assert.ok(t.mb < 12, `XRef-Tabelle: ${t.mb.toFixed(1)} MB bleibend`);
+  // XRef-Ströme: je Strom unter 100.000 Einträgen, zusammen 180.000 neue Verweise (vorher ungezählt; 150 Ströme: OOM)
+  const d = zlib.deflateSync(Buffer.alloc(60000, 1));
+  const teile = [Buffer.from(KATALOG)];
+  for (let i = 0; i < 3; i += 1) teile.push(Buffer.from(`${10 + i} 0 obj\n<< /Type /XRef /W [1 0 0] /Index [${8000000 + i * 60000} 60000] /Size 9000000 /Root 1 0 R /Filter /FlateDecode /Length ${d.length} >>\nstream\n`), d, Buffer.from('\nendstream\nendobj\n'));
+  teile.push(Buffer.from('trailer\n<< /Root 1 0 R >>\n%%EOF\n'));
+  const s = await bleibend(() => ladePdfBegrenzt(new Uint8Array(Buffer.concat(teile))));
+  assert.equal(s.r.zuGross, true, 'XRef-Ströme');
+  assert.ok(s.mb < 12, `XRef-Ströme: ${s.mb.toFixed(1)} MB bleibend`);
+  // derselbe Verweis 120.000-mal (kein Wachstum im globalen Speicher): lädt (vorher zählte jeder Verweis, Grenze 100.000)
+  const gleich = await ladePdfBegrenzt(mitObjekt3('[' + '1 0 R '.repeat(120000) + ']'));
+  assert.ok(gleich.pdf && !gleich.zuGross, 'wiederholter Verweis');
+  // normale klassische XRef-Tabelle lädt weiter (Test oben: pdf-lib klassisch); PDFRef.of außerhalb des begrenzten Ladens bleibt unverändert und wirft nie
+  const { PDFRef } = await import('pdf-lib');
+  assert.equal(PDFRef.of(9999999, 3).toString(), '9999999 3 R');
+});
