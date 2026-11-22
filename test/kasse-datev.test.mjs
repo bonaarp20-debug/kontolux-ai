@@ -521,7 +521,7 @@ test('K1-Fix M-1 Szenario (Gegenlesung E): Wechsel auf SumUp ab 01.11. und zurü
   assert.deepEqual(kurz(r2.zeilen, 'TCNACH').map((x) => x.slice(0, 4)), [['20,00', 'S', '1200', '8400']], 'nach dem Wechsel zurück: Bank');
   assert.deepEqual(kurz(r2.zeilen, 'K-THK-2026-0001-Z').map((x) => x.slice(0, 4)), [['50,00', 'H', '1000', '1360']]);
   assert.match(r2.warnung, /1 SumUp-Barzahlung\(en\) stehen auf dem Kassenkonto der SumUp-Kasse/);
-  assert.doesNotMatch(r2.warnung, /nicht sicher bekannt|eindeutig zugeordnet|datenquelle_unbekannt/);
+  assert.doesNotMatch(r2.warnung, /Datenquelle der Kasse nicht eindeutig|eindeutig zugeordnet|datenquelle_unbekannt/);
   // Kassenkonto 1000 = Kassenbuch ohne Anfangsbestand: 31.10. -50,00, 01.11. +119,00 = 69,00 (gezählt 169,00 - 100,00)
   assert.equal(nachKonto(r2.zeilen)['1000'], 6900);
 });
@@ -535,7 +535,7 @@ test('K1-Fix M-1: Historie der Kasse unlesbar: SumUp-Barbeleg bleibt auf der Ban
   const r = await w.exp();
   assert.equal(r.status, 200, r.text);
   assert.deepEqual(kurz(r.zeilen, 'TCBAR1').map((x) => x.slice(0, 4)), [['119,00', 'S', '1200', '8400']]);
-  assert.match(r.warnung, /1 SumUp-Barzahlung\(en\) stehen auf der Bank, nicht auf dem Kassenkonto: für ihren Tag ist nicht sicher bekannt/);
+  assert.match(r.warnung, /1 SumUp-Barzahlung\(en\) stehen auf der Bank, nicht auf dem Kassenkonto: für ihren Tag ist die Datenquelle der Kasse nicht eindeutig \(Verlauf der Kassen-Stammdaten fehlt, ist unlesbar oder der Beleg hat kein Datum\)/);
 });
 
 // A-M1 (Gegenlesung o-p1c, Baukonzept 2.11 H/#F35): Bareingang auf Rechnung, Durchlaufendes und Trinkgeld der Mitarbeiter fehlten im Stapel. Die Werte stehen nur in der
