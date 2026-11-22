@@ -17,8 +17,9 @@ export const PDF_ENTPACKT_MAX = 16 * 1024 * 1024;
 export const PDF_XREF_EINTRAEGE_MAX = 100000;
 // Geparste Objekte je Datei: ohne Grenze machen schon 8 MB „0 0 0 …“ in einem Array (unkomprimiert oder aus einem Objektstrom) rund 480 MB Speicher
 // (pdf-lib legt je Zahl ein Objekt mit Text an). Gezählt wird jedes Objekt mit eigenem Speicher (Zahl, Text, Array, Dict, Strom, Dict-Schlüssel), null/true/false
-// (geteilte Einzelobjekte, nur ein Platz im Array) zu 1/16. Gemessen (mit Vorabblick): 18 Seiten ReportLab rund 10.000, 201 Seiten Adobe (8,5 MB) rund 143.000;
-// 400 reale PDFs von 1 bis 201 Seiten laden alle objektgleich wie PDFDocument.load. Über der Grenze höchstens rund 25 MB Speicher statt 480 MB.
+// (geteilte Einzelobjekte, nur ein Platz im Array) und Verweise zu 1/16. Jedes Objekt wird einmal gezählt. Gemessen (Grenze schrittweise gesenkt): größtes
+// reales PDF (201 Seiten, 8,1 MB) braucht 110.000 bis 130.000, pdf-lib-Dokument mit 3000 Seiten 130.000 bis 150.000; 400 reale PDFs von 1 bis 201 Seiten
+// laden alle objektgleich wie PDFDocument.load. Über der Grenze höchstens rund 25 MB Speicher statt 480 MB.
 export const PDF_OBJEKTE_MAX = 200000;
 // pdf-lib hält Namen (PDFName.of) und Verweise (PDFRef.of) in globalen Speichern, die nie geleert werden (je Isolat, über Anfragen hinweg). Gezählt wird
 // nur, was diese Speicher wachsen lässt (eindeutig, zum ersten Mal gesehen). Namen nach geschätztem Speicher: 2 Byte je Zeichen (Schlüssel und Text,
