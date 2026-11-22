@@ -1974,3 +1974,35 @@ test('O6 M3: Festschreibung, die zwischen Lesen und Commit startet (Commit schei
   assert.equal(c.fs.lies(P(`dokumente/${orig.json.beleg_id}`)).storniert, undefined);
   assert.deepEqual(c.fs.pfade(P('kassenbewegungen/')).length, 1);
 });
+
+test('O6 M5: KU-Summe bei mehr als 2.000 Belegen vor dem Tag wird nicht abgeschnitten (monatsweise gelesen, KU_GRENZE_AM_TAG greift); ein einzelner Monat mit 2.000 Belegen: fail-closed 503 KU_SUMME_ZU_GROSS', async () => {
+  const belege = (u, anzahl, monate) => {
+    for (let i = 0; i < anzahl; i += 1) {
+      const d = `2026-${String(1 + (i % monate)).padStart(2, '0')}-15`;
+      u.fs.setze(P(`dokumente/vor${i}`), { typ: 'rechnung_ausgehend', betrag: 49, betrag_netto: 49, mwst_satz: 'keine', datum: d, bezahlt: true, bezahlt_am: d, absender: 'K', rechnungsnr: `R${i}` });
+    }
+  };
+  const ku = (id, cent) => ({ ...abschluss(id, '2026-11-02'), umsaetze: [{ steuerfall: 'A_KU', bar_cent: cent, unbar_cent: 0 }], gezaehlt_cent: 10000 + cent });
+  // 2.100 mal 49,00 = 102.900,00 über zehn Monate; abgeschnitten auf 2.000 Belege wären es 98.000,00 und 98.000 + 100,00 liegt unter 100.000,00
+  const u = umgebung({ profil: KU });
+  const id = await u.legeKasseAn();
+  belege(u, 2100, 10);
+  const r = await u.tagRufe(ku(id, 10000));
+  assert.equal(r.status, 409, JSON.stringify(r.json));
+  assert.equal(r.json.fehler[0].code, 'KU_GRENZE_AM_TAG');
+  assert.equal(r.json.fehler[0].summe_cent, 10290000 + 10000);
+  assert.deepEqual(u.fs.pfade(P('kassentage/')), []);
+  // unter 2.000 Belegen bleibt es bei der einen Abfrage; 1.999 mal 49,00 = 97.951,00: 100,00 mehr geht
+  const v = umgebung({ profil: KU });
+  const vid = await v.legeKasseAn();
+  belege(v, 1999, 10);
+  assert.equal((await v.tagRufe(ku(vid, 10000))).status, 200);
+  // ein einzelner Monat mit 2.000 oder mehr Belegen: lieber blockieren als falsch entscheiden
+  const w = umgebung({ profil: KU });
+  const wid = await w.legeKasseAn();
+  belege(w, 2100, 1);
+  const x = await w.tagRufe(ku(wid, 100));
+  assert.equal(x.status, 503, JSON.stringify(x.json));
+  assert.equal(x.json.fehler[0].code, 'KU_SUMME_ZU_GROSS');
+  assert.deepEqual(w.fs.pfade(P('kassentage/')), []);
+});

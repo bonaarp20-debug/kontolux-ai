@@ -264,13 +264,27 @@ async function sumupLesen(c, tag) {
 }
 
 // Gesamtumsatz nach § 19 Abs. 2 UStG des Jahres bis einschließlich Vortag (Näherung aus den Belegen mit Belegdatum im Jahr vor dem Tag; Kern grenzenFuerJahr)
+const KU_BELEGE_LIMIT = 2000;
 async function kuSummeVorTag(c, tag, kernOptionen) {
   const { fs, uid, profil } = c;
   const jahr = Number(tag.slice(0, 4));
-  const r = await fs.runQuery(`users/${uid}`, { from: [{ collectionId: 'dokumente' }], where: { compositeFilter: { op: 'AND', filters: [
-    { fieldFilter: { field: { fieldPath: 'datum' }, op: 'GREATER_THAN_OR_EQUAL', value: { stringValue: `${jahr}-01-01` } } },
-    { fieldFilter: { field: { fieldPath: 'datum' }, op: 'LESS_THAN', value: { stringValue: tag } } },
-  ] } }, limit: 2000 });
+  const lesen = (von, bis) => fs.runQuery(`users/${uid}`, { from: [{ collectionId: 'dokumente' }], where: { compositeFilter: { op: 'AND', filters: [
+    { fieldFilter: { field: { fieldPath: 'datum' }, op: 'GREATER_THAN_OR_EQUAL', value: { stringValue: von } } },
+    { fieldFilter: { field: { fieldPath: 'datum' }, op: 'LESS_THAN', value: { stringValue: bis } } },
+  ] } }, limit: KU_BELEGE_LIMIT });
+  let r = await lesen(`${jahr}-01-01`, tag);
+  // O6 M5: eine volle Antwort kann abgeschnitten sein (zu kleine Summe, KU_GRENZE_AM_TAG griffe zu spät, Umsätze würden als A_KU statt regelbesteuert gebucht):
+  // dann monatsweise lesen; ist auch ein einzelner Monat voll, fail-closed (503), nie eine geschätzte Summe
+  if (r.length >= KU_BELEGE_LIMIT) {
+    r = [];
+    for (let m = 1; m <= Number(tag.slice(5, 7)); m += 1) {
+      const von = `${jahr}-${String(m).padStart(2, '0')}-01`;
+      const naechster = m < 12 ? `${jahr}-${String(m + 1).padStart(2, '0')}-01` : `${jahr + 1}-01-01`;
+      const x = await lesen(von, naechster < tag ? naechster : tag);
+      if (x.length >= KU_BELEGE_LIMIT) throw new KasseLesefehler('KU_SUMME_ZU_GROSS', 'KU-Summe: mehr Belege je Monat als lesbar');
+      r.push(...x);
+    }
+  }
   const belege = Steuerkern.belegeFuerKern(r.map((d) => ({ ...d.daten, id: idVon(d) })), profil, kernOptionen).belege;
   const wirkungen = Steuerkern.alleWirkungen(belege, profil, kernOptionen).filter((x) => !(typeof x.datum_wirk === 'string' && x.datum_wirk >= tag));
   const g = Steuerkern.grenzenFuerJahr(wirkungen, profil, jahr, null, {});
