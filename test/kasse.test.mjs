@@ -2925,3 +2925,60 @@ test('W2-W1 anfangsbestand_nachweis: nur der aus der anfrage_id berechnete Kasse
   assert.equal(andere.json.fehler[0].code, 'ANHANG_FREMD');
   assert.equal((await u.kasse({ ...basis, anfangsbestand_nachweis: gut })).status, 200);
 });
+
+// ---------------------------------------------------------------------------------------------
+// W2-W1 Block 3: Belegart kleinbetrag, exportierte Schlüssellisten
+// ---------------------------------------------------------------------------------------------
+test('W2-W1 Ausgabe mit beleg_art kleinbetrag (bis 250 EUR brutto): Beleg mit Kennzeichen kleinbetrag und Vorsteuer; über 250 EUR schließt der Kern den Vorsteuerabzug aus (kein stilles Rechnen als Rechnung); unbekannte Art 400', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const tag = '2026-11-02';
+  const klein = await u.bewRufe(bewegung(id, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG({ beleg_art: 'kleinbetrag' }) }));
+  assert.equal(klein.status, 200, JSON.stringify(klein.json));
+  const b = u.fs.lies(P(`dokumente/${klein.json.beleg_id}`));
+  assert.deepEqual([b.steuer.beleg_art, b.steuer.kleinbetrag, b.steuer.steuerfall, b.steuer.richtung], ['kleinbetrag', true, 'E_INLAND_VORSTEUER', 'eingang']);
+  assert.equal(K.driftStatus({ ...b, id: klein.json.beleg_id }), 'ok');
+  const kz = K.ustvaFuer(K.alleWirkungen([K.belegFuerKern({ ...b, id: klein.json.beleg_id }, REGEL).beleg], REGEL), REGEL, '2026-11').kennzahlen;
+  assert.equal(kz['66'], 1900, 'Vorsteuer 19,00 aus der Kleinbetragsrechnung');
+  // Quittung und Rechnung bleiben erlaubt
+  for (const art of ['rechnung', 'quittung']) assert.equal((await u.bewRufe(bewegung(id, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG({ beleg_art: art }) }))).status, 200, art);
+  // über der Grenze
+  const gross = await u.bewRufe(bewegung(id, tag, 'ausgabe', 30000, { beleg: AUSGABE_BELEG({ beleg_art: 'kleinbetrag', positionen: [{ bez: 'Regal', brutto_cent: 30000, satz_bp: 1900 }] }) }));
+  assert.equal(gross.status, 200, JSON.stringify(gross.json));
+  const g = u.fs.lies(P(`dokumente/${gross.json.beleg_id}`));
+  assert.deepEqual([g.steuer.ausschluss && g.steuer.ausschluss.vorsteuer, g.steuer.ausschluss && g.steuer.ausschluss.grund], ['nein', 'kleinbetrag_ueber_250']);
+  const vor = u.fs.log.commits;
+  const r = await u.bewRufe(bewegung(id, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG({ beleg_art: 'kassenzettel' }) }));
+  assert.equal(r.status, 400);
+  assert.equal(r.json.feld, 'beleg.beleg_art');
+  assert.equal(u.fs.log.commits, vor);
+});
+
+test('W2-W1 Schlüssellisten sind exportiert und decken genau das, was die Prüfung annimmt: jeder Schlüssel einer Liste wird akzeptiert (kein 400 mit feld = Schlüssel), ein fremder Schlüssel nicht', async () => {
+  const F = await import('../regel/kasse-form.js');
+  const Z = await import('../regel/kasse-zbon-ki.js');
+  const listen = { ANLEGEN_SCHLUESSEL: F.ANLEGEN_SCHLUESSEL, AENDERN_SCHLUESSEL: F.AENDERN_SCHLUESSEL, WECHSELN_SCHLUESSEL: F.WECHSELN_SCHLUESSEL, BEWEGUNG_ANLEGEN_SCHLUESSEL: F.BEWEGUNG_ANLEGEN_SCHLUESSEL,
+    BEWEGUNG_STORNO_SCHLUESSEL: F.BEWEGUNG_STORNO_SCHLUESSEL, ABSCHLIESSEN_SCHLUESSEL: F.ABSCHLIESSEN_SCHLUESSEL, STORNIEREN_SCHLUESSEL: F.STORNIEREN_SCHLUESSEL, RUHETAG_SCHLUESSEL: F.RUHETAG_SCHLUESSEL,
+    RUHETAGE_SCHLUESSEL: F.RUHETAGE_SCHLUESSEL, RUHETAG_AUFHEBEN_SCHLUESSEL: F.RUHETAG_AUFHEBEN_SCHLUESSEL, AUSGABE_BELEG_SCHLUESSEL: F.AUSGABE_BELEG_SCHLUESSEL, ZBON_SCHLUESSEL: Z.SCHLUESSEL, ZBON_DATEI_SCHLUESSEL: Z.DATEI_SCHLUESSEL };
+  for (const [name, l] of Object.entries(listen)) {
+    assert.ok(Array.isArray(l) && l.length > 0 && new Set(l).size === l.length, `${name}: nichtleere Liste ohne Doppelte`);
+    assert.ok(l.every((k) => typeof k === 'string' && k), name);
+  }
+  for (const k of ['anfrage_id', 'aktion']) for (const n of ['ANLEGEN_SCHLUESSEL', 'AENDERN_SCHLUESSEL', 'WECHSELN_SCHLUESSEL', 'BEWEGUNG_ANLEGEN_SCHLUESSEL', 'BEWEGUNG_STORNO_SCHLUESSEL']) assert.ok(listen[n].includes(k), `${n} enthält ${k}`);
+  for (const k of ['beleg_anhang', 'beleg']) assert.ok(F.BEWEGUNG_ANLEGEN_SCHLUESSEL.includes(k));
+  assert.ok(F.ANLEGEN_SCHLUESSEL.includes('anfangsbestand_nachweis'));
+  assert.ok(F.AUSGABE_BELEG_SCHLUESSEL.includes('leistungsmonat'));
+  assert.deepEqual([...F.AUSGABE_BELEG_ARTEN], ['rechnung', 'quittung', 'kleinbetrag']);
+  // nie vom Nutzer: werden vom Worker gesetzt oder sind Sicherheitswahl (400, nie still verworfen)
+  for (const k of ['id', 'weg', 'herkunft', 'zahlungen', 'zahlung', 'sperrgrund', 'erfasst_am', 'wirkdatum', 'bezug', 'korrektur_grund', 'rueckzahlung', 'bestaetigt', 'leistungsart']) assert.ok(!F.AUSGABE_BELEG_SCHLUESSEL.includes(k), `${k} nicht in der Positivliste`);
+  assert.deepEqual([...Z.SCHLUESSEL], ['userId', 'token', 'anfrage_id', 'kasse_id', 'geschaeftstag_dialog', 'datei']);
+  assert.deepEqual([...Z.DATEI_SCHLUESSEL], ['name', 'type', 'base64']);
+  // jeder Beleg-Schlüssel kommt an der Positivliste vorbei: als einziger unbekannter Schlüssel wird nur der Zusatzschlüssel 'zzz' gemeldet, nie der Listenschlüssel
+  const basis = { aktion: 'anlegen', kasse_id: 'kabcdefgh', geschaeftstag: '2026-11-02', art: 'ausgabe', betrag_cent: 100, text: 'x', beleg: {} };
+  for (const k of F.AUSGABE_BELEG_SCHLUESSEL) {
+    const r = F.pruefeBewegung({ ...basis, beleg: { [k]: 1, zzz: 1 } }, 'anlegen', { uid: UID, heute: HEUTE });
+    assert.equal(r.fehler.feld, 'beleg.zzz', k);
+  }
+  const fremd = F.pruefeBewegung({ ...basis, beleg: { sperrgrund: 'x' } }, 'anlegen', { uid: UID, heute: HEUTE });
+  assert.equal(fremd.fehler.feld, 'beleg.sperrgrund');
+});

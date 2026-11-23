@@ -247,11 +247,11 @@ export const ANFANGSBESTAND_HERKUENFTE = Object.freeze(['einlage_privat', 'bank'
 // W2-W1 (E2, Gegenlesung M-4): Nachweis des Anfangsbestands ist Pflicht bei Übernahme aus einem alten Kassenbuch (letzte Seite/Endbestand) und bei einer Privateinlage
 // über 0 (Eigenbeleg), jeweils nur für eine Kasse mit eigenem Kassenbuch (ohne eigenes Kassenbuch gibt es weder Übernahme noch Privatvorgang). Bei 'bank' freiwillig.
 export const nachweisPflicht = (w) => w.kassenbuch === true && (w.anfangsbestand_herkunft === 'uebernahme' || (w.anfangsbestand_herkunft === 'einlage_privat' && w.anfangsbestand_cent > 0));
-const ANLEGEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'bezeichnung', 'kuerzel', 'art', 'grundaufzeichnung', 'datenquelle', 'anfangsbestand_cent', 'anfangsbestand_am',
+export const ANLEGEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'bezeichnung', 'kuerzel', 'art', 'grundaufzeichnung', 'datenquelle', 'anfangsbestand_cent', 'anfangsbestand_am',
   'anfangsbestand_herkunft', 'anfangsbestand_nachweis', 'karte_ueber_integration', 'ruhetage_wochentage', 'kassenbuch', 'bestand_in_kasse_id', 'datev_konto']);
-const AENDERN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'bezeichnung', 'ruhetage_wochentage', 'datev_konto', 'karte_ueber_integration', 'art', 'art_ab',
+export const AENDERN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'bezeichnung', 'ruhetage_wochentage', 'datev_konto', 'karte_ueber_integration', 'art', 'art_ab',
   'grundaufzeichnung', 'grundaufzeichnung_ab', 'datenquelle', 'datenquelle_ab', 'bestand_in_kasse_id']);
-const WECHSELN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'gueltig_ab', 'art', 'grundaufzeichnung', 'datenquelle', 'software', 'software_version', 'hersteller', 'modell', 'seriennummer']);
+export const WECHSELN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'gueltig_ab', 'art', 'grundaufzeichnung', 'datenquelle', 'software', 'software_version', 'hersteller', 'modell', 'seriennummer']);
 export const SYSTEM_TEXTFELDER = Object.freeze(['software', 'software_version', 'hersteller', 'modell', 'seriennummer']);
 
 function wochentagePruefen(x) {
@@ -351,12 +351,14 @@ export function pruefeKasse(body, aktion, { heute }) {
 export const BEWEGUNG_ARTEN_NEU = Object.freeze(['ausgabe', 'entnahme', 'einlage', 'wechselgeld_einlage', 'geldtransit_bank_ein', 'geldtransit_bank_aus',
   'geldtransit_kasse_ein', 'geldtransit_kasse_aus', 'trinkgeld_ma_auszahlung']); // 'storno' entsteht nur über stornieren
 export const PRIVAT_ARTEN = Object.freeze(['entnahme', 'einlage', 'wechselgeld_einlage']); // erzeugen einen Privatvorgang (zahlweg 'kasse') und brauchen den Eigenbeleg
-const BEWEGUNG_ANLEGEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'geschaeftstag', 'art', 'betrag_cent', 'text', 'beleg', 'beleg_anhang', 'gegenkasse_id', 'eigenbeleg_pfad']);
-const BEWEGUNG_STORNO_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'bewegung_id', 'grund']);
+export const BEWEGUNG_ANLEGEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'geschaeftstag', 'art', 'betrag_cent', 'text', 'beleg', 'beleg_anhang', 'gegenkasse_id', 'eigenbeleg_pfad']);
+export const BEWEGUNG_STORNO_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'bewegung_id', 'grund']);
 export const BEWEGUNG_ID_MUSTER = /^(k[a-z0-9]{8})_(\d{4}-\d{2}-\d{2})_(\d{3})$/;
 // Kern-Eingabe des Beleg-Formulars v2 (Richtung Eingang): nur diese Schlüssel. Nie vom Nutzer: id, weg, herkunft, zahlungen (der Worker setzt Zahlung bar am
 // Geschäftstag), wirkdatum, bezug, korrektur_grund, rueckzahlung, sperrgrund, fa_*, bestaetigt. Ein solcher Schlüssel ergibt 400 FORMAT mit feld 'beleg.<name>'
 // (nie still verworfen); die App schickt nur diese Liste (kassenAusgabeEingabe). W2-W1: 'leistungsmonat' (Wahl „Monat“ im Formular) ist dabei.
+// W2-W1: 'kleinbetrag' (Kleinbetragsrechnung bis 250 EUR brutto, § 33 UStDV; das Formular wählt sie bei Eingang, der Kern kennt sie) neben rechnung und quittung
+export const AUSGABE_BELEG_ARTEN = Object.freeze(['rechnung', 'quittung', 'kleinbetrag']);
 export const AUSGABE_BELEG_SCHLUESSEL = Object.freeze(['beleg_art', 'richtung', 'steuerwahl', 'satz_bp', 'betrag', 'positionen', 'rechnungsdatum', 'leistung', 'leistungsdatum', 'leistungsmonat', 'erhalt',
   'kategorie', 'gegenpartei', 'rechnungsnr', 'waehrung', 'bewirtung', 'geschenk', 'kein_vorsteuerabzug', 'kein_anlagegut', 'anlagegut', 'ohne_ust_grund', 'ohne_rechnung',
   'bewirtungsnachweis_vollstaendig', 'bestaetigung_12_abs_3', 'empfaenger', 'bezeichnung']);
@@ -388,7 +390,7 @@ export function pruefeBewegung(body, aktion, { uid, heute, storageUrlOk }) {
     const b = body.beleg;
     if (!istObjekt(b) || !nurSchluessel(b, AUSGABE_BELEG_SCHLUESSEL)) return fehl(istObjekt(b) ? `beleg.${Object.keys(b).find((x) => !AUSGABE_BELEG_SCHLUESSEL.includes(x))}` : 'beleg');
     if (b.richtung !== undefined && b.richtung !== 'eingang') return fehl('beleg.richtung'); // Ausgabe aus der Kasse ist immer ein Eingangsbeleg (2.11 C.12)
-    if (b.beleg_art !== undefined && !['rechnung', 'quittung'].includes(b.beleg_art)) return fehl('beleg.beleg_art');
+    if (b.beleg_art !== undefined && !AUSGABE_BELEG_ARTEN.includes(b.beleg_art)) return fehl('beleg.beleg_art');
     if (!istDatum(b.rechnungsdatum)) return fehl('beleg.rechnungsdatum');
     if (!istObjekt(b.gegenpartei) || !textOk(b.gegenpartei.name, 1, 100)) return fehl('beleg.gegenpartei.name');
     w.beleg = b;

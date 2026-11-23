@@ -69,8 +69,9 @@ export const ZBON_LISTE_MAX = 6;
 export const ZBON_ZAHLARTEN_MAX = 20; // echte Bons nennen oft mehr als 6 Zahlarten: bis 20 Einträge, Summe je Art (O4-W A-N2, Delta C-N1)
 export const ZBON_PFAD_MAX = 40; // Feldpfade im Modellfeld unsicher (zum Beispiel saetze[1].brutto_cent)
 export const ZBON_DATUM_MIN = '2020-01-01';
-const SCHLUESSEL = ['userId', 'token', 'anfrage_id', 'kasse_id', 'geschaeftstag_dialog', 'datei'];
-const DATEI_SCHLUESSEL = ['name', 'type', 'base64'];
+// Positivlisten des Bodys (W2-W1: exportiert für den Vertragstest der App)
+export const SCHLUESSEL = ['userId', 'token', 'anfrage_id', 'kasse_id', 'geschaeftstag_dialog', 'datei'];
+export const DATEI_SCHLUESSEL = ['name', 'type', 'base64'];
 const KASSE_ID = /^k[a-z0-9]{8}$/;
 const Z_NUMMER = /^[A-Za-z0-9\-/]{1,20}$/;
 // G2-Fix N-2: gedruckte Z-Nummern stehen oft als „#123“, „Nr. 123“, „No. 0412“ oder „№ 7“ da. Vor der Prüfung werden nur Leerraum am Rand und dieses eine Präfix entfernt;
