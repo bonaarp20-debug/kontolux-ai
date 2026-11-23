@@ -556,3 +556,26 @@ test('Altfall Außerbetriebnahme vor 01.07.2025: Frist 31.07.2025 mit Hinweis al
   assert.deepEqual([m.meldestatus, m.frist_bis], ['aenderung_offen', '2025-07-31']);
 });
 
+// =============================================================================================
+// Block 4: Archiv, Löschlauf, Prüfer
+// =============================================================================================
+test('Archiv/Löschlauf/Prüfer: Meldung, Betriebsstätte und ELSTER-Protokoll sind Aufbewahrung, stehen im Archiv-Register und in den Prüfer-Daten; Protokoll per /pruefer-datei abrufbar', async () => {
+  const u = umgebung();
+  const bs = await u.neueStaette();
+  const id = await u.neueKasse({ betriebsstaette_id: bs, angeschafft_am: '2026-11-01' });
+  const anfrageId = 'pruefer-meld-001';
+  const meldungId = await meldungIdAus(UID, anfrageId);
+  const protokoll = `${PROTOKOLL_PRAEFIX(UID, meldungId)}protokoll.pdf`;
+  assert.equal((await u.melden({ anfrage_id: anfrageId, betriebsstaette_id: bs, gemeldet_am: '2026-11-19', protokoll_pfad: protokoll })).status, 200);
+  assert.ok(REGEL_SAMMLUNGEN.includes('kassenmeldungen') && REGEL_SAMMLUNGEN.includes('betriebsstaetten'));
+  assert.equal(istAufbewahrungsPfad(P(`kassenmeldungen/${meldungId}`)), true);
+  assert.equal(istAufbewahrungsPfad(P(`betriebsstaetten/${bs}`)), true);
+  assert.equal(istAufbewahrungsDatei(protokoll), true);
+  assert.equal(prueferDateiPfadOk(UID, protokoll), true);
+  const d = await kassenPrueferDaten(UID, 't', u.fs.fetchFn);
+  assert.equal(d.kassen_unvollstaendig, false);
+  assert.deepEqual(d.kassenmeldungen.map((x) => [x.id, x.protokoll_pfad, x.gemeldet_am]), [[meldungId, protokoll, '2026-11-19']]);
+  assert.deepEqual(d.betriebsstaetten.map((x) => x.id), [bs]);
+  const k = d.kassen.find((x) => x.id === id);
+  assert.deepEqual([k.meldestatus, k.betriebsstaette_id], ['gemeldet', bs]);
+});
