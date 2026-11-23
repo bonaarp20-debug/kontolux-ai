@@ -15,18 +15,21 @@
 // (kiLandAbgleichen, Text KI_RC_LAND_TEXT), freigeschaltet erst mit KI_RC_LAND_BEFEHL_AKTIV (Filter-Einbindung in worker.js und Client fehlen noch).
 // Release-C-Fassung der AGB: ist AGB_FASSUNG_RELEASE_C gesetzt, bekommt das Konto den OSS-Abschnitt nur mit Zustimmung zu dieser Fassung.
 import * as Steuerkern from '../steuerkern/index.js';
-import { CONFIG_PFAD, configBereinigen, agbFassungenLaden, agbFassungVergleich, AGB_FASSUNG_RELEASE_B, AGB_FASSUNG_RELEASE_C, UID_MUSTER } from './gemeinsam.js';
+import { CONFIG_PFAD, configBereinigen, agbFassungenLaden, agbFassungVergleich, AGB_FASSUNG_RELEASE_B, AGB_FASSUNG_RELEASE_C, AGB_MINDESTFASSUNG_KASSE, UID_MUSTER } from './gemeinsam.js';
 import { erzeugeSchicht } from './firestore.js';
 
 export const KI_FEATURES = Object.freeze(['ausland', 'zahlung', 'korrektur', 'anlagegut', 'rechnung', 'erechnung', 'plattform', 'oss']);
-export const KI_FEATURES_AUS = Object.freeze(Object.fromEntries(KI_FEATURES.map((n) => [n, false])));
-export const KI_FEATURES_AN = Object.freeze(Object.fromEntries(KI_FEATURES.map((n) => [n, true])));
+// W2-W3: 'kasse' ist ein Prompt-Feature ohne Abschnitt in KI_FEATURE_TEXTE (es ersetzt nur den Text KASSEN-TAGESBERICHT, kiKasseText) und hängt an der
+// AGB-Fassung des Kassenbuchs (AGB_MINDESTFASSUNG_KASSE), nicht an Release B; deshalb nicht in KI_FEATURES, aber im Stand.
+export const KI_STAND_NAMEN = Object.freeze([...KI_FEATURES, 'kasse']);
+export const KI_FEATURES_AUS = Object.freeze(Object.fromEntries(KI_STAND_NAMEN.map((n) => [n, false])));
+export const KI_FEATURES_AN = Object.freeze(Object.fromEntries(KI_STAND_NAMEN.map((n) => [n, true])));
 
 // Reine Funktion: rohes oder bereinigtes config/features-Dokument -> { name: true|false } für die Prompt-Features.
 export function kiFeatureStand(config) {
   const c = configBereinigen(config);
   if (!c || c.kern_max !== 'an') return KI_FEATURES_AUS;
-  return Object.freeze(Object.fromEntries(KI_FEATURES.map((n) => [n, c.features[n] === 'an'])));
+  return Object.freeze(Object.fromEntries(KI_STAND_NAMEN.map((n) => [n, c.features[n] === 'an'])));
 }
 
 // Texte je Feature: modul = Prompt-Modul, an = Abschnitt bei an, aus = kurzer Satz bei aus (oder null, wenn der Grundtext den Altpfad schon beschreibt).
@@ -86,6 +89,12 @@ export const KI_RC_LAND_TEXT = ' Im Befehl DOKUMENT_SPEICHERN nach j zusätzlich
 // über einen Finanzbericht (z. B. von der Beratung) bleibt eine normale Eingangsrechnung. Kein Versprechen eines Kassenbuch-Moduls.
 export const KI_KASSENBERICHT_TEXT = 'KASSEN-TAGESBERICHT: Der Tagesabschluss der EIGENEN Kasse des Nutzers (Z-Bon, Z-Bericht, X-Bericht, Tagesabschluss, Tagesbericht, Kassenbericht, Kassenabschluss, Finanzbericht, "Bericht Nr."; Tagessummen je MwSt-Satz, Z-Nummer, keine Artikelzeilen, das Geschäft ist der Nutzer selbst) ist keine Rechnung an einen Kunden. Dann KEIN DOKUMENT_SPEICHERN und kein AUSGABE_UPDATE, auch nicht als "ausgehend" und auch nicht nach Rückfrage. Erkläre stattdessen kurz: Im Belegarchiv je Steuersatz eine Einnahme mit dem Gesamtumsatz des Tages anlegen (bar und Karte zusammen), als bezahlt am Tag des Bons, als Rechnungsnummer die Z-Nummer mit dem Steuersatz, z. B. Z123-19 und Z123-7, damit jede Nummer nur einmal vorkommt. Die spätere Auszahlung des Kartenanbieters im Kontoauszug als "Auszahlung einer Zahlungsplattform" zuordnen, nicht als neue Einnahme. Wer SumUp verbunden hat, trägt den SumUp-Bon nicht zusätzlich ein, denn Kontolux übernimmt die SumUp-Zahlungen einzeln. NICHT betroffen: Ein Kassenbon über einen Einkauf des Nutzers (fremdes Geschäft wie Supermarkt, Tankstelle oder Baumarkt, mit Artikelzeilen und MwSt-Aufstellung) bleibt eine normale Ausgabe und wird wie bisher als Eingangsbeleg erfasst; ebenso eine Eingangsrechnung über einen Finanzbericht (z. B. eine Leistung der Beratung des Nutzers). Ein Kassenbuch in Kontolux gibt es noch nicht, versprich keines.';
 export function kiKassenberichtText() { return KI_KASSENBERICHT_TEXT; }
+
+// W2-W3 (Konzept Welle 2, 2.3): Kassenbuch-Fassung des Textes, Muster KI_RC_LAND_TEXT (featureabhängig). Bei Feature kasse an ersetzt sie
+// KI_KASSENBERICHT_TEXT an derselben Stelle (Anfang DOKUMENT-UPLOAD ERKENNUNG, Modul tools), bei kasse aus bleibt der P0-Text byte-gleich. Der Chat
+// verweist nur auf das Kassenbuch: kein Kassenbefehl, nie Kassendaten schreiben, keine Kassenstände aus dem Gedächtnis. Höchstens etwa 600 Token.
+export const KI_KASSE_TEXT = 'KASSEN-TAGESBERICHT: Der Tagesabschluss der EIGENEN Kasse des Nutzers (Z-Bon, Z-Bericht, X-Bericht, Tagesabschluss, Tagesbericht, Kassenbericht, Kassenabschluss, Finanzbericht, "Bericht Nr."; Tagessummen je MwSt-Satz, Z-Nummer, keine Artikelzeilen, das Geschäft ist der Nutzer selbst) ist keine Rechnung an einen Kunden. Dann KEIN DOKUMENT_SPEICHERN und kein AUSGABE_UPDATE, auch nicht als "ausgehend" und auch nicht nach Rückfrage. Verweise stattdessen kurz: "Öffne das Kassenbuch → Tagesabschluss erfassen"; den Abschluss trägt der Nutzer dort selbst ein. Der Chat führt keine Kassenbefehle aus und schreibt nie Kassendaten (Tagesabschluss, Kassenbewegung, Kassenstand, Kassendifferenz), auch nicht nach Rückfrage. Nenne keine Kassenstände, Tageswerte oder Differenzen aus dem Gedächtnis oder aus dem Gesprächsverlauf; verweise auf die Ansicht Kassenbuch. Die spätere Auszahlung des Kartenanbieters im Kontoauszug als "Auszahlung einer Zahlungsplattform" zuordnen, nicht als neue Einnahme. Wer SumUp verbunden hat, trägt den SumUp-Bon nicht zusätzlich ein, denn Kontolux übernimmt die SumUp-Zahlungen einzeln. Fragen zu Pflichten der Kassenführung (Aufzeichnung, Meldung, Aufbewahrung): allgemein erklären, keine Rechtsberatung, die Entscheidung und eine Meldung beim Finanzamt bleiben beim Nutzer (Meldehilfe in Kontolux ist nur eine Hilfe); Kontolux nicht als zertifiziert oder als Nachweis der Ordnungsmäßigkeit bezeichnen. NICHT betroffen: Ein Kassenbon über einen Einkauf des Nutzers (fremdes Geschäft wie Supermarkt, Tankstelle oder Baumarkt, mit Artikelzeilen und MwSt-Aufstellung) bleibt eine normale Ausgabe und wird wie bisher als Eingangsbeleg erfasst; ebenso eine Eingangsrechnung über einen Finanzbericht (z. B. eine Leistung der Beratung des Nutzers).';
+export function kiKasseText(features) { return features && features.kasse === true ? KI_KASSE_TEXT : KI_KASSENBERICHT_TEXT; }
 
 // Abschnitt für ein Modul (leer, wenn dort kein Feature steht). stand: { name: true|false }, fehlend = aus.
 // WORKER-C2: an_mit_oss ersetzt den An-Text, wenn oss an ist; rcLand hängt den Land-Satz an den Abschnitt ausland (Standard KI_RC_LAND_BEFEHL_AKTIV).
@@ -148,16 +157,17 @@ export async function kiFeatureStandLesen({ tokenFn, fetchFn, jetzt = Date.now()
 // FIX-EB (G-EB F3): Prompt-Stand eines Kontos. stand = globaler Stand (kiFeatureStandLesen). Ist dort nichts an, keine Unteranfrage. Sonst eine
 // Unteranfrage (Liste agb_zustimmung) je Konto höchstens alle 60 s (Fehler 10 s). Wirft nie: jeder Fehler = alles aus.
 const ZUSTIMMUNG_CACHE_MAX = 2000;
-const zustimmungCache = new Map(); // uid -> { ok, okC, bis }
+const zustimmungCache = new Map(); // uid -> { ok, okC, okK, bis }
 export function kiZustimmungCacheLeeren() { zustimmungCache.clear(); }
 export async function kiFeatureStandKonto({ uid, stand, tokenFn, fetchFn, jetzt = Date.now() } = {}) {
   try {
-    if (!stand || !KI_FEATURES.some((n) => stand[n] === true)) return KI_FEATURES_AUS;
+    if (!stand || !KI_STAND_NAMEN.some((n) => stand[n] === true)) return KI_FEATURES_AUS;
     if (!UID_MUSTER.test(String(uid || ''))) return KI_FEATURES_AUS;
     const c = zustimmungCache.get(uid);
     let ok;
     let okC;
-    if (c && jetzt < c.bis) { ok = c.ok; okC = c.okC; }
+    let okK;
+    if (c && jetzt < c.bis) { ok = c.ok; okC = c.okC; okK = c.okK; }
     else {
       let bis = jetzt + CACHE_MS;
       // WORKER-C2: eine Liste agb_zustimmung für beide Fassungen (wie agbZustimmungAb, streng)
@@ -166,11 +176,15 @@ export async function kiFeatureStandKonto({ uid, stand, tokenFn, fetchFn, jetzt 
         const ab = (mindest) => fassungen.some((v) => (agbFassungVergleich(v, mindest) ?? -1) >= 0);
         ok = ab(AGB_FASSUNG_RELEASE_B);
         okC = AGB_FASSUNG_RELEASE_C ? ab(AGB_FASSUNG_RELEASE_C) : true;
-      } catch { ok = false; okC = false; bis = jetzt + FEHLER_CACHE_MS; }
+        okK = ab(AGB_MINDESTFASSUNG_KASSE); // W2-W3: der Kassen-Chattext nur mit Zustimmung zur Fassung des Kassenbuchs
+      } catch { ok = false; okC = false; okK = false; bis = jetzt + FEHLER_CACHE_MS; }
       if (zustimmungCache.size >= ZUSTIMMUNG_CACHE_MAX) zustimmungCache.clear();
-      zustimmungCache.set(uid, { ok, okC, bis });
+      zustimmungCache.set(uid, { ok, okC, okK, bis });
     }
-    if (ok !== true) return KI_FEATURES_AUS;
-    return okC === true || stand.oss !== true ? stand : Object.freeze({ ...stand, oss: false });
+    const kasse = stand.kasse === true && okK === true;
+    if (ok !== true) return kasse ? Object.freeze({ ...KI_FEATURES_AUS, kasse: true }) : KI_FEATURES_AUS;
+    const ohneOss = okC === true || stand.oss !== true;
+    if (ohneOss && kasse === (stand.kasse === true)) return stand;
+    return Object.freeze({ ...stand, ...(ohneOss ? {} : { oss: false }), kasse });
   } catch { return KI_FEATURES_AUS; }
 }

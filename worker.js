@@ -28,7 +28,7 @@ import { datevMischsatzGruppen, datevKorrekturGruppen, KORREKTUR_BELEG_ARTEN } f
 import { dekodiereFelder as datevDekodiereFelder } from './regel/firestore.js';
 import { DATEV_KASSE_KONTEN, KASSE_UMSATZ_STEUERFAELLE, KASSE_DURCHLAUF_KONTO, KASSE_ERLOES_0_KONTO, KASSE_MEHRZWECK_KONTO, kassenKontoWahl, istKasseTagesbeleg, kasseBelegPlan, kasseBewegungBuchung, kasseBewegungOhneBuchung, kasseGeldtransitGegenbein, kasseTagesPosten, istSumupBarbeleg, sumupKasseWahl } from './regel/datev-kasse.js'; // Kassenbuch P1b-5: DATEV-Kassenzweig
 import { datevBelegfeldBereinigen, datevFeldGequotet, datevNummerPruefen, datevKontoVierstellig, datevGeldkontoImBereich, datevKuKonto, RC_EINGANG_KONTEN, RC_AUSGANG_KONTEN, datevRcLage, datevUstId, GWG_KONTEN, AFA_KATEGORIE, GWG_KATEGORIE, FA_EST_ART, UST_KATEGORIEN, datevWarnHeader } from './regel/datev-export-regeln.js'; // DATEV-Gesamtcheck 21.11.2026: Belegfeld 1, § 13b, GWG, Konten
-import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen, kiKassenberichtText } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4); Kassen-P0: kiKassenberichtText
+import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen, kiKassenberichtText, kiKasseText } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4); Kassen-P0: kiKassenberichtText
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
 import { v2Vorbereiten, clientSteuerVorbereiten, v2RestFelder, nachFestschreibungAntwort, festPruefungMarkieren } from './regel/schreibweg-v2.js';
@@ -1786,8 +1786,8 @@ WICHTIG: Der Befehl MUSS in der bestätigenden Antwort stehen, sonst wird nichts
 Hochgeladene Rechnung → jeden Punkt ✅/❌: vollständiger Name+Anschrift beider Parteien, Steuernummer/USt-ID, Ausstellungsdatum, fortlaufende Rechnungsnummer, Menge/Art der Leistung, Leistungsdatum/-zeitraum, Nettobetrag, Steuersatz+-betrag in €, Bruttobetrag, KU-Hinweis (§19) statt Steuerausweis. Am Ende: fehlende Pflichtangaben + Korrekturvorschläge (kein Gesamturteil wie "konform"). Warnung wenn KU trotzdem USt ausweist (schuldet sie dann dem Finanzamt).`;
 
 // ── Modul TOOLS — Dokument-Upload, Zeiterfassung, Reisekosten (~2.200 T) ──
-const _KI_TOOLS = `## DOKUMENT-UPLOAD ERKENNUNG
-${kiKassenberichtText()}
+const _KI_TOOLS_BAUEN = (kasseText) => `## DOKUMENT-UPLOAD ERKENNUNG
+${kasseText}
 
 PDF/Bild hochgeladen: Inhalt direkt lesen, nicht nach Infos fragen die im Dokument stehen.
 Rechnung erkannt → Betrag/Absender-Name/Empfänger-Name/Datum/Rechnungsnummer/MwSt-Satz lesen.
@@ -1841,6 +1841,8 @@ WICHTIG: Der Befehl MUSS in der bestätigenden Antwort (Schritt 2) stehen, sonst
 "Berechne die Reisekosten an [Kunde] weiter" → die IDs aus "Offene, noch nicht weiterberechnete Reisekosten pro Kunde" im Profilkontext nehmen, MwSt-Satz UND Format (PDF/XRechnung/Beides) wie bei RECHNUNG ERSTELLEN erfragen falls unklar, dann "Reisekosten an [Kunde] abrechnen? (j/n)", bei j:
 REISE_ABRECHNEN:kunde=[Name],reise_ids=[id1;id2],rechnungsnummer=[auto oder eigene Nr.],mwst_satz=[19/7/0],format=[pdf/xrechnung/beide]
 `;
+// W2-W3: _KI_TOOLS = Fassung ohne Kassenbuch (P0-Text, byte-gleich wie bisher); bei Feature kasse an baut buildStaticForModules die Fassung mit kiKasseText.
+const _KI_TOOLS = _KI_TOOLS_BAUEN(kiKassenberichtText());
 
 // ── Modul INTEGRATIONEN — Stripe, PayPal, SumUp, Shopify, Webhooks (~400 T) ──
 const _KI_INTEGRATIONEN = `## ZAHLUNGSPLATTFORMEN & WEBHOOKS
@@ -1857,7 +1859,7 @@ function buildStaticForModules(modules, stand = KI_FEATURES_AUS) {
   if (modules.includes('euer'))          mit('euer', _KI_EUER);
   if (modules.includes('rechnungen'))    mit('rechnungen', _KI_RECHNUNGEN);
   if (modules.includes('integrationen')) mit('integrationen', _KI_INTEGRATIONEN);
-  if (modules.includes('tools'))         mit('tools', _KI_TOOLS);
+  if (modules.includes('tools'))         mit('tools', stand && stand.kasse === true ? _KI_TOOLS_BAUEN(kiKasseText(stand)) : _KI_TOOLS);
   return parts.join('\n\n');
 }
 

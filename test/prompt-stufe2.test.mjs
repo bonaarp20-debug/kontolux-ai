@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { kiPromptTeile, detectRequiredModules, erkennungsText } from '../worker.js';
-import { KI_FEATURES, KI_FEATURES_AN, KI_FEATURES_AUS, kiFeatureStand, kiFeatureStandLesen, kiFeatureCacheLeeren, kiFeatureAbschnitt, KI_FEATURE_TEXTE } from '../regel/prompts.js';
+import { KI_STAND_NAMEN, KI_FEATURES, KI_FEATURES_AN, KI_FEATURES_AUS, kiFeatureStand, kiFeatureStandLesen, kiFeatureCacheLeeren, kiFeatureAbschnitt, KI_FEATURE_TEXTE } from '../regel/prompts.js';
 import { VERBOTEN, ohneVerbotsAnweisungen, uebermittlungOhneVerneinung } from './prompt-wortliste.mjs';
 import { ZUSAMMENSTELLUNGEN } from './prompt-messung.mjs';
 
@@ -22,7 +22,7 @@ const enthaeltKeins = (text, teile, wo) => { for (const p of teile) assert.ok(!t
 // Feature-Zustand
 // ---------------------------------------------------------------------------------------------
 test('Feature-Zustand: nur kern_max "an" UND Feature "an" gilt; fehlt, aus, schatten, kaputt oder unlesbar = aus', () => {
-  assert.deepEqual(Object.keys(KI_FEATURES_AUS).sort(), [...KI_FEATURES].sort());
+  assert.deepEqual(Object.keys(KI_FEATURES_AUS).sort(), [...KI_STAND_NAMEN].sort()); // W2-W3: Stand = KI_FEATURES plus kasse
   for (const n of ['ausland', 'korrektur', 'anlagegut', 'zahlung', 'rechnung', 'erechnung', 'plattform']) assert.ok(KI_FEATURES.includes(n), n);
   assert.deepEqual(kiFeatureStand(null), KI_FEATURES_AUS);
   assert.deepEqual(kiFeatureStand({ kern_max: 'an', features: {} }), KI_FEATURES_AUS);
@@ -30,7 +30,7 @@ test('Feature-Zustand: nur kern_max "an" UND Feature "an" gilt; fehlt, aus, scha
   assert.deepEqual(kiFeatureStand({ kern_max: 'aus', features: { ausland: 'an' } }), KI_FEATURES_AUS);
   assert.deepEqual(kiFeatureStand({ kern_max: 'an', features: { ausland: true } }), KI_FEATURES_AUS, 'nur der String "an" zählt');
   assert.deepEqual(kiFeatureStand({ kern_max: 'an', features: { ausland: 'an', plattform: 'aus' } }), nur('ausland'));
-  assert.deepEqual(kiFeatureStand({ kern_max: 'an', features: Object.fromEntries(KI_FEATURES.map((n) => [n, 'an'])) }), KI_FEATURES_AN);
+  assert.deepEqual(kiFeatureStand({ kern_max: 'an', features: Object.fromEntries(KI_STAND_NAMEN.map((n) => [n, 'an'])) }), KI_FEATURES_AN);
 });
 
 test('Feature-Zustand lesen: eine Unteranfrage je 60 s, Fehler und 404 = alles aus', async () => {
