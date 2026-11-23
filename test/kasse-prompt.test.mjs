@@ -54,9 +54,10 @@ test('Fallback: kein Stand, kaputter Stand oder kasse nicht true = P0-Text', () 
   for (const f of [undefined, null, {}, { kasse: false }, { kasse: 'an' }, { kasse: 1 }, 'an']) assert.equal(kiKasseText(f), KI_KASSENBERICHT_TEXT, JSON.stringify(f));
 });
 
-test('Stand aus config/features: kasse nur bei kern_max an UND Feature kasse an', () => {
+test('Stand aus config/features: kasse wie featureAktiv (kern_max an oder schatten UND Feature kasse an; O7a N10)', () => {
   assert.equal(kiFeatureStand({ kern_max: 'an', features: { kasse: 'an' } }).kasse, true);
-  for (const c of [{ kern_max: 'schatten', features: { kasse: 'an' } }, { kern_max: 'aus', features: { kasse: 'an' } }, { kern_max: 'an', features: {} }, { kern_max: 'an', features: { kasse: 'aus' } }, { kern_max: 'an', features: { kasse: true } }, null]) {
+  assert.equal(kiFeatureStand({ kern_max: 'schatten', features: { kasse: 'an' } }).kasse, true, 'O7a N10: /kasse läuft bei schatten, der Chat kennt das Kassenbuch');
+  for (const c of [{ kern_max: 'aus', features: { kasse: 'an' } }, { kern_max: 'an', features: {} }, { kern_max: 'an', features: { kasse: 'aus' } }, { kern_max: 'an', features: { kasse: true } }, null]) {
     assert.equal(kiFeatureStand(c).kasse, false, JSON.stringify(c));
   }
   assert.equal(KI_FEATURES_AUS.kasse, false);
@@ -96,7 +97,7 @@ test('Kassen-Fassung: Verweis aufs Kassenbuch, keine Befehle, nie Kassendaten sc
   assert.match(t, /EIGENEN Kasse/);
   assert.match(t, /keine Rechtsberatung/);
   assert.match(t, /Meldehilfe in Kontolux ist nur eine Hilfe/);
-  assert.ok(!/Kassenbuch in Kontolux gibt es noch nicht/.test(t), 'das Kassenbuch gibt es bei Feature an');
+  assert.ok(!/Biete kein Kassenbuch/.test(t), 'das Kassenbuch gibt es bei Feature an');
   assert.ok(!/deiner/.test(t));
   // Keine Kassen-Befehlswörter im Beispielformat KOMMANDO:param=
   assert.ok(!/KASSE[A-Z_]*:[a-z_]+=/.test(t));
@@ -123,7 +124,7 @@ test('Inhalt: Erkennungswörter, kein Speichern, Erfassungsweg, Kartenauszahlung
   assert.match(t, /EIGENEN Kasse/);
   assert.match(t, /Kassenbon über einen Einkauf des Nutzers[^.]*Supermarkt, Tankstelle oder Baumarkt[^.]*bleibt eine normale Ausgabe[^.]*Eingangsbeleg/);
   assert.ok(!/deiner/.test(t), 'der Prompt spricht die KI an, kein "deiner"');
-  assert.match(t, /Kassenbuch in Kontolux gibt es noch nicht/);
+  assert.match(t, /Biete kein Kassenbuch in Kontolux an und versprich keines\./, 'O7a N10: kein „gibt es noch nicht“ (stimmt nach einem Notaus nicht), aber auch kein Versprechen');
 });
 
 test('Wortwahl: keine verbotenen Selbstbezeichnungen', () => {

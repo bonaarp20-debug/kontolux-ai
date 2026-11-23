@@ -15,7 +15,7 @@
 // (kiLandAbgleichen, Text KI_RC_LAND_TEXT), freigeschaltet erst mit KI_RC_LAND_BEFEHL_AKTIV (Filter-Einbindung in worker.js und Client fehlen noch).
 // Release-C-Fassung der AGB: ist AGB_FASSUNG_RELEASE_C gesetzt, bekommt das Konto den OSS-Abschnitt nur mit Zustimmung zu dieser Fassung.
 import * as Steuerkern from '../steuerkern/index.js';
-import { CONFIG_PFAD, configBereinigen, agbFassungenLaden, agbFassungVergleich, AGB_FASSUNG_RELEASE_B, AGB_FASSUNG_RELEASE_C, AGB_MINDESTFASSUNG_KASSE, UID_MUSTER } from './gemeinsam.js';
+import { CONFIG_PFAD, configBereinigen, featureAktiv, agbFassungenLaden, agbFassungVergleich, AGB_FASSUNG_RELEASE_B, AGB_FASSUNG_RELEASE_C, AGB_MINDESTFASSUNG_KASSE, UID_MUSTER } from './gemeinsam.js';
 import { erzeugeSchicht } from './firestore.js';
 
 export const KI_FEATURES = Object.freeze(['ausland', 'zahlung', 'korrektur', 'anlagegut', 'rechnung', 'erechnung', 'plattform', 'oss']);
@@ -26,10 +26,13 @@ export const KI_FEATURES_AUS = Object.freeze(Object.fromEntries(KI_STAND_NAMEN.m
 export const KI_FEATURES_AN = Object.freeze(Object.fromEntries(KI_STAND_NAMEN.map((n) => [n, true])));
 
 // Reine Funktion: rohes oder bereinigtes config/features-Dokument -> { name: true|false } für die Prompt-Features.
+// O7a N10: 'kasse' folgt featureAktiv (wie die Route /kasse): auch bei kern_max 'schatten' läuft das Kassenbuch, dann kennt der Chat es auch; kern_max 'aus' schaltet es ab.
 export function kiFeatureStand(config) {
   const c = configBereinigen(config);
-  if (!c || c.kern_max !== 'an') return KI_FEATURES_AUS;
-  return Object.freeze(Object.fromEntries(KI_STAND_NAMEN.map((n) => [n, c.features[n] === 'an'])));
+  if (!c) return KI_FEATURES_AUS;
+  const kasse = featureAktiv(c, 'kasse') === true;
+  if (c.kern_max !== 'an') return kasse ? Object.freeze({ ...KI_FEATURES_AUS, kasse: true }) : KI_FEATURES_AUS;
+  return Object.freeze(Object.fromEntries(KI_STAND_NAMEN.map((n) => [n, n === 'kasse' ? kasse : c.features[n] === 'an'])));
 }
 
 // Texte je Feature: modul = Prompt-Modul, an = Abschnitt bei an, aus = kurzer Satz bei aus (oder null, wenn der Grundtext den Altpfad schon beschreibt).
@@ -87,7 +90,7 @@ export const KI_RC_LAND_TEXT = ' Im Befehl DOKUMENT_SPEICHERN nach j zusätzlich
 // Konten, der Cache-Block bleibt gleich), als Funktion hier statt in worker.js, damit das spätere Kassenbuch-Paket nur diese Datei ändert. Höchstens
 // etwa 600 Token. Er steht am Anfang des Abschnitts DOKUMENT-UPLOAD ERKENNUNG (Modul tools). Gilt nur für eigene (ausgehende) Belege: eine Eingangsrechnung
 // über einen Finanzbericht (z. B. von der Beratung) bleibt eine normale Eingangsrechnung. Kein Versprechen eines Kassenbuch-Moduls.
-export const KI_KASSENBERICHT_TEXT = 'KASSEN-TAGESBERICHT: Der Tagesabschluss der EIGENEN Kasse des Nutzers (Z-Bon, Z-Bericht, X-Bericht, Tagesabschluss, Tagesbericht, Kassenbericht, Kassenabschluss, Finanzbericht, "Bericht Nr."; Tagessummen je MwSt-Satz, Z-Nummer, keine Artikelzeilen, das Geschäft ist der Nutzer selbst) ist keine Rechnung an einen Kunden. Dann KEIN DOKUMENT_SPEICHERN und kein AUSGABE_UPDATE, auch nicht als "ausgehend" und auch nicht nach Rückfrage. Erkläre stattdessen kurz: Im Belegarchiv je Steuersatz eine Einnahme mit dem Gesamtumsatz des Tages anlegen (bar und Karte zusammen), als bezahlt am Tag des Bons, als Rechnungsnummer die Z-Nummer mit dem Steuersatz, z. B. Z123-19 und Z123-7, damit jede Nummer nur einmal vorkommt. Die spätere Auszahlung des Kartenanbieters im Kontoauszug als "Auszahlung einer Zahlungsplattform" zuordnen, nicht als neue Einnahme. Wer SumUp verbunden hat, trägt den SumUp-Bon nicht zusätzlich ein, denn Kontolux übernimmt die SumUp-Zahlungen einzeln. NICHT betroffen: Ein Kassenbon über einen Einkauf des Nutzers (fremdes Geschäft wie Supermarkt, Tankstelle oder Baumarkt, mit Artikelzeilen und MwSt-Aufstellung) bleibt eine normale Ausgabe und wird wie bisher als Eingangsbeleg erfasst; ebenso eine Eingangsrechnung über einen Finanzbericht (z. B. eine Leistung der Beratung des Nutzers). Ein Kassenbuch in Kontolux gibt es noch nicht, versprich keines.';
+export const KI_KASSENBERICHT_TEXT = 'KASSEN-TAGESBERICHT: Der Tagesabschluss der EIGENEN Kasse des Nutzers (Z-Bon, Z-Bericht, X-Bericht, Tagesabschluss, Tagesbericht, Kassenbericht, Kassenabschluss, Finanzbericht, "Bericht Nr."; Tagessummen je MwSt-Satz, Z-Nummer, keine Artikelzeilen, das Geschäft ist der Nutzer selbst) ist keine Rechnung an einen Kunden. Dann KEIN DOKUMENT_SPEICHERN und kein AUSGABE_UPDATE, auch nicht als "ausgehend" und auch nicht nach Rückfrage. Erkläre stattdessen kurz: Im Belegarchiv je Steuersatz eine Einnahme mit dem Gesamtumsatz des Tages anlegen (bar und Karte zusammen), als bezahlt am Tag des Bons, als Rechnungsnummer die Z-Nummer mit dem Steuersatz, z. B. Z123-19 und Z123-7, damit jede Nummer nur einmal vorkommt. Die spätere Auszahlung des Kartenanbieters im Kontoauszug als "Auszahlung einer Zahlungsplattform" zuordnen, nicht als neue Einnahme. Wer SumUp verbunden hat, trägt den SumUp-Bon nicht zusätzlich ein, denn Kontolux übernimmt die SumUp-Zahlungen einzeln. NICHT betroffen: Ein Kassenbon über einen Einkauf des Nutzers (fremdes Geschäft wie Supermarkt, Tankstelle oder Baumarkt, mit Artikelzeilen und MwSt-Aufstellung) bleibt eine normale Ausgabe und wird wie bisher als Eingangsbeleg erfasst; ebenso eine Eingangsrechnung über einen Finanzbericht (z. B. eine Leistung der Beratung des Nutzers). Biete kein Kassenbuch in Kontolux an und versprich keines.';
 export function kiKassenberichtText() { return KI_KASSENBERICHT_TEXT; }
 
 // W2-W3 (Konzept Welle 2, 2.3): Kassenbuch-Fassung des Textes, Muster KI_RC_LAND_TEXT (featureabhängig). Bei Feature kasse an ersetzt sie
