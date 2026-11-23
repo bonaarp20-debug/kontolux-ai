@@ -37,7 +37,7 @@ export const MELDEANLAESSE = Object.freeze(['anschaffung', 'tse_ausruestung', 'a
 // altfall_frage (O8 M1): vor dem 01.07.2025 endgültig außer Betrieb, ob die Anschaffung gemeldet war, ist unbeantwortet -> keine Frist, nur die Frage.
 // endgueltig_frage (O8 M2): unbeantwortet, ob das Gerät endgültig außer Betrieb ist (Systemwechsel, Altdaten) -> Frist bleibt (vorsichtig), dazu die Frage.
 // frist_frueher (O8 M5): die Frist kommt aus einer früheren Angabe, weil eine laufende Frist nie nach hinten wandert.
-export const FRIST_HINWEISE = Object.freeze(['altfall', 'altfall_ausserbetrieb', 'anschaffung_fehlt', 'altfall_frage', 'endgueltig_frage', 'frist_frueher']);
+export const FRIST_HINWEISE = Object.freeze(['altfall', 'altfall_ausserbetrieb', 'anschaffung_fehlt', 'altfall_frage', 'endgueltig_frage', 'frist_frueher', 'frist_gesetz_abgelaufen']);
 const FRAGE_HINWEISE = ['altfall_frage', 'endgueltig_frage'];
 export const VERFAHREN_BEGINN = '2025-01-01'; // ELSTER-Mitteilungsverfahren steht ab 01.01.2025 zur Verfügung (BMF 28.06.2024)
 const TAXAMETER = ['taxameter', 'wegstreckenzaehler'];
@@ -172,7 +172,9 @@ export function korrekturEreignis(am, heute, elsterAm = null) {
   const grenze = istDatum(heute) ? Steuerkern.addiereTage(heute, KORREKTUR_TAGE_MAX) : null;
   if ((am != null && !ausDatum) || !grenze) throw new Error('Meldefrist: Datum unlesbar');
   const frist = ausDatum && ausDatum >= heute && ausDatum < grenze ? ausDatum : grenze;
-  return { anlass: 'korrektur', am: istDatum(elsterAm) ? elsterAm : heute, frist_bis: frist, hinweis: null };
+  // O10 N2: ist die gesetzliche Monatsfrist (§ 146a Abs. 4 Satz 2 AO) aus dem Datum schon vorbei, sagt der Hinweis frist_gesetz_abgelaufen das ausdrücklich
+  // („korrigiere sofort“); die angezeigte Frist bleibt die vorsichtige Produktgrenze (nie vor heute, kein sofortiges „überfällig“)
+  return { anlass: 'korrektur', am: istDatum(elsterAm) ? elsterAm : heute, frist_bis: frist, hinweis: ausDatum && ausDatum < heute ? 'frist_gesetz_abgelaufen' : null };
 }
 // Ergibt die Änderung alt -> neu eine Korrektur einer schon gemeldeten Angabe (Zweig korrekturEreignis in meldeNachAenderung)? Rein; für die Prüfung von
 // korrektur_elster_am (O9a M1) im Handler und in der App gleich gerechnet. Datum: wie bisher immer eine Korrektur. Andere Angaben (W2-Recht Ä2): nur mit der Antwort
@@ -617,9 +619,10 @@ export async function betriebsstaette(c, h, aktion) {
       if (spaetestens && w.felder.aufgegeben_am < spaetestens) return { antwort: h.formFehler({ code: 'FORMAT', feld: 'aufgegeben_am', grund: 'vor_ausser_betrieb', erwartet_ab: spaetestens }, cors) };
     }
     // W2-Recht Ä2 (AEAO zu § 146a Nr. 1.16.3.2): Bezeichnung, Anschrift oder Bemerkung einer schon gemeldeten Betriebsstätte geändert -> der Nutzer sagt, ob die gemeldete
-    // Angabe falsch war (Korrektur, mit Frist) oder sich geändert hat. Die Korrektur bekommt jede gemeldete, meldepflichtige Kasse der Stätte, deren
-    // Außerbetriebnahme noch nicht gemeldet ist, als Ereignis (die nächste Meldung der Stätte erledigt es, Bruttomethode). korrektur_elster_am nur bei Korrektur,
-    // nicht vor der letzten Meldung der Stätte.
+    // Angabe falsch war (Korrektur, mit Frist) oder sich geändert hat. Die Korrektur bekommt jede gemeldete, meldepflichtige Kasse der Stätte als Ereignis (die nächste
+    // Meldung der Stätte erledigt es, Bruttomethode). O10 N8: auch eine Kasse, deren Außerbetriebnahme schon gemeldet ist (wie /kasse aendern mit „Korrektur“): die
+    // falsche Angabe stand auch in ihrer Mitteilung, AEAO 1.16.3.1 kennt dafür keine Ausnahme, und die Bruttomethode führt sie in der nächsten Mitteilung der Stätte
+    // ohnehin mit (kein zusätzlicher Aufwand). korrektur_elster_am nur bei Korrektur, nicht vor der letzten Meldung der Stätte.
     const meldePflicht = typeof alt.gemeldet_am === 'string' && geaendert.some((f) => BS_MELDE_FELDER.includes(f));
     if (meldePflicht && !w.aenderung_art) return { antwort: h.formFehler({ code: 'FORMAT', feld: 'aenderung_art', grund: 'pflicht' }, cors) };
     const korrektur = meldePflicht && w.aenderung_art === 'korrektur';
@@ -630,7 +633,7 @@ export async function betriebsstaette(c, h, aktion) {
     const korrigiert = [];
     if (korrektur) {
       const betroffen = (await kassenLesen(fs, uid)).filter((d) => d.daten.betriebsstaette_id === id && typeof d.daten.gemeldet_am === 'string'
-        && typeof d.daten.ausser_betrieb_gemeldet_in !== 'string' && meldeAbleitung(d.daten).meldepflichtig === true).sort((a, b) => (idVon(a) < idVon(b) ? -1 : 1));
+        && meldeAbleitung(d.daten).meldepflichtig === true).sort((a, b) => (idVon(a) < idVon(b) ? -1 : 1));
       for (const d of betroffen) {
         const k = d.daten;
         const kid = idVon(d);
