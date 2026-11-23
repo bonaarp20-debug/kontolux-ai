@@ -1168,3 +1168,44 @@ test('W2-Recht Ä5: Wegstreckenzähler vor dem 01.07.2024 erstmals in Verkehr ge
   assert.equal(wegstreckeOhnePflicht({ art: 'taxameter', in_verkehr_gebracht: 'vor_2024_07' }), false);
   assert.equal(meldeAbleitung({ art: 'taxameter', angeschafft_am: '2026-11-02', in_verkehr_gebracht: 'vor_2024_07' }).meldestatus, 'offen');
 });
+
+test('O10 M2: Meldung mit einem Wegstreckenzähler „vor 01.07.2024“ in der Betriebsstätte: der Zähler bleibt ungemeldet und außerhalb des Schnappschusses; später meldepflichtig -> Anschaffungsereignis', async () => {
+  const u = umgebung();
+  const bs = await u.neueStaette();
+  const rk = await u.neueKasse({ betriebsstaette_id: bs, kuerzel: 'RK', angeschafft_am: '2026-10-15', tse: TSE, seriennummer: 'SN-R' });
+  const wz = await u.neueKasse({ betriebsstaette_id: bs, kuerzel: 'WZ', art: 'wegstreckenzaehler', grundaufzeichnung: 'tse_kasse', angeschafft_am: '2024-03-01', in_verkehr_gebracht: 'vor_2024_07' });
+  assert.equal(u.lies(`kassen/${wz}`).meldestatus, 'nicht_noetig');
+  const r = await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2026-11-18' });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.kassen_ids, [rk], 'nur die Registrierkasse ist gemeldet');
+  assert.deepEqual(r.json.kassen_offen, []);
+  const zaehler = u.lies(`kassen/${wz}`);
+  assert.deepEqual([zaehler.gemeldet_am ?? null, zaehler.letzte_meldung_id ?? null, zaehler.meldestatus], [null, null, 'nicht_noetig']);
+  const meldung = u.lies(`kassenmeldungen/${r.json.meldung_id}`);
+  assert.deepEqual(meldung.stand.map((s) => s.kasse_id), [rk], 'Schnappschuss ohne den Zähler');
+  assert.equal(meldung.anzahl_aktiv, 1);
+  // später: doch ab 08/2024 in Verkehr gebracht -> nie gemeldet, Frist aus dem Datum (Altfall: 31.07.2025, schon abgelaufen)
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: wz, in_verkehr_gebracht: 'ab_2024_07' })).status, 200);
+  const z2 = u.lies(`kassen/${wz}`);
+  assert.equal(z2.meldestatus, 'offen');
+  assert.equal(z2.frist_bis, '2025-07-31');
+  // nur ein „vor“-Zähler in der Stätte: keine Meldung annehmbar
+  const bs2 = await u.neueStaette({ bezeichnung: 'Taxi-Halle' });
+  await u.neueKasse({ betriebsstaette_id: bs2, kuerzel: 'W2', art: 'wegstreckenzaehler', grundaufzeichnung: 'tse_kasse', angeschafft_am: '2024-03-01', in_verkehr_gebracht: 'vor_2024_07' });
+  const r2 = await u.melden({ betriebsstaette_id: bs2, gemeldet_am: '2026-11-18' });
+  assert.deepEqual([r2.status, r2.json.fehler?.[0]?.code ?? r2.json.code], [422, 'KEINE_MELDEPFLICHTIGE_KASSE']);
+});
+
+test('O10 M2: Altdaten (Zähler „vor“ trotzdem mit Meldedatum) -> Wechsel auf meldepflichtig ergibt ein offenes Anschaffungsereignis (aenderung_offen), auch bei „weiß nicht“ und Wechsel der Art', () => {
+  const alt = { art: 'wegstreckenzaehler', angeschafft_am: '2026-08-10', in_verkehr_gebracht: 'vor_2024_07', gemeldet_am: '2026-09-01', letzte_meldung_id: 'mabcdefgh', melde_ereignisse: [], meldestatus: 'nicht_noetig' };
+  for (const neu of [{ ...alt, in_verkehr_gebracht: 'ab_2024_07' }, { ...alt, in_verkehr_gebracht: 'unbekannt' }, { ...alt, in_verkehr_gebracht: null }, { ...alt, art: 'taxameter' }]) {
+    const m = meldeNachAenderung(alt, neu, '2026-11-23');
+    assert.equal(m.meldestatus, 'aenderung_offen', JSON.stringify(neu));
+    assert.deepEqual(m.melde_ereignisse.map((e) => [e.anlass, e.am, e.frist_bis]), [['anschaffung', '2026-08-10', '2026-09-10']]);
+  }
+  // bleibt „vor“: nichts
+  assert.equal(meldeNachAenderung(alt, { ...alt, seriennummer: 'X' }, '2026-11-23').meldestatus, 'nicht_noetig');
+  // war nie „vor“ und ist gemeldet: unverändert (keine neue Frist)
+  const g = { ...alt, in_verkehr_gebracht: 'ab_2024_07' };
+  assert.equal(meldeNachAenderung(g, { ...g, in_verkehr_gebracht: 'unbekannt' }, '2026-11-23').meldestatus, 'gemeldet');
+});

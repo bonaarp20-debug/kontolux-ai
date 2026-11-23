@@ -246,6 +246,10 @@ export function meldeNachAenderung(alt, neu, heute, { korrekturElsterAm = null, 
     if (aenderungArt === 'korrektur') ev = ereignisSetzen(ev, angabeKorrektur(offen, a1.am, heute, korrekturElsterAm));
     else empfohlen = empfohlen || heute;
   }
+  // O10 M2: Ein Wegstreckenzähler „vor dem 01.07.2024“ war nicht mitzuteilen; eine Meldung der Betriebsstätte umfasste ihn deshalb nicht (kassenmeldungGemeldet
+  // nimmt ihn nicht auf, Altdaten vor diesem Fix trugen trotzdem gemeldet_am). Wird er später meldepflichtig (andere Antwort oder andere Art), gilt er als nie
+  // gemeldet: das Anschaffungsereignis kommt wieder (Frist aus dem Datum, auch schon abgelaufen; mit vermerkter Meldung Status aenderung_offen).
+  if (wegstreckeOhnePflicht(alt) && meldepflichtigArt(neu.art) && !wegstreckeOhnePflicht(neu) && !ev.some((e) => slot(e.anlass) === 'anschaffung')) ev = ereignisSetzen(ev, ereignis(a1.anlass, a1.am));
   const ab0 = geraetAusserBetriebAm(alt);
   const ab1 = geraetAusserBetriebAm(neu);
   // Antwort im Altfall geändert (O8 M1): „nein“ hatte die Ereignisse geleert, also die Außerbetriebnahme aus dem Datum wiederherstellen
@@ -680,7 +684,9 @@ export async function kassenmeldungGemeldet(c, h) {
     }
     const bd = docs.get(P.betriebsstaette(uid, bsId));
     if (!bd || !istObjekt(bd.daten)) return { antwort: fehlerAntwort(404, 'BETRIEBSSTAETTE_UNBEKANNT', cors, { feld: 'betriebsstaette_id' }) };
-    const hier = (await kassenLesen(fs, uid)).filter((d) => d.daten.betriebsstaette_id === bsId && meldepflichtigArt(d.daten.art)).sort((a, b) => (idVon(a) < idVon(b) ? -1 : 1));
+    // O10 M2: nur Kassen, die nach den Angaben meldepflichtig sind (wie die Ausfüllhilfe der App und die Betriebsstätten-Korrektur); ein Wegstreckenzähler
+    // „vor dem 01.07.2024“ steht nicht in der Mitteilung und bekommt weder Meldedatum noch Schnappschuss
+    const hier = (await kassenLesen(fs, uid)).filter((d) => d.daten.betriebsstaette_id === bsId && meldeAbleitung(d.daten).meldepflichtig === true).sort((a, b) => (idVon(a) < idVon(b) ? -1 : 1));
     if (!hier.length) return { antwort: fehlerAntwort(422, 'KEINE_MELDEPFLICHTIGE_KASSE', cors, { betriebsstaette_id: bsId }) };
     const ts = zeitstempel(zeit);
     const writes = [];
