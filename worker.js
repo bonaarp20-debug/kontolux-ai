@@ -19,7 +19,7 @@ import { regelAdminFeatures } from './regel/admin-features.js';
 import { regelOssMeldung } from './regel/oss-meldung.js'; // WORKER-C (Release C, BP-29)
 import { regelKasse, KASSE_PFADE } from './regel/kasse.js'; // KASSE-P1b: Kassenbuch (Feature kasse, Standard aus)
 import { regelKasseZbonLesen, KASSE_ZBON_PFAD } from './regel/kasse-zbon-ki.js'; // KASSE-P5-KI: Z-Bon lesen (Features kasse und kasse_ki, Standard aus)
-import { kassenPrueferDaten } from './regel/kasse-daten.js'; // KASSE-P1b: Prüfer-Daten Kassenbuch
+import { kassenPrueferDaten, kassenPrueferFortsetzung } from './regel/kasse-daten.js'; // KASSE-P1b: Prüfer-Daten Kassenbuch
 import { kassenAusgabeBeleg } from './regel/kasse-ausgabe.js'; // KASSE-P1b-4: Ausgabe aus der Kasse über den Beleg-Schreibweg v2
 import { regelEzbKurs } from './regel/ezb-kurs.js'; // WORKER-C (Release C, BP-29)
 import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // KX-WC2 (Release C, BP-30 DATEV-Teil)
@@ -408,6 +408,8 @@ const ROUTEN_LIMITS = {
   '/send-password-reset':   { limit: 5,  windowMs: 10 * 60 * 1000 },
   '/pruefer-daten':         { limit: 10, windowMs: 10 * 60 * 1000 },
   '/pruefer-datei':         { limit: 120, windowMs: 10 * 60 * 1000 },
+  // O9a M4: Etappen der Kassendaten (die Prüfer-Seite lädt ältere Jahre in Etappen nach; je Etappe ein eigenes Unteranfragen-Budget)
+  '/pruefer-kasse':         { limit: 60, windowMs: 10 * 60 * 1000 },
   '/konto-archivieren':     { limit: 3,  windowMs: 60 * 60 * 1000 },
   '/konto-art':              { limit: 10, windowMs: 10 * 60 * 1000 },
   '/anfrage':               { limit: 5,  windowMs: 60 * 60 * 1000 },
@@ -821,6 +823,8 @@ export default {
       if (url.pathname === '/pruefer-daten') return handlePrueferDaten(body, env, cors, authHeader);
       // H1-Fix: Datei des Prüferzugangs per POST (Token im Header, Pfad im Körper, nichts in der Adresse); gleicher Zugangsnachweis wie /pruefer-daten
       if (url.pathname === '/pruefer-datei') return handlePrueferDatei(body, env, cors, authHeader, limitIP);
+      // O9a M4: weitere Etappe der Kassendaten (gleicher Zugangsnachweis wie /pruefer-daten)
+      if (url.pathname === '/pruefer-kasse') return handlePrueferKasse(body, env, cors, authHeader);
       if (url.pathname === '/freigabe-status') {
         return new Response(JSON.stringify({ status: (await freigabeStatus(verifiedUid, env)) || 'frei' }), {
           status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
@@ -4507,6 +4511,25 @@ async function handlePrueferDatei(body, env, cors, authHeader, quelle = 'unknown
   } catch (e) {
     console.error('Prüfer-Datei Fehler'); // bewusst ohne Meldungstext: nichts mit Pfad, Token oder Adresse ins Protokoll
     return fehler(502, 'nicht_verfuegbar');
+  }
+}
+
+// O9a M4: /pruefer-kasse liest die Kassendaten an den Cursorn aus kassen_fortsetzung weiter (vorige Antwort von /pruefer-daten oder /pruefer-kasse). Gleicher
+// Zugangsnachweis wie /pruefer-daten (Token im Authorization-Header, gleiche generische Antwort bei unbekanntem Token), eigenes Ratenlimit, eigenes Budget je Etappe.
+// Nur Lesen; Dateiadressen wie bei /pruefer-daten durch Speicherpfade ersetzt.
+async function handlePrueferKasse(body, env, cors = {}, authHeader = null) {
+  const json = (o, status) => new Response(JSON.stringify(o), { status, headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  if (!token || token.length < 16 || token.length > 64) return json({ error: 'invalid' }, 400);
+  try {
+    const zugang = await prueferZugangPruefen(token, env);
+    if (!zugang) return json({ error: 'invalid' }, 404);
+    const kasse = await kassenPrueferFortsetzung(zugang.uid, zugang.adminToken, (...a) => fetch(...a), body && body.kassen_fortsetzung);
+    if (kasse.fehler) return json({ error: 'format' }, 400);
+    return json(prueferLinksErsetzen(kasse, zugang.uid), 200);
+  } catch (e) {
+    console.error('Prüfer-Kasse Fehler');
+    return json({ error: 'server_error' }, 500);
   }
 }
 

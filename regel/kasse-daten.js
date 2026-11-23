@@ -304,15 +304,37 @@ export async function kassenPrueferDaten(uid, token, fetchFn = globalThis.fetch,
   // Tage (mit Fassungen) und Bewegungen je Kasse, absteigend, reihum. Kassen mit eigenem Kassenbuch zuerst.
   const ids = kassen.map(idVon);
   const reihenfolge = [...ids].sort((a, b) => Number(kassenbuchLos(kassen, a)) - Number(kassenbuchLos(kassen, b)));
-  const stroeme = [];
-  for (const kid of reihenfolge) {
-    stroeme.push({ kid, art: 'tage', ab: null, fertig: false, vollAb: null, gelesen: false });
-    stroeme.push({ kid, art: 'bew', ab: null, fertig: false, vollAb: null, gelesen: false });
-  }
+  const stroeme = reihenfolge.flatMap((kid) => [neuerStrom(kid, 'tage'), neuerStrom(kid, 'bew')]);
+  const r = await stroemeLesen(fs, uid, stroeme, () => benutzt >= max);
+  for (const t of r.fehlt) fehlt.add(t);
+  aus.kassentage = r.kassentage;
+  aus.kassenbewegungen = r.kassenbewegungen;
+  if (r.unvollstaendigAb) { aus.kassen_unvollstaendig_ab = r.unvollstaendigAb; aus.kassen_fortsetzung = r.fortsetzung; }
+  return abschluss();
+}
+// ---------------------------------------------------------------------------------------------
+// Lesen in Strömen (O9a M4, Verschärfung): je Kasse ein Strom Tage und einer Bewegungen, absteigend, reihum bis zum Budget. Jeder Strom endet mit einem Cursor
+// (letzte gelesene ID). kassen_fortsetzung = { kasseId: { tage_ab, bew_ab } } (null = dieser Strom ist ganz gelesen) geht an /pruefer-kasse zurück; dort liest
+// kassenPrueferFortsetzung genau an dieser Stelle weiter (Etappen, jede mit eigenem Budget). So sieht der Prüfer auch bei sehr großen Konten zuerst die jüngsten
+// Tage jeder Kasse und lädt ältere Jahre lückenlos nach.
+// ---------------------------------------------------------------------------------------------
+const neuerStrom = (kid, art, ab = null) => ({ kid, art, ab, fertig: false, kaputt: false, vollAb: ab ? vollAbAusCursor(art, ab) : null });
+// Was vor dieser Etappe schon vollständig war: Tage bis einschließlich des Cursor-Tags (jeder Tagesplatz ist ein ganzer Tag, Fassungen kamen mit); Bewegungen erst ab
+// dem Tag nach dem Cursor-Tag (der Tag des Cursors kann weitere, ältere Nummern haben)
+function vollAbAusCursor(art, id) {
+  const t = tagAusId(id);
+  if (!t) return null;
+  return art === 'tage' ? t : Steuerkern.addiereTage(t, 1);
+}
+async function stroemeLesen(fs, uid, stroeme, budgetWeg) {
   const tage = [];
   const bewegungen = [];
   const fassungenJeTag = new Map();
   let budgetAus = false;
+  const merke = (e, sammlung, st) => {
+    if (budgetWeg()) budgetAus = true; else st.kaputt = true;
+    console.warn('pruefer_kasse_teil ' + JSON.stringify({ pfad: sammlung, art: String(e?.name || 'Error').slice(0, 40) }));
+  };
   while (!budgetAus && stroeme.some((x) => !x.fertig && !x.kaputt)) {
     for (const st of stroeme) {
       if (st.fertig || st.kaputt || budgetAus) continue;
@@ -320,15 +342,11 @@ export async function kassenPrueferDaten(uid, token, fetchFn = globalThis.fetch,
       const seite = st.art === 'tage' ? PRUEFER_TAGE_SEITE : PRUEFER_BEWEGUNGEN_SEITE;
       const [von, bis] = st.art === 'tage' ? [`${st.kid}_0000-00-00`, `${st.kid}_9999-99-99`] : [`${st.kid}_0000-00-00_000`, `${st.kid}_9999-99-99_999`];
       let r;
-      try { r = await fs.runQuery(`users/${uid}`, idBereich(uid, sammlung, von, bis, { absteigend: true, limit: seite, ab: st.ab })); } catch (e) {
-        if (benutzt >= max) budgetAus = true; else st.kaputt = true;
-        console.warn('pruefer_kasse_teil ' + JSON.stringify({ pfad: sammlung, art: String(e?.name || 'Error').slice(0, 40) }));
-        continue;
-      }
+      try { r = await fs.runQuery(`users/${uid}`, idBereich(uid, sammlung, von, bis, { absteigend: true, limit: seite, ab: st.ab })); } catch (e) { merke(e, sammlung, st); continue; }
       const seitenTage = r.map((d) => tagAusId(idVon(d))).filter(Boolean);
       if (st.art === 'tage') {
-        tage.push(...r);
-        // Fassungen dieser Tage (alle, auch stornierte), je höchstens 100 Pfade in einem batchGet
+        // Fassungen dieser Tage (alle, auch stornierte), je höchstens 100 Pfade in einem batchGet. Scheitert das, bleibt der Cursor stehen: die nächste Etappe liest
+        // diese Seite noch einmal (die Seite ersetzt die Tage dann über die ID).
         const pfade = r.flatMap((d) => (istObjektRoh(d.daten) ? fassungsNummern(d.daten).map((n) => P.fassung(uid, idVon(d), n)) : []));
         let fassungenOk = true;
         for (let i = 0; i < pfade.length && fassungenOk; i += PRUEFER_FASSUNGEN_JE_BATCH) {
@@ -340,42 +358,81 @@ export async function kassenPrueferDaten(uid, token, fetchFn = globalThis.fetch,
               if (!fassungenJeTag.has(t[3])) fassungenJeTag.set(t[3], []);
               fassungenJeTag.get(t[3]).push({ n: Number(t[5]), ...d.daten });
             }
-          } catch (e) {
-            fassungenOk = false;
-            if (benutzt >= max) budgetAus = true; else st.kaputt = true;
-            console.warn('pruefer_kasse_teil ' + JSON.stringify({ pfad: 'fassungen', art: String(e?.name || 'Error').slice(0, 40) }));
-          }
+          } catch (e) { fassungenOk = false; merke(e, 'fassungen', st); }
         }
-        if (!fassungenOk) { st.fassungenFehlen = true; continue; }
-        st.gelesen = true;
+        tage.push(...r);
+        if (!fassungenOk) continue;
         if (r.length < seite) { st.fertig = true; continue; }
-        st.vollAb = seitenTage[seitenTage.length - 1] || st.vollAb; // jeder Tagesplatz ist ein ganzer Tag
+        st.vollAb = seitenTage[seitenTage.length - 1] || st.vollAb;
       } else {
         bewegungen.push(...r);
-        st.gelesen = true;
         if (r.length < seite) { st.fertig = true; continue; }
-        // der älteste Tag der Seite kann noch weitere (ältere Nummern) haben: vollständig erst ab dem Tag danach
         const aeltester = seitenTage[seitenTage.length - 1];
         st.vollAb = aeltester ? Steuerkern.addiereTage(aeltester, 1) : st.vollAb;
       }
       st.ab = idVon(r[r.length - 1]);
     }
   }
+  const fehlt = new Set();
   const unvollstaendigAb = {};
+  const fortsetzung = {};
   for (const st of stroeme) {
+    if (!fortsetzung[st.kid]) fortsetzung[st.kid] = { tage_ab: null, bew_ab: null };
     if (st.fertig) continue;
     fehlt.add(st.art === 'tage' ? 'kassentage' : 'kassenbewegungen');
     if (st.art === 'tage') fehlt.add('fassungen');
+    // Cursor: '' = noch nichts gelesen (von vorn), sonst die letzte gelesene ID
+    fortsetzung[st.kid][st.art === 'tage' ? 'tage_ab' : 'bew_ab'] = st.ab || '';
     const bisher = Object.hasOwn(unvollstaendigAb, st.kid) ? unvollstaendigAb[st.kid] : undefined;
     // die strengere Grenze gilt: der spätere Tag; null (nichts vollständig) schlägt jeden Tag
     unvollstaendigAb[st.kid] = bisher === null || st.vollAb === null ? null : bisher === undefined || st.vollAb > bisher ? st.vollAb : bisher;
   }
-  aus.kassentage = tage.map((d) => {
+  for (const kid of Object.keys(fortsetzung)) if (fortsetzung[kid].tage_ab === null && fortsetzung[kid].bew_ab === null) delete fortsetzung[kid];
+  const kassentage = tage.map((d) => {
     const alle = (fassungenJeTag.get(idVon(d)) || []).sort((a, b) => a.n - b.n).map((f) => ({ ...f, aktiv: f.n === d.daten.fassung_aktiv }));
     return { ...mitId(d), fassungen: alle };
   });
-  aus.kassenbewegungen = bewegungen.map(mitId);
-  if (Object.keys(unvollstaendigAb).length) aus.kassen_unvollstaendig_ab = unvollstaendigAb;
-  return abschluss();
+  return { kassentage, kassenbewegungen: bewegungen.map(mitId), fehlt: [...fehlt], unvollstaendigAb: Object.keys(unvollstaendigAb).length ? unvollstaendigAb : null, fortsetzung };
+}
+
+// /pruefer-kasse (Etappe): liest an den Cursorn aus kassen_fortsetzung weiter, nur Tage (mit Fassungen) und Bewegungen. fortsetzung ist ungeprüfte Eingabe des Prüfers:
+// höchstens PRUEFER_FORTSETZUNG_KASSEN Kassen, Kassen-ID ohne „/“, jeder Cursor leer, null oder eine ID genau dieser Kasse. Alles läuft unter users/{uid} (die UID kommt
+// aus dem geprüften Prüferzugang, nie aus dem Körper). Rückgabe wie kassenPrueferDaten (nur die Kassenbuch-Listen) oder { fehler } bei falscher Form.
+export const PRUEFER_FORTSETZUNG_KASSEN = 50;
+export const PRUEFER_ETAPPE_UNTERANFRAGEN_MAX = 40;
+const FORTSETZUNG_KASSE = /^[A-Za-z0-9-]{1,64}$/; // ohne „_“: der ID-Bereich {kasseId}_… trifft nie eine andere Kasse
+export function fortsetzungPruefen(f) {
+  if (!istObjektRoh(f)) return null;
+  const e = Object.entries(f);
+  if (!e.length || e.length > PRUEFER_FORTSETZUNG_KASSEN) return null;
+  const aus = [];
+  for (const [kid, c] of e) {
+    if (!FORTSETZUNG_KASSE.test(kid) || !istObjektRoh(c) || Object.keys(c).some((k) => !['tage_ab', 'bew_ab'].includes(k))) return null;
+    const tagOk = (x) => x === null || x === undefined || x === '' || (typeof x === 'string' && x.length <= 200 && x.startsWith(`${kid}_`) && /^\d{4}-\d{2}-\d{2}$/.test(x.slice(kid.length + 1)));
+    const bewOk = (x) => x === null || x === undefined || x === '' || (typeof x === 'string' && x.length <= 200 && x.startsWith(`${kid}_`) && /^\d{4}-\d{2}-\d{2}_\d{3}$/.test(x.slice(kid.length + 1)));
+    if (!tagOk(c.tage_ab) || !bewOk(c.bew_ab)) return null;
+    aus.push({ kid, tage_ab: c.tage_ab ?? null, bew_ab: c.bew_ab ?? null });
+  }
+  return aus;
+}
+export async function kassenPrueferFortsetzung(uid, token, fetchFn = globalThis.fetch, fortsetzung, { max = PRUEFER_ETAPPE_UNTERANFRAGEN_MAX } = {}) {
+  const liste = fortsetzungPruefen(fortsetzung);
+  if (!liste) return { fehler: 'FORMAT' };
+  let benutzt = 0;
+  const zaehlend = (...a) => { if (benutzt >= max) throw new Error('Prüfer-Kassendaten: Unteranfragen-Budget erschöpft'); benutzt += 1; return fetchFn(...a); };
+  const fs = erzeugeSchicht({ token, fetchFn: zaehlend, budget: max });
+  const stroeme = [];
+  for (const x of liste) {
+    if (x.tage_ab !== null) stroeme.push(neuerStrom(x.kid, 'tage', x.tage_ab || null));
+    if (x.bew_ab !== null) stroeme.push(neuerStrom(x.kid, 'bew', x.bew_ab || null));
+  }
+  const r = await stroemeLesen(fs, uid, stroeme, () => benutzt >= max);
+  const aus = { kassentage: r.kassentage, kassenbewegungen: r.kassenbewegungen, kassen_unvollstaendig: r.fehlt.length > 0 };
+  if (r.fehlt.length) {
+    aus.kassen_unvollstaendig_teile = PRUEFER_TEILE.filter((t) => r.fehlt.includes(t));
+    aus.kassen_unvollstaendig_ab = r.unvollstaendigAb;
+    aus.kassen_fortsetzung = r.fortsetzung;
+  }
+  return aus;
 }
 const kassenbuchLos = (kassen, id) => { const d = kassen.find((x) => idVon(x) === id); return Boolean(d && istObjektRoh(d.daten) && d.daten.kassenbuch === false); };
