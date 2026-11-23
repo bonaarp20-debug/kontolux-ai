@@ -22,7 +22,7 @@ import { legacyHash } from './drift.js';
 import { heuteBerlin } from './oss-meldung.js';
 import { KASSE_PFADE, FEATURE, aufbewahrungBis, anhaengePruefen, nachweisPflicht, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, pruefeBewegung, kernFassung, stammKombination, PRIVAT_ARTEN, K3_INAKTIV_ERLAUBT, INAKTIV_FRAGEN_SCHLUESSEL } from './kasse-form.js';
 import {
-  ausserBetrieb, ausserBetriebAufheben, betriebsstaette, kassenmeldungGemeldet, protokollNachreichen, inaktivAngaben, meldeAbleitung, meldeNachAenderung, k3Konsistenz, betriebsstaetteZuordnung, meldepflichtigArt,
+  ausserBetrieb, ausserBetriebAufheben, betriebsstaette, kassenmeldungGemeldet, protokollNachreichen, inaktivAngaben, meldeAbleitung, meldeNachAenderung, korrekturFaellt, k3Konsistenz, betriebsstaetteZuordnung, meldepflichtigArt,
   ohneSystemDaten, ereignis, ereignisSetzen, anschaffungsEreignis, K3_LEER,
 } from './kasse-register.js';
 import {
@@ -309,7 +309,11 @@ async function kasseAktion(c, aktion) {
       const k3f = k3Konsistenz({ ...alt, ...neu });
       if (k3f) return { antwort: formFehler(k3f, cors) };
       // Meldestatus und Frist (Anschaffung neu/geändert -> Frist aus dem Kern; sonst nach einer Meldung „Aktualisierung empfohlen“)
-      const m = meldeNachAenderung(alt, { ...alt, ...neu }, heute);
+      // O9a M1: korrektur_elster_am nur bei einer echten Korrektur und nicht vor der Meldung, die das alte Datum trug (sonst 400, nichts geschrieben)
+      const kea = w.korrektur_elster_am ?? null;
+      if (kea && !korrekturFaellt(alt, { ...alt, ...neu })) return { antwort: formFehler({ code: 'FORMAT', feld: 'korrektur_elster_am', grund: 'keine_korrektur' }, cors) };
+      if (kea && kea < alt.gemeldet_am) return { antwort: formFehler({ code: 'FORMAT', feld: 'korrektur_elster_am', grund: 'vor_meldung', gemeldet_am: alt.gemeldet_am }, cors) };
+      const m = meldeNachAenderung(alt, { ...alt, ...neu }, heute, { korrekturElsterAm: kea });
       Object.assign(neu, m);
       if (m.meldestatus !== alt.meldestatus || m.frist_bis !== (alt.frist_bis ?? null)) geaendert.push('meldestatus');
     } else {
@@ -361,7 +365,7 @@ async function kasseAktion(c, aktion) {
     writes.push(schreibe.setzen(P.kasse(uid, id), neuKasse, { updateTime: kasseDok.updateTime }));
     if (archiv) writes.push(schreibe.anlegen(P.kasse(uid, archiv.id), archiv.daten));
     const aktionAudit = aktion === 'aendern' ? 'kasse_aendern' : 'kasse_system_wechseln';
-    const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{ aktion: aktionAudit, ziel: `kassen/${id}`, vorher: alt, nachher: neuKasse, details: { kasse_id: id, felder: [...new Set(geaendert)].sort().slice(0, 20) } }], zeit);
+    const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{ aktion: aktionAudit, ziel: `kassen/${id}`, vorher: alt, nachher: neuKasse, details: { kasse_id: id, felder: [...new Set(geaendert)].sort().slice(0, 20), ...(w.korrektur_elster_am ? { korrektur_elster_am: w.korrektur_elster_am } : {}) } }], zeit);
     return { writes: [...writes, ...audit.writes], erfolg: () => antwort({ ok: true, kasse_id: id, ...(archiv ? { archiv_kasse_id: archiv.id } : {}) }, 200, cors) };
   });
 }
@@ -1053,9 +1057,13 @@ async function bewegungStornieren(c) {
     // O8 H2: kein Storno in einer Kasse außer Betrieb und keiner, dessen Gegenkasse (Geldtransit) außer Betrieb ist (deren Bestand ist 0 und bleibt es; der Storno
     // nähme die Gegenbuchung dort nicht zurück)
     if (kasseDok.daten.aktiv === false) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors) };
+    // O9a N6: die Gegenkasse muss bis zum Commit aktiv bleiben. Ihr gelesener Stand kommt als Vorbedingung in denselben Commit (Schreibvorgang ohne Änderung:
+    // aktiv true bleibt true, mit updateTime-Vorbedingung); zusätzlich serialisiert der Audit-Kopf alle Kassen-Commits eines Kontos. Eine gleichzeitige
+    // Außerbetriebnahme der Gegenkasse lässt den Commit scheitern, die Wiederholung liest neu und lehnt mit 422 ab.
+    let gegenDok = null;
     if (typeof orig.gegenkasse_id === 'string' && orig.gegenkasse_id) {
-      const gegen = await fs.get(P.kasse(uid, orig.gegenkasse_id));
-      if (gegen && istObjekt(gegen.daten) && gegen.daten.aktiv === false) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors, { feld: 'gegenkasse_id' }) };
+      gegenDok = await fs.get(P.kasse(uid, orig.gegenkasse_id));
+      if (gegenDok && istObjekt(gegenDok.daten) && gegenDok.daten.aktiv === false) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors, { feld: 'gegenkasse_id' }) };
     }
     if (orig.art === 'storno') return { antwort: fehlerAntwort(409, 'STORNO_VON_STORNO', cors) };
     if (bisher.some((d) => d.daten.storno_von === origId)) return { antwort: fehlerAntwort(409, 'BEWEGUNG_STORNIERT', cors, { bewegung_id: origId }) };
@@ -1102,6 +1110,7 @@ async function bewegungStornieren(c) {
       kassennummer: nummer, erfasst_am: ts, anfrage_id: body.anfrage_id, aufbewahrung_bis: aufbewahrungBis(tag),
     };
     writes.unshift(schreibe.anlegen(P.bewegung(uid, stornoId), bewegung), schreibe.setzen(P.zaehler(uid, kasseId, jahr), { letzte: nummerNeu, aktualisiert_am: ts }, zaehlerDok ? { updateTime: zaehlerDok.updateTime } : { exists: false }));
+    if (gegenDok && istObjekt(gegenDok.daten) && gegenDok.daten.aktiv === true && gegenDok.updateTime) writes.push(schreibe.aendern(P.kasse(uid, orig.gegenkasse_id), { aktiv: true }, ['aktiv'], { updateTime: gegenDok.updateTime }));
     const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{
       aktion: 'kassenbewegung_storno', ziel: `kassenbewegungen/${stornoId}`, vorher: orig, nachher: bewegung,
       details: { kasse_id: kasseId, bewegung_id: stornoId, storno_von: origId, art: orig.art, nach_festschreibung: gesperrt.length > 0 },

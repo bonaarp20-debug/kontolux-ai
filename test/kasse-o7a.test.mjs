@@ -38,11 +38,15 @@ test('O7a H2: Budget reicht nur für die Kassenliste → die Kasse ist trotzdem 
 
 test('O7a H2: Teilergebnisse je Sammlung bleiben: gelesene Seiten der Kassentage, Betriebsstätten, Meldungen, Verlauf; nur das Fehlende ist gemeldet', async () => {
   const fs = konto({ tage: 301 });
-  // Anfragen: kassen 1, betriebsstaetten 1, kassenmeldungen 1, verlauf 1, kassentage Seite 1 (300) = 5; Seite 2 scheitert
+  // Anfragen: kassen 1, betriebsstaetten 1, kassenmeldungen 1, verlauf 1, kassentage Seite 1 (100 jüngste, ohne Fassungen) = 5; die Bewegungen scheitern
+  // (O9a M4: absteigend je Kasse, Seite 100 Tage)
   const d = await kassenPrueferDaten(UID, 't', fs.fetchFn, { max: 5 });
   assert.equal(d.kassen.length, 1); assert.equal(d.betriebsstaetten.length, 1); assert.equal(d.kassenmeldungen.length, 1);
   assert.deepEqual(d.kassen[0].verlauf.map((v) => v.felder), [['bezeichnung'], ['ruhetage_wochentage']], 'ausgelagerter plus gespeicherter Verlauf');
-  assert.equal(d.kassentage.length, 300, 'die erste Seite bleibt');
+  assert.equal(d.kassentage.length, 100, 'die erste Seite bleibt');
+  const tag = (i) => new Date(Date.UTC(2020, 0, 1 + i)).toISOString().slice(0, 10);
+  assert.equal(d.kassentage[0].geschaeftstag, tag(300), 'jüngster Tag zuerst');
+  assert.deepEqual(d.kassen_unvollstaendig_ab, { [KID]: null }, 'Bewegungen gar nicht gelesen: kein Tag vollständig');
   assert.equal(d.kassen_unvollstaendig, true);
   assert.deepEqual(d.kassen_unvollstaendig_teile, ['kassentage', 'fassungen', 'kassenbewegungen']);
 });

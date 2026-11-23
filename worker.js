@@ -7334,7 +7334,20 @@ function regelAbhaengigkeiten(env) {
     storageUrlOk: storageUrlGehoertDemNutzer,
     heute: () => berlinDatumAlsString(),
     kassenAusgabeBeleg, // KASSE-P1b-4 (2.12 M16): Eingangsbeleg zur Kassenausgabe (v2Entscheiden, Altfelder, legacy_hash, Duplikat-Backstop), schreibt nichts
+    // O9a N4: liegt das ELSTER-Protokoll wirklich im Speicher? Nur Metadaten (fields=name), beide Buckets; 404 überall = false, andere Fehler werfen (503, fail-closed)
+    storageVorhanden: (pfad) => storageObjektVorhanden(env, pfad),
   };
+}
+async function storageObjektVorhanden(env, pfad) {
+  const t = await getGoogleAccessToken(env, STORAGE_SCOPE);
+  let infra = false;
+  for (const bucket of STORAGE_BUCKETS) {
+    const r = await fetch(`https://storage.googleapis.com/storage/v1/b/${bucket}/o/${encodeURIComponent(pfad)}?fields=name`, { headers: { Authorization: `Bearer ${t}` } });
+    if (r.ok) return true;
+    if (r.status !== 404) infra = true;
+  }
+  if (infra) throw new Error('Speicher nicht erreichbar');
+  return false;
 }
 
 // ── Steuerkern im WARNMODUS (Regelbesteuerung AP1.8, Konzept 2.3/2.5/2.6) ───────────────────────────

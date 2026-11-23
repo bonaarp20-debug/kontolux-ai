@@ -57,7 +57,10 @@ export function geraetAusserBetriebAm(k) {
 // Altfall BMF 28.06.2024 I (O8 M1): vor dem 01.07.2025 endgültig außer Betrieb genommene Systeme sind nur mitzuteilen, wenn die Anschaffung zu diesem Zeitpunkt
 // schon gemeldet war. Ist in Kontolux eine Meldung bis zu diesem Tag vermerkt, ist das bekannt (kein Altfall im Sinne der Frage); sonst fragt die App
 // (altfall_anschaffung_gemeldet: true/false, null = unbeantwortet).
+// O9a M2: nur, wenn das Gerät ausdrücklich endgültig außer Betrieb ist (geraet_endgueltig === true). Unbeantwortet (null) ist kein Altfall: die Ausnahme setzt
+// „endgültig außer Betrieb … nicht mehr vorgehalten“ voraus; ein Reservegerät ist Altbestand und war bis 31.07.2025 mitzuteilen. Erst „endgültig?“, dann die Altfrage.
 export function altfallAusserBetrieb(k) {
+  if (!istObjekt(k) || k.geraet_endgueltig !== true) return false;
   const d = geraetAusserBetriebAm(k);
   return Boolean(d && d < Steuerkern.KASSENMELDUNG_BEGINN && !(typeof k.gemeldet_am === 'string' && k.gemeldet_am <= d));
 }
@@ -83,7 +86,18 @@ export function ereignis(anlass, am, { anschaffungFehlt = false } = {}) {
 }
 
 const ereignisGueltig = (e) => istObjekt(e) && MELDEANLAESSE.includes(e.anlass) && (e.am === null || istDatum(e.am)) && (e.frist_bis === null || istDatum(e.frist_bis));
-const ereignisseAus = (k) => (Array.isArray(k.melde_ereignisse) ? k.melde_ereignisse.filter(ereignisGueltig).map((e) => ({ anlass: e.anlass, am: e.am ?? null, frist_bis: e.frist_bis ?? null, hinweis: FRIST_HINWEISE.includes(e.hinweis) ? e.hinweis : null })) : []);
+// geleert_am (O9a N2): Tag, an dem das Datum eines offenen Ereignisses geleert wurde (nur bei am null mit Frist); erledigt wird es nur durch eine Meldung ab diesem Tag
+const ereignisseAus = (k) => (Array.isArray(k.melde_ereignisse) ? k.melde_ereignisse.filter(ereignisGueltig).map((e) => ({
+  anlass: e.anlass, am: e.am ?? null, frist_bis: e.frist_bis ?? null, hinweis: FRIST_HINWEISE.includes(e.hinweis) ? e.hinweis : null,
+  ...(e.am == null && istDatum(e.geleert_am) ? { geleert_am: e.geleert_am } : {}),
+})) : []);
+// Bleibt ein Ereignis nach einer Meldung mit Datum gemeldetAm offen? (rein; O9a N2) Mit Datum: liegt es nach dem Meldedatum. Ohne Datum, aber mit Frist (Datum
+// geleert, O8 H1): offen, außer die Meldung liegt am oder nach dem Tag des Leerens (ohne bekannten Tag nie still erledigt). Ohne Datum und ohne Frist (nie erfasst): erledigt.
+export function bleibtOffen(e, gemeldetAm) {
+  if (typeof e.am === 'string') return e.am > gemeldetAm;
+  if (!e.frist_bis) return false;
+  return !(typeof e.geleert_am === 'string' && gemeldetAm >= e.geleert_am);
+}
 export function ereignisSetzen(liste, e) {
   return [...(liste || []).filter((x) => slot(x.anlass) !== slot(e.anlass)), e].sort((a, b) => (slot(a.anlass) === 'anschaffung' ? -1 : 1) - (slot(b.anlass) === 'anschaffung' ? -1 : 1));
 }
@@ -130,12 +144,26 @@ function nieSpaeter(e, offen) {
 // Korrektur eines schon gemeldeten Anschaffungsdatums (O8 M4, Anwaltsfrage): Ereignis am Korrekturtag. Frist: die gesetzliche Monatsfrist aus dem korrigierten
 // Datum, solange sie noch läuft (nie später als das Gesetz); ist sie schon abgelaufen, ein Monat ab dem Korrekturtag (kein sofortiges „überfällig“ für einen Tippfehler,
 // keine Frist vor dem Korrekturtag).
-export function korrekturEreignis(am, heute) {
+// O9a M1: elsterAm = Tag, an dem der Nutzer die Korrektur laut eigener Angabe schon in Mein ELSTER mitgeteilt hat (nicht vor der Meldung, die das alte Datum trug,
+// nicht nach heute; der Handler prüft das). Dann liegt das Ereignis an diesem Tag, und die Meldung mit diesem Datum erledigt es (keine falsche Angabe nötig).
+// Ohne Angabe bleibt es beim Korrekturtag in Kontolux (keine geratene Erledigung). Die Frist rechnet in beiden Fällen ab heute wie bisher.
+export function korrekturEreignis(am, heute, elsterAm = null) {
   const ausDatum = Steuerkern.kassenmeldeFrist(am);
   const ausKorrektur = Steuerkern.kassenmeldeFrist(heute);
   if (!ausDatum || !ausKorrektur) throw new Error('Meldefrist: Datum unlesbar');
-  return { anlass: 'korrektur', am: heute, frist_bis: ausDatum >= heute ? ausDatum : ausKorrektur, hinweis: null };
+  return { anlass: 'korrektur', am: istDatum(elsterAm) ? elsterAm : heute, frist_bis: ausDatum >= heute ? ausDatum : ausKorrektur, hinweis: null };
 }
+// Ergibt die Änderung alt -> neu eine Korrektur eines schon gemeldeten Datums (Zweig korrekturEreignis in meldeNachAenderung)? Rein; für die Prüfung von
+// korrektur_elster_am (O9a M1) im Handler und in der App gleich gerechnet.
+export function korrekturFaellt(alt, neu) {
+  const a0 = anschaffungsEreignis(alt);
+  const a1 = anschaffungsEreignis(neu);
+  const offen = ereignisseAus(alt).find((e) => slot(e.anlass) === 'anschaffung') || null;
+  return typeof neu.gemeldet_am === 'string' && (a0.am !== a1.am || a0.anlass !== a1.anlass) && Boolean(a1.am) && Boolean(a0.am) && (!offen || offen.anlass === 'korrektur');
+}
+// O9a N1: eine schon abgelaufene Frist wird nie still „geheilt“: wandert das Datum eines offenen Ereignisses nach hinten, während dessen Frist schon vorbei ist, bleibt
+// die alte Frist (Hinweis frist_frueher). Solange die Frist läuft, darf ein Tippfehler korrigiert werden (wie bisher bei der Anschaffung). Gemeldet werden muss ohnehin.
+const nieHeilen = (e, offen, heute) => (offen && offen.frist_bis && offen.frist_bis < heute ? nieSpaeter(e, offen) : e);
 
 // Register-Angaben, deren Änderung nach einer Meldung eine Aktualisierung empfiehlt, aber keine Frist auslöst (Software-Version nicht: Updates müssen nicht
 // gemeldet werden, Ausfüllanleitung 02.12.2024; TSE-Wechsel nicht mitteilungspflichtig, FAQ Mitteilungspflicht 11)
@@ -147,7 +175,7 @@ const gleich = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
 //   Nach einer Meldung, die das bisherige Datum schon umfasste: Korrektur (korrekturEreignis); erstmals eingetragenes Datum bis zum Meldedatum ist von der Meldung gedeckt.
 //   Sonst (noch nicht gemeldet bzw. Ereignis nach dem Meldedatum): Ereignis aus dem neuen Datum; Wechsel Anschaffung <-> TSE-Ausrüstung behält die frühere Frist (O8 M5).
 //   Außerbetriebnahme des Geräts (geraet_endgueltig, geraet_ausser_betrieb_am) neu oder geändert: Ereignis neu, solange sie nicht gemeldet ist (O8 M2).
-export function meldeNachAenderung(alt, neu, heute) {
+export function meldeNachAenderung(alt, neu, heute, { korrekturElsterAm = null } = {}) {
   let ev = ereignisseAus(alt);
   let empfohlen = typeof alt.aenderung_empfohlen_seit === 'string' ? alt.aenderung_empfohlen_seit : null;
   const gemeldet = typeof neu.gemeldet_am === 'string';
@@ -156,16 +184,16 @@ export function meldeNachAenderung(alt, neu, heute) {
   const offen = ev.find((e) => slot(e.anlass) === 'anschaffung') || null;
   if (a0.am !== a1.am || a0.anlass !== a1.anlass) {
     if (!a1.am) {
-      if (offen) ev = ereignisSetzen(ev, offen.anlass === 'korrektur' ? offen : { anlass: a1.anlass, am: null, frist_bis: offen.frist_bis, hinweis: 'anschaffung_fehlt' });
+      if (offen) ev = ereignisSetzen(ev, offen.anlass === 'korrektur' ? offen : { anlass: a1.anlass, am: null, frist_bis: offen.frist_bis, hinweis: 'anschaffung_fehlt', ...(offen.frist_bis ? { geleert_am: offen.geleert_am || heute } : {}) });
       else if (gemeldet) empfohlen = empfohlen || heute;
       else ev = ereignisSetzen(ev, ereignis(a1.anlass, null));
     } else if (gemeldet && (!offen || offen.anlass === 'korrektur')) {
-      if (a0.am) ev = ereignisSetzen(ev, nieSpaeter(korrekturEreignis(a1.am, heute), offen));
+      if (a0.am) ev = ereignisSetzen(ev, nieSpaeter(korrekturEreignis(a1.am, heute, korrekturElsterAm), offen));
       else if (a1.am > neu.gemeldet_am) ev = ereignisSetzen(ev, nieSpaeter(ereignis(a1.anlass, a1.am), offen));
       // sonst: erstmals eingetragenes Datum, das vor der Meldung lag: die Meldung umfasste die Kasse schon (Bruttomethode), nichts Neues
     } else {
       const e = ereignis(a1.anlass, a1.am);
-      ev = ereignisSetzen(ev, offen && offen.anlass !== a1.anlass ? nieSpaeter(e, offen) : e);
+      ev = ereignisSetzen(ev, offen && offen.anlass !== a1.anlass ? nieSpaeter(e, offen) : nieHeilen(e, offen, heute));
     }
   } else if (gemeldet && EMPFOHLEN_FELDER.some((f) => !gleich(alt[f], neu[f]))) empfohlen = empfohlen || heute;
   const ab0 = geraetAusserBetriebAm(alt);
@@ -174,7 +202,7 @@ export function meldeNachAenderung(alt, neu, heute) {
   const altfallWechsel = (alt.altfall_anschaffung_gemeldet ?? null) !== (neu.altfall_anschaffung_gemeldet ?? null);
   if ((ab0 !== ab1 || altfallWechsel) && typeof neu.ausser_betrieb_gemeldet_in !== 'string') {
     if (!ab1) ev = ereignisOhne(ev, 'ausserbetriebnahme');
-    else if (ab0 !== ab1 || !ev.some((e) => e.anlass === 'ausserbetriebnahme')) ev = ereignisSetzen(ev, ereignis('ausserbetriebnahme', ab1));
+    else if (ab0 !== ab1 || !ev.some((e) => e.anlass === 'ausserbetriebnahme')) ev = ereignisSetzen(ev, nieHeilen(ereignis('ausserbetriebnahme', ab1), ev.find((e) => e.anlass === 'ausserbetriebnahme'), heute));
   }
   return meldeAbleitung({ ...neu, melde_ereignisse: ev, aenderung_empfohlen_seit: empfohlen });
 }
@@ -324,6 +352,17 @@ const PROTOKOLL_REST = /^\d{13}_(?!\.+$)[A-Za-z0-9._-]{1,100}$/;
 export function protokollPfadOk(pfad, { uid, meldungId }) {
   const p = PROTOKOLL_PRAEFIX(uid, meldungId);
   return typeof pfad === 'string' && pfad.length <= 300 && pfad.startsWith(p) && PROTOKOLL_REST.test(pfad.slice(p.length)) && !pfad.includes('..');
+}
+
+// O9a N4: das Protokoll muss im Speicher liegen, bevor sein Pfad an eine Meldung kommt (ein Pfad ohne Datei wäre ein toter Verweis für den Prüfer, und das echte
+// Protokoll ließe sich nie mehr anhängen: der Pfad ist endgültig). c.deps.storageVorhanden(pfad) -> true | false, wirft bei Speicherfehlern. Fehlt die Abhängigkeit
+// oder scheitert die Prüfung: 503, nichts geschrieben (fail-closed). Löschen erlauben die Storage-Rules nicht: eine einmal geprüfte Datei bleibt.
+export async function protokollPruefen(c, pfad) {
+  const f = c.deps && typeof c.deps.storageVorhanden === 'function' ? c.deps.storageVorhanden : null;
+  if (!f) return fehlerAntwort(503, 'SPEICHER_NICHT_ERREICHBAR', c.cors, { feld: 'protokoll_pfad' });
+  let da;
+  try { da = await f(pfad); } catch { return fehlerAntwort(503, 'SPEICHER_NICHT_ERREICHBAR', c.cors, { feld: 'protokoll_pfad' }); }
+  return da === true ? null : fehlerAntwort(422, 'PROTOKOLL_FEHLT', c.cors, { feld: 'protokoll_pfad' });
 }
 
 export function pruefeMeldung(body, { heute }) {
@@ -539,6 +578,7 @@ export async function kassenmeldungGemeldet(c, h) {
   const w = f.wert;
   const meldungId = await meldungIdAus(uid, body.anfrage_id);
   if (w.protokoll_pfad !== null && !protokollPfadOk(w.protokoll_pfad, { uid, meldungId })) return fehlerAntwort(400, 'ANHANG_FREMD', cors, { feld: 'protokoll_pfad', praefix: PROTOKOLL_PRAEFIX(uid, meldungId) });
+  if (w.protokoll_pfad !== null) { const pf = await protokollPruefen(c, w.protokoll_pfad); if (pf) return pf; }
   const bsId = w.betriebsstaette_id;
   return h.mitWiederholung(fs, async () => {
     const docs = await fs.batchGet([P.meldung(uid, meldungId), P.betriebsstaette(uid, bsId), kopfPfad(uid)]);
@@ -562,18 +602,22 @@ export async function kassenmeldungGemeldet(c, h) {
       const k = d.daten;
       const kid = idVon(d);
       const ev = meldeAbleitung(k).melde_ereignisse;
-      const bleibt = ev.filter((e) => typeof e.am === 'string' && e.am > w.gemeldet_am);
+      const bleibt = ev.filter((e) => bleibtOffen(e, w.gemeldet_am));
       const erledigt = ev.filter((e) => !bleibt.includes(e));
       for (const e of erledigt) anlaesse.add(e.anlass);
       const empfohlenErledigt = typeof k.aenderung_empfohlen_seit === 'string' && k.aenderung_empfohlen_seit <= w.gemeldet_am;
-      const neuer = typeof k.gemeldet_am !== 'string' || w.gemeldet_am >= k.gemeldet_am;
+      // O9a N3: Meldedatum und letzte Meldung nur, wenn die Meldung diese Kasse umfasste: ein Ereignis erledigt, eine empfohlene Aktualisierung erledigt, die Kasse
+      // war schon gemeldet, oder sie war zum Meldedatum angeschafft. Eine nachträglich erfasste ältere Meldung macht ein später angeschafftes System nicht „gemeldet“.
+      const an = anschaffungsEreignis(k).am;
+      const umfasst = erledigt.length > 0 || empfohlenErledigt || typeof k.gemeldet_am === 'string' || (typeof an === 'string' && an <= w.gemeldet_am);
+      const neuer = umfasst && (typeof k.gemeldet_am !== 'string' || w.gemeldet_am >= k.gemeldet_am);
       const roh = {
         ...k, melde_ereignisse: bleibt, aenderung_empfohlen_seit: empfohlenErledigt ? null : k.aenderung_empfohlen_seit ?? null,
         gemeldet_am: neuer ? w.gemeldet_am : k.gemeldet_am, letzte_meldung_id: neuer ? meldungId : k.letzte_meldung_id ?? null,
         ...(erledigt.some((e) => e.anlass === 'ausserbetriebnahme') ? { ausser_betrieb_gemeldet_in: meldungId } : {}),
       };
       const m = meldeAbleitung(roh);
-      (bleibt.length ? offenIds : gemeldetIds).push(kid);
+      (bleibt.length || (ev.length && !umfasst) ? offenIds : gemeldetIds).push(kid);
       const v = h.verlaufFortschreiben(uid, kid, k, ['meldestatus'], ts);
       writes.push(schreibe.setzen(P.kasse(uid, kid), { ...roh, ...m, geaendert_am: ts, verlauf: v.verlauf, ...v.extra }, { updateTime: d.updateTime }), ...v.writes);
     }
@@ -600,6 +644,7 @@ export async function kassenmeldungGemeldet(c, h) {
 // /kassenmeldung protokoll_nachreichen (O8 N1): das ELSTER-Protokoll einer schon erfassten Meldung, die ohne Protokoll gespeichert wurde, einmalig nachreichen.
 // Vorher erzeugte die App dafür eine zweite Meldung mit demselben Datum; die Dokumentation zeigte dann zwei Meldungen, wo nur eine abgegeben wurde. Der Schnappschuss
 // bleibt unverändert, nur protokoll_pfad und protokoll_nachgereicht_am kommen dazu; ein vorhandenes Protokoll wird nie ersetzt (409 PROTOKOLL_VORHANDEN). Audit.
+// O9a N4: endgültig bleibt es, aber nur mit einer Datei, die wirklich im Speicher liegt (protokollPruefen); ein falscher Pfad kommt so gar nicht erst an die Meldung.
 export const MELDUNG_ID_MUSTER = /^m[a-z0-9]{8}$/;
 export const NACHREICHEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'meldung_id', 'protokoll_pfad']);
 export function pruefeNachreichen(body) {
@@ -614,6 +659,8 @@ export async function protokollNachreichen(c, h) {
   if (f.fehler) return h.formFehler(f.fehler, cors);
   const { meldung_id: mid, protokoll_pfad: pfad } = f.wert;
   if (!protokollPfadOk(pfad, { uid, meldungId: mid })) return fehlerAntwort(400, 'ANHANG_FREMD', cors, { feld: 'protokoll_pfad', praefix: PROTOKOLL_PRAEFIX(uid, mid) });
+  const pf = await protokollPruefen(c, pfad);
+  if (pf) return pf;
   return h.mitWiederholung(fs, async () => {
     const docs = await fs.batchGet([P.meldung(uid, mid), kopfPfad(uid)]);
     const md = docs.get(P.meldung(uid, mid));

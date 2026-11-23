@@ -34,7 +34,7 @@ import {
   jetztIso, schichtFuer, regelFehler, agbZustimmungAb, codesBereinigen,
 } from './gemeinsam.js';
 import { schreibe, vorbedingungAus } from './firestore.js';
-import { stammVerlaufAus, stammAm } from './kasse-daten.js';
+import { stammVerlaufAus, stammAm, idBereich } from './kasse-daten.js';
 import { heuteBerlin } from './oss-meldung.js';
 
 export const KASSE_ZBON_PFAD = '/kasse-zbon-lesen';
@@ -75,6 +75,12 @@ export const ZBON_ERLAUBTE_TYPEN = Object.freeze(['application/pdf', 'image/jpeg
 // einer Ladenkasse liegt weit darunter, ein höherer Wert ist fast sicher ein Lesefehler).
 export const ZBON_MAX_CENT = 100000000;
 export const ZBON_BETRAG_KLEIN_CENT = 1000; // K16 (O4-Fix N1): unter 10 EUR
+// K16 (O9a N5): krumme Beträge, Euro als Cent gelesen (2.537,40 EUR -> 2537 = 25,37 EUR), fallen K1-K3 nicht auf. Vergleich mit dem Median der letzten
+// abgeschlossenen Tage derselben Kasse: liegt die größte gelesene Summe unter einem Zwanzigstel davon, kommt der Hinweis. Erst ab 5 Tagen mit Umsatz (sonst kein
+// belastbarer Vergleich). Nur ein Hinweis (der Nutzer prüft am Bon), nie eine Sperre; scheitert das Lesen, entfällt nur dieser Vergleich.
+export const ZBON_VERGLEICH_TAGE = 10;
+export const ZBON_VERGLEICH_MIN_TAGE = 5;
+export const ZBON_VERGLEICH_FAKTOR = 20;
 export const ZBON_STRING_MAX = 20;
 export const ZBON_LISTE_MAX = 6;
 export const ZBON_ZAHLARTEN_MAX = 20; // echte Bons nennen oft mehr als 6 Zahlarten: bis 20 Einträge, Summe je Art (O4-W A-N2, Delta C-N1)
@@ -424,8 +430,11 @@ export function pruefeZbonVorschlag(roh, ctx = {}) {
   // K16 (O4-Fix N1): Euro statt Cent oder abgeschnittene Nachkommastellen fallen K1/K2/K3 nicht auf, wenn sie durchgängig auftreten (alle Summen stimmen
   // untereinander). Hinweis, wenn alle gelesenen Beträge unter 10 EUR liegen, oder wenn alle volle Euro sind und mindestens einer unter 10 EUR liegt.
   const betraege = [gesamt, ...saetze.map((s) => (bruttoOk(s) ? s.brutto : null)), zahlen.bar, zahlen.karte, zahlen.sonstig].filter((x) => typeof x === 'number' && x > 0);
+  const median = Number.isSafeInteger(ctx.vergleich_median_cent) && ctx.vergleich_median_cent > 0 ? ctx.vergleich_median_cent : null;
   if (betraege.length && (Math.max(...betraege) < ZBON_BETRAG_KLEIN_CENT || (betraege.every((x) => x % 100 === 0) && betraege.some((x) => x < ZBON_BETRAG_KLEIN_CENT)))) {
     pruefungen.push({ code: 'K16_BETRAG_KLEIN', stufe: 'hinweis', felder: ['umsaetze_je_satz', 'zbon_gesamt_cent'] });
+  } else if (betraege.length && median && Math.max(...betraege) * ZBON_VERGLEICH_FAKTOR < median) {
+    pruefungen.push({ code: 'K16_BETRAG_KLEIN', stufe: 'hinweis', felder: ['umsaetze_je_satz', 'zbon_gesamt_cent'] }); // gleicher Code und Text: die App braucht nichts Neues
   }
 
   // Sperre: schlechte Lesbarkeit und mehr als die Hälfte der Felder null
@@ -737,6 +746,28 @@ export async function gibKasseZbonZurueck(fs, uid, tag, { versuche = 4 } = {}) {
   } catch { /* im Zweifel stehen lassen (ein Tag, höchstens 5 Lesungen) */ }
 }
 
+// O9a N5: Median der Tagesumsätze (bar + unbar aller Umsatzzeilen der aktiven Fassung) der letzten abgeschlossenen Tage VOR dem Dialogtag. Zwei Unteranfragen
+// (ID-Bereich absteigend, batchGet der aktiven Fassungen). null bei weniger als ZBON_VERGLEICH_MIN_TAGE Tagen mit Umsatz oder jedem Lesefehler.
+export async function zbonVergleichMedian(fs, uid, kasseId, vorTag) {
+  try {
+    const bis = Steuerkern.addiereTage(vorTag, -1);
+    const r = await fs.runQuery(`users/${uid}`, idBereich(uid, 'kassentage', `${kasseId}_0000-00-00`, `${kasseId}_${bis}`, { absteigend: true, limit: 3 * ZBON_VERGLEICH_TAGE }));
+    const tage = r.filter((d) => istObjekt(d.daten) && d.daten.status === 'abgeschlossen' && istInt(d.daten.fassung_aktiv) && d.daten.fassung_aktiv >= 1).slice(0, ZBON_VERGLEICH_TAGE);
+    if (tage.length < ZBON_VERGLEICH_MIN_TAGE) return null;
+    const m = await fs.batchGet(tage.map((d) => `users/${uid}/kassentage/${String(d.pfad).split('/').pop()}/fassungen/${d.daten.fassung_aktiv}`));
+    const summen = [];
+    for (const d of m.values()) {
+      if (!d || !istObjekt(d.daten) || !Array.isArray(d.daten.umsaetze)) continue;
+      const s = d.daten.umsaetze.reduce((a, z) => a + (istObjekt(z) && istInt(z.bar_cent) ? z.bar_cent : 0) + (istObjekt(z) && istInt(z.unbar_cent) ? z.unbar_cent : 0), 0);
+      if (s > 0) summen.push(s);
+    }
+    if (summen.length < ZBON_VERGLEICH_MIN_TAGE) return null;
+    summen.sort((a, b) => a - b);
+    const h = summen.length >> 1;
+    return summen.length % 2 ? summen[h] : Math.round((summen[h - 1] + summen[h]) / 2);
+  } catch { return null; }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Endpunkt
 // ---------------------------------------------------------------------------------------------
@@ -828,7 +859,8 @@ export async function regelKasseZbonLesen(body, env, cors = {}, deps = {}) {
     try { data = await ki.json(); } catch { data = null; }
     // 12. Prüfung (nie Rohtext in der Antwort)
     let ergebnis;
-    try { ergebnis = pruefeZbonVorschlag(zbonAntwortText(data), { besteuerung: status, geschaeftstag_dialog: body.geschaeftstag_dialog, anfangsbestand_am: anfangsbestandAm, heute }); } catch { ergebnis = { unlesbar: true }; }
+    const vergleich = await zbonVergleichMedian(fs, uid, kasseId, body.geschaeftstag_dialog); // O9a N5, wirft nie
+    try { ergebnis = pruefeZbonVorschlag(zbonAntwortText(data), { besteuerung: status, geschaeftstag_dialog: body.geschaeftstag_dialog, anfangsbestand_am: anfangsbestandAm, heute, vergleich_median_cent: vergleich }); } catch { ergebnis = { unlesbar: true }; }
     logge(deps, data, ergebnis);
     // 13. Antwort
     if (ergebnis.unlesbar) {

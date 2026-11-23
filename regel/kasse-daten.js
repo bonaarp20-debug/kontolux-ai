@@ -224,16 +224,24 @@ export function bewegungFuerKern(d) {
 // Prüfer-Daten (Baukonzept 2.3 Nr. 4, 2.12 H8, 09 #W13): Datenzugriff Z1 auf das Kassenbuch, nur Lesen.
 // kassen mit vollständigem verlauf (Stammdatenfeld plus ausgelagerte Einträge aus kassen/{id}/verlauf), kassentage mit ALLEN Fassungen (auch stornierte,
 // mit Storno-Grund und -Zeitpunkt aus fassungen_kurz; die aktive trägt aktiv: true), kassenbewegungen, betriebsstaetten, kassenmeldungen. Anhänge liegen als
-// { pfad, url } in den Fassungen, der Kassenbeleg trägt storage_url (in dokumente). Fassungen und verlauf über untersammlungLesen: eine Anfrage je 300 Dokumente
-// (nicht eine Liste je Kassentag). Unteranfragen sind begrenzt (Free-Plan 50 je Aufruf, der Prüfer-Handler braucht selbst rund 10): reicht das Budget nicht,
-// kommt das Gelesene mit kassen_unvollstaendig: true statt eines Abbruchs (ein Prüfer sieht dann den Hinweis, nie stillschweigend weniger).
-// O7a H2: Jede Sammlung wird einzeln gelesen und ihr Teilergebnis behalten (auch die schon gelesenen Seiten einer Sammlung, die das Budget nicht ganz schafft).
-// aus.kassen steht sofort nach dem Lesen der Kassen fest (der Prüfer-Tab erscheint also auch bei erschöpftem Budget, mit dem Hinweis). Reihenfolge nach Bedarf:
-// erst die kleinen Sammlungen (Kassen, Betriebsstätten, Meldungen, Verlauf), dann Tage, Fassungen, Bewegungen. kassen_unvollstaendig_teile nennt, was fehlt.
+// { pfad, url } in den Fassungen, der Kassenbeleg trägt storage_url (in dokumente). Unteranfragen sind begrenzt (Free-Plan 50 je Aufruf, der Prüfer-Handler braucht
+// selbst rund 10): reicht das Budget nicht, kommt das Gelesene mit kassen_unvollstaendig: true statt eines Abbruchs (nie stillschweigend weniger).
+// O7a H2 / O9a M3: jede Sammlung behält ihr Teilergebnis, auch der ausgelagerte Verlauf (untersammlungLesen mit teil).
+// O9a M4: Kassentage und Bewegungen je Kasse ABSTEIGEND (jüngste zuerst, Kassen-Nachschau § 146b AO braucht die aktuellen Tage) über eine ID-Bereichs-Abfrage
+// {kasseId}_… (Sammlungs-Bereich, orderBy __name__ DESC: dafür hält Firestore die automatischen Einzelfeld-Indexe, kein neuer Index; dasselbe Muster wie
+// letzterTagMit). Die Kassen kommen reihum dran (das Budget verteilt sich gleichmäßig; keine Kasse fällt ganz weg). Die Fassungen werden je gelesener Seite von
+// Tagen per batchGet aus fassungen_kurz geholt (Tage und Fassungen passen immer zusammen; keine Abfrage über alle Nachfahren).
+// kassen_unvollstaendig_ab: { kasseId: Tag | null } für jede Kasse, deren Tage oder Bewegungen nicht ganz gelesen sind: ab diesem Tag (einschließlich) ist alles
+// vollständig; null = nicht einmal der jüngste Tag ist vollständig gelesen.
 // ---------------------------------------------------------------------------------------------
 export const PRUEFER_UNTERANFRAGEN_MAX = 30;
+export const PRUEFER_TAGE_SEITE = 100;
+export const PRUEFER_BEWEGUNGEN_SEITE = 300;
+const PRUEFER_FASSUNGEN_JE_BATCH = 100;
+const PRUEFER_TEILE = ['kassen', 'betriebsstaetten', 'kassenmeldungen', 'verlauf', 'kassentage', 'fassungen', 'kassenbewegungen'];
 const mitId = (d) => ({ id: idVon(d), ...d.daten });
 const pfadTeile = (rohName) => { const i = String(rohName).indexOf('/documents/'); return (i >= 0 ? rohName.slice(i + '/documents/'.length) : '').split('/'); };
+const tagAusId = (id) => { const m = /_(\d{4}-\d{2}-\d{2})(?:_\d+)?$/.exec(String(id)); return m ? m[1] : null; };
 
 // Wie listeAlle, aber die gelesenen Seiten bleiben erhalten: { dokumente, vollstaendig }
 async function listeTeil(fs, pfad, maxSeiten) {
@@ -252,57 +260,122 @@ async function listeTeil(fs, pfad, maxSeiten) {
   return { dokumente, vollstaendig: false };
 }
 
+// Fassungsnummern eines Tagesplatzes (fassungen_kurz, dazu die aktive)
+function fassungsNummern(t) {
+  const n = new Set((Array.isArray(t.fassungen_kurz) ? t.fassungen_kurz : []).filter(istObjektRoh).map((x) => x.n).filter((x) => Number.isSafeInteger(x) && x >= 1));
+  if (Number.isSafeInteger(t.fassung_aktiv) && t.fassung_aktiv >= 1) n.add(t.fassung_aktiv);
+  return [...n].sort((a, b) => a - b);
+}
+
 export async function kassenPrueferDaten(uid, token, fetchFn = globalThis.fetch, { max = PRUEFER_UNTERANFRAGEN_MAX } = {}) {
   let benutzt = 0;
   const zaehlend = (...a) => { if (benutzt >= max) throw new Error('Prüfer-Kassendaten: Unteranfragen-Budget erschöpft'); benutzt += 1; return fetchFn(...a); };
   const aus = { kassen: [], kassentage: [], kassenbewegungen: [], betriebsstaetten: [], kassenmeldungen: [], kassen_unvollstaendig: false };
-  const fehlt = [];
+  const fehlt = new Set();
   const fs = erzeugeSchicht({ token, fetchFn: zaehlend, budget: max });
-  const untersammlung = async (name, eltern) => {
-    try { return { dokumente: (await untersammlungLesen(uid, name, token, zaehlend)).filter((d) => pfadTeile(d.name)[2] === eltern), vollstaendig: true }; } catch (e) {
-      console.warn('pruefer_kasse_teil ' + JSON.stringify({ pfad: name, art: String(e?.name || 'Error').slice(0, 40) }));
-      return { dokumente: [], vollstaendig: false };
+  const abschluss = () => {
+    if (fehlt.size) {
+      aus.kassen_unvollstaendig = true;
+      aus.kassen_unvollstaendig_teile = PRUEFER_TEILE.filter((t) => fehlt.has(t));
+      console.warn('pruefer_kasse_unvollstaendig ' + JSON.stringify({ teile: aus.kassen_unvollstaendig_teile }));
     }
+    return aus;
   };
   const k = await listeTeil(fs, `users/${uid}/kassen`, 5);
-  if (!k.vollstaendig) fehlt.push('kassen');
+  if (!k.vollstaendig) fehlt.add('kassen');
   const kassen = k.dokumente;
-  if (!kassen.length) {
-    if (fehlt.length) { aus.kassen_unvollstaendig = true; aus.kassen_unvollstaendig_teile = fehlt; }
-    return aus;
-  }
+  if (!kassen.length) return abschluss();
   const kasseAus = (d, archiv) => ({ id: idVon(d), ...d.daten, verlauf: [...archiv, ...(Array.isArray(d.daten.verlauf) ? d.daten.verlauf : [])] });
   aus.kassen = kassen.map((d) => kasseAus(d, [])); // sofort: ohne ausgelagerten Verlauf, der folgt unten
-  const lies = async (name, maxSeiten) => { const r = await listeTeil(fs, `users/${uid}/${name}`, maxSeiten); if (!r.vollstaendig) fehlt.push(name); return r.dokumente; };
+  const lies = async (name, maxSeiten) => { const r = await listeTeil(fs, `users/${uid}/${name}`, maxSeiten); if (!r.vollstaendig) fehlt.add(name); return r.dokumente; };
   aus.betriebsstaetten = (await lies('betriebsstaetten', 3)).map(mitId);
   aus.kassenmeldungen = (await lies('kassenmeldungen', 3)).map(mitId);
-  const verlauf = await untersammlung('verlauf', 'kassen');
-  if (!verlauf.vollstaendig) fehlt.push('verlauf');
+  const verlauf = await untersammlungLesen(uid, 'verlauf', token, zaehlend, { teil: true });
+  if (!verlauf.vollstaendig) fehlt.add('verlauf');
   const verlaufJeKasse = new Map();
   for (const d of verlauf.dokumente) {
     const t = pfadTeile(d.name);
+    if (t[2] !== 'kassen') continue;
     if (!verlaufJeKasse.has(t[3])) verlaufJeKasse.set(t[3], []);
     verlaufJeKasse.get(t[3]).push({ n: Number(String(t[5]).replace(/^v/, '')), ...dekodiereFelder(d.fields) });
   }
   aus.kassen = kassen.map((d) => kasseAus(d, (verlaufJeKasse.get(idVon(d)) || []).sort((a, b) => a.n - b.n).map(({ n, ...rest }) => rest)));
-  const tage = await lies('kassentage', 30);
-  const fassungen = await untersammlung('fassungen', 'kassentage');
-  if (!fassungen.vollstaendig) fehlt.push('fassungen');
+
+  // Tage (mit Fassungen) und Bewegungen je Kasse, absteigend, reihum. Kassen mit eigenem Kassenbuch zuerst.
+  const ids = kassen.map(idVon);
+  const reihenfolge = [...ids].sort((a, b) => Number(kassenbuchLos(kassen, a)) - Number(kassenbuchLos(kassen, b)));
+  const stroeme = [];
+  for (const kid of reihenfolge) {
+    stroeme.push({ kid, art: 'tage', ab: null, fertig: false, vollAb: null, gelesen: false });
+    stroeme.push({ kid, art: 'bew', ab: null, fertig: false, vollAb: null, gelesen: false });
+  }
+  const tage = [];
+  const bewegungen = [];
   const fassungenJeTag = new Map();
-  for (const d of fassungen.dokumente) {
-    const t = pfadTeile(d.name);
-    if (!fassungenJeTag.has(t[3])) fassungenJeTag.set(t[3], []);
-    fassungenJeTag.get(t[3]).push({ n: Number(t[5]), ...dekodiereFelder(d.fields) });
+  let budgetAus = false;
+  while (!budgetAus && stroeme.some((x) => !x.fertig && !x.kaputt)) {
+    for (const st of stroeme) {
+      if (st.fertig || st.kaputt || budgetAus) continue;
+      const sammlung = st.art === 'tage' ? 'kassentage' : 'kassenbewegungen';
+      const seite = st.art === 'tage' ? PRUEFER_TAGE_SEITE : PRUEFER_BEWEGUNGEN_SEITE;
+      const [von, bis] = st.art === 'tage' ? [`${st.kid}_0000-00-00`, `${st.kid}_9999-99-99`] : [`${st.kid}_0000-00-00_000`, `${st.kid}_9999-99-99_999`];
+      let r;
+      try { r = await fs.runQuery(`users/${uid}`, idBereich(uid, sammlung, von, bis, { absteigend: true, limit: seite, ab: st.ab })); } catch (e) {
+        if (benutzt >= max) budgetAus = true; else st.kaputt = true;
+        console.warn('pruefer_kasse_teil ' + JSON.stringify({ pfad: sammlung, art: String(e?.name || 'Error').slice(0, 40) }));
+        continue;
+      }
+      const seitenTage = r.map((d) => tagAusId(idVon(d))).filter(Boolean);
+      if (st.art === 'tage') {
+        tage.push(...r);
+        // Fassungen dieser Tage (alle, auch stornierte), je höchstens 100 Pfade in einem batchGet
+        const pfade = r.flatMap((d) => (istObjektRoh(d.daten) ? fassungsNummern(d.daten).map((n) => P.fassung(uid, idVon(d), n)) : []));
+        let fassungenOk = true;
+        for (let i = 0; i < pfade.length && fassungenOk; i += PRUEFER_FASSUNGEN_JE_BATCH) {
+          try {
+            const m = await fs.batchGet(pfade.slice(i, i + PRUEFER_FASSUNGEN_JE_BATCH));
+            for (const [pf, d] of m) {
+              if (!d || !istObjektRoh(d.daten)) continue;
+              const t = pf.split('/');
+              if (!fassungenJeTag.has(t[3])) fassungenJeTag.set(t[3], []);
+              fassungenJeTag.get(t[3]).push({ n: Number(t[5]), ...d.daten });
+            }
+          } catch (e) {
+            fassungenOk = false;
+            if (benutzt >= max) budgetAus = true; else st.kaputt = true;
+            console.warn('pruefer_kasse_teil ' + JSON.stringify({ pfad: 'fassungen', art: String(e?.name || 'Error').slice(0, 40) }));
+          }
+        }
+        if (!fassungenOk) { st.fassungenFehlen = true; continue; }
+        st.gelesen = true;
+        if (r.length < seite) { st.fertig = true; continue; }
+        st.vollAb = seitenTage[seitenTage.length - 1] || st.vollAb; // jeder Tagesplatz ist ein ganzer Tag
+      } else {
+        bewegungen.push(...r);
+        st.gelesen = true;
+        if (r.length < seite) { st.fertig = true; continue; }
+        // der älteste Tag der Seite kann noch weitere (ältere Nummern) haben: vollständig erst ab dem Tag danach
+        const aeltester = seitenTage[seitenTage.length - 1];
+        st.vollAb = aeltester ? Steuerkern.addiereTage(aeltester, 1) : st.vollAb;
+      }
+      st.ab = idVon(r[r.length - 1]);
+    }
+  }
+  const unvollstaendigAb = {};
+  for (const st of stroeme) {
+    if (st.fertig) continue;
+    fehlt.add(st.art === 'tage' ? 'kassentage' : 'kassenbewegungen');
+    if (st.art === 'tage') fehlt.add('fassungen');
+    const bisher = Object.hasOwn(unvollstaendigAb, st.kid) ? unvollstaendigAb[st.kid] : undefined;
+    // die strengere Grenze gilt: der spätere Tag; null (nichts vollständig) schlägt jeden Tag
+    unvollstaendigAb[st.kid] = bisher === null || st.vollAb === null ? null : bisher === undefined || st.vollAb > bisher ? st.vollAb : bisher;
   }
   aus.kassentage = tage.map((d) => {
     const alle = (fassungenJeTag.get(idVon(d)) || []).sort((a, b) => a.n - b.n).map((f) => ({ ...f, aktiv: f.n === d.daten.fassung_aktiv }));
     return { ...mitId(d), fassungen: alle };
   });
-  aus.kassenbewegungen = (await lies('kassenbewegungen', 30)).map(mitId);
-  if (fehlt.length) {
-    aus.kassen_unvollstaendig = true;
-    aus.kassen_unvollstaendig_teile = fehlt;
-    console.warn('pruefer_kasse_unvollstaendig ' + JSON.stringify({ teile: fehlt }));
-  }
-  return aus;
+  aus.kassenbewegungen = bewegungen.map(mitId);
+  if (Object.keys(unvollstaendigAb).length) aus.kassen_unvollstaendig_ab = unvollstaendigAb;
+  return abschluss();
 }
+const kassenbuchLos = (kassen, id) => { const d = kassen.find((x) => idVon(x) === id); return Boolean(d && istObjektRoh(d.daten) && d.daten.kassenbuch === false); };
