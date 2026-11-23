@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import * as K from '../steuerkern/index.js';
 import { regelKasse } from '../regel/kasse.js';
 import { kassenAusgabeBeleg } from '../regel/kasse-ausgabe.js';
+import { kasseIdAus } from '../regel/kasse-daten.js';
 import { AGB_MINDESTFASSUNG_KASSE } from '../regel/gemeinsam.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
 import { datevWarnHeader, WARN_HEADER_MAX } from '../regel/datev-export-regeln.js';
@@ -78,7 +79,14 @@ async function welt({ skr = 'SKR03', profil = REGEL, settings = {}, kasseExtra =
     const r = await regelKasse(pfad, { userId: UID, token: 'tok', anfrage_id: aid(), ...body }, {}, {}, deps);
     return { status: r.status, json: await r.json() };
   };
-  const a = await ruf('/kasse', { ...KASSE_ANLEGEN, ...kasseExtra });
+  const kb = { ...KASSE_ANLEGEN, ...kasseExtra };
+  if (!kb.anfangsbestand_nachweis && (kb.anfangsbestand_herkunft === 'einlage_privat' || kb.anfangsbestand_herkunft === 'uebernahme')) {
+    // W2-W1: Nachweis Pflicht; Kassen-ID vorab aus anfrage_id berechnet (wie die App)
+    kb.anfrage_id = aid();
+    const pfad = `users/${UID}/kasse/${await kasseIdAus(UID, kb.anfrage_id)}/${kb.anfangsbestand_am}/1700000000_nachweis.pdf`;
+    kb.anfangsbestand_nachweis = { pfad, url: `${BUCKET}${encodeURIComponent(pfad)}?alt=media&token=t0` };
+  }
+  const a = await ruf('/kasse', kb);
   assert.equal(a.status, 200, JSON.stringify(a.json));
   return { fs, id: a.json.kasse_id, kasse: (b) => ruf('/kasse', b), tag: (b) => ruf('/kassentag', b), bew: (b) => ruf('/kassenbewegung', b), exp: (jahr) => exportiere(fs, jahr) };
 }

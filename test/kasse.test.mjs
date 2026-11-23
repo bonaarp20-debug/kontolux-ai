@@ -10,7 +10,7 @@ import { AGB_MINDESTFASSUNG_KASSE, FEATURES_KASSE, featureAktiv, configBereinige
 import { fakeFirestore } from './regel-fake-firestore.mjs';
 import { erzeugeTestEnv, anfrage } from './harness.mjs';
 import { createHash } from 'node:crypto';
-import { kassenPrueferDaten } from '../regel/kasse-daten.js';
+import { kassenPrueferDaten, kasseIdAus } from '../regel/kasse-daten.js';
 import { kassenAusgabeBeleg } from '../regel/kasse-ausgabe.js';
 import { REGEL_SAMMLUNGEN, REGEL_UNTERSAMMLUNGEN, UNTERSAMMLUNGEN } from '../regel/archiv.js';
 import { AUFBEWAHRUNG_SAMMLUNGEN, AUFBEWAHRUNG_ORDNER } from '../regel/loeschlaeufe.js';
@@ -66,7 +66,13 @@ function umgebung({ config = AN, profil = REGEL, agb = true, heute = HEUTE, budg
   const tagRufe = (body, optionen) => rufeRoh('/kassentag', body, deps, optionen);
   const bewRufe = (body, optionen) => rufeRoh('/kassenbewegung', body, deps, optionen);
   const legeKasseAn = async (extra = {}) => {
-    const r = await kasse({ ...KASSE_ANLEGEN, ...extra });
+    // W2-W1: Übernahme und Privateinlage (> 0) brauchen den Nachweis; die Hilfsfunktion legt ihn selbst bei (Kassen-ID vorab aus anfrage_id berechnet, wie die App)
+    const body = { ...KASSE_ANLEGEN, ...extra };
+    if (!body.anfrage_id && !body.anfangsbestand_nachweis && (body.anfangsbestand_herkunft === 'uebernahme' || body.anfangsbestand_herkunft === 'einlage_privat')) {
+      body.anfrage_id = aid();
+      body.anfangsbestand_nachweis = anhang(await kasseIdAus(UID, body.anfrage_id), body.anfangsbestand_am, 'nachweis.pdf');
+    }
+    const r = await kasse(body);
     assert.equal(r.status, 200, JSON.stringify(r.json));
     return r.json.kasse_id;
   };
@@ -2828,4 +2834,94 @@ test('W2-W1 leistungsmonat erreicht den Kern (Leistungszeitraum = Monat), sperrg
     assert.equal(r.json.feld, `beleg.${k}`);
   }
   assert.equal(u.fs.log.commits, vor);
+});
+
+// ---------------------------------------------------------------------------------------------
+// W2-W1 Block 2: Nachweis des Anfangsbestands atomar im Anlegen (E2, Gegenlesung M-4)
+// ---------------------------------------------------------------------------------------------
+const nachweisFuer = async (anfrageId, tag = '2026-11-01', name = 'nachweis.pdf') => anhang(await kasseIdAus(UID, anfrageId), tag, name);
+
+test('W2-W1 /kasse anlegen: Übernahme und Privateinlage > 0 ohne Nachweis 422 ANHANG_FEHLT (feld anfangsbestand_nachweis), nichts geschrieben; Bank, Einlage 0 und Kasse ohne Kassenbuch freiwillig', async () => {
+  const u = umgebung();
+  const vor = u.fs.log.commits;
+  for (const extra of [{ anfangsbestand_herkunft: 'uebernahme' }, { anfangsbestand_herkunft: 'einlage_privat' }, { anfangsbestand_herkunft: 'einlage_privat', anfangsbestand_nachweis: null }]) {
+    const r = await u.kasse({ ...KASSE_ANLEGEN, ...extra });
+    assert.equal(r.status, 422, JSON.stringify(extra));
+    assert.equal(r.json.fehler[0].code, 'ANHANG_FEHLT');
+    assert.equal(r.json.feld, 'anfangsbestand_nachweis');
+  }
+  assert.equal(u.fs.log.commits, vor);
+  assert.deepEqual(u.fs.pfade(P('kassen/')), []);
+  assert.deepEqual(u.fs.pfade(P('privatvorgaenge/')), []);
+  // freiwillig
+  assert.equal((await u.kasse({ ...KASSE_ANLEGEN })).status, 200, 'bank');
+  assert.equal((await u.kasse({ ...KASSE_ANLEGEN, kuerzel: 'N0', anfangsbestand_herkunft: 'einlage_privat', anfangsbestand_cent: 0 })).status, 200, 'Einlage 0');
+  assert.equal((await u.kasse({ ...KASSE_ANLEGEN, kuerzel: 'OKB', anfangsbestand_herkunft: 'uebernahme', kassenbuch: false })).status, 200, 'ohne eigenes Kassenbuch keine Übernahme');
+});
+
+test('W2-W1 /kasse anlegen mit Nachweis: an der Kasse und als eigenbeleg_pfad am Privatvorgang, im selben Commit; Audit-Eintrag im selben Commit; Bank mit freiwilligem Nachweis speichert ihn an der Kasse', async () => {
+  const u = umgebung();
+  const aidP = aid();
+  const nw = await nachweisFuer(aidP);
+  const vor = u.fs.log.commits;
+  const r = await u.kasse({ ...KASSE_ANLEGEN, anfrage_id: aidP, anfangsbestand_herkunft: 'einlage_privat', anfangsbestand_cent: 25050, anfangsbestand_nachweis: nw });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(u.fs.log.commits - vor, 1, 'Kasse, Privatvorgang und Audit in EINEM Commit');
+  const id = r.json.kasse_id;
+  assert.deepEqual(u.fs.lies(P(`kassen/${id}`)).anfangsbestand_nachweis, nw);
+  assert.equal(u.fs.lies(P(`privatvorgaenge/kasse_${id}_anfang`)).eigenbeleg_pfad, nw.pfad);
+  const a = u.audit().find((x) => x.aktion === 'kasse_anlegen');
+  assert.ok(a && a.nachher_hash, 'Audit-Eintrag (Hash über die gespeicherte Kasse inkl. Nachweis)');
+  // Wiederholung derselben anfrage_id: idempotent, nichts doppelt
+  const w = await u.kasse({ ...KASSE_ANLEGEN, anfrage_id: aidP, anfangsbestand_herkunft: 'einlage_privat', anfangsbestand_cent: 25050, anfangsbestand_nachweis: nw });
+  assert.deepEqual([w.status, w.json.idempotent, w.json.kasse_id], [200, true, id]);
+  // Bank mit freiwilligem Nachweis; Übernahme speichert ihn nur an der Kasse (kein Privatvorgang)
+  const a2 = aid();
+  const k2 = await u.kasse({ ...KASSE_ANLEGEN, anfrage_id: a2, kuerzel: 'BK2', anfangsbestand_nachweis: await nachweisFuer(a2, '2026-11-01', 'kontoauszug.pdf') });
+  assert.equal(k2.status, 200, JSON.stringify(k2.json));
+  assert.match(u.fs.lies(P(`kassen/${k2.json.kasse_id}`)).anfangsbestand_nachweis.pfad, /kontoauszug\.pdf$/);
+  const a3 = aid();
+  const k3 = await u.kasse({ ...KASSE_ANLEGEN, anfrage_id: a3, kuerzel: 'UEB', anfangsbestand_herkunft: 'uebernahme', anfangsbestand_nachweis: await nachweisFuer(a3) });
+  assert.equal(k3.status, 200, JSON.stringify(k3.json));
+  assert.deepEqual(u.fs.pfade(P('privatvorgaenge/')), [P(`privatvorgaenge/kasse_${id}_anfang`)]);
+  // Kassen ohne Nachweis tragen null (Feld immer vorhanden)
+  const k4 = await u.kasse({ ...KASSE_ANLEGEN, kuerzel: 'NIX' });
+  assert.equal(u.fs.lies(P(`kassen/${k4.json.kasse_id}`)).anfangsbestand_nachweis, null);
+});
+
+test('W2-W1 anfangsbestand_nachweis: nur der aus der anfrage_id berechnete Kassen-Ordner am Tag des Anfangsbestands, eigene URL (400 ANHANG_FREMD), Form 400 FORMAT; fail-closed ohne storageUrlOk; nichts geschrieben', async () => {
+  const u = umgebung();
+  const aidP = aid();
+  const gut = await nachweisFuer(aidP);
+  const fremdePfad = `users/anderer0Nutzer000001/kasse/${await kasseIdAus(UID, aidP)}/2026-11-01/x.pdf`;
+  const basis = { ...KASSE_ANLEGEN, anfrage_id: aidP, anfangsbestand_herkunft: 'uebernahme' };
+  const fremd = [
+    anhang('kandere99', '2026-11-01'), // andere Kasse (nicht die aus anfrage_id berechnete)
+    anhang(await kasseIdAus(UID, aidP), '2026-11-02'), // anderer Tag
+    { pfad: fremdePfad, url: `${BUCKET}${encodeURIComponent(fremdePfad)}?alt=media` },
+    { pfad: gut.pfad, url: 'https://evil.example/o/' + encodeURIComponent(gut.pfad) },
+    { pfad: gut.pfad, url: `${BUCKET}${encodeURIComponent(anhang(await kasseIdAus(UID, aidP), '2026-11-01', 'anders.pdf').pfad)}?alt=media` },
+    { pfad: `users/${UID}/kasse/${await kasseIdAus(UID, aidP)}/2026-11-01/../x.pdf`, url: gut.url },
+  ];
+  const vor = u.fs.log.commits;
+  for (const n of fremd) {
+    const r = await u.kasse({ ...basis, anfangsbestand_nachweis: n });
+    assert.equal(r.status, 400, JSON.stringify(n));
+    assert.equal(r.json.fehler[0].code, 'ANHANG_FREMD');
+    assert.equal(r.json.feld, 'anfangsbestand_nachweis');
+  }
+  for (const n of ['text', 7, [gut], { pfad: gut.pfad }, { pfad: gut.pfad, url: gut.url, extra: 1 }, { pfad: '', url: '' }]) {
+    const r = await u.kasse({ ...basis, anfangsbestand_nachweis: n });
+    assert.equal(r.status, 400, JSON.stringify(n));
+    assert.equal(r.json.fehler[0].code, 'FORMAT');
+    assert.equal(r.json.feld, 'anfangsbestand_nachweis');
+  }
+  const ohne = await u.rufeRoh('/kasse', { ...basis, anfangsbestand_nachweis: gut }, { ...u.deps, storageUrlOk: undefined });
+  assert.equal(ohne.json.fehler[0].code, 'ANHANG_FREMD');
+  assert.equal(u.fs.log.commits, vor);
+  assert.deepEqual(u.fs.pfade(P('kassen/')), []);
+  // ein Nachweis aus einer anderen anfrage_id (andere Kassen-ID) passt nicht, auch wenn er dem Nutzer gehört
+  const andere = await u.kasse({ ...basis, anfangsbestand_nachweis: await nachweisFuer('anderebeispiel-0001') });
+  assert.equal(andere.json.fehler[0].code, 'ANHANG_FREMD');
+  assert.equal((await u.kasse({ ...basis, anfangsbestand_nachweis: gut })).status, 200);
 });

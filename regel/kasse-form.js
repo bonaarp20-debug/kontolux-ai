@@ -244,8 +244,11 @@ export function pruefeStorno(body, { heute }) {
 export const KARTE_INTEGRATIONEN = Object.freeze(['keine', 'sumup']); // karte_ueber_integration (2.11 A): bisher nur SumUp POS ist als Quelle angebunden
 export const KASSE_DATENQUELLEN_NEU = Object.freeze(['manuell', 'sumup_integration']); // 'import_dsfinvk' entfällt (Parser gestrichen, Nr. 30)
 export const ANFANGSBESTAND_HERKUENFTE = Object.freeze(['einlage_privat', 'bank', 'uebernahme']);
+// W2-W1 (E2, Gegenlesung M-4): Nachweis des Anfangsbestands ist Pflicht bei Übernahme aus einem alten Kassenbuch (letzte Seite/Endbestand) und bei einer Privateinlage
+// über 0 (Eigenbeleg), jeweils nur für eine Kasse mit eigenem Kassenbuch (ohne eigenes Kassenbuch gibt es weder Übernahme noch Privatvorgang). Bei 'bank' freiwillig.
+export const nachweisPflicht = (w) => w.kassenbuch === true && (w.anfangsbestand_herkunft === 'uebernahme' || (w.anfangsbestand_herkunft === 'einlage_privat' && w.anfangsbestand_cent > 0));
 const ANLEGEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'bezeichnung', 'kuerzel', 'art', 'grundaufzeichnung', 'datenquelle', 'anfangsbestand_cent', 'anfangsbestand_am',
-  'anfangsbestand_herkunft', 'karte_ueber_integration', 'ruhetage_wochentage', 'kassenbuch', 'bestand_in_kasse_id', 'datev_konto']);
+  'anfangsbestand_herkunft', 'anfangsbestand_nachweis', 'karte_ueber_integration', 'ruhetage_wochentage', 'kassenbuch', 'bestand_in_kasse_id', 'datev_konto']);
 const AENDERN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'bezeichnung', 'ruhetage_wochentage', 'datev_konto', 'karte_ueber_integration', 'art', 'art_ab',
   'grundaufzeichnung', 'grundaufzeichnung_ab', 'datenquelle', 'datenquelle_ab', 'bestand_in_kasse_id']);
 const WECHSELN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'gueltig_ab', 'art', 'grundaufzeichnung', 'datenquelle', 'software', 'software_version', 'hersteller', 'modell', 'seriennummer']);
@@ -274,6 +277,13 @@ export function pruefeKasse(body, aktion, { heute }) {
     if (!centOk(body.anfangsbestand_cent)) return fehl('anfangsbestand_cent');
     if (!geschaeftstagOk(body.anfangsbestand_am, heute)) return fehl('anfangsbestand_am');
     if (!ANFANGSBESTAND_HERKUENFTE.includes(body.anfangsbestand_herkunft)) return fehl('anfangsbestand_herkunft');
+    // W2-W1: Nachweis des Anfangsbestands { pfad, url } (nur die Form; Pfad und URL prüft kasse.js gegen die aus uid und anfrage_id berechnete Kassen-ID, Pflicht siehe nachweisPflicht)
+    let nachweis = null;
+    if (body.anfangsbestand_nachweis !== undefined && body.anfangsbestand_nachweis !== null) {
+      const n = body.anfangsbestand_nachweis;
+      if (!istObjekt(n) || !nurSchluessel(n, ['pfad', 'url']) || typeof n.pfad !== 'string' || typeof n.url !== 'string' || !n.pfad || !n.url) return fehl('anfangsbestand_nachweis');
+      nachweis = { pfad: n.pfad, url: n.url };
+    }
     const karte = body.karte_ueber_integration === undefined ? 'keine' : body.karte_ueber_integration;
     if (!KARTE_INTEGRATIONEN.includes(karte)) return fehl('karte_ueber_integration');
     const ruhe = body.ruhetage_wochentage === undefined ? [] : wochentagePruefen(body.ruhetage_wochentage);
@@ -287,7 +297,7 @@ export function pruefeKasse(body, aktion, { heute }) {
     if (konto !== null && !(typeof konto === 'string' && /^\d{4}$/.test(konto))) return fehl('datev_konto');
     return ok({
       bezeichnung: body.bezeichnung.trim(), kuerzel: body.kuerzel, art: body.art, grundaufzeichnung: body.grundaufzeichnung, datenquelle: body.datenquelle === undefined ? 'manuell' : body.datenquelle,
-      anfangsbestand_cent: body.anfangsbestand_cent, anfangsbestand_am: body.anfangsbestand_am, anfangsbestand_herkunft: body.anfangsbestand_herkunft,
+      anfangsbestand_cent: body.anfangsbestand_cent, anfangsbestand_am: body.anfangsbestand_am, anfangsbestand_herkunft: body.anfangsbestand_herkunft, anfangsbestand_nachweis: nachweis,
       karte_ueber_integration: karte, ruhetage_wochentage: ruhe, kassenbuch: body.kassenbuch !== false, bestand_in_kasse_id: bestandIn, datev_konto: konto,
     });
   }

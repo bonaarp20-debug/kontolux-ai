@@ -19,7 +19,7 @@ import { auditKette, kopfPfad, eintragPfad } from './audit.js';
 import { profilBereit, wirkPerioden, nachFestschreibungAntwort, festPruefungMarkieren } from './schreibweg-v2.js';
 import { legacyHash } from './drift.js';
 import { heuteBerlin } from './oss-meldung.js';
-import { KASSE_PFADE, FEATURE, aufbewahrungBis, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, pruefeBewegung, kernFassung, stammKombination, PRIVAT_ARTEN } from './kasse-form.js';
+import { KASSE_PFADE, FEATURE, aufbewahrungBis, anhaengePruefen, nachweisPflicht, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, pruefeBewegung, kernFassung, stammKombination, PRIVAT_ARTEN } from './kasse-form.js';
 import {
   P, kasseIdAus, kassennummer, zeigerAus, zeigerPasst, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern, ohneStornoPaare, KasseLesefehler,
   STAMM_FELDER, STAMMDATEN_VERLAUF_MAX, stammVerlaufAus, stammAm, stammVerlaufMit, stammVerlaufStart, stammVerlaufVerdichten,
@@ -128,6 +128,15 @@ async function kasseAktion(c, aktion) {
   const w = f.wert;
   if (aktion === 'anlegen') {
     const id = await kasseIdAus(uid, body.anfrage_id);
+    // W2-W1: Nachweis des Anfangsbestands atomar im Anlegen. Die App berechnet die Kassen-ID vorab (kasseIdAus) und lädt die Datei nach
+    // users/{uid}/kasse/{kasse_id}/{anfangsbestand_am}/ hoch; hier gilt dieselbe Pfad- und URL-Prüfung wie bei Anhängen. Fehlt er, wo er Pflicht ist: 422, nichts geschrieben.
+    let nachweis = null;
+    if (w.anfangsbestand_nachweis) {
+      const an = anhaengePruefen([w.anfangsbestand_nachweis], { uid, kasseId: id, tag: w.anfangsbestand_am, storageUrlOk: deps.storageUrlOk });
+      if (an.fehler) return formFehler({ ...an.fehler, feld: 'anfangsbestand_nachweis' }, cors);
+      nachweis = an.wert[0];
+    }
+    if (!nachweis && nachweisPflicht(w)) return fehlerAntwort(422, 'ANHANG_FEHLT', cors, { feld: 'anfangsbestand_nachweis' });
     return mitWiederholung(fs, async () => {
       const [docs, liste] = await Promise.all([fs.batchGet([P.kasse(uid, id), kopfPfad(uid)]), fs.list(`users/${uid}/kassen`, { pageSize: 100 })]);
       if (docs.get(P.kasse(uid, id))) return { antwort: antwort({ ok: true, kasse_id: id, idempotent: true }, 200, cors) };
@@ -141,6 +150,7 @@ async function kasseAktion(c, aktion) {
         art: w.art, art_ab: w.anfangsbestand_am, grundaufzeichnung: w.grundaufzeichnung, grundaufzeichnung_ab: w.anfangsbestand_am,
         datenquelle: w.datenquelle, datenquelle_ab: w.anfangsbestand_am,
         anfangsbestand_cent: w.anfangsbestand_cent, anfangsbestand_am: w.anfangsbestand_am, anfangsbestand_herkunft: w.anfangsbestand_herkunft,
+        anfangsbestand_nachweis: nachweis,
         kassenbuch: w.kassenbuch, bestand_in_kasse_id: w.bestand_in_kasse_id, karte_ueber_integration: w.karte_ueber_integration, karte_ueber_integration_ab: w.anfangsbestand_am,
         ruhetage_wochentage: w.ruhetage_wochentage, datev_konto: w.datev_konto, meldepflicht_bestaetigt_am: null,
         aktiv: true, erstellt_am: ts, geaendert_am: ts, verlauf: [],
@@ -154,7 +164,7 @@ async function kasseAktion(c, aktion) {
       if (w.anfangsbestand_herkunft === 'einlage_privat' && w.anfangsbestand_cent > 0 && w.kassenbuch) {
         writes.push(schreibe.anlegen(P.privat(uid, `kasse_${id}_anfang`), {
           art: 'einlage', datum: w.anfangsbestand_am, betrag: w.anfangsbestand_cent / 100, notiz: `Anfangsbestand ${w.bezeichnung}`, storniert: false, erstellt: zeit,
-          konto: '1890', zahlweg: 'kasse', kasse_id: id, kassenbewegung_id: null, quelle: 'kasse',
+          konto: '1890', zahlweg: 'kasse', kasse_id: id, kassenbewegung_id: null, eigenbeleg_pfad: nachweis ? nachweis.pfad : null, quelle: 'kasse',
         }));
       }
       const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{ aktion: 'kasse_anlegen', ziel: `kassen/${id}`, vorher: null, nachher: kasse, details: { kasse_id: id, art: w.art, grundaufzeichnung: w.grundaufzeichnung, datenquelle: w.datenquelle } }], zeit);
