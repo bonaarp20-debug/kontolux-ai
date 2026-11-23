@@ -10,7 +10,7 @@ import { fakeFirestore } from './regel-fake-firestore.mjs';
 import { erzeugeTestEnv, anfrage } from './harness.mjs';
 import { kasseIdAus, meldungIdAus, betriebsstaetteIdAus, kassenPrueferDaten } from '../regel/kasse-daten.js';
 import { kassenAusgabeBeleg } from '../regel/kasse-ausgabe.js';
-import { meldeAbleitung, meldeNachAenderung, protokollPfadOk, PROTOKOLL_PRAEFIX, korrekturEreignis, KORREKTUR_TAGE_MAX, aenderungArtNoetig, altfallVorVerfahren, wegstreckeOhnePflicht } from '../regel/kasse-register.js';
+import { meldeAbleitung, meldeNachAenderung, protokollPfadOk, PROTOKOLL_PRAEFIX, korrekturEreignis, KORREKTUR_TAGE_MAX, aenderungArtNoetig, angabeKorrektur, altfallVorVerfahren, wegstreckeOhnePflicht } from '../regel/kasse-register.js';
 import { REGEL_SAMMLUNGEN } from '../regel/archiv.js';
 import { istAufbewahrungsPfad, istAufbewahrungsDatei } from '../regel/loeschlaeufe.js';
 import { prueferDateiPfadOk } from '../worker.js';
@@ -1088,7 +1088,8 @@ test('W2-Recht Ä2 (rein): aenderungArtNoetig nur nach einer Meldung, bei K3-Ang
   // offenes Ereignis (frühere Frist) bleibt in der Korrektur erhalten
   const offen = { ...alt, melde_ereignisse: [{ anlass: 'anschaffung', am: '2026-11-18', frist_bis: '2026-11-30', hinweis: null }] };
   const m = meldeNachAenderung(offen, { ...offen, seriennummer: 'B' }, HEUTE, { aenderungArt: 'korrektur' });
-  assert.deepEqual(m.melde_ereignisse, [{ anlass: 'korrektur', am: HEUTE, frist_bis: '2026-11-30', hinweis: 'frist_frueher' }]);
+  // O11 N5: die gesetzliche Monatsfrist aus dem 01.10. ist vorbei (02.11.), das bleibt neben frist_frueher erhalten
+  assert.deepEqual(m.melde_ereignisse, [{ anlass: 'korrektur', am: HEUTE, frist_bis: '2026-11-30', hinweis: 'frist_frueher', gesetz_abgelaufen: true }]);
   // ohne Antwort (z. B. Art über den Stammdaten-Dialog): wie bisher empfohlen
   assert.equal(meldeNachAenderung(alt, { ...alt, art: 'pc_kasse' }, HEUTE).meldestatus, 'aenderung_empfohlen');
 });
@@ -1231,6 +1232,24 @@ test('O10 N8: Korrektur einer Betriebsstätte und einer Kasse behandeln eine Kas
   const k = u.lies(`kassen/${alt}`);
   const n = meldeNachAenderung(k, { ...k, seriennummer: 'SN-NEU' }, HEUTE, { aenderungArt: 'korrektur' });
   assert.deepEqual(n.melde_ereignisse.map((e) => e.anlass), ['korrektur']);
+});
+
+test('O11 N5 (rein): Korrektur mit abgelaufener gesetzlicher Frist und früherer offener Frist -> frist_frueher UND gesetz_abgelaufen; bleibt über die Ableitung; laufende Frist ohne Merker', () => {
+  // erste Korrektur offen (Frist heute + 9), zweite Korrektur mit längst abgelaufener Monatsfrist (Datum 2026-09-01)
+  const offen = { anlass: 'korrektur', am: '2026-11-18', frist_bis: '2026-11-29', hinweis: null };
+  const e = angabeKorrektur(offen, '2026-09-01', '2026-11-20');
+  assert.deepEqual([e.frist_bis, e.hinweis, e.gesetz_abgelaufen], ['2026-11-29', 'frist_frueher', true]);
+  const k = { art: 'registrierkasse', angeschafft_am: '2026-09-01', gemeldet_am: '2026-09-10', melde_ereignisse: [e] };
+  const ab = meldeAbleitung(k).melde_ereignisse[0];
+  assert.deepEqual([ab.hinweis, ab.gesetz_abgelaufen], ['frist_frueher', true], 'gespeichert und wieder gelesen');
+  // die frühere offene Korrektur trug schon frist_gesetz_abgelaufen: bleibt ebenfalls
+  const e2 = angabeKorrektur({ ...offen, hinweis: 'frist_gesetz_abgelaufen' }, '2026-11-10', '2026-11-20');
+  assert.deepEqual([e2.hinweis, e2.gesetz_abgelaufen], ['frist_frueher', true]);
+  // gesetzliche Frist läuft noch: kein Merker
+  const e3 = angabeKorrektur(offen, '2026-11-10', '2026-11-20');
+  assert.equal(e3.gesetz_abgelaufen, undefined);
+  // ungültiger Merker wird beim Lesen verworfen
+  assert.equal(meldeAbleitung({ ...k, melde_ereignisse: [{ ...e, gesetz_abgelaufen: 'ja' }] }).melde_ereignisse[0].gesetz_abgelaufen, undefined);
 });
 
 test('O10 N2 (rein): Korrektur nach Ablauf der gesetzlichen Monatsfrist -> Hinweis frist_gesetz_abgelaufen; Frist läuft noch (auch heute) oder ohne Datum -> kein Hinweis', () => {

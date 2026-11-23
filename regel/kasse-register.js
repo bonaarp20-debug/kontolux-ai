@@ -104,6 +104,7 @@ const ereignisGueltig = (e) => istObjekt(e) && MELDEANLAESSE.includes(e.anlass) 
 const ereignisseAus = (k) => (Array.isArray(k.melde_ereignisse) ? k.melde_ereignisse.filter(ereignisGueltig).map((e) => ({
   anlass: e.anlass, am: e.am ?? null, frist_bis: e.frist_bis ?? null, hinweis: FRIST_HINWEISE.includes(e.hinweis) ? e.hinweis : null,
   ...(e.am == null && istDatum(e.geleert_am) ? { geleert_am: e.geleert_am } : {}),
+  ...(e.gesetz_abgelaufen === true ? { gesetz_abgelaufen: true } : {}),
 })) : []);
 // Bleibt ein Ereignis nach einer Meldung mit Datum gemeldetAm offen? (rein; O9a N2) Mit Datum: liegt es nach dem Meldedatum. Ohne Datum, aber mit Frist (Datum
 // geleert, O8 H1): offen, außer die Meldung liegt am oder nach dem Tag des Leerens (ohne bekannten Tag nie still erledigt). Ohne Datum und ohne Frist (nie erfasst): erledigt.
@@ -151,9 +152,12 @@ export function meldeAbleitung(k) {
 }
 
 // Eine laufende Frist wandert nie nach hinten (O8 M5): liegt die Frist des bisher offenen Ereignisses früher, bleibt sie (Hinweis frist_frueher).
+// O11 N5: war bei dem neuen oder dem bisher offenen Ereignis die gesetzliche Monatsfrist schon abgelaufen (frist_gesetz_abgelaufen), geht das nicht verloren:
+// das Ereignis trägt dann zusätzlich gesetz_abgelaufen: true, und die App zeigt beide Hinweise („Frist aus früherer Angabe“ und „korrigiere sofort“).
+const gesetzAbgelaufen = (x) => istObjekt(x) && (x.hinweis === 'frist_gesetz_abgelaufen' || x.gesetz_abgelaufen === true);
 function nieSpaeter(e, offen) {
   if (!offen || !offen.frist_bis || (e.frist_bis && e.frist_bis <= offen.frist_bis)) return e;
-  return { ...e, frist_bis: offen.frist_bis, hinweis: 'frist_frueher' };
+  return { ...e, frist_bis: offen.frist_bis, hinweis: 'frist_frueher', ...(gesetzAbgelaufen(e) || gesetzAbgelaufen(offen) ? { gesetz_abgelaufen: true } : {}) };
 }
 // Korrektur einer schon gemeldeten Angabe (O8 M4; W2-Recht Ä1, Ä2): Ereignis am Korrekturtag. Eine fehlerhafte Mitteilung ist „nach Kenntnis des Fehlers unverzüglich,
 // spätestens aber bis zum Ablauf der Frist nach § 146a Abs. 4 Satz 2 AO“ zu korrigieren (AEAO zu § 146a Nr. 1.16.3.1, Fassung 30.06.2023). Frist daher: die frühere von
