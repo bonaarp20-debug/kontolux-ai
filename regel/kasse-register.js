@@ -32,12 +32,35 @@ const unbekannt = (body, erlaubt) => (istObjekt(body) ? Object.keys(body).find((
 //   gemeldet             laut Angabe des Nutzers gemeldet, nichts offen
 // ---------------------------------------------------------------------------------------------
 export const MELDESTATI = Object.freeze(['nicht_noetig', 'offen', 'gemeldet', 'aenderung_offen', 'aenderung_empfohlen']);
-export const MELDEANLAESSE = Object.freeze(['anschaffung', 'tse_ausruestung', 'ausserbetriebnahme']);
-export const FRIST_HINWEISE = Object.freeze(['altfall', 'altfall_ausserbetrieb', 'anschaffung_fehlt']);
+// korrektur (O8 M4): ein schon gemeldetes Anschaffungsdatum wurde korrigiert; das Ereignis liegt am Korrekturtag (eine ältere Meldung erledigt es nicht)
+export const MELDEANLAESSE = Object.freeze(['anschaffung', 'tse_ausruestung', 'ausserbetriebnahme', 'korrektur']);
+// altfall_frage (O8 M1): vor dem 01.07.2025 endgültig außer Betrieb, ob die Anschaffung gemeldet war, ist unbeantwortet -> keine Frist, nur die Frage.
+// endgueltig_frage (O8 M2): unbeantwortet, ob das Gerät endgültig außer Betrieb ist (Systemwechsel, Altdaten) -> Frist bleibt (vorsichtig), dazu die Frage.
+// frist_frueher (O8 M5): die Frist kommt aus einer früheren Angabe, weil eine laufende Frist nie nach hinten wandert.
+export const FRIST_HINWEISE = Object.freeze(['altfall', 'altfall_ausserbetrieb', 'anschaffung_fehlt', 'altfall_frage', 'endgueltig_frage', 'frist_frueher']);
+const FRAGE_HINWEISE = ['altfall_frage', 'endgueltig_frage'];
 export const VERFAHREN_BEGINN = '2025-01-01'; // ELSTER-Mitteilungsverfahren steht ab 01.01.2025 zur Verfügung (BMF 28.06.2024)
 const TAXAMETER = ['taxameter', 'wegstreckenzaehler'];
 export const meldepflichtigArt = (art) => typeof art === 'string' && Steuerkern.KASSEN_ARTEN.includes(art) && art !== 'offene_ladenkasse';
 const slot = (anlass) => (anlass === 'ausserbetriebnahme' ? 'ausserbetriebnahme' : 'anschaffung');
+
+// Außerbetriebnahme im Sinne von § 146a Abs. 4 AO (O8 M2): das Gerät ist ENDGÜLTIG außer Betrieb und wird im Betrieb nicht mehr vorgehalten (BMF 28.06.2024 I,
+// Merkblätter der Länder: Verkauf, Verschrottung, Diebstahl, Defekt ohne Reparatur, Rückgabe nach Miete/Leasing, Wechsel der Betriebsstätte). Kontolux trennt das
+// Ende des Kassenbuchs (ausser_betrieb_am, aktiv false) von der Außerbetriebnahme des Geräts (geraet_endgueltig, geraet_ausser_betrieb_am). Rückgabe: Tag oder null
+// (Gerät läuft weiter oder bleibt als Reserve: nichts zu melden). geraet_endgueltig null (unbeantwortet, Systemwechsel ohne Antwort, Altdaten) zählt vorsichtig als
+// endgültig (Frist läuft), die App fragt nach (Hinweis endgueltig_frage).
+export function geraetAusserBetriebAm(k) {
+  if (!istObjekt(k) || k.aktiv !== false || k.geraet_endgueltig === false) return null;
+  if (typeof k.geraet_ausser_betrieb_am === 'string') return k.geraet_ausser_betrieb_am;
+  return typeof k.ausser_betrieb_am === 'string' ? k.ausser_betrieb_am : null;
+}
+// Altfall BMF 28.06.2024 I (O8 M1): vor dem 01.07.2025 endgültig außer Betrieb genommene Systeme sind nur mitzuteilen, wenn die Anschaffung zu diesem Zeitpunkt
+// schon gemeldet war. Ist in Kontolux eine Meldung bis zu diesem Tag vermerkt, ist das bekannt (kein Altfall im Sinne der Frage); sonst fragt die App
+// (altfall_anschaffung_gemeldet: true/false, null = unbeantwortet).
+export function altfallAusserBetrieb(k) {
+  const d = geraetAusserBetriebAm(k);
+  return Boolean(d && d < Steuerkern.KASSENMELDUNG_BEGINN && !(typeof k.gemeldet_am === 'string' && k.gemeldet_am <= d));
+}
 
 // Ereignis „Anschaffung“: das Anschaffungsdatum (bei Miete/Leasing Beginn der Überlassung, BMF 28.06.2024 I, Nutzerangabe). Taxameter und Wegstreckenzähler:
 // die spätere Ausrüstung mit TSE ist das Ereignis (BMF 28.06.2024 II), sonst die Anschaffung (früher, also nie zu spät).
@@ -49,8 +72,7 @@ export function anschaffungsEreignis(k) {
 }
 
 // Ein Ereignis mit Frist aus dem Kern. Ohne Datum keine Frist (nichts geraten), Hinweis anschaffung_fehlt: die App fragt nach dem Datum.
-// Vor dem 01.07.2025: Frist 31.07.2025 (Kern); bei einer Außerbetriebnahme davor nur meldepflichtig, wenn die Anschaffung schon gemeldet war (BMF 28.06.2024 I):
-// Kontolux kann das nicht wissen, die Frist bleibt stehen (höchstens zu früh), der Hinweis altfall_ausserbetrieb erklärt es.
+// Vor dem 01.07.2025: Frist 31.07.2025 (Kern). Außerbetriebnahme davor: siehe altfallAusserBetrieb und meldeAbleitung (Frage statt Frist, O8 M1).
 export function ereignis(anlass, am, { anschaffungFehlt = false } = {}) {
   if (!am) return { anlass, am: null, frist_bis: null, hinweis: 'anschaffung_fehlt' };
   const frist = Steuerkern.kassenmeldeFrist(am);
@@ -67,7 +89,19 @@ export function ereignisSetzen(liste, e) {
 }
 const ereignisOhne = (liste, s) => (liste || []).filter((x) => slot(x.anlass) !== s);
 
+// Hinweis eines Ereignisses aus dem Stand der Kasse (rein). Fragen (altfall_frage, endgueltig_frage) werden gesetzt und, sobald beantwortet, wieder auf den
+// Grund-Hinweis des Datums zurückgeführt; die Frist des Ereignisses bleibt dabei immer erhalten (nie verloren, nie nach hinten).
+function hinweisFuer(k, e, altfall) {
+  if (altfall && k.altfall_anschaffung_gemeldet !== true && k.altfall_anschaffung_gemeldet !== false) return 'altfall_frage';
+  if (e.anlass === 'ausserbetriebnahme' && k.aktiv === false && k.geraet_endgueltig !== true && k.geraet_endgueltig !== false) return 'endgueltig_frage';
+  if (FRAGE_HINWEISE.includes(e.hinweis)) return e.am ? (e.anlass === 'korrektur' ? null : ereignis(e.anlass, e.am).hinweis) : 'anschaffung_fehlt';
+  return e.hinweis;
+}
+
 // Abgeleitete Felder einer Kasse (rein). Eine meldepflichtige Kasse, die noch nie gemeldet wurde, hat immer ein Anschaffungs-Ereignis (auch Kassen vor W2-W2).
+// Altdokument ohne Ereignisliste (vor W2-W2) und außer Betrieb: die Außerbetriebnahme kommt als Ereignis dazu (O8 N9).
+// Altfall vor dem 01.07.2025 (O8 M1): Antwort „nein, Anschaffung war nicht gemeldet“ -> nicht_noetig ohne Ereignis; „ja“ -> nur die Außerbetriebnahme bleibt;
+// unbeantwortet -> Ereignisse mit Hinweis altfall_frage, die nicht in frist_bis zählen (kein „überfällig“ ohne Pflicht).
 export function meldeAbleitung(k) {
   if (!meldepflichtigArt(k.art)) return { meldepflichtig: false, melde_ereignisse: [], meldestatus: 'nicht_noetig', frist_bis: null, aenderung_empfohlen_seit: null };
   let ev = ereignisseAus(k);
@@ -76,38 +110,109 @@ export function meldeAbleitung(k) {
     const a = anschaffungsEreignis(k);
     ev = ereignisSetzen(ev, ereignis(a.anlass, a.am));
   }
+  const abAm = geraetAusserBetriebAm(k);
+  if (!Array.isArray(k.melde_ereignisse) && abAm && typeof k.ausser_betrieb_gemeldet_in !== 'string' && !ev.some((e) => e.anlass === 'ausserbetriebnahme')) ev = ereignisSetzen(ev, ereignis('ausserbetriebnahme', abAm));
+  const altfall = altfallAusserBetrieb(k);
+  if (altfall && k.altfall_anschaffung_gemeldet === false) return { meldepflichtig: true, melde_ereignisse: [], meldestatus: 'nicht_noetig', frist_bis: null, aenderung_empfohlen_seit: null };
+  if (altfall && k.altfall_anschaffung_gemeldet === true) ev = ev.filter((e) => slot(e.anlass) !== 'anschaffung');
+  ev = ev.map((e) => ({ ...e, hinweis: hinweisFuer(k, e, altfall) }));
   const empfohlen = typeof k.aenderung_empfohlen_seit === 'string' ? k.aenderung_empfohlen_seit : null;
-  const fristen = ev.map((e) => e.frist_bis).filter(Boolean).sort();
+  const fristen = ev.filter((e) => e.hinweis !== 'altfall_frage').map((e) => e.frist_bis).filter(Boolean).sort();
   const meldestatus = ev.length ? (gemeldet ? 'aenderung_offen' : 'offen') : empfohlen ? 'aenderung_empfohlen' : gemeldet ? 'gemeldet' : 'offen';
   return { meldepflichtig: true, melde_ereignisse: ev, meldestatus, frist_bis: fristen.length ? fristen[0] : null, aenderung_empfohlen_seit: empfohlen };
+}
+
+// Eine laufende Frist wandert nie nach hinten (O8 M5): liegt die Frist des bisher offenen Ereignisses früher, bleibt sie (Hinweis frist_frueher).
+function nieSpaeter(e, offen) {
+  if (!offen || !offen.frist_bis || (e.frist_bis && e.frist_bis <= offen.frist_bis)) return e;
+  return { ...e, frist_bis: offen.frist_bis, hinweis: 'frist_frueher' };
+}
+// Korrektur eines schon gemeldeten Anschaffungsdatums (O8 M4, Anwaltsfrage): Ereignis am Korrekturtag. Frist: die gesetzliche Monatsfrist aus dem korrigierten
+// Datum, solange sie noch läuft (nie später als das Gesetz); ist sie schon abgelaufen, ein Monat ab dem Korrekturtag (kein sofortiges „überfällig“ für einen Tippfehler,
+// keine Frist vor dem Korrekturtag).
+export function korrekturEreignis(am, heute) {
+  const ausDatum = Steuerkern.kassenmeldeFrist(am);
+  const ausKorrektur = Steuerkern.kassenmeldeFrist(heute);
+  if (!ausDatum || !ausKorrektur) throw new Error('Meldefrist: Datum unlesbar');
+  return { anlass: 'korrektur', am: heute, frist_bis: ausDatum >= heute ? ausDatum : ausKorrektur, hinweis: null };
 }
 
 // Register-Angaben, deren Änderung nach einer Meldung eine Aktualisierung empfiehlt, aber keine Frist auslöst (Software-Version nicht: Updates müssen nicht
 // gemeldet werden, Ausfüllanleitung 02.12.2024; TSE-Wechsel nicht mitteilungspflichtig, FAQ Mitteilungspflicht 11)
 const EMPFOHLEN_FELDER = ['art', 'software', 'hersteller', 'modell', 'seriennummer', 'in_betrieb_am', 'miete_leasing', 'tse', 'meldung_bemerkung'];
 const gleich = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
-// Meldefolge einer Stammdatenänderung (/kasse aendern): neu = Kasse mit den Änderungen. Neues oder geändertes Anschaffungs-Ereignis -> Frist (auch eine Korrektur
-// nach einer Meldung ist mitzuteilen, konservativ); sonst nach einer Meldung nur „Aktualisierung empfohlen“.
+// Meldefolge einer Stammdatenänderung (/kasse aendern): neu = Kasse mit den Änderungen (rein).
+//   Anschaffungsdatum geleert: ein offenes Ereignis bleibt mit seiner Frist (Hinweis anschaffung_fehlt), es wird nie gelöscht (O8 H1); ohne offenes Ereignis nach einer
+//     Meldung nur „Aktualisierung empfohlen“.
+//   Nach einer Meldung, die das bisherige Datum schon umfasste: Korrektur (korrekturEreignis); erstmals eingetragenes Datum bis zum Meldedatum ist von der Meldung gedeckt.
+//   Sonst (noch nicht gemeldet bzw. Ereignis nach dem Meldedatum): Ereignis aus dem neuen Datum; Wechsel Anschaffung <-> TSE-Ausrüstung behält die frühere Frist (O8 M5).
+//   Außerbetriebnahme des Geräts (geraet_endgueltig, geraet_ausser_betrieb_am) neu oder geändert: Ereignis neu, solange sie nicht gemeldet ist (O8 M2).
 export function meldeNachAenderung(alt, neu, heute) {
   let ev = ereignisseAus(alt);
   let empfohlen = typeof alt.aenderung_empfohlen_seit === 'string' ? alt.aenderung_empfohlen_seit : null;
   const gemeldet = typeof neu.gemeldet_am === 'string';
   const a0 = anschaffungsEreignis(alt);
   const a1 = anschaffungsEreignis(neu);
+  const offen = ev.find((e) => slot(e.anlass) === 'anschaffung') || null;
   if (a0.am !== a1.am || a0.anlass !== a1.anlass) {
-    if (a1.am) ev = ereignisSetzen(ev, ereignis(a1.anlass, a1.am));
-    else if (gemeldet) { ev = ereignisOhne(ev, 'anschaffung'); empfohlen = empfohlen || heute; }
-    else ev = ereignisSetzen(ev, ereignis(a1.anlass, null));
+    if (!a1.am) {
+      if (offen) ev = ereignisSetzen(ev, offen.anlass === 'korrektur' ? offen : { anlass: a1.anlass, am: null, frist_bis: offen.frist_bis, hinweis: 'anschaffung_fehlt' });
+      else if (gemeldet) empfohlen = empfohlen || heute;
+      else ev = ereignisSetzen(ev, ereignis(a1.anlass, null));
+    } else if (gemeldet && (!offen || offen.anlass === 'korrektur')) {
+      if (a0.am) ev = ereignisSetzen(ev, nieSpaeter(korrekturEreignis(a1.am, heute), offen));
+      else if (a1.am > neu.gemeldet_am) ev = ereignisSetzen(ev, nieSpaeter(ereignis(a1.anlass, a1.am), offen));
+      // sonst: erstmals eingetragenes Datum, das vor der Meldung lag: die Meldung umfasste die Kasse schon (Bruttomethode), nichts Neues
+    } else {
+      const e = ereignis(a1.anlass, a1.am);
+      ev = ereignisSetzen(ev, offen && offen.anlass !== a1.anlass ? nieSpaeter(e, offen) : e);
+    }
   } else if (gemeldet && EMPFOHLEN_FELDER.some((f) => !gleich(alt[f], neu[f]))) empfohlen = empfohlen || heute;
+  const ab0 = geraetAusserBetriebAm(alt);
+  const ab1 = geraetAusserBetriebAm(neu);
+  // Antwort im Altfall geändert (O8 M1): „nein“ hatte die Ereignisse geleert, also die Außerbetriebnahme aus dem Datum wiederherstellen
+  const altfallWechsel = (alt.altfall_anschaffung_gemeldet ?? null) !== (neu.altfall_anschaffung_gemeldet ?? null);
+  if ((ab0 !== ab1 || altfallWechsel) && typeof neu.ausser_betrieb_gemeldet_in !== 'string') {
+    if (!ab1) ev = ereignisOhne(ev, 'ausserbetriebnahme');
+    else if (ab0 !== ab1 || !ev.some((e) => e.anlass === 'ausserbetriebnahme')) ev = ereignisSetzen(ev, ereignis('ausserbetriebnahme', ab1));
+  }
   return meldeAbleitung({ ...neu, melde_ereignisse: ev, aenderung_empfohlen_seit: empfohlen });
 }
 
-// Widerspruchsfreie Daten an der Kasse (gegen die gespeicherten Werte): Inbetriebnahme und Außerbetriebnahme nicht vor der Anschaffung
+// Widerspruchsfreie Daten an der Kasse (gegen die gespeicherten Werte): Inbetriebnahme und Außerbetriebnahme nicht vor der Anschaffung; die Außerbetriebnahme des
+// Geräts nicht vor dem Ende des Kassenbuchs (das Gerät lief bis dahin in Kontolux)
 export function k3Konsistenz(k) {
   const an = typeof k.angeschafft_am === 'string' ? k.angeschafft_am : null;
   if (an && typeof k.in_betrieb_am === 'string' && k.in_betrieb_am < an) return { code: 'FORMAT', feld: 'in_betrieb_am', grund: 'vor_anschaffung' };
   if (an && typeof k.ausser_betrieb_am === 'string' && k.ausser_betrieb_am < an) return { code: 'FORMAT', feld: 'angeschafft_am', grund: 'nach_ausser_betrieb' };
+  if (typeof k.geraet_ausser_betrieb_am === 'string') {
+    if (an && k.geraet_ausser_betrieb_am < an) return { code: 'FORMAT', feld: 'geraet_ausser_betrieb_am', grund: 'vor_anschaffung' };
+    if (typeof k.ausser_betrieb_am === 'string' && k.geraet_ausser_betrieb_am < k.ausser_betrieb_am) return { code: 'FORMAT', feld: 'geraet_ausser_betrieb_am', grund: 'vor_ausser_betrieb', erwartet_ab: k.ausser_betrieb_am };
+  }
   return null;
+}
+
+// /kasse aendern an einer Kasse außer Betrieb (O8 M1, M2): Antworten auf die Fragen zur Außerbetriebnahme. Rein. felder = geprüfte Felder des Körpers.
+// Rückgabe { fehler: { status, code, ...extra } } oder { felder } (normalisiert: geraet_endgueltig false leert das Datum; ein Datum oder true heißt endgültig,
+// ohne Datum gilt das Ende des Kassenbuchs). Nur an einer Kasse außer Betrieb; das Gerät nicht mehr, sobald die Außerbetriebnahme als gemeldet vermerkt ist.
+export const INAKTIV_FRAGEN = Object.freeze(['geraet_endgueltig', 'geraet_ausser_betrieb_am', 'altfall_anschaffung_gemeldet']);
+export function inaktivAngaben(alt, felder) {
+  const genannt = INAKTIV_FRAGEN.filter((f) => felder[f] !== undefined);
+  if (!genannt.length) return { felder: {} };
+  if (alt.aktiv !== false) return { fehler: { status: 400, code: 'FORMAT', feld: genannt[0], grund: 'nur_ausser_betrieb' } };
+  const aus = {};
+  if (felder.altfall_anschaffung_gemeldet !== undefined) aus.altfall_anschaffung_gemeldet = felder.altfall_anschaffung_gemeldet;
+  if (felder.geraet_endgueltig !== undefined || felder.geraet_ausser_betrieb_am !== undefined) {
+    if (typeof alt.ausser_betrieb_gemeldet_in === 'string') return { fehler: { status: 409, code: 'AUSSERBETRIEB_GEMELDET', meldung_id: alt.ausser_betrieb_gemeldet_in } };
+    if (felder.geraet_endgueltig === false) {
+      if (felder.geraet_ausser_betrieb_am !== undefined) return { fehler: { status: 400, code: 'FORMAT', feld: 'geraet_ausser_betrieb_am', grund: 'nicht_endgueltig' } };
+      aus.geraet_endgueltig = false; aus.geraet_ausser_betrieb_am = null;
+    } else {
+      aus.geraet_endgueltig = true;
+      aus.geraet_ausser_betrieb_am = felder.geraet_ausser_betrieb_am ?? (typeof alt.geraet_ausser_betrieb_am === 'string' ? alt.geraet_ausser_betrieb_am : alt.ausser_betrieb_am ?? null);
+    }
+  }
+  return { felder: aus };
 }
 
 // System-Angaben einer Kasse (vor W2-W2 fehlten sie): leer, wenn nichts erfasst ist. Ein Wechsel der Kassenart über die Meldepflicht-Grenze (offen <-> elektronisch)
@@ -120,10 +225,13 @@ export const K3_LEER = Object.freeze({
   software: null, software_version: null, hersteller: null, modell: null, seriennummer: null, angeschafft_am: null, in_betrieb_am: null, miete_leasing: null, tse: null,
   meldeweg: null, betriebsstaette_id: null, meldepflicht_bestaetigt_am: null, tse_bestaetigt_am: null, meldung_bemerkung: null,
   ausser_betrieb_am: null, ausser_betrieb_grund: null, ausser_betrieb_text: null, ausser_betrieb_gemeldet_in: null, gemeldet_am: null, letzte_meldung_id: null,
+  geraet_endgueltig: null, geraet_ausser_betrieb_am: null, altfall_anschaffung_gemeldet: null,
 });
 
 // Zuordnung einer Kasse zu einer Betriebsstätte prüfen (anlegen, aendern). Eine schon gemeldete Kasse wechselt die Betriebsstätte nicht über aendern: rechtlich ist
 // das eine Außerbetriebnahme in der alten Betriebsstätte (Ausfüllanleitung: „endgültig oder Wechsel der Betriebsstätte“) und eine neue Mitteilung in der neuen.
+// Eine aufgegebene Betriebsstätte nimmt nur noch eine Kasse auf, die dort bis zur Aufgabe lief, also spätestens am Tag der Aufgabe außer Betrieb ging (O8 M7:
+// sonst bliebe deren Außerbetriebnahme ohne Betriebsstätte und damit ohne Meldehilfe).
 export async function betriebsstaetteZuordnung(fs, uid, alt, neuId, cors) {
   const bisher = alt ? alt.betriebsstaette_id ?? null : null;
   if (neuId === bisher) return null;
@@ -131,15 +239,20 @@ export async function betriebsstaetteZuordnung(fs, uid, alt, neuId, cors) {
   if (!neuId) return null;
   const bs = await fs.get(P.betriebsstaette(uid, neuId));
   if (!bs || !istObjekt(bs.daten)) return fehlerAntwort(404, 'BETRIEBSSTAETTE_UNBEKANNT', cors, { feld: 'betriebsstaette_id' });
-  if (typeof bs.daten.aufgegeben_am === 'string') return fehlerAntwort(422, 'BETRIEBSSTAETTE_AUFGEGEBEN', cors, { feld: 'betriebsstaette_id', aufgegeben_am: bs.daten.aufgegeben_am });
+  const aufgegeben = bs.daten.aufgegeben_am;
+  if (typeof aufgegeben === 'string' && !(alt && alt.aktiv === false && typeof alt.ausser_betrieb_am === 'string' && alt.ausser_betrieb_am <= aufgegeben)) {
+    return fehlerAntwort(422, 'BETRIEBSSTAETTE_AUFGEGEBEN', cors, { feld: 'betriebsstaette_id', aufgegeben_am: aufgegeben });
+  }
   return null;
 }
 
 // ---------------------------------------------------------------------------------------------
 // Formprüfungen der neuen Aktionen (rein)
 // ---------------------------------------------------------------------------------------------
-export const AUSSER_BETRIEB_GRUENDE = Object.freeze(['defekt', 'verkauft', 'aufgegeben', 'ersetzt', 'sonstig']);
-export const AUSSER_BETRIEB_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'ausser_betrieb_am', 'ausser_betrieb_grund', 'ausser_betrieb_text']);
+// rueckgabe: Rückgabe nach Miete/Leasing (O8 N10, Merkblätter der Länder nennen sie als Außerbetriebnahme)
+export const AUSSER_BETRIEB_GRUENDE = Object.freeze(['defekt', 'verkauft', 'aufgegeben', 'ersetzt', 'rueckgabe', 'sonstig']);
+// geraet_endgueltig (O8 M2): Pflicht bei meldepflichtigen Kassen (der Handler prüft es nach dem Lesen der Kasse); altfall_anschaffung_gemeldet (O8 M1) freiwillig
+export const AUSSER_BETRIEB_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'ausser_betrieb_am', 'ausser_betrieb_grund', 'ausser_betrieb_text', 'geraet_endgueltig', 'altfall_anschaffung_gemeldet']);
 export const AUFHEBEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'grund']);
 export const BS_ANLEGEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'bezeichnung', 'anschrift', 'bemerkung', 'geschaeftsleitung']);
 export const BS_AENDERN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'betriebsstaette_id', 'bezeichnung', 'anschrift', 'bemerkung', 'geschaeftsleitung', 'aufgegeben_am']);
@@ -162,7 +275,13 @@ export function pruefeAusserBetrieb(body, aktion, { heute }) {
   const text = body.ausser_betrieb_text;
   if (text !== undefined && text !== null && !textOk(text, 1, 200)) return fehl('ausser_betrieb_text');
   if (body.ausser_betrieb_grund === 'sonstig' && !(typeof text === 'string' && text.trim())) return fehl('ausser_betrieb_text', 'FORMAT', { grund: 'pflicht_bei_sonstig' });
-  return ok({ kasse_id: body.kasse_id, ausser_betrieb_am: body.ausser_betrieb_am, grund: body.ausser_betrieb_grund, text: typeof text === 'string' && text.trim() ? text.trim() : null });
+  if (body.geraet_endgueltig !== undefined && typeof body.geraet_endgueltig !== 'boolean') return fehl('geraet_endgueltig');
+  const af = body.altfall_anschaffung_gemeldet;
+  if (af !== undefined && af !== null && typeof af !== 'boolean') return fehl('altfall_anschaffung_gemeldet');
+  return ok({
+    kasse_id: body.kasse_id, ausser_betrieb_am: body.ausser_betrieb_am, grund: body.ausser_betrieb_grund, text: typeof text === 'string' && text.trim() ? text.trim() : null,
+    geraet_endgueltig: typeof body.geraet_endgueltig === 'boolean' ? body.geraet_endgueltig : null, altfall_anschaffung_gemeldet: typeof af === 'boolean' ? af : null,
+  });
 }
 
 function anschriftPruefen(a) {
@@ -197,11 +316,14 @@ export function pruefeBetriebsstaette(body, aktion, { heute }) {
   return ok(w);
 }
 
-// ELSTER-Protokoll: users/{uid}/kasse/meldungen/{meldungId}_{name} (Vertrag 4 Storage), ein Dateiname ohne Unterordner
+// ELSTER-Protokoll (Vertrag stand-kasse.md 10.2, O8 M6): users/{uid}/kasse/meldungen/{meldungId}_{versuch}_{name}. versuch = Date.now() des Uploads (13 Ziffern):
+// jeder Upload-Versuch hat einen eigenen Pfad, so scheitert ein neuer Versuch nach einer verlorenen Antwort nicht am Überschreibverbot der Storage-Rules.
+// name = bereinigter Dateiname ([A-Za-z0-9._-], 1-100 Zeichen, nicht nur Punkte), kein Unterordner.
 export const PROTOKOLL_PRAEFIX = (uid, meldungId) => `users/${uid}/kasse/meldungen/${meldungId}_`;
+const PROTOKOLL_REST = /^\d{13}_(?!\.+$)[A-Za-z0-9._-]{1,100}$/;
 export function protokollPfadOk(pfad, { uid, meldungId }) {
   const p = PROTOKOLL_PRAEFIX(uid, meldungId);
-  return typeof pfad === 'string' && pfad.length <= 300 && pfad.startsWith(p) && pfad.length > p.length && !pfad.includes('..') && !pfad.slice(p.length).includes('/');
+  return typeof pfad === 'string' && pfad.length <= 300 && pfad.startsWith(p) && PROTOKOLL_REST.test(pfad.slice(p.length)) && !pfad.includes('..');
 }
 
 export function pruefeMeldung(body, { heute }) {
@@ -218,6 +340,11 @@ export function pruefeMeldung(body, { heute }) {
 // Handler. c = Aufrufkontext aus regel/kasse.js, h = { mitWiederholung, formFehler, verlaufFortschreiben } (kein Kreisimport)
 // ---------------------------------------------------------------------------------------------
 const kassenLesen = async (fs, uid) => (await listeAlle(fs, `users/${uid}/kassen`, { seite: 300, maxSeiten: 2 })).dokumente.filter((d) => istObjekt(d.daten));
+// O8 N8: die letzten 20 anfrage_ids von ausser_betrieb und ausser_betrieb_aufheben an der Kasse. Eine späte Wiederholung aus einem alten Dialog (A, Rücknahme B,
+// dann noch einmal A) wird so erkannt und nicht erneut ausgeführt; die Erkennung im Zielzustand allein reichte dafür nicht.
+const REGISTER_ANFRAGEN_MAX = 20;
+const anfrageVerbraucht = (k, aid) => Array.isArray(k.register_anfragen) && k.register_anfragen.includes(aid);
+const anfrageMerken = (k, aid) => [...(Array.isArray(k.register_anfragen) ? k.register_anfragen : []), aid].slice(-REGISTER_ANFRAGEN_MAX);
 
 // /kasse ausser_betrieb (Gegenlesung M-3): Fachregeln 1-5 aus welle2-konzept 3.5, fail-closed. Danach lehnt der Worker jeden Abschluss, Ruhetag und jede Bewegung
 // mit 422 KASSE_INAKTIV ab (kasse.js). Leere Tage zwischen dem letzten Abschluss und der Außerbetriebnahme sperren nicht (wie im laufenden Betrieb; die App weist
@@ -238,7 +365,12 @@ export async function ausserBetrieb(c, h) {
     if (k.aktiv === false && k.ausser_betrieb_anfrage_id === body.anfrage_id) {
       return { antwort: antwort({ ok: true, idempotent: true, kasse_id: id, ausser_betrieb_am: k.ausser_betrieb_am ?? null, meldestatus: k.meldestatus ?? null, frist_bis: k.frist_bis ?? null }, 200, cors) };
     }
+    // O8 N8: eine späte Wiederholung einer schon verbrauchten Anfrage (Außerbetriebnahme danach zurückgenommen) wird nicht noch einmal ausgeführt
+    if (anfrageVerbraucht(k, body.anfrage_id)) return { antwort: fehlerAntwort(409, 'KONFLIKT', cors, { grund: 'anfrage_verbraucht' }) };
     if (k.aktiv === false) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors) };
+    // O8 M2: bei einer meldepflichtigen Kasse muss feststehen, ob das Gerät endgültig außer Betrieb ist (nur dann ist eine Außerbetriebnahme zu melden)
+    const pflichtig = meldepflichtigArt(k.art);
+    if (pflichtig && typeof w.geraet_endgueltig !== 'boolean') return { antwort: h.formFehler({ code: 'FORMAT', feld: 'geraet_endgueltig', grund: 'pflicht' }, cors) };
     if (typeof k.angeschafft_am === 'string' && am < k.angeschafft_am) return { antwort: h.formFehler({ code: 'FORMAT', feld: 'ausser_betrieb_am', grund: 'vor_anschaffung', angeschafft_am: k.angeschafft_am }, cors) };
     const zeiger = zeigerAus(k.letzter_abschluss);
     if (k.kassenbuch !== false) {
@@ -266,11 +398,17 @@ export async function ausserBetrieb(c, h) {
     // Regel 4: keine aktive Kasse ohne eigenes Kassenbuch zählt ihren Bestand in dieser Kasse (Archiv-Einträge aus system_wechseln sind inaktiv und zählen nicht)
     const verweise = (await kassenLesen(fs, uid)).filter((d) => idVon(d) !== id && d.daten.bestand_in_kasse_id === id && d.daten.aktiv !== false).map(idVon).sort();
     if (verweise.length) return { antwort: fehlerAntwort(409, 'KASSE_REFERENZIERT', cors, { kasse_ids: verweise.slice(0, 20) }) };
-    // Regel 3 und 5: aktiv false, Außerbetriebnahme als Meldeereignis (frühere offene Fristen bleiben, es gilt die früheste)
+    // Regel 3 und 5: aktiv false, Außerbetriebnahme als Meldeereignis (frühere offene Fristen bleiben, es gilt die früheste), aber nur, wenn das Gerät endgültig
+    // außer Betrieb ist (O8 M2); sonst endet nur das Kassenbuch in Kontolux
     const ts = zeitstempel(zeit);
+    const endgueltig = pflichtig ? w.geraet_endgueltig : null;
+    const basis = pflichtig ? meldeAbleitung(k).melde_ereignisse : [];
     const roh = {
       ...k, aktiv: false, ausser_betrieb_am: am, ausser_betrieb_grund: w.grund, ausser_betrieb_text: w.text, ausser_betrieb_anfrage_id: body.anfrage_id, ausser_betrieb_gemeldet_in: null,
-      melde_ereignisse: meldepflichtigArt(k.art) ? ereignisSetzen(meldeAbleitung(k).melde_ereignisse, ereignis('ausserbetriebnahme', am)) : [],
+      geraet_endgueltig: endgueltig, geraet_ausser_betrieb_am: endgueltig === true ? am : null,
+      altfall_anschaffung_gemeldet: w.altfall_anschaffung_gemeldet ?? k.altfall_anschaffung_gemeldet ?? null,
+      register_anfragen: anfrageMerken(k, body.anfrage_id),
+      melde_ereignisse: pflichtig ? (endgueltig ? ereignisSetzen(basis, ereignis('ausserbetriebnahme', am)) : ereignisOhne(basis, 'ausserbetriebnahme')) : [],
     };
     const v = h.verlaufFortschreiben(uid, id, k, ['aktiv', 'ausser_betrieb_am', 'ausser_betrieb_grund', 'meldestatus'], ts);
     const neu = { ...roh, ...meldeAbleitung(roh), geaendert_am: ts, verlauf: v.verlauf, ...v.extra };
@@ -295,6 +433,7 @@ export async function ausserBetriebAufheben(c, h) {
     if (!kd || !istObjekt(kd.daten)) return { antwort: fehlerAntwort(404, 'KASSE_UNBEKANNT', cors) };
     const k = kd.daten;
     if (k.aktiv !== false && k.wieder_in_betrieb_anfrage_id === body.anfrage_id) return { antwort: antwort({ ok: true, idempotent: true, kasse_id: id, meldestatus: k.meldestatus ?? null, frist_bis: k.frist_bis ?? null }, 200, cors) };
+    if (anfrageVerbraucht(k, body.anfrage_id)) return { antwort: fehlerAntwort(409, 'KONFLIKT', cors, { grund: 'anfrage_verbraucht' }) };
     if (k.aktiv !== false) return { antwort: fehlerAntwort(409, 'NICHT_AUSSER_BETRIEB', cors) };
     if (k.ausser_betrieb_grund === 'systemwechsel' || typeof k.nachfolger_kasse_id === 'string') return { antwort: fehlerAntwort(409, 'AUSSERBETRIEB_SYSTEMWECHSEL', cors, { nachfolger_kasse_id: k.nachfolger_kasse_id ?? null }) };
     if (typeof k.ausser_betrieb_gemeldet_in === 'string') return { antwort: fehlerAntwort(409, 'AUSSERBETRIEB_GEMELDET', cors, { meldung_id: k.ausser_betrieb_gemeldet_in }) };
@@ -308,6 +447,7 @@ export async function ausserBetriebAufheben(c, h) {
     const ts = zeitstempel(zeit);
     const roh = {
       ...k, aktiv: true, ausser_betrieb_am: null, ausser_betrieb_grund: null, ausser_betrieb_text: null, ausser_betrieb_anfrage_id: null, wieder_in_betrieb_anfrage_id: body.anfrage_id,
+      geraet_endgueltig: null, geraet_ausser_betrieb_am: null, register_anfragen: anfrageMerken(k, body.anfrage_id),
       melde_ereignisse: ereignisOhne(ereignisseAus(k), 'ausserbetriebnahme'),
     };
     const v = h.verlaufFortschreiben(uid, id, k, ['aktiv', 'ausser_betrieb_am', 'ausser_betrieb_grund', 'meldestatus'], ts);
@@ -357,7 +497,11 @@ export async function betriebsstaette(c, h, aktion) {
     const alt = bd.daten;
     const geaendert = Object.keys(w.felder).filter((k) => !gleich(alt[k], w.felder[k])).sort();
     if (!geaendert.length) return { antwort: antwort({ ok: true, betriebsstaette_id: id, unveraendert: true }, 200, cors) };
-    if (w.felder.geschaeftsleitung === true && alt.geschaeftsleitung !== true) {
+    // höchstens eine AKTIVE Geschäftsleitung: auch beim Wiedereröffnen einer aufgegebenen Stätte, die Geschäftsleitung ist (O8 N6)
+    const wirdLeitung = (w.felder.geschaeftsleitung ?? alt.geschaeftsleitung) === true;
+    const wirdAktiv = typeof ('aufgegeben_am' in w.felder ? w.felder.aufgegeben_am : alt.aufgegeben_am) !== 'string';
+    const warAktiveLeitung = alt.geschaeftsleitung === true && typeof alt.aufgegeben_am !== 'string';
+    if (wirdLeitung && wirdAktiv && !warAktiveLeitung) {
       const d = await leitungDoppelt();
       if (d) return { antwort: fehlerAntwort(409, 'GESCHAEFTSLEITUNG_VORHANDEN', cors, { feld: 'geschaeftsleitung', betriebsstaette_id: idVon(d) }) };
     }
@@ -376,7 +520,8 @@ export async function betriebsstaette(c, h, aktion) {
 
 // Schnappschuss je Kasse: genau die Angaben der Ausfüllanleitung (System, TSE, Daten) plus Status vor der Meldung
 const SCHNAPPSCHUSS_FELDER = ['bezeichnung', 'art', 'aktiv', 'kassenbuch', 'software', 'software_version', 'hersteller', 'modell', 'seriennummer', 'angeschafft_am', 'in_betrieb_am',
-  'miete_leasing', 'tse', 'ausser_betrieb_am', 'ausser_betrieb_grund', 'ausser_betrieb_text', 'meldung_bemerkung', 'meldeweg', 'nachfolger_kasse_id'];
+  'miete_leasing', 'tse', 'ausser_betrieb_am', 'ausser_betrieb_grund', 'ausser_betrieb_text', 'meldung_bemerkung', 'meldeweg', 'nachfolger_kasse_id',
+  'geraet_endgueltig', 'geraet_ausser_betrieb_am', 'altfall_anschaffung_gemeldet'];
 const schnappschuss = (d) => {
   const k = d.daten;
   const m = meldeAbleitung(k);
@@ -449,5 +594,36 @@ export async function kassenmeldungGemeldet(c, h) {
       details: { meldung_id: meldungId, betriebsstaette_id: bsId, kassen: hier.length, offen: offenIds.length, protokoll: w.protokoll_pfad !== null },
     }], zeit);
     return { writes: [...writes, ...audit.writes], erfolg: () => antwort({ ok: true, meldung_id: meldungId, kassen_ids: gemeldetIds, kassen_offen: offenIds }, 200, cors) };
+  });
+}
+
+// /kassenmeldung protokoll_nachreichen (O8 N1): das ELSTER-Protokoll einer schon erfassten Meldung, die ohne Protokoll gespeichert wurde, einmalig nachreichen.
+// Vorher erzeugte die App dafür eine zweite Meldung mit demselben Datum; die Dokumentation zeigte dann zwei Meldungen, wo nur eine abgegeben wurde. Der Schnappschuss
+// bleibt unverändert, nur protokoll_pfad und protokoll_nachgereicht_am kommen dazu; ein vorhandenes Protokoll wird nie ersetzt (409 PROTOKOLL_VORHANDEN). Audit.
+export const MELDUNG_ID_MUSTER = /^m[a-z0-9]{8}$/;
+export const NACHREICHEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'meldung_id', 'protokoll_pfad']);
+export function pruefeNachreichen(body) {
+  if (!istObjekt(body) || !nurSchluessel(body, NACHREICHEN_SCHLUESSEL)) return fehl(unbekannt(body, NACHREICHEN_SCHLUESSEL));
+  if (typeof body.meldung_id !== 'string' || !MELDUNG_ID_MUSTER.test(body.meldung_id)) return fehl('meldung_id');
+  if (typeof body.protokoll_pfad !== 'string') return fehl('protokoll_pfad');
+  return ok({ meldung_id: body.meldung_id, protokoll_pfad: body.protokoll_pfad });
+}
+export async function protokollNachreichen(c, h) {
+  const { fs, uid, body, cors, zeit } = c;
+  const f = pruefeNachreichen(body);
+  if (f.fehler) return h.formFehler(f.fehler, cors);
+  const { meldung_id: mid, protokoll_pfad: pfad } = f.wert;
+  if (!protokollPfadOk(pfad, { uid, meldungId: mid })) return fehlerAntwort(400, 'ANHANG_FREMD', cors, { feld: 'protokoll_pfad', praefix: PROTOKOLL_PRAEFIX(uid, mid) });
+  return h.mitWiederholung(fs, async () => {
+    const docs = await fs.batchGet([P.meldung(uid, mid), kopfPfad(uid)]);
+    const md = docs.get(P.meldung(uid, mid));
+    if (!md || !istObjekt(md.daten)) return { antwort: fehlerAntwort(404, 'MELDUNG_UNBEKANNT', cors, { feld: 'meldung_id' }) };
+    const m = md.daten;
+    if (m.protokoll_pfad === pfad) return { antwort: antwort({ ok: true, idempotent: true, meldung_id: mid }, 200, cors) };
+    if (typeof m.protokoll_pfad === 'string' && m.protokoll_pfad !== '') return { antwort: fehlerAntwort(409, 'PROTOKOLL_VORHANDEN', cors, { meldung_id: mid }) };
+    const ts = zeitstempel(zeit);
+    const neu = { ...m, protokoll_pfad: pfad, protokoll_nachgereicht_am: ts };
+    const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{ aktion: 'kassenmeldung_protokoll', ziel: `kassenmeldungen/${mid}`, vorher: m, nachher: neu, details: { meldung_id: mid } }], zeit);
+    return { writes: [schreibe.setzen(P.meldung(uid, mid), neu, { updateTime: md.updateTime }), ...audit.writes], erfolg: () => antwort({ ok: true, meldung_id: mid }, 200, cors) };
   });
 }
