@@ -268,7 +268,7 @@ export const K3_INAKTIV_ERLAUBT = Object.freeze(['bezeichnung', ...K3_SCHLUESSEL
 export const ANLEGEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'bezeichnung', 'kuerzel', 'art', 'grundaufzeichnung', 'datenquelle', 'anfangsbestand_cent', 'anfangsbestand_am',
   'anfangsbestand_herkunft', 'anfangsbestand_nachweis', 'karte_ueber_integration', 'ruhetage_wochentage', 'kassenbuch', 'bestand_in_kasse_id', 'datev_konto', ...K3_SCHLUESSEL]);
 export const AENDERN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'bezeichnung', 'ruhetage_wochentage', 'datev_konto', 'karte_ueber_integration', 'art', 'art_ab',
-  'grundaufzeichnung', 'grundaufzeichnung_ab', 'datenquelle', 'datenquelle_ab', 'bestand_in_kasse_id', ...K3_SCHLUESSEL, ...INAKTIV_FRAGEN_SCHLUESSEL]);
+  'grundaufzeichnung', 'grundaufzeichnung_ab', 'datenquelle', 'datenquelle_ab', 'bestand_in_kasse_id', ...K3_SCHLUESSEL, ...INAKTIV_FRAGEN_SCHLUESSEL, 'korrektur_elster_am']);
 // system_wechseln: die Angaben des NEUEN Systems; nicht genannte System-Angaben (Anschaffung, Inbetriebnahme, Miete, TSE, Bestätigungen) werden geleert (sie gehörten zum alten System)
 export const WECHSELN_K3 = Object.freeze(['angeschafft_am', 'in_betrieb_am', 'miete_leasing', 'tse', 'meldepflicht_bestaetigt_am', 'tse_bestaetigt_am']);
 // altgeraet_endgueltig (O8 M2, freiwillig): ist das alte Gerät endgültig außer Betrieb? Ohne Angabe bleibt die Frage offen (Frist läuft vorsichtig, die App fragt nach)
@@ -413,6 +413,12 @@ export function pruefeKasse(body, aktion, { heute }) {
     if (body.altfall_anschaffung_gemeldet !== undefined) {
       if (body.altfall_anschaffung_gemeldet !== null && typeof body.altfall_anschaffung_gemeldet !== 'boolean') return fehl('altfall_anschaffung_gemeldet');
       w.felder.altfall_anschaffung_gemeldet = body.altfall_anschaffung_gemeldet;
+    }
+    // O9a M1: Korrektur eines gemeldeten Anschaffungsdatums schon in Mein ELSTER mitgeteilt (Tag laut Nutzer). Kein Feld der Kasse; nur zusammen mit einer Korrektur
+    // (der Handler prüft, dass die Änderung eine ist und der Tag nicht vor der Meldung liegt, die das alte Datum trug)
+    if (body.korrektur_elster_am !== undefined && body.korrektur_elster_am !== null) {
+      if (!istDatum(body.korrektur_elster_am) || body.korrektur_elster_am > heute) return fehl('korrektur_elster_am');
+      w.korrektur_elster_am = body.korrektur_elster_am;
     }
     if (!Object.keys(w.felder).length) return fehl('felder');
     return ok(w);

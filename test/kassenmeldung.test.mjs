@@ -43,7 +43,8 @@ function umgebung({ config = AN } = {}) {
   fs.setze(P('agb_zustimmung/z1'), { version: AGB_MINDESTFASSUNG_KASSE });
   let t = 0;
   let heute = HEUTE;
-  const deps = { fetchFn: fs.fetchFn, adminToken: async () => 't', heute: () => heute, jetzt: () => new Date(Date.parse(`${heute}T09:00:00Z`) + (t++) * 1000).toISOString(), storageUrlOk, kassenAusgabeBeleg };
+  const dateienFehlen = new Set(); // O9a N4: Protokolldateien, die NICHT im Speicher liegen (sonst liegt jede vor)
+  const deps = { fetchFn: fs.fetchFn, adminToken: async () => 't', heute: () => heute, jetzt: () => new Date(Date.parse(`${heute}T09:00:00Z`) + (t++) * 1000).toISOString(), storageUrlOk, kassenAusgabeBeleg, storageVorhanden: async (p) => !dateienFehlen.has(p) };
   const ruf = async (pfad, body, { am = HEUTE } = {}) => {
     heute = am;
     const r = await regelKasse(pfad, { userId: UID, anfrage_id: aid(), ...body }, {}, {}, deps);
@@ -55,7 +56,7 @@ function umgebung({ config = AN } = {}) {
   const melden = async (body, o) => ruf('/kassenmeldung', { aktion: 'gemeldet', ...body }, o);
   const audit = () => fs.pfade(P('audit_v2/e')).map((p) => fs.lies(p));
   const lies = (p) => fs.lies(P(p));
-  return { fs, deps, ruf, kasse, neueKasse, neueStaette, melden, audit, lies };
+  return { fs, deps, ruf, kasse, neueKasse, neueStaette, melden, audit, lies, dateienFehlen };
 }
 const abschluss = (id, tag, gezaehlt, extra = {}) => ({ aktion: 'abschliessen', kasse_id: id, geschaeftstag: tag, umsaetze: [], gezaehlt_cent: gezaehlt, bestand_gezaehlt_bestaetigt: true, grundaufzeichnung_bestaetigt: true, ...extra });
 const code = (r) => r.json.fehler && r.json.fehler[0].code;
@@ -270,7 +271,8 @@ test('/kassenmeldung gemeldet: Ereignis nach dem Meldedatum bleibt offen (kassen
   const r = await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2026-11-05' });
   assert.equal(r.status, 200, JSON.stringify(r.json));
   assert.deepEqual([r.json.kassen_ids, r.json.kassen_offen], [[b], [a]]);
-  assert.deepEqual([u.lies(`kassen/${a}`).meldestatus, u.lies(`kassen/${a}`).frist_bis], ['aenderung_offen', '2026-12-10']);
+  // O9a N3: die Meldung vom 05.11. umfasste die erst am 10.11. angeschaffte Kasse nicht: sie bleibt noch nie gemeldet (offen), ohne fremdes Meldedatum
+  assert.deepEqual([u.lies(`kassen/${a}`).meldestatus, u.lies(`kassen/${a}`).frist_bis, u.lies(`kassen/${a}`).gemeldet_am], ['offen', '2026-12-10', null]);
   assert.equal(u.lies(`kassen/${b}`).meldestatus, 'gemeldet');
   assert.equal(u.lies(`kassenmeldungen/${r.json.meldung_id}`).protokoll_pfad, null);
 });
@@ -433,7 +435,9 @@ test('ausser_betrieb: Restbestand > 0 -> 409 RESTBESTAND mit bestand_cent; nach 
   assert.equal(code(await u.kasse({ aktion: 'aendern', kasse_id: id, ruhetage_wochentage: [0] })), 'KASSE_INAKTIV');
   // Register-Angaben darf sie noch vervollständigen (für die Mitteilung der Außerbetriebnahme)
   assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, seriennummer: 'SN-9', angeschafft_am: '2026-10-05' })).status, 200);
-  assert.equal(u.lies(`kassen/${id}`).frist_bis, '2026-11-05');
+  // O9a N1: die alte Frist (02.11.) ist schon abgelaufen, ein späteres Datum heilt sie nicht still (Hinweis frist_frueher); gemeldet werden muss ohnehin
+  assert.equal(u.lies(`kassen/${id}`).frist_bis, '2026-11-02');
+  assert.equal(u.lies(`kassen/${id}`).melde_ereignisse[0].hinweis, 'frist_frueher');
   // Anschaffung nach der Außerbetriebnahme ist widersprüchlich
   assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, angeschafft_am: '2026-11-13' })).json.grund, 'nach_ausser_betrieb');
   assert.deepEqual(u.audit().map((e) => e.aktion).filter((a) => a.startsWith('kasse_')), ['kasse_anlegen', 'kasse_aendern', 'kasse_ausser_betrieb', 'kasse_aendern']);
@@ -603,7 +607,7 @@ test('O8 H1: Systemwechsel nach einer Meldung -> neues System nie gemeldet (offe
   assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, angeschafft_am: null })).status, 200);
   k = u.lies(`kassen/${id}`);
   assert.deepEqual([k.meldestatus, k.frist_bis, k.aenderung_empfohlen_seit], ['offen', '2026-11-30', null]);
-  assert.deepEqual(k.melde_ereignisse, [{ anlass: 'anschaffung', am: null, frist_bis: '2026-11-30', hinweis: 'anschaffung_fehlt' }]);
+  assert.deepEqual(k.melde_ereignisse, [{ anlass: 'anschaffung', am: null, frist_bis: '2026-11-30', hinweis: 'anschaffung_fehlt', geleert_am: HEUTE }]); // O9a N2: Tag des Leerens
   // Nebenfolge 1 behoben: das neue System darf der Betriebsstätte zugeordnet werden, solange es nicht gemeldet ist
   assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, betriebsstaette_id: bs2 })).status, 200);
 });
@@ -828,4 +832,184 @@ test('O8 N6, N8, N9, N10: Wiedereröffnen einer aufgegebenen Geschäftsleitung p
   assert.deepEqual(alt.melde_ereignisse, [{ anlass: 'ausserbetriebnahme', am: '2026-11-10', frist_bis: '2026-12-10', hinweis: 'endgueltig_frage' }]);
   const r = await u.kasse(AB(await u.neueKasse({ kuerzel: 'RG' }), '2026-11-20', { ausser_betrieb_grund: 'rueckgabe' }));
   assert.equal(r.status, 200, JSON.stringify(r.json));
+});
+
+// =============================================================================================
+// Block 6: Delta-Lesung O9a (docs/kassenbuch/o9a-gegenlesung.md, Fixbericht o9a-fix-bericht.md)
+// =============================================================================================
+test('O9a M1: Korrektur schon vorher in Mein ELSTER (korrektur_elster_am) -> die Meldung mit diesem Datum erledigt das Ereignis; ohne Angabe bleibt es beim Korrekturtag (keine geratene Erledigung)', async () => {
+  const u = umgebung();
+  const bs = await u.neueStaette();
+  const id = await u.neueKasse({ betriebsstaette_id: bs, angeschafft_am: '2026-10-01' });
+  assert.equal((await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2026-10-15' })).status, 200);
+  // Nutzer korrigiert am 10.11. in ELSTER, am 20.11. in Kontolux
+  const r = await u.kasse({ aktion: 'aendern', kasse_id: id, angeschafft_am: '2026-10-03', korrektur_elster_am: '2026-11-10' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  let k = u.lies(`kassen/${id}`);
+  assert.deepEqual(k.melde_ereignisse.map((e) => [e.anlass, e.am]), [['korrektur', '2026-11-10']]);
+  assert.equal(k.meldestatus, 'aenderung_offen');
+  const a = u.audit().filter((e) => e.aktion === 'kasse_aendern').pop();
+  assert.equal(a.details.korrektur_elster_am, '2026-11-10', 'Angabe im Audit');
+  const m = await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2026-11-10' });
+  assert.deepEqual([m.status, m.json.kassen_ids, m.json.kassen_offen], [200, [id], []]);
+  k = u.lies(`kassen/${id}`);
+  assert.deepEqual([k.meldestatus, k.melde_ereignisse, k.gemeldet_am], ['gemeldet', [], '2026-11-10']);
+  // Gegenprobe ohne Angabe: Ereignis am Korrekturtag (20.11.), die Meldung vom 10.11. erledigt es nicht
+  const bs2 = await u.neueStaette({ bezeichnung: 'Zwei' });
+  const id2 = await u.neueKasse({ kuerzel: 'K2', betriebsstaette_id: bs2, angeschafft_am: '2026-10-01' });
+  assert.equal((await u.melden({ betriebsstaette_id: bs2, gemeldet_am: '2026-10-15' })).status, 200);
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id2, angeschafft_am: '2026-10-03' })).status, 200);
+  assert.deepEqual(u.lies(`kassen/${id2}`).melde_ereignisse.map((e) => [e.anlass, e.am]), [['korrektur', HEUTE]]);
+  const m2 = await u.melden({ betriebsstaette_id: bs2, gemeldet_am: '2026-11-10' });
+  assert.deepEqual(m2.json.kassen_offen, [id2]);
+});
+
+test('O9a M1: korrektur_elster_am nur bei einer echten Korrektur, nicht vor der Meldung mit dem alten Datum, nicht in der Zukunft; sonst 400 ohne Schreiben', async () => {
+  const u = umgebung();
+  const bs = await u.neueStaette();
+  const id = await u.neueKasse({ betriebsstaette_id: bs, angeschafft_am: '2026-10-01' });
+  const ohneMeldung = await u.kasse({ aktion: 'aendern', kasse_id: id, angeschafft_am: '2026-10-02', korrektur_elster_am: '2026-11-10' });
+  assert.deepEqual([ohneMeldung.status, ohneMeldung.json.feld, ohneMeldung.json.grund], [400, 'korrektur_elster_am', 'keine_korrektur'], 'vor einer Meldung ist es keine Korrektur');
+  assert.equal((await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2026-10-15' })).status, 200);
+  const c0 = u.fs.log.commits;
+  const nurText = await u.kasse({ aktion: 'aendern', kasse_id: id, seriennummer: 'SN-1', korrektur_elster_am: '2026-11-10' });
+  assert.deepEqual([nurText.status, nurText.json.grund], [400, 'keine_korrektur']);
+  const vorher = await u.kasse({ aktion: 'aendern', kasse_id: id, angeschafft_am: '2026-10-03', korrektur_elster_am: '2026-10-14' });
+  assert.deepEqual([vorher.status, vorher.json.grund, vorher.json.gemeldet_am], [400, 'vor_meldung', '2026-10-15']);
+  const zukunft = await u.kasse({ aktion: 'aendern', kasse_id: id, angeschafft_am: '2026-10-03', korrektur_elster_am: '2026-11-21' });
+  assert.deepEqual([zukunft.status, zukunft.json.feld], [400, 'korrektur_elster_am']);
+  assert.equal(u.fs.log.commits, c0);
+});
+
+test('O9a M2: Archiv-Eintrag aus system_wechseln vor dem 01.07.2025 ohne Antwort „endgültig?“ und Altfrage „nicht gemeldet“ -> kein nicht_noetig, die Frage endgueltig_frage bleibt; erst „endgültig ja“ macht den Altfall', async () => {
+  const u = umgebung();
+  const id = await u.neueKasse({ angeschafft_am: '2019-05-01', anfangsbestand_am: '2025-03-01' });
+  const w = await u.kasse({ aktion: 'system_wechseln', kasse_id: id, gueltig_ab: '2025-03-01', art: 'app_kasse', grundaufzeichnung: 'tse_kasse', datenquelle: 'manuell', angeschafft_am: '2025-02-20' });
+  assert.equal(w.status, 200, JSON.stringify(w.json));
+  const arch = w.json.archiv_kasse_id;
+  assert.equal(u.lies(`kassen/${arch}`).geraet_endgueltig, null);
+  const r = await u.kasse({ aktion: 'aendern', kasse_id: arch, altfall_anschaffung_gemeldet: false });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  let k = u.lies(`kassen/${arch}`);
+  assert.notEqual(k.meldestatus, 'nicht_noetig', 'Reservegerät wäre Altbestand: Pflicht bleibt bis zur Antwort');
+  assert.ok(k.melde_ereignisse.some((e) => e.anlass === 'ausserbetriebnahme' && e.hinweis === 'endgueltig_frage'), JSON.stringify(k.melde_ereignisse));
+  assert.ok(k.melde_ereignisse.some((e) => e.anlass === 'anschaffung' && e.frist_bis === '2025-07-31'));
+  assert.equal(k.frist_bis, '2025-07-31');
+  // jetzt „endgültig ja“: Altfall mit Antwort „nicht gemeldet“ -> keine Pflicht
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: arch, geraet_endgueltig: true })).status, 200);
+  k = u.lies(`kassen/${arch}`);
+  assert.deepEqual([k.meldestatus, k.melde_ereignisse], ['nicht_noetig', []]);
+});
+
+test('O9a M2 (rein): meldeAbleitung wertet den Altfall nur bei geraet_endgueltig === true; „nein“ (Reserve) lässt die Anschaffung als Altbestand offen', () => {
+  const basis = { art: 'registrierkasse', aktiv: false, ausser_betrieb_am: '2025-03-10', geraet_ausser_betrieb_am: '2025-03-10', angeschafft_am: '2019-05-01', gemeldet_am: null, altfall_anschaffung_gemeldet: false };
+  const offen = meldeAbleitung({ ...basis, geraet_endgueltig: null });
+  assert.equal(offen.meldestatus, 'offen');
+  assert.deepEqual(offen.melde_ereignisse.map((e) => [e.anlass, e.hinweis]), [['anschaffung', 'altfall'], ['ausserbetriebnahme', 'endgueltig_frage']]);
+  assert.equal(meldeAbleitung({ ...basis, geraet_endgueltig: true }).meldestatus, 'nicht_noetig');
+  const reserve = meldeAbleitung({ ...basis, geraet_endgueltig: false, geraet_ausser_betrieb_am: null });
+  assert.deepEqual([reserve.meldestatus, reserve.frist_bis, reserve.melde_ereignisse.map((e) => e.anlass)], ['offen', '2025-07-31', ['anschaffung']]);
+});
+
+test('O9a N1 (rein): Datum der Außerbetriebnahme nach hinten verschoben -> eine schon abgelaufene Frist bleibt (frist_frueher); eine laufende darf wandern (Tippfehler)', () => {
+  const ev = [{ anlass: 'ausserbetriebnahme', am: '2026-01-10', frist_bis: '2026-02-10', hinweis: null }];
+  const alt = { art: 'registrierkasse', aktiv: false, geraet_endgueltig: true, geraet_ausser_betrieb_am: '2026-01-10', ausser_betrieb_am: '2026-01-10', angeschafft_am: '2025-01-01', gemeldet_am: '2025-07-01', melde_ereignisse: ev };
+  const spaet = meldeNachAenderung(alt, { ...alt, geraet_ausser_betrieb_am: '2026-11-01' }, '2026-11-20');
+  assert.deepEqual([spaet.frist_bis, spaet.melde_ereignisse[0].hinweis, spaet.melde_ereignisse[0].am], ['2026-02-10', 'frist_frueher', '2026-11-01']);
+  const laufend = meldeNachAenderung(alt, { ...alt, geraet_ausser_betrieb_am: '2026-01-15' }, '2026-02-01');
+  assert.deepEqual([laufend.frist_bis, laufend.melde_ereignisse[0].hinweis], ['2026-02-16', null], '15.02.2026 ist ein Sonntag');
+});
+
+test('O9a N2: Anschaffungsdatum geleert (Frist bleibt) -> eine Meldung vor dem Tag des Leerens erledigt das Ereignis nicht, eine ab diesem Tag schon', async () => {
+  const u = umgebung();
+  const bs = await u.neueStaette();
+  const id = await u.neueKasse({ betriebsstaette_id: bs, angeschafft_am: '2026-11-01' });
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, angeschafft_am: null })).status, 200);
+  assert.deepEqual(u.lies(`kassen/${id}`).melde_ereignisse, [{ anlass: 'anschaffung', am: null, frist_bis: '2026-12-01', hinweis: 'anschaffung_fehlt', geleert_am: HEUTE }]);
+  const alt = await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2026-11-05' });
+  assert.deepEqual([alt.status, alt.json.kassen_offen], [200, [id]]);
+  assert.deepEqual([u.lies(`kassen/${id}`).frist_bis, u.lies(`kassen/${id}`).gemeldet_am], ['2026-12-01', null]);
+  const neu = await u.melden({ betriebsstaette_id: bs, gemeldet_am: HEUTE });
+  assert.deepEqual([neu.json.kassen_ids, u.lies(`kassen/${id}`).meldestatus, u.lies(`kassen/${id}`).gemeldet_am], [[id], 'gemeldet', HEUTE]);
+});
+
+test('O9a N3: nach einem Systemwechsel nachträglich erfasste ältere Meldung -> das neue System bekommt weder Meldedatum noch letzte Meldung (kassen_offen), das Archiv schon', async () => {
+  const u = umgebung();
+  const bs = await u.neueStaette();
+  const id = await u.neueKasse({ betriebsstaette_id: bs, angeschafft_am: '2025-03-01' });
+  const w = await u.kasse({ aktion: 'system_wechseln', kasse_id: id, gueltig_ab: '2026-11-01', art: 'app_kasse', grundaufzeichnung: 'tse_kasse', datenquelle: 'manuell', angeschafft_am: '2026-10-28', altgeraet_endgueltig: true });
+  assert.equal(w.status, 200, JSON.stringify(w.json));
+  const m = await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2025-07-20' });
+  assert.equal(m.status, 200, JSON.stringify(m.json));
+  assert.ok(m.json.kassen_offen.includes(id));
+  const k = u.lies(`kassen/${id}`);
+  assert.deepEqual([k.gemeldet_am, k.letzte_meldung_id, k.meldestatus], [null, null, 'offen']);
+  const a = u.lies(`kassen/${w.json.archiv_kasse_id}`);
+  assert.deepEqual([a.gemeldet_am, a.letzte_meldung_id], ['2025-07-20', m.json.meldung_id]);
+  // Betriebsstätte des neuen Systems bleibt änderbar (nicht gemeldet)
+  const bs2 = await u.neueStaette({ bezeichnung: 'Zwei' });
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, betriebsstaette_id: bs2 })).status, 200);
+});
+
+test('O9a N4: Protokollpfad ohne Datei im Speicher -> 422 PROTOKOLL_FEHLT (gemeldet und nachreichen), Speicherfehler oder fehlende Prüfung 503; nichts geschrieben', async () => {
+  const u = umgebung();
+  const bs = await u.neueStaette();
+  await u.neueKasse({ betriebsstaette_id: bs, angeschafft_am: '2026-11-01' });
+  const anfrageId = 'meld-o9a-n4-0001';
+  const mid = await meldungIdAus(UID, anfrageId);
+  const pfad = `${PROTOKOLL_PRAEFIX(UID, mid)}1763600000123_elster.pdf`;
+  u.dateienFehlen.add(pfad);
+  const c0 = u.fs.log.commits;
+  const r = await u.melden({ anfrage_id: anfrageId, betriebsstaette_id: bs, gemeldet_am: '2026-11-19', protokoll_pfad: pfad });
+  assert.deepEqual([r.status, code(r), r.json.feld], [422, 'PROTOKOLL_FEHLT', 'protokoll_pfad']);
+  const alt = u.deps.storageVorhanden;
+  u.deps.storageVorhanden = async () => { throw new Error('netz'); };
+  assert.deepEqual([(await u.melden({ anfrage_id: anfrageId, betriebsstaette_id: bs, gemeldet_am: '2026-11-19', protokoll_pfad: pfad })).status], [503]);
+  delete u.deps.storageVorhanden;
+  assert.equal(code(await u.melden({ anfrage_id: anfrageId, betriebsstaette_id: bs, gemeldet_am: '2026-11-19', protokoll_pfad: pfad })), 'SPEICHER_NICHT_ERREICHBAR', 'ohne Prüfung fail-closed');
+  u.deps.storageVorhanden = alt;
+  assert.equal(u.fs.log.commits, c0);
+  // Meldung ohne Protokoll, dann nachreichen: fehlende Datei 422, die echte geht und ist danach endgültig
+  const ohne = await u.melden({ anfrage_id: anfrageId, betriebsstaette_id: bs, gemeldet_am: '2026-11-19' });
+  assert.equal(ohne.status, 200);
+  const nach = (p) => u.ruf('/kassenmeldung', { aktion: 'protokoll_nachreichen', meldung_id: mid, protokoll_pfad: p });
+  const fehlt = await nach(pfad);
+  assert.deepEqual([fehlt.status, code(fehlt)], [422, 'PROTOKOLL_FEHLT']);
+  assert.equal(u.lies(`kassenmeldungen/${mid}`).protokoll_pfad, null);
+  const echt = `${PROTOKOLL_PRAEFIX(UID, mid)}1763600000456_elster.pdf`;
+  assert.equal((await nach(echt)).status, 200);
+  assert.equal(code(await nach(`${PROTOKOLL_PRAEFIX(UID, mid)}1763600000789_x.pdf`)), 'PROTOKOLL_VORHANDEN');
+});
+
+test('O9a N8: protokoll_nachreichen mit dem Präfix einer fremden UID und der eigenen meldung_id -> 400 ANHANG_FREMD, nichts geschrieben', async () => {
+  const u = umgebung();
+  const bs = await u.neueStaette();
+  await u.neueKasse({ betriebsstaette_id: bs, angeschafft_am: '2026-11-01' });
+  const m = await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2026-11-19' });
+  const mid = m.json.meldung_id;
+  const c0 = u.fs.log.commits;
+  const r = await u.ruf('/kassenmeldung', { aktion: 'protokoll_nachreichen', meldung_id: mid, protokoll_pfad: `${PROTOKOLL_PRAEFIX('fremdeUid000000000000001', mid)}1763600000123_elster.pdf` });
+  assert.deepEqual([r.status, code(r), r.json.feld], [400, 'ANHANG_FREMD', 'protokoll_pfad']);
+  assert.equal(u.fs.log.commits, c0);
+});
+
+test('O9a N6: Gegenkasse geht zwischen Lesen und Commit außer Betrieb -> der Storno scheitert an ihrer Vorbedingung, die Wiederholung lehnt mit 422 ab', async () => {
+  const u = umgebung();
+  const a = await u.neueKasse({ kuerzel: 'KA', anfangsbestand_cent: 10000 });
+  const b = await u.neueKasse({ kuerzel: 'KB' });
+  const aus = await u.ruf('/kassenbewegung', { aktion: 'anlegen', kasse_id: a, geschaeftstag: '2026-11-18', art: 'geldtransit_kasse_aus', betrag_cent: 5000, text: 'an B', gegenkasse_id: b }, { am: '2026-11-18' });
+  assert.equal(aus.status, 200, JSON.stringify(aus.json));
+  let einmal = true;
+  u.fs.haken.vorCommit = async (writes, api) => {
+    if (einmal && writes.some((x) => String(x.update && x.update.name).includes('/kassenbewegungen/') && x.currentDocument && x.currentDocument.exists === false)) {
+      einmal = false;
+      api.setze(P(`kassen/${b}`), { ...u.lies(`kassen/${b}`), aktiv: false, ausser_betrieb_am: '2026-11-20' }); // gleichzeitige Außerbetriebnahme (ohne Audit-Kopf)
+    }
+  };
+  const c0 = u.fs.log.commits;
+  const sb = await u.ruf('/kassenbewegung', { aktion: 'stornieren', kasse_id: a, bewegung_id: aus.json.bewegung_id, grund: 'doppelt erfasst' });
+  u.fs.haken.vorCommit = null;
+  assert.deepEqual([sb.status, code(sb), sb.json.feld], [422, 'KASSE_INAKTIV', 'gegenkasse_id']);
+  assert.ok(!u.fs.pfade(P('kassenbewegungen/')).some((p) => u.fs.lies(p).storno_von === aus.json.bewegung_id), 'kein Storno geschrieben');
+  assert.ok(u.fs.log.commits >= c0);
 });

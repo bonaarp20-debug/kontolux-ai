@@ -952,3 +952,53 @@ test('O4-Fix N1: K16 Euro statt Cent: alle Beträge unter 10 EUR oder nur volle 
   const grossRund = pr({ saetze: [{ satz_prozent: 19, brutto_cent: 12000, netto_cent: null, steuer_cent: null }, { satz_prozent: 7, brutto_cent: 8000, netto_cent: null, steuer_cent: null }], zahlarten: [{ art: 'bar', betrag_cent: 20000 }], gesamt_brutto_cent: 20000 });
   assert.equal(stufe(grossRund, 'K16_BETRAG_KLEIN'), undefined, 'runde Beträge über 10 EUR: kein Hinweis');
 });
+
+// ---------------------------------------------------------------------------------------------
+// O9a N5 (K16 bei krummen Beträgen über den Median der letzten Tage) und N8 (Bildkopf: EXIF-Vorschaubild, progressives JPEG)
+// ---------------------------------------------------------------------------------------------
+const KRUMM = () => ({ ...BAECKEREI(), saetze: [{ satz_prozent: 19, brutto_cent: 2537, netto_cent: 2132, steuer_cent: 405 }], zahlarten: [{ art: 'bar', betrag_cent: 2537 }], gesamt_brutto_cent: 2537 });
+function vortage(u, n, cent) {
+  for (let i = 1; i <= n; i += 1) {
+    const t = new Date(Date.UTC(2026, 10, 20 - i)).toISOString().slice(0, 10);
+    u.fs.setze(`users/${UID}/kassentage/${KASSE}_${t}`, { kasse_id: KASSE, geschaeftstag: t, status: 'abgeschlossen', fassung_aktiv: 1 });
+    u.fs.setze(`users/${UID}/kassentage/${KASSE}_${t}/fassungen/1`, { n: 1, umsaetze: [{ steuerfall: 'A_19', bar_cent: cent - 1000, unbar_cent: 1000 }] });
+  }
+}
+
+test('O9a N5: krummer Umsatz als Euro statt Cent gelesen (2.537,40 EUR -> 25,37 EUR): K16-Hinweis über den Median der letzten Tage; ohne genug Vortage kein Vergleich', () => {
+  assert.equal(stufe(pr(KRUMM()), 'K16_BETRAG_KLEIN'), undefined, 'ohne Vergleich schweigt K16 (bisheriger Fall)');
+  const mit = pruefeZbonVorschlag(KRUMM(), { besteuerung: 'Regel', geschaeftstag_dialog: '2026-11-20', heute: TAG, vergleich_median_cent: 250000 });
+  const k = mit.pruefungen.find((p) => p.code === 'K16_BETRAG_KLEIN');
+  assert.equal(k.stufe, 'hinweis');
+  assert.equal(pruefeZbonVorschlag(BAECKEREI(), { besteuerung: 'Regel', geschaeftstag_dialog: '2026-11-20', heute: TAG, vergleich_median_cent: 25000 }).pruefungen.find((p) => p.code === 'K16_BETRAG_KLEIN'), undefined, 'normaler Tag: kein Hinweis');
+});
+
+test('O9a N5 (Endpunkt): fünf Vortage mit rund 2.500 EUR -> K16; vier Vortage -> kein Vergleich; Lesefehler beim Vergleich ändert die Antwort sonst nicht', async () => {
+  const u = umgebung({ ki: () => antwortKi(KRUMM()) });
+  vortage(u, 5, 250000);
+  const r = await u.rufe();
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.pruefungen.find((p) => p.code === 'K16_BETRAG_KLEIN')?.stufe, 'hinweis');
+  const w = umgebung({ ki: () => antwortKi(KRUMM()) });
+  vortage(w, 4, 250000);
+  assert.equal((await w.rufe()).json.pruefungen.find((p) => p.code === 'K16_BETRAG_KLEIN'), undefined);
+  const f = umgebung({ ki: () => antwortKi(KRUMM()) });
+  vortage(f, 6, 250000);
+  f.fs.haken.fehler = (url) => (url.includes(':runQuery') ? new Response('{}', { status: 500 }) : null);
+  const rf = await f.rufe();
+  assert.equal(rf.status, 200);
+  assert.equal(rf.json.pruefungen.find((p) => p.code === 'K16_BETRAG_KLEIN'), undefined);
+});
+
+test('O9a N8: JPEG mit APP1/EXIF-Vorschaubild (eigener SOF im Segment) vor dem echten SOF und progressives JPEG (SOF2 nach DQT/DHT): Maße des Hauptbilds', () => {
+  const seg = (m, daten) => Buffer.concat([Buffer.from([0xFF, m, (daten.length + 2) >> 8, (daten.length + 2) & 0xFF]), Buffer.from(daten)]);
+  const sof = (m, b, h) => seg(m, [8, h >> 8, h & 0xFF, b >> 8, b & 0xFF, 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
+  const vorschau = Buffer.concat([Buffer.from([0xFF, 0xD8]), sof(0xC0, 160, 120), Buffer.from([0xFF, 0xD9])]);
+  const app1 = seg(0xE1, [...Buffer.from('Exif\0\0'), ...vorschau]);
+  const dqt = seg(0xDB, new Array(65).fill(1));
+  const dht = seg(0xC4, new Array(30).fill(2));
+  const exif = Buffer.concat([Buffer.from([0xFF, 0xD8]), app1, dqt, sof(0xC0, 3024, 4032), Buffer.from([0xFF, 0xDA])]);
+  assert.deepEqual(zbonBildMasse(exif, 'image/jpeg'), { breite: 3024, hoehe: 4032 }, 'nicht das Vorschaubild 160 x 120');
+  const progressiv = Buffer.concat([Buffer.from([0xFF, 0xD8]), seg(0xE0, [...Buffer.from('JFIF\0'), 1, 1, 0, 0, 1, 0, 1, 0, 0]), dqt, dht, sof(0xC2, 9000, 2000), dht, Buffer.from([0xFF, 0xDA])]);
+  assert.deepEqual(zbonBildMasse(progressiv, 'image/jpeg'), { breite: 9000, hoehe: 2000 });
+});

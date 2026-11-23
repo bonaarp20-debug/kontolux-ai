@@ -54,22 +54,30 @@ function gehoertZu(uid, name, dokName) {
   return seg[0] === 'users' && seg[1] === uid && seg.length >= 6 && seg.length % 2 === 0 && seg[seg.length - 2] === name;
 }
 
-// Alle Dokumente einer Unterkollektion (beliebiger Elterndokumente) unter users/{uid}; Rohform wie die Firestore-REST-Liste { name, fields }
-export async function untersammlungLesen(uid, name, token, fetchFn = globalThis.fetch, { nurName = false } = {}) {
+// Alle Dokumente einer Unterkollektion (beliebiger Elterndokumente) unter users/{uid}; Rohform wie die Firestore-REST-Liste { name, fields }.
+// teil: true (O9a M3, Prüfer-Daten): wirft nie, sondern liefert { dokumente, vollstaendig } mit allen schon gelesenen Seiten (wie listeTeil in kasse-daten.js);
+// ohne teil wie bisher alles oder ein Fehler (Löschlauf und Export brauchen alles).
+export async function untersammlungLesen(uid, name, token, fetchFn = globalThis.fetch, { nurName = false, teil = false } = {}) {
   const alle = [];
   let cursor = null;
-  for (let runde = 0; runde < RUNDEN_MAX; runde++) {
-    const res = await fetchFn(`${FIRESTORE_WURZEL}/users/${uid}:runQuery`, {
-      method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(abfrage(name, nurName, cursor)),
-    });
-    if (!res.ok) throw new Error(`Abfrage ${name} fehlgeschlagen (${res.status})`);
-    const zeilen = await res.json();
-    const docs = (Array.isArray(zeilen) ? zeilen : []).map((z) => z && z.document).filter((d) => d && d.name);
-    for (const d of docs) if (gehoertZu(uid, name, d.name)) alle.push(d);
-    if (docs.length < SEITE) return alle;
-    cursor = docs[docs.length - 1].name;
+  try {
+    for (let runde = 0; runde < RUNDEN_MAX; runde++) {
+      const res = await fetchFn(`${FIRESTORE_WURZEL}/users/${uid}:runQuery`, {
+        method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(abfrage(name, nurName, cursor)),
+      });
+      if (!res.ok) throw new Error(`Abfrage ${name} fehlgeschlagen (${res.status})`);
+      const zeilen = await res.json();
+      const docs = (Array.isArray(zeilen) ? zeilen : []).map((z) => z && z.document).filter((d) => d && d.name);
+      for (const d of docs) if (gehoertZu(uid, name, d.name)) alle.push(d);
+      if (docs.length < SEITE) return teil ? { dokumente: alle, vollstaendig: true } : alle;
+      cursor = docs[docs.length - 1].name;
+    }
+    throw new Error(`Abfrage ${name}: zu viele Seiten`);
+  } catch (e) {
+    if (!teil) throw e;
+    console.warn('untersammlung_teil ' + JSON.stringify({ name, art: String(e?.name || 'Error').slice(0, 40) }));
+    return { dokumente: alle, vollstaendig: false };
   }
-  throw new Error(`Abfrage ${name}: zu viele Seiten`);
 }
 
 // Löscht alle Dokumente der genannten Unterkollektionen unter users/{uid} (batchWrite, je 400). Gibt die Anzahl je Name zurück.
