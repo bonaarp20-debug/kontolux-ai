@@ -168,9 +168,10 @@ export function featureAktiv(config, name) {
 // FEATURE_STANDARD); in der App (Lader) gilt ein fehlender Name als an: das Drehbuch setzt beide Namen vor dem App-Deploy ausdrücklich auf 'aus'.
 // 'kasse' hängt am Kern (KERN_ABHAENGIG: kern_max 'aus' schaltet das Kassenbuch mit ab). Die Liste schaltet nichts; sie dient Drehbuch und Paritätstest.
 export const FEATURES_KASSE = Object.freeze(['kasse', 'kasse_ki']);
-// KASSE-P1b (M15): Mindestfassung der Nutzungsbedingungen für das Kassenbuch (Zustimmungsnachweis users/{uid}/agb_zustimmung, wie OSS). PLATZHALTER bis P6:
-// die Fassung mit den Kassenbuch-Texten legt P6 fest, dann dieselbe Fassung im Lader (App, P3) und im Vorprüfungs-Vergleich. Bis dahin hat niemand zugestimmt,
-// das Kassenbuch ist also (zusätzlich zum Schalter) für alle 403 AGB_FEHLT.
+// KASSE-P1b (M15): Mindestfassung der Nutzungsbedingungen für das Kassenbuch (Zustimmungsnachweis users/{uid}/agb_zustimmung, wie OSS). P6-Fassungs-Commit
+// (23.11.2026): echte Fassung mit den Kassenbuch-Texten (Nutzungsbedingungen 2b/2c, Stand 14. Dezember 2026), gleich App AGB_VERSION und Lader
+// AGB_MINDESTFASSUNG_KASSE (scripts/rollout-vorpruefung.mjs). Das Datum darf nicht nach dem Deploy-Tag liegen (agbZustimmungPruefen in worker.js lehnt
+// eine Fassung mit Datum nach heute ab); bei abweichendem Deploy-Tag in App, Worker und Landing vorher gemeinsam umdatieren (deploy-reihenfolge.md).
 export const AGB_MINDESTFASSUNG_KASSE = '2026-12-14-1';
 
 // E-B (Auflage A1 G-KERN-B, KERN-B2): Kern-Optionen (optionen.regeln) aus config/features, dieselbe Abbildung wie die App (Kern-Index
