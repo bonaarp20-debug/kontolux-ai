@@ -20,9 +20,9 @@ import { auditKette, kopfPfad, eintragPfad } from './audit.js';
 import { profilBereit, wirkPerioden, nachFestschreibungAntwort, festPruefungMarkieren } from './schreibweg-v2.js';
 import { legacyHash } from './drift.js';
 import { heuteBerlin } from './oss-meldung.js';
-import { KASSE_PFADE, FEATURE, aufbewahrungBis, anhaengePruefen, nachweisPflicht, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, pruefeBewegung, kernFassung, stammKombination, PRIVAT_ARTEN, K3_INAKTIV_ERLAUBT } from './kasse-form.js';
+import { KASSE_PFADE, FEATURE, aufbewahrungBis, anhaengePruefen, nachweisPflicht, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, pruefeBewegung, kernFassung, stammKombination, PRIVAT_ARTEN, K3_INAKTIV_ERLAUBT, INAKTIV_FRAGEN_SCHLUESSEL } from './kasse-form.js';
 import {
-  ausserBetrieb, ausserBetriebAufheben, betriebsstaette, kassenmeldungGemeldet, meldeAbleitung, meldeNachAenderung, k3Konsistenz, betriebsstaetteZuordnung, meldepflichtigArt,
+  ausserBetrieb, ausserBetriebAufheben, betriebsstaette, kassenmeldungGemeldet, protokollNachreichen, inaktivAngaben, meldeAbleitung, meldeNachAenderung, k3Konsistenz, betriebsstaetteZuordnung, meldepflichtigArt,
   ohneSystemDaten, ereignis, ereignisSetzen, anschaffungsEreignis, K3_LEER,
 } from './kasse-register.js';
 import {
@@ -45,7 +45,7 @@ export const AKTIONEN = Object.freeze({
   '/kasse': ['anlegen', 'aendern', 'system_wechseln', 'ausser_betrieb', 'ausser_betrieb_aufheben', 'betriebsstaette_anlegen', 'betriebsstaette_aendern'],
   '/kassentag': ['abschliessen', 'ruhetag', 'ruhetage', 'stornieren', 'ruhetag_aufheben'],
   '/kassenbewegung': ['anlegen', 'stornieren'],
-  '/kassenmeldung': ['gemeldet'],
+  '/kassenmeldung': ['gemeldet', 'protokoll_nachreichen'],
 });
 // Abbildung der Kern-Prüfcodes auf HTTP (stand-kasse.md 5): FORMAT-Gruppe 400 mit code FORMAT (kern_code nennt den Kern-Code), die übrigen gleichnamig
 const FORMAT_GRUPPE = ['FORMAT', 'STEUERFALL_UNZULAESSIG', 'KU_MEHRERE_SAETZE', 'DIFFERENZ_OHNE_GRUND', 'ZBON_SUMME_ABWEICHUNG', 'RETROGRAD_DIFFERENZ'];
@@ -115,7 +115,7 @@ export async function regelKasse(pfad, body, env, cors = {}, deps = {}) {
     if (typeof aktion !== 'string' || !Array.isArray(AKTIONEN[pfad]) || !AKTIONEN[pfad].includes(aktion)) return fehlerAntwort(400, 'AKTION_UNBEKANNT', cors);
     const c = { fs, uid, body, cors, zeit, heute, profil, config, deps, env };
     const h = { mitWiederholung, formFehler, verlaufFortschreiben };
-    if (pfad === '/kassenmeldung') return await kassenmeldungGemeldet(c, h);
+    if (pfad === '/kassenmeldung') return aktion === 'protokoll_nachreichen' ? await protokollNachreichen(c, h) : await kassenmeldungGemeldet(c, h);
     if (pfad === '/kasse') {
       if (aktion === 'ausser_betrieb') return await ausserBetrieb(c, h);
       if (aktion === 'ausser_betrieb_aufheben') return await ausserBetriebAufheben(c, h);
@@ -273,6 +273,7 @@ async function kasseAktion(c, aktion) {
       if (w.felder.bestand_in_kasse_id && alt.kassenbuch !== false) return { antwort: formFehler({ code: 'FORMAT', feld: 'bestand_in_kasse_id', grund: 'nur_ohne_kassenbuch' }, cors) };
       for (const [k, v] of Object.entries(w.felder)) {
         if (['art', 'art_ab', 'grundaufzeichnung', 'grundaufzeichnung_ab', 'datenquelle', 'datenquelle_ab'].includes(k)) continue;
+        if (INAKTIV_FRAGEN_SCHLUESSEL.includes(k)) continue; // O8 M1/M2: unten über inaktivAngaben
         if (k === 'karte_ueber_integration') {
           // J1-Fix N-e: gilt wie die anderen Stammdaten ab dem nächsten freien Tag (karte_ueber_integration_ab, Eintrag in der Historie), nicht rückwirkend für
           // stornierte Tage davor: deren Neuerfassung prüft die Kartenbeträge mit dem Wert, der am Tag galt
@@ -290,6 +291,13 @@ async function kasseAktion(c, aktion) {
         const liste = await fs.list(`users/${uid}/kassen`, { pageSize: 100 });
         if (neu.bestand_in_kasse_id === id || !liste.dokumente.some((d) => idVon(d) === neu.bestand_in_kasse_id)) return { antwort: fehlerAntwort(404, 'KASSE_UNBEKANNT', cors, { feld: 'bestand_in_kasse_id' }) };
       }
+      // O8 M1/M2: Antworten zur Außerbetriebnahme (nur außer Betrieb; das Gerät nicht mehr nach gemeldeter Außerbetriebnahme), normalisiert
+      const ia = inaktivAngaben(alt, w.felder);
+      if (ia.fehler) {
+        const { status, code, ...extra } = ia.fehler;
+        return { antwort: code === 'FORMAT' ? formFehler({ code, ...extra }, cors) : fehlerAntwort(status, code, cors, extra) };
+      }
+      for (const [k, v] of Object.entries(ia.felder)) if (JSON.stringify(alt[k] ?? null) !== JSON.stringify(v)) { neu[k] = v; geaendert.push(k); }
       if (!geaendert.length) return { antwort: antwort({ ok: true, kasse_id: id, unveraendert: true }, 200, cors) };
       // W2-W2: Betriebsstätte (existiert, nicht aufgegeben; eine gemeldete Kasse wechselt sie nicht über aendern)
       if (geaendert.includes('betriebsstaette_id')) {
@@ -317,8 +325,11 @@ async function kasseAktion(c, aktion) {
         anfangsbestand_herkunft: alt.anfangsbestand_herkunft, kassenbuch: false, bestand_in_kasse_id: id, karte_ueber_integration: alt.karte_ueber_integration ?? 'keine',
         ruhetage_wochentage: [], datev_konto: null, meldepflicht_bestaetigt_am: alt.meldepflicht_bestaetigt_am ?? null,
         aktiv: false, ausser_betrieb_am: alterTag, ausser_betrieb_grund: 'systemwechsel', ausser_betrieb_text: null, ausser_betrieb_gemeldet_in: null, nachfolger_kasse_id: id,
+        // O8 M2: das alte Gerät ist nur dann außer Betrieb im Sinne von § 146a Abs. 4 AO, wenn es endgültig weg ist; ohne Antwort bleibt die Frage offen (Frist läuft
+        // vorsichtig, Hinweis endgueltig_frage), bei „nein“ (Reserve) gibt es kein Ereignis
+        geraet_endgueltig: w.altgeraet_endgueltig, geraet_ausser_betrieb_am: w.altgeraet_endgueltig === false ? null : alterTag, altfall_anschaffung_gemeldet: null,
         erstellt_am: zeitstempel(zeit), geaendert_am: zeitstempel(zeit), verlauf: [], letzter_abschluss: null,
-        melde_ereignisse: altM.meldepflichtig ? ereignisSetzen(altM.melde_ereignisse, ereignis('ausserbetriebnahme', alterTag)) : [],
+        melde_ereignisse: altM.meldepflichtig ? (w.altgeraet_endgueltig === false ? altM.melde_ereignisse : ereignisSetzen(altM.melde_ereignisse, ereignis('ausserbetriebnahme', alterTag))) : [],
         aenderung_empfohlen_seit: alt.aenderung_empfohlen_seit ?? null,
       };
       archiv = { id: archivId, daten: { ...archivRoh, ...meldeAbleitung(archivRoh) } };
@@ -327,6 +338,9 @@ async function kasseAktion(c, aktion) {
       // (die App fragt das Datum nach; die Außerbetriebnahme des alten Systems in derselben Betriebsstätte hat die frühere Frist). Kein Altstand übernommen.
       const k3f = k3Konsistenz({ ...alt, ...neu, ausser_betrieb_am: null });
       if (k3f) return { antwort: formFehler(k3f, cors) };
+      // O8 H1: das neue System ist noch nie gemeldet. Meldedatum und letzte Meldung gehören zum alten System (der Archiv-Eintrag behält sie); sonst sähe das neue
+      // System gemeldet aus, eine geleerte Anschaffung löschte seine Erstmeldung und die Betriebsstätte wäre gesperrt.
+      neu.gemeldet_am = null; neu.letzte_meldung_id = null; geaendert.push('gemeldet_am');
       const a = anschaffungsEreignis({ ...alt, ...neu });
       const nRoh = { ...alt, ...neu, melde_ereignisse: [ereignis(a.anlass, a.am || w.gueltig_ab, { anschaffungFehlt: !a.am })], aenderung_empfohlen_seit: null };
       Object.assign(neu, meldeAbleitung(nRoh));
@@ -816,6 +830,9 @@ async function stornieren(c) {
     // Wiederholung derselben Anfrage (Netzabbruch): der Storno steht schon unter dieser anfrage_id
     const gleiche = kurzListe.find((x) => x.storno_anfrage_id === body.anfrage_id);
     if (gleiche) return { antwort: antwort({ ok: true, idempotent: true, kassentag_id: tagId, fassung: gleiche.n, storno_beleg_id: gleiche.storno_beleg_id ?? null }, 200, cors) };
+    // O8 H2: eine Kasse außer Betrieb nimmt keinen Storno mehr an (der Zeiger spränge zurück, in der stillgelegten Kasse läge wieder Geld, und der Tag ließe sich
+    // nicht neu erfassen: Lücke im Kassenbuch); wie Abschluss, Ruhetag und Bewegung 422 KASSE_INAKTIV
+    if (kasse.aktiv === false) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors) };
     if (tagAlt.status !== 'abgeschlossen' || !Number.isSafeInteger(tagAlt.fassung_aktiv)) return { antwort: fehlerAntwort(409, 'KEIN_ABSCHLUSS', cors, { kassentag_id: tagId, status: tagAlt.status ?? null }) };
     // Nur der letzte Abschluss ist stornierbar (Zeiger der Kasse, hyg H2). Zeigt er auf einen späteren Tag: SPAETERE_TAGE. Zeigt er nicht genau auf diesen
     // abgeschlossenen Tag (fehlt, früherer Tag, andere Fassung oder anderer Bestand) oder fehlt der Vorgänger im Tagesplatz: fail-closed 503.
@@ -1033,6 +1050,13 @@ async function bewegungStornieren(c) {
     const bisher = await bewegungenDesTages(fs, uid, kasseId, tag);
     const gleiche = bisher.find((d) => d.daten.anfrage_id === body.anfrage_id);
     if (gleiche) return { antwort: antwort({ ok: true, idempotent: true, bewegung_id: idVon(gleiche), kassennummer: gleiche.daten.kassennummer }, 200, cors) };
+    // O8 H2: kein Storno in einer Kasse außer Betrieb und keiner, dessen Gegenkasse (Geldtransit) außer Betrieb ist (deren Bestand ist 0 und bleibt es; der Storno
+    // nähme die Gegenbuchung dort nicht zurück)
+    if (kasseDok.daten.aktiv === false) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors) };
+    if (typeof orig.gegenkasse_id === 'string' && orig.gegenkasse_id) {
+      const gegen = await fs.get(P.kasse(uid, orig.gegenkasse_id));
+      if (gegen && istObjekt(gegen.daten) && gegen.daten.aktiv === false) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors, { feld: 'gegenkasse_id' }) };
+    }
     if (orig.art === 'storno') return { antwort: fehlerAntwort(409, 'STORNO_VON_STORNO', cors) };
     if (bisher.some((d) => d.daten.storno_von === origId)) return { antwort: fehlerAntwort(409, 'BEWEGUNG_STORNIERT', cors, { bewegung_id: origId }) };
     const sperre = await offenerTag(c, kasseDok, docs.get(P.kassentag(uid, tagId)), tag, tagId);

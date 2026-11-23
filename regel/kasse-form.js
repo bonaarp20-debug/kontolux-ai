@@ -260,15 +260,19 @@ export const BETRIEBSSTAETTE_ID_MUSTER = /^b[a-z0-9]{8}$/;
 export const K3_DATUM_MIN = '1990-01-01'; // Anschaffung einer alten Registrierkasse kann vor 2020 liegen
 export const K3_SCHLUESSEL = Object.freeze([...SYSTEM_TEXTFELDER, 'angeschafft_am', 'in_betrieb_am', 'miete_leasing', 'tse', 'meldeweg', 'betriebsstaette_id',
   'meldepflicht_bestaetigt_am', 'tse_bestaetigt_am', 'meldung_bemerkung']);
+// O8 M1/M2: Antworten zur Außerbetriebnahme (nur an einer Kasse außer Betrieb, regel/kasse-register.js inaktivAngaben): Gerät endgültig außer Betrieb (ja/nein,
+// Datum) und, für den Altfall vor dem 01.07.2025, ob die Anschaffung vorher schon gemeldet war
+export const INAKTIV_FRAGEN_SCHLUESSEL = Object.freeze(['geraet_endgueltig', 'geraet_ausser_betrieb_am', 'altfall_anschaffung_gemeldet']);
 // Diese Felder darf auch eine Kasse außer Betrieb noch ändern (Angaben für die Mitteilung der Außerbetriebnahme vervollständigen), dazu die Bezeichnung
-export const K3_INAKTIV_ERLAUBT = Object.freeze(['bezeichnung', ...K3_SCHLUESSEL]);
+export const K3_INAKTIV_ERLAUBT = Object.freeze(['bezeichnung', ...K3_SCHLUESSEL, ...INAKTIV_FRAGEN_SCHLUESSEL]);
 export const ANLEGEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'bezeichnung', 'kuerzel', 'art', 'grundaufzeichnung', 'datenquelle', 'anfangsbestand_cent', 'anfangsbestand_am',
   'anfangsbestand_herkunft', 'anfangsbestand_nachweis', 'karte_ueber_integration', 'ruhetage_wochentage', 'kassenbuch', 'bestand_in_kasse_id', 'datev_konto', ...K3_SCHLUESSEL]);
 export const AENDERN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'bezeichnung', 'ruhetage_wochentage', 'datev_konto', 'karte_ueber_integration', 'art', 'art_ab',
-  'grundaufzeichnung', 'grundaufzeichnung_ab', 'datenquelle', 'datenquelle_ab', 'bestand_in_kasse_id', ...K3_SCHLUESSEL]);
+  'grundaufzeichnung', 'grundaufzeichnung_ab', 'datenquelle', 'datenquelle_ab', 'bestand_in_kasse_id', ...K3_SCHLUESSEL, ...INAKTIV_FRAGEN_SCHLUESSEL]);
 // system_wechseln: die Angaben des NEUEN Systems; nicht genannte System-Angaben (Anschaffung, Inbetriebnahme, Miete, TSE, Bestätigungen) werden geleert (sie gehörten zum alten System)
 export const WECHSELN_K3 = Object.freeze(['angeschafft_am', 'in_betrieb_am', 'miete_leasing', 'tse', 'meldepflicht_bestaetigt_am', 'tse_bestaetigt_am']);
-export const WECHSELN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'gueltig_ab', 'art', 'grundaufzeichnung', 'datenquelle', ...SYSTEM_TEXTFELDER, ...WECHSELN_K3]);
+// altgeraet_endgueltig (O8 M2, freiwillig): ist das alte Gerät endgültig außer Betrieb? Ohne Angabe bleibt die Frage offen (Frist läuft vorsichtig, die App fragt nach)
+export const WECHSELN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'gueltig_ab', 'art', 'grundaufzeichnung', 'datenquelle', ...SYSTEM_TEXTFELDER, ...WECHSELN_K3, 'altgeraet_endgueltig']);
 
 const k3DatumOk = (d, heute) => istDatum(d) && d >= K3_DATUM_MIN && d <= heute;
 function tsePruefen(t, heute) {
@@ -403,6 +407,13 @@ export function pruefeKasse(body, aktion, { heute }) {
     const k3 = k3Pruefen(body, { heute });
     if (k3.fehler) return k3;
     Object.assign(w.felder, k3.wert);
+    // O8 M1/M2: Antworten zur Außerbetriebnahme (Fachprüfung in kasse-register.js inaktivAngaben)
+    if (body.geraet_endgueltig !== undefined) { if (typeof body.geraet_endgueltig !== 'boolean') return fehl('geraet_endgueltig'); w.felder.geraet_endgueltig = body.geraet_endgueltig; }
+    if (body.geraet_ausser_betrieb_am !== undefined) { if (!k3DatumOk(body.geraet_ausser_betrieb_am, heute)) return fehl('geraet_ausser_betrieb_am'); w.felder.geraet_ausser_betrieb_am = body.geraet_ausser_betrieb_am; }
+    if (body.altfall_anschaffung_gemeldet !== undefined) {
+      if (body.altfall_anschaffung_gemeldet !== null && typeof body.altfall_anschaffung_gemeldet !== 'boolean') return fehl('altfall_anschaffung_gemeldet');
+      w.felder.altfall_anschaffung_gemeldet = body.altfall_anschaffung_gemeldet;
+    }
     if (!Object.keys(w.felder).length) return fehl('felder');
     return ok(w);
   }
@@ -422,7 +433,9 @@ export function pruefeKasse(body, aktion, { heute }) {
     const k3 = k3Pruefen(body, { heute, erlaubt: WECHSELN_K3 });
     if (k3.fehler) return k3;
     for (const f of WECHSELN_K3) sys[f] = k3.wert[f] === undefined ? null : k3.wert[f];
-    return ok({ kasse_id: body.kasse_id, gueltig_ab: body.gueltig_ab, art: body.art, grundaufzeichnung: body.grundaufzeichnung, datenquelle: body.datenquelle, system: sys });
+    if (body.altgeraet_endgueltig !== undefined && body.altgeraet_endgueltig !== null && typeof body.altgeraet_endgueltig !== 'boolean') return fehl('altgeraet_endgueltig');
+    return ok({ kasse_id: body.kasse_id, gueltig_ab: body.gueltig_ab, art: body.art, grundaufzeichnung: body.grundaufzeichnung, datenquelle: body.datenquelle, system: sys,
+      altgeraet_endgueltig: typeof body.altgeraet_endgueltig === 'boolean' ? body.altgeraet_endgueltig : null });
   }
   return fehl('aktion', 'AKTION_UNBEKANNT');
 }

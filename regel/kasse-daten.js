@@ -18,7 +18,7 @@ export const P = {
   privat: (uid, id) => `users/${uid}/privatvorgaenge/${id}`,
   festschreibungen: (uid) => `users/${uid}/festschreibung`,
   betriebsstaette: (uid, id) => `users/${uid}/betriebsstaetten/${id}`, // W2-W2
-  meldung: (uid, id) => `users/${uid}/kassenmeldungen/${id}`, // W2-W2, unveränderlich
+  meldung: (uid, id) => `users/${uid}/kassenmeldungen/${id}`, // W2-W2, unveränderlich (einzige Ausnahme: Protokoll einmalig nachreichen, O8 N1)
 };
 
 // IDs aus UID und anfrage_id (Idempotenz ohne eigenen Zustand: dieselbe anfrage_id ergibt dieselbe ID): Präfix + 8 Zeichen [a-z0-9].
