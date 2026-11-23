@@ -10,7 +10,7 @@ import { fakeFirestore } from './regel-fake-firestore.mjs';
 import { erzeugeTestEnv, anfrage } from './harness.mjs';
 import { kasseIdAus, meldungIdAus, betriebsstaetteIdAus, kassenPrueferDaten } from '../regel/kasse-daten.js';
 import { kassenAusgabeBeleg } from '../regel/kasse-ausgabe.js';
-import { meldeAbleitung, meldeNachAenderung, protokollPfadOk, PROTOKOLL_PRAEFIX } from '../regel/kasse-register.js';
+import { meldeAbleitung, meldeNachAenderung, protokollPfadOk, PROTOKOLL_PRAEFIX, korrekturEreignis, KORREKTUR_TAGE_MAX, aenderungArtNoetig, altfallVorVerfahren, wegstreckeOhnePflicht } from '../regel/kasse-register.js';
 import { REGEL_SAMMLUNGEN } from '../regel/archiv.js';
 import { istAufbewahrungsPfad, istAufbewahrungsDatei } from '../regel/loeschlaeufe.js';
 import { prueferDateiPfadOk } from '../worker.js';
@@ -210,7 +210,8 @@ test('/kasse aendern K3: Anschaffung setzt die Frist; nach einer Meldung: TSE-We
   assert.deepEqual([u.lies(`kassen/${id}`).meldestatus, u.lies(`kassen/${id}`).frist_bis], ['gemeldet', null]);
   assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, software_version: '5.0' })).status, 200);
   assert.equal(u.lies(`kassen/${id}`).meldestatus, 'gemeldet', 'Updates müssen nicht gemeldet werden');
-  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, tse: { ...TSE, seriennummer_hex: 'B'.repeat(64) } })).status, 200);
+  // W2-Recht Ä2: nach einer Meldung fragt die App „Korrektur oder Änderung?“; ein TSE-Wechsel ist eine Änderung
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, tse: { ...TSE, seriennummer_hex: 'B'.repeat(64) }, aenderung_art: 'aenderung' })).status, 200);
   assert.deepEqual([u.lies(`kassen/${id}`).meldestatus, u.lies(`kassen/${id}`).frist_bis, u.lies(`kassen/${id}`).aenderung_empfohlen_seit], ['aenderung_empfohlen', null, HEUTE]);
   assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, angeschafft_am: '2026-11-03' })).status, 200);
   assert.deepEqual([u.lies(`kassen/${id}`).meldestatus, u.lies(`kassen/${id}`).frist_bis], ['aenderung_offen', '2026-12-03']);
@@ -727,12 +728,12 @@ test('O8 M4: Korrektur eines gemeldeten Anschaffungsdatums -> Ereignis korrektur
   assert.equal((await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2025-07-20' })).status, 200);
   assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, angeschafft_am: '2024-03-02' })).status, 200);
   let k = u.lies(`kassen/${id}`);
-  // Frist aus dem Datum (31.07.2025) ist abgelaufen -> ein Monat ab Korrektur: 20.12.2026 (So) -> Mo 21.12.2026
-  assert.deepEqual([k.meldestatus, k.frist_bis], ['aenderung_offen', '2026-12-21']);
-  assert.deepEqual(k.melde_ereignisse, [{ anlass: 'korrektur', am: HEUTE, frist_bis: '2026-12-21', hinweis: null }]);
+  // Frist aus dem Datum (31.07.2025) ist abgelaufen -> „unverzüglich“: höchstens 14 Tage ab der Korrektur (W2-Recht Ä1, vorher ein Monat): 20.11. + 14 = 04.12.2026
+  assert.deepEqual([k.meldestatus, k.frist_bis], ['aenderung_offen', '2026-12-04']);
+  assert.deepEqual(k.melde_ereignisse, [{ anlass: 'korrektur', am: HEUTE, frist_bis: '2026-12-04', hinweis: null }]);
   assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, angeschafft_am: '2024-03-03' }, { am: '2026-11-25' })).status, 200);
   k = u.lies(`kassen/${id}`);
-  assert.deepEqual([k.frist_bis, k.melde_ereignisse[0].am, k.melde_ereignisse[0].hinweis], ['2026-12-21', '2026-11-25', 'frist_frueher']);
+  assert.deepEqual([k.frist_bis, k.melde_ereignisse[0].am, k.melde_ereignisse[0].hinweis], ['2026-12-04', '2026-11-25', 'frist_frueher']);
   const m = await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2026-11-19' }, { am: '2026-11-25' });
   assert.deepEqual(m.json.kassen_offen, [id], 'Meldedatum vor der Korrektur erledigt sie nicht');
   // Korrektur, deren gesetzliche Frist noch läuft: diese Frist (nie später als das Gesetz)
@@ -872,7 +873,7 @@ test('O9a M1: korrektur_elster_am nur bei einer echten Korrektur, nicht vor der 
   assert.deepEqual([ohneMeldung.status, ohneMeldung.json.feld, ohneMeldung.json.grund], [400, 'korrektur_elster_am', 'keine_korrektur'], 'vor einer Meldung ist es keine Korrektur');
   assert.equal((await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2026-10-15' })).status, 200);
   const c0 = u.fs.log.commits;
-  const nurText = await u.kasse({ aktion: 'aendern', kasse_id: id, seriennummer: 'SN-1', korrektur_elster_am: '2026-11-10' });
+  const nurText = await u.kasse({ aktion: 'aendern', kasse_id: id, seriennummer: 'SN-1', korrektur_elster_am: '2026-11-10', aenderung_art: 'aenderung' });
   assert.deepEqual([nurText.status, nurText.json.grund], [400, 'keine_korrektur']);
   const vorher = await u.kasse({ aktion: 'aendern', kasse_id: id, angeschafft_am: '2026-10-03', korrektur_elster_am: '2026-10-14' });
   assert.deepEqual([vorher.status, vorher.json.grund, vorher.json.gemeldet_am], [400, 'vor_meldung', '2026-10-15']);
@@ -1012,4 +1013,158 @@ test('O9a N6: Gegenkasse geht zwischen Lesen und Commit außer Betrieb -> der St
   assert.deepEqual([sb.status, code(sb), sb.json.feld], [422, 'KASSE_INAKTIV', 'gegenkasse_id']);
   assert.ok(!u.fs.pfade(P('kassenbewegungen/')).some((p) => u.fs.lies(p).storno_von === aus.json.bewegung_id), 'kein Storno geschrieben');
   assert.ok(u.fs.log.commits >= c0);
+});
+
+// ---------------------------------------------------------------------------------------------
+// W2-Recht (docs/kassenbuch/w2-rechtsfragen-recherche.md Abschnitt 9, Ä1, Ä2, Ä4, Ä5)
+// ---------------------------------------------------------------------------------------------
+test('W2-Recht Ä1 (rein): Korrekturfrist = frühere von laufender Monatsfrist und Korrekturtag + 14 Tage (vorsichtige Produktgrenze, nicht amtlich); nie vor heute; ohne Datum nur die Grenze', () => {
+  assert.equal(KORREKTUR_TAGE_MAX, 14);
+  // Monatsfrist abgelaufen -> Grenze
+  assert.equal(korrekturEreignis('2024-03-02', '2026-11-20').frist_bis, '2026-12-04');
+  // Monatsfrist läuft und endet früher -> Monatsfrist
+  assert.equal(korrekturEreignis('2026-11-03', '2026-11-20').frist_bis, '2026-12-03');
+  // Monatsfrist läuft, endet aber später als die Grenze -> Grenze (vorher galt die Monatsfrist)
+  assert.equal(korrekturEreignis('2026-11-15', '2026-11-20').frist_bis, '2026-12-04');
+  // Monatsfrist endet heute -> heute (nie vor heute)
+  assert.equal(korrekturEreignis('2026-10-20', '2026-11-20').frist_bis, '2026-11-20');
+  // ohne Anschaffungsdatum (Korrektur einer anderen Angabe) -> Grenze; Grenze nicht auf den Werktag verschoben (höchstens früher): 06.12.2026 ist ein Sonntag
+  assert.deepEqual(korrekturEreignis(null, '2026-11-22'), { anlass: 'korrektur', am: '2026-11-22', frist_bis: '2026-12-06', hinweis: null });
+  assert.equal(korrekturEreignis(null, '2026-11-22', '2026-11-21').am, '2026-11-21');
+  assert.throws(() => korrekturEreignis('kaputt', '2026-11-20'));
+});
+
+test('W2-Recht Ä2: nach einer Meldung verlangt eine geänderte K3-Angabe die Antwort aenderung_art (400 pflicht, nichts geschrieben); Korrektur -> Ereignis mit Frist, Änderung -> nur empfohlen; ELSTER-Tag auch für die Korrektur einer Angabe', async () => {
+  const u = umgebung();
+  const bs = await u.neueStaette();
+  const id = await u.neueKasse({ betriebsstaette_id: bs, angeschafft_am: '2026-10-01', seriennummer: 'SN-A' });
+  // vor der Meldung keine Frage
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, modell: 'M1' })).status, 200);
+  assert.equal((await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2026-10-15' })).status, 200);
+  const c0 = u.fs.log.commits;
+  const ohne = await u.kasse({ aktion: 'aendern', kasse_id: id, seriennummer: 'SN-B' });
+  assert.deepEqual([ohne.status, code(ohne), ohne.json.feld, ohne.json.grund], [400, 'FORMAT', 'aenderung_art', 'pflicht']);
+  const falsch = await u.kasse({ aktion: 'aendern', kasse_id: id, seriennummer: 'SN-B', aenderung_art: 'vielleicht' });
+  assert.deepEqual([falsch.status, falsch.json.feld], [400, 'aenderung_art']);
+  assert.equal(u.fs.log.commits, c0, 'nichts geschrieben');
+  // Software-Version allein: keine Frage (nicht in der Mitteilung)
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, software_version: '9' })).status, 200);
+  assert.equal(u.lies(`kassen/${id}`).meldestatus, 'gemeldet');
+  // Korrektur: Ereignis korrektur am Korrekturtag, Frist 14 Tage (Monatsfrist aus 01.10. längst abgelaufen)
+  const r = await u.kasse({ aktion: 'aendern', kasse_id: id, seriennummer: 'SN-B', aenderung_art: 'korrektur' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  let k = u.lies(`kassen/${id}`);
+  assert.deepEqual([k.meldestatus, k.frist_bis, k.melde_ereignisse], ['aenderung_offen', '2026-12-04', [{ anlass: 'korrektur', am: HEUTE, frist_bis: '2026-12-04', hinweis: null }]]);
+  assert.equal(u.audit().filter((e) => e.aktion === 'kasse_aendern').pop().details.aenderung_art, 'korrektur');
+  // zweite Korrektur später: die Frist wandert nicht nach hinten
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, hersteller: 'H', aenderung_art: 'korrektur' }, { am: '2026-11-25' })).status, 200);
+  k = u.lies(`kassen/${id}`);
+  assert.deepEqual([k.frist_bis, k.melde_ereignisse[0].am, k.melde_ereignisse[0].hinweis], ['2026-12-04', '2026-11-25', 'frist_frueher']);
+  // Meldung ab dem Korrekturtag erledigt sie
+  assert.equal((await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2026-11-25' }, { am: '2026-11-25' })).status, 200);
+  assert.equal(u.lies(`kassen/${id}`).meldestatus, 'gemeldet');
+  // Änderung (neue TSE): nur empfohlen
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, tse: TSE, aenderung_art: 'aenderung' }, { am: '2026-11-25' })).status, 200);
+  k = u.lies(`kassen/${id}`);
+  assert.deepEqual([k.meldestatus, k.frist_bis], ['aenderung_empfohlen', null]);
+  // Korrektur schon in Mein ELSTER gemeldet: Ereignis an diesem Tag, die Meldung mit diesem Datum erledigt es
+  const r2 = await u.kasse({ aktion: 'aendern', kasse_id: id, modell: 'M2', aenderung_art: 'korrektur', korrektur_elster_am: '2026-11-26' }, { am: '2026-11-27' });
+  assert.equal(r2.status, 200, JSON.stringify(r2.json));
+  assert.deepEqual(u.lies(`kassen/${id}`).melde_ereignisse.map((e) => [e.anlass, e.am, e.frist_bis]), [['korrektur', '2026-11-26', '2026-12-11']]);
+  const m = await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2026-11-26' }, { am: '2026-11-27' });
+  assert.deepEqual(m.json.kassen_offen, []);
+  // ELSTER-Tag bei „Änderung“: keine Korrektur
+  const r3 = await u.kasse({ aktion: 'aendern', kasse_id: id, modell: 'M3', aenderung_art: 'aenderung', korrektur_elster_am: '2026-11-26' }, { am: '2026-11-27' });
+  assert.deepEqual([r3.status, r3.json.grund], [400, 'keine_korrektur']);
+});
+
+test('W2-Recht Ä2 (rein): aenderungArtNoetig nur nach einer Meldung, bei K3-Angaben, ohne geändertes Anschaffungsereignis; Art allein (Stammdaten-Dialog) ohne Frage; offenes Ereignis geht in der Korrektur auf (frühere Frist bleibt)', () => {
+  const alt = { art: 'registrierkasse', gemeldet_am: '2026-10-15', angeschafft_am: '2026-10-01', seriennummer: 'A', melde_ereignisse: [] };
+  assert.equal(aenderungArtNoetig(alt, { ...alt, seriennummer: 'B' }), true);
+  assert.equal(aenderungArtNoetig({ ...alt, gemeldet_am: null }, { ...alt, gemeldet_am: null, seriennummer: 'B' }), false);
+  assert.equal(aenderungArtNoetig(alt, { ...alt, seriennummer: 'B', angeschafft_am: '2026-10-02' }), false, 'Datum ist immer Korrektur');
+  assert.equal(aenderungArtNoetig(alt, { ...alt, art: 'pc_kasse' }), false);
+  assert.equal(aenderungArtNoetig(alt, { ...alt, software_version: '2' }), false);
+  // offenes Ereignis (frühere Frist) bleibt in der Korrektur erhalten
+  const offen = { ...alt, melde_ereignisse: [{ anlass: 'anschaffung', am: '2026-11-18', frist_bis: '2026-11-30', hinweis: null }] };
+  const m = meldeNachAenderung(offen, { ...offen, seriennummer: 'B' }, HEUTE, { aenderungArt: 'korrektur' });
+  assert.deepEqual(m.melde_ereignisse, [{ anlass: 'korrektur', am: HEUTE, frist_bis: '2026-11-30', hinweis: 'frist_frueher' }]);
+  // ohne Antwort (z. B. Art über den Stammdaten-Dialog): wie bisher empfohlen
+  assert.equal(meldeNachAenderung(alt, { ...alt, art: 'pc_kasse' }, HEUTE).meldestatus, 'aenderung_empfohlen');
+});
+
+test('W2-Recht Ä2: Bezeichnung/Anschrift/Bemerkung einer gemeldeten Betriebsstätte -> Antwort Pflicht; Korrektur gibt jeder gemeldeten Kasse dort ein Ereignis (nicht der nie gemeldeten); Änderung nicht; Geschäftsleitung ohne Frage', async () => {
+  const u = umgebung();
+  const bs = await u.neueStaette();
+  const a = await u.neueKasse({ betriebsstaette_id: bs, angeschafft_am: '2026-10-01' });
+  const b = await u.neueKasse({ kuerzel: 'B2', betriebsstaette_id: bs, angeschafft_am: '2026-10-02' });
+  // vor jeder Meldung: keine Frage
+  assert.equal((await u.kasse({ aktion: 'betriebsstaette_aendern', betriebsstaette_id: bs, bezeichnung: 'Laden Nord' })).status, 200);
+  assert.equal((await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2026-10-15' })).status, 200);
+  const neuK = await u.neueKasse({ kuerzel: 'N3', betriebsstaette_id: bs, angeschafft_am: '2026-11-18' });
+  const c0 = u.fs.log.commits;
+  const ohne = await u.kasse({ aktion: 'betriebsstaette_aendern', betriebsstaette_id: bs, anschrift: { strasse: 'Weg 1', plz: '12345', ort: 'Ort' } });
+  assert.deepEqual([ohne.status, ohne.json.feld, ohne.json.grund], [400, 'aenderung_art', 'pflicht']);
+  assert.equal(u.fs.log.commits, c0);
+  // Bemerkung steht in der Ausfüllhilfe: ebenfalls Antwort Pflicht; Geschäftsleitung (nur Kontolux) ohne Frage
+  const bem = await u.kasse({ aktion: 'betriebsstaette_aendern', betriebsstaette_id: bs, bemerkung: 'Hinterhof' });
+  assert.deepEqual([bem.status, bem.json.feld], [400, 'aenderung_art']);
+  assert.equal((await u.kasse({ aktion: 'betriebsstaette_aendern', betriebsstaette_id: bs, geschaeftsleitung: true })).status, 200);
+  assert.equal(u.lies(`kassen/${a}`).meldestatus, 'gemeldet');
+  // Änderung (Umbenennung): nichts an den Kassen
+  assert.equal((await u.kasse({ aktion: 'betriebsstaette_aendern', betriebsstaette_id: bs, bezeichnung: 'Laden Nord 2', aenderung_art: 'aenderung' })).status, 200);
+  assert.equal(u.lies(`kassen/${a}`).meldestatus, 'gemeldet');
+  // Korrektur der Anschrift
+  const r = await u.kasse({ aktion: 'betriebsstaette_aendern', betriebsstaette_id: bs, anschrift: { strasse: 'Weg 1', plz: '12345', ort: 'Ort' }, aenderung_art: 'korrektur' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.deepEqual(r.json.kassen_korrektur, [a, b].sort());
+  for (const id of [a, b]) assert.deepEqual(u.lies(`kassen/${id}`).melde_ereignisse, [{ anlass: 'korrektur', am: HEUTE, frist_bis: '2026-12-04', hinweis: null }]);
+  assert.deepEqual(u.lies(`kassen/${neuK}`).melde_ereignisse.map((e) => e.anlass), ['anschaffung'], 'nie gemeldete Kasse unverändert');
+  const au = u.audit().filter((e) => e.aktion === 'betriebsstaette_aendern').pop();
+  assert.deepEqual([au.details.aenderung_art, au.details.kassen_korrektur], ['korrektur', [a, b].sort()]);
+  // die nächste Meldung der Stätte erledigt die Korrektur
+  const m = await u.melden({ betriebsstaette_id: bs, gemeldet_am: HEUTE });
+  assert.deepEqual(m.json.kassen_offen, []);
+  assert.equal(u.lies(`kassen/${a}`).meldestatus, 'gemeldet');
+  // ELSTER-Tag: nicht vor der letzten Meldung der Stätte, nur bei Korrektur
+  const vor = await u.kasse({ aktion: 'betriebsstaette_aendern', betriebsstaette_id: bs, bezeichnung: 'X', aenderung_art: 'korrektur', korrektur_elster_am: '2026-11-19' });
+  assert.deepEqual([vor.status, vor.json.grund], [400, 'vor_meldung']);
+  const keine = await u.kasse({ aktion: 'betriebsstaette_aendern', betriebsstaette_id: bs, bezeichnung: 'X', aenderung_art: 'aenderung', korrektur_elster_am: HEUTE });
+  assert.deepEqual([keine.status, keine.json.grund], [400, 'keine_korrektur']);
+});
+
+test('W2-Recht Ä4: Altfall mit Außerbetriebnahme vor dem 01.01.2025 ist ohne Frage nicht mitzuteilen (Meldeverfahren erst ab 01.01.2025); 2025 vor dem 01.07. fragt weiter', () => {
+  const basis = { art: 'registrierkasse', angeschafft_am: '2020-01-01', aktiv: false, geraet_endgueltig: true };
+  const alt = { ...basis, ausser_betrieb_am: '2024-12-31', geraet_ausser_betrieb_am: '2024-12-31' };
+  assert.equal(altfallVorVerfahren(alt), true);
+  assert.deepEqual([meldeAbleitung(alt).meldestatus, meldeAbleitung(alt).melde_ereignisse, meldeAbleitung(alt).frist_bis], ['nicht_noetig', [], null]);
+  // auch mit Antwort „ja, gemeldet“ (vor 2025 unmöglich) nicht mitzuteilen
+  assert.equal(meldeAbleitung({ ...alt, altfall_anschaffung_gemeldet: true }).meldestatus, 'nicht_noetig');
+  // 2025 vor dem 01.07.: die Frage bleibt
+  const f = { ...basis, ausser_betrieb_am: '2025-03-01', geraet_ausser_betrieb_am: '2025-03-01' };
+  assert.equal(altfallVorVerfahren(f), false);
+  assert.ok(meldeAbleitung(f).melde_ereignisse.every((e) => e.hinweis === 'altfall_frage'));
+  // nicht endgültig (Reserve) ist kein Altfall
+  assert.equal(altfallVorVerfahren({ ...alt, geraet_endgueltig: false }), false);
+});
+
+test('W2-Recht Ä5: Wegstreckenzähler vor dem 01.07.2024 erstmals in Verkehr gebracht -> nicht_noetig; ab 01.07.2024 oder „weiß nicht“ oder unbeantwortet -> meldepflichtig; Taxameter unverändert; Feld nur mit erlaubtem Wert', async () => {
+  const u = umgebung();
+  const wsz = { art: 'wegstreckenzaehler', grundaufzeichnung: 'tse_kasse', angeschafft_am: '2026-11-02' };
+  const id = await u.neueKasse({ ...wsz, kuerzel: 'WZ' });
+  assert.deepEqual([u.lies(`kassen/${id}`).meldestatus, u.lies(`kassen/${id}`).frist_bis], ['offen', '2026-12-02'], 'unbeantwortet: vorsichtig meldepflichtig');
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, in_verkehr_gebracht: 'vor_2024_07' })).status, 200);
+  assert.deepEqual([u.lies(`kassen/${id}`).meldestatus, u.lies(`kassen/${id}`).frist_bis, u.lies(`kassen/${id}`).melde_ereignisse], ['nicht_noetig', null, []]);
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, in_verkehr_gebracht: 'unbekannt' })).status, 200);
+  assert.deepEqual([u.lies(`kassen/${id}`).meldestatus, u.lies(`kassen/${id}`).frist_bis], ['offen', '2026-12-02'], 'weiß nicht gilt als ja');
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, in_verkehr_gebracht: 'ab_2024_07' })).status, 200);
+  assert.equal(u.lies(`kassen/${id}`).meldestatus, 'offen');
+  const bad = await u.kasse({ aktion: 'aendern', kasse_id: id, in_verkehr_gebracht: 'ja' });
+  assert.deepEqual([bad.status, bad.json.feld], [400, 'in_verkehr_gebracht']);
+  // beim Anlegen
+  const alt = await u.neueKasse({ ...wsz, kuerzel: 'WA', in_verkehr_gebracht: 'vor_2024_07' });
+  assert.equal(u.lies(`kassen/${alt}`).meldestatus, 'nicht_noetig');
+  // Taxameter: das Feld ändert nichts
+  assert.equal(wegstreckeOhnePflicht({ art: 'taxameter', in_verkehr_gebracht: 'vor_2024_07' }), false);
+  assert.equal(meldeAbleitung({ art: 'taxameter', angeschafft_am: '2026-11-02', in_verkehr_gebracht: 'vor_2024_07' }).meldestatus, 'offen');
 });

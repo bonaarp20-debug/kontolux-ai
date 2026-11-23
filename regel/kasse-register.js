@@ -28,11 +28,11 @@ const unbekannt = (body, erlaubt) => (istObjekt(body) ? Object.keys(body).find((
 //   nicht_noetig         keine Kasse im Sinn von § 146a Abs. 1 AO (offene Ladenkasse; AEAO Nr. 1.16.1, 02-recht 2.5)
 //   offen                noch nie gemeldet (Erstmeldung fällig)
 //   aenderung_offen      schon gemeldet, ein neues Ereignis ist mitzuteilen (Anschaffung, Außerbetriebnahme, Systemwechsel)
-//   aenderung_empfohlen  schon gemeldet, nur Angaben geändert, die keine Frist auslösen (TSE-Wechsel: FAQ Mitteilungspflicht 11; Korrekturen)
+//   aenderung_empfohlen  schon gemeldet, nur Angaben geändert, die keine Frist auslösen (TSE-Wechsel: FAQ Mitteilungspflicht 11); Korrekturen haben ein Ereignis (Ä2)
 //   gemeldet             laut Angabe des Nutzers gemeldet, nichts offen
 // ---------------------------------------------------------------------------------------------
 export const MELDESTATI = Object.freeze(['nicht_noetig', 'offen', 'gemeldet', 'aenderung_offen', 'aenderung_empfohlen']);
-// korrektur (O8 M4): ein schon gemeldetes Anschaffungsdatum wurde korrigiert; das Ereignis liegt am Korrekturtag (eine ältere Meldung erledigt es nicht)
+// korrektur (O8 M4, W2-Recht Ä2): eine schon gemeldete Angabe wurde korrigiert; das Ereignis liegt am Korrekturtag (eine ältere Meldung erledigt es nicht)
 export const MELDEANLAESSE = Object.freeze(['anschaffung', 'tse_ausruestung', 'ausserbetriebnahme', 'korrektur']);
 // altfall_frage (O8 M1): vor dem 01.07.2025 endgültig außer Betrieb, ob die Anschaffung gemeldet war, ist unbeantwortet -> keine Frist, nur die Frage.
 // endgueltig_frage (O8 M2): unbeantwortet, ob das Gerät endgültig außer Betrieb ist (Systemwechsel, Altdaten) -> Frist bleibt (vorsichtig), dazu die Frage.
@@ -42,6 +42,13 @@ const FRAGE_HINWEISE = ['altfall_frage', 'endgueltig_frage'];
 export const VERFAHREN_BEGINN = '2025-01-01'; // ELSTER-Mitteilungsverfahren steht ab 01.01.2025 zur Verfügung (BMF 28.06.2024)
 const TAXAMETER = ['taxameter', 'wegstreckenzaehler'];
 export const meldepflichtigArt = (art) => typeof art === 'string' && Steuerkern.KASSEN_ARTEN.includes(art) && art !== 'offene_ladenkasse';
+// W2-Recht Ä5: Wegstreckenzähler sind nach BMF 28.06.2024 II (letzter Absatz) nur mitzuteilen, wenn sie „am oder nach dem 1. Juli 2024 erstmalig in den Verkehr gebracht“
+// wurden. Feld in_verkehr_gebracht (nur Wegstreckenzähler): 'ab_2024_07' | 'vor_2024_07' | 'unbekannt' | null. Nur „vor_2024_07“ heißt: nach dieser Regel nicht
+// mitzuteilen (nicht_noetig); „weiß nicht“ und unbeantwortet zählen vorsichtig als meldepflichtig. Ältere Geräte mit digitaler Schnittstelle fallen ab 01.01.2027 unter
+// § 8 KassenSichV (§ 10 KassenSichV i. d. F. der 2. ÄndVO); ob dann auch die Mitteilung gilt, sagt das BMF-Schreiben nicht (Anwaltsfrage, App weist darauf hin).
+// Taxameter unverändert.
+export const IN_VERKEHR_WERTE = Object.freeze(['ab_2024_07', 'vor_2024_07', 'unbekannt']);
+export const wegstreckeOhnePflicht = (k) => istObjekt(k) && k.art === 'wegstreckenzaehler' && k.in_verkehr_gebracht === 'vor_2024_07';
 const slot = (anlass) => (anlass === 'ausserbetriebnahme' ? 'ausserbetriebnahme' : 'anschaffung');
 
 // Außerbetriebnahme im Sinne von § 146a Abs. 4 AO (O8 M2): das Gerät ist ENDGÜLTIG außer Betrieb und wird im Betrieb nicht mehr vorgehalten (BMF 28.06.2024 I,
@@ -63,6 +70,13 @@ export function altfallAusserBetrieb(k) {
   if (!istObjekt(k) || k.geraet_endgueltig !== true) return false;
   const d = geraetAusserBetriebAm(k);
   return Boolean(d && d < Steuerkern.KASSENMELDUNG_BEGINN && !(typeof k.gemeldet_am === 'string' && k.gemeldet_am <= d));
+}
+// W2-Recht Ä4: Altfall mit Außerbetriebnahme vor dem 01.01.2025: das Mitteilungsverfahren „steht ab dem 1. Januar 2025 zur Verfügung“ (BMF 28.06.2024, Einleitung),
+// die Anschaffung konnte also vorher nicht gemeldet sein. Dann gilt der Altfall ohne Frage als nicht mitzuteilen (BMF 28.06.2024 I); eine Antwort auf
+// altfall_anschaffung_gemeldet ändert daran nichts.
+export function altfallVorVerfahren(k) {
+  if (!altfallAusserBetrieb(k)) return false;
+  return geraetAusserBetriebAm(k) < VERFAHREN_BEGINN;
 }
 
 // Ereignis „Anschaffung“: das Anschaffungsdatum (bei Miete/Leasing Beginn der Überlassung, BMF 28.06.2024 I, Nutzerangabe). Taxameter und Wegstreckenzähler:
@@ -117,7 +131,7 @@ function hinweisFuer(k, e, altfall) {
 // Altfall vor dem 01.07.2025 (O8 M1): Antwort „nein, Anschaffung war nicht gemeldet“ -> nicht_noetig ohne Ereignis; „ja“ -> nur die Außerbetriebnahme bleibt;
 // unbeantwortet -> Ereignisse mit Hinweis altfall_frage, die nicht in frist_bis zählen (kein „überfällig“ ohne Pflicht).
 export function meldeAbleitung(k) {
-  if (!meldepflichtigArt(k.art)) return { meldepflichtig: false, melde_ereignisse: [], meldestatus: 'nicht_noetig', frist_bis: null, aenderung_empfohlen_seit: null };
+  if (!meldepflichtigArt(k.art) || wegstreckeOhnePflicht(k)) return { meldepflichtig: false, melde_ereignisse: [], meldestatus: 'nicht_noetig', frist_bis: null, aenderung_empfohlen_seit: null };
   let ev = ereignisseAus(k);
   const gemeldet = typeof k.gemeldet_am === 'string';
   if (!gemeldet && !ev.some((e) => slot(e.anlass) === 'anschaffung')) {
@@ -127,7 +141,7 @@ export function meldeAbleitung(k) {
   const abAm = geraetAusserBetriebAm(k);
   if (!Array.isArray(k.melde_ereignisse) && abAm && typeof k.ausser_betrieb_gemeldet_in !== 'string' && !ev.some((e) => e.anlass === 'ausserbetriebnahme')) ev = ereignisSetzen(ev, ereignis('ausserbetriebnahme', abAm));
   const altfall = altfallAusserBetrieb(k);
-  if (altfall && k.altfall_anschaffung_gemeldet === false) return { meldepflichtig: true, melde_ereignisse: [], meldestatus: 'nicht_noetig', frist_bis: null, aenderung_empfohlen_seit: null };
+  if (altfall && (k.altfall_anschaffung_gemeldet === false || altfallVorVerfahren(k))) return { meldepflichtig: true, melde_ereignisse: [], meldestatus: 'nicht_noetig', frist_bis: null, aenderung_empfohlen_seit: null };
   if (altfall && k.altfall_anschaffung_gemeldet === true) ev = ev.filter((e) => slot(e.anlass) !== 'anschaffung');
   ev = ev.map((e) => ({ ...e, hinweis: hinweisFuer(k, e, altfall) }));
   const empfohlen = typeof k.aenderung_empfohlen_seit === 'string' ? k.aenderung_empfohlen_seit : null;
@@ -141,41 +155,74 @@ function nieSpaeter(e, offen) {
   if (!offen || !offen.frist_bis || (e.frist_bis && e.frist_bis <= offen.frist_bis)) return e;
   return { ...e, frist_bis: offen.frist_bis, hinweis: 'frist_frueher' };
 }
-// Korrektur eines schon gemeldeten Anschaffungsdatums (O8 M4, Anwaltsfrage): Ereignis am Korrekturtag. Frist: die gesetzliche Monatsfrist aus dem korrigierten
-// Datum, solange sie noch läuft (nie später als das Gesetz); ist sie schon abgelaufen, ein Monat ab dem Korrekturtag (kein sofortiges „überfällig“ für einen Tippfehler,
-// keine Frist vor dem Korrekturtag).
-// O9a M1: elsterAm = Tag, an dem der Nutzer die Korrektur laut eigener Angabe schon in Mein ELSTER mitgeteilt hat (nicht vor der Meldung, die das alte Datum trug,
+// Korrektur einer schon gemeldeten Angabe (O8 M4; W2-Recht Ä1, Ä2): Ereignis am Korrekturtag. Eine fehlerhafte Mitteilung ist „nach Kenntnis des Fehlers unverzüglich,
+// spätestens aber bis zum Ablauf der Frist nach § 146a Abs. 4 Satz 2 AO“ zu korrigieren (AEAO zu § 146a Nr. 1.16.3.1, Fassung 30.06.2023). Frist daher: die frühere von
+//   (a) der gesetzlichen Monatsfrist aus dem (korrigierten) Anschaffungsdatum am, solange sie noch läuft, und
+//   (b) dem Korrekturtag plus KORREKTUR_TAGE_MAX Tagen („unverzüglich“, § 121 Abs. 1 BGB: ohne schuldhaftes Zögern).
+// Vorher galt „ein Monat ab dem Korrekturtag“; das war länger als „unverzüglich“ (w2-rechtsfragen-recherche.md 1b). Nie vor heute (kein sofortiges „überfällig“).
+// am null (Korrektur einer anderen Angabe ohne Anschaffungsdatum): nur (b).
+// O9a M1: elsterAm = Tag, an dem der Nutzer die Korrektur laut eigener Angabe schon in Mein ELSTER mitgeteilt hat (nicht vor der Meldung, die die alte Angabe trug,
 // nicht nach heute; der Handler prüft das). Dann liegt das Ereignis an diesem Tag, und die Meldung mit diesem Datum erledigt es (keine falsche Angabe nötig).
-// Ohne Angabe bleibt es beim Korrekturtag in Kontolux (keine geratene Erledigung). Die Frist rechnet in beiden Fällen ab heute wie bisher.
+// Ohne Angabe bleibt es beim Korrekturtag in Kontolux (keine geratene Erledigung). Die Frist rechnet in beiden Fällen ab heute.
+// KORREKTUR_TAGE_MAX: vorsichtige Produktgrenze von Kontolux für „unverzüglich“, NICHT amtlich (weder Gesetz noch AEAO nennen eine Tageszahl; die oft genannten etwa
+// zwei Wochen stammen aus der Zivilrechtsprechung zu § 121 BGB). Kalendertage, ohne Verschiebung auf den nächsten Werktag (höchstens früher). App: kasse-register-fristen.js.
+export const KORREKTUR_TAGE_MAX = 14;
 export function korrekturEreignis(am, heute, elsterAm = null) {
-  const ausDatum = Steuerkern.kassenmeldeFrist(am);
-  const ausKorrektur = Steuerkern.kassenmeldeFrist(heute);
-  if (!ausDatum || !ausKorrektur) throw new Error('Meldefrist: Datum unlesbar');
-  return { anlass: 'korrektur', am: istDatum(elsterAm) ? elsterAm : heute, frist_bis: ausDatum >= heute ? ausDatum : ausKorrektur, hinweis: null };
+  const ausDatum = am == null ? null : Steuerkern.kassenmeldeFrist(am);
+  const grenze = istDatum(heute) ? Steuerkern.addiereTage(heute, KORREKTUR_TAGE_MAX) : null;
+  if ((am != null && !ausDatum) || !grenze) throw new Error('Meldefrist: Datum unlesbar');
+  const frist = ausDatum && ausDatum >= heute && ausDatum < grenze ? ausDatum : grenze;
+  return { anlass: 'korrektur', am: istDatum(elsterAm) ? elsterAm : heute, frist_bis: frist, hinweis: null };
 }
-// Ergibt die Änderung alt -> neu eine Korrektur eines schon gemeldeten Datums (Zweig korrekturEreignis in meldeNachAenderung)? Rein; für die Prüfung von
-// korrektur_elster_am (O9a M1) im Handler und in der App gleich gerechnet.
-export function korrekturFaellt(alt, neu) {
+// Ergibt die Änderung alt -> neu eine Korrektur einer schon gemeldeten Angabe (Zweig korrekturEreignis in meldeNachAenderung)? Rein; für die Prüfung von
+// korrektur_elster_am (O9a M1) im Handler und in der App gleich gerechnet. Datum: wie bisher immer eine Korrektur. Andere Angaben (W2-Recht Ä2): nur mit der Antwort
+// aenderungArt 'korrektur'.
+export function korrekturFaellt(alt, neu, { aenderungArt = null } = {}) {
   const a0 = anschaffungsEreignis(alt);
   const a1 = anschaffungsEreignis(neu);
   const offen = ereignisseAus(alt).find((e) => slot(e.anlass) === 'anschaffung') || null;
-  return typeof neu.gemeldet_am === 'string' && (a0.am !== a1.am || a0.anlass !== a1.anlass) && Boolean(a1.am) && Boolean(a0.am) && (!offen || offen.anlass === 'korrektur');
+  if (typeof neu.gemeldet_am !== 'string') return false;
+  if (a0.am !== a1.am || a0.anlass !== a1.anlass) return Boolean(a1.am) && Boolean(a0.am) && (!offen || offen.anlass === 'korrektur');
+  return aenderungArt === 'korrektur' && EMPFOHLEN_FELDER.some((f) => !gleich(alt[f], neu[f]));
 }
 // O9a N1: eine schon abgelaufene Frist wird nie still „geheilt“: wandert das Datum eines offenen Ereignisses nach hinten, während dessen Frist schon vorbei ist, bleibt
 // die alte Frist (Hinweis frist_frueher). Solange die Frist läuft, darf ein Tippfehler korrigiert werden (wie bisher bei der Anschaffung). Gemeldet werden muss ohnehin.
 const nieHeilen = (e, offen, heute) => (offen && offen.frist_bis && offen.frist_bis < heute ? nieSpaeter(e, offen) : e);
 
-// Register-Angaben, deren Änderung nach einer Meldung eine Aktualisierung empfiehlt, aber keine Frist auslöst (Software-Version nicht: Updates müssen nicht
-// gemeldet werden, Ausfüllanleitung 02.12.2024; TSE-Wechsel nicht mitteilungspflichtig, FAQ Mitteilungspflicht 11)
+// Register-Angaben, die in der Mitteilung stehen (Software-Version nicht: Updates müssen nicht gemeldet werden, Ausfüllanleitung 02.12.2024). Nach einer Meldung:
+//   echte Änderung (z. B. neue TSE, FAQ Mitteilungspflicht 11; neue Software): nur „Aktualisierung empfohlen“, keine Frist;
+//   Korrektur einer falsch gemeldeten Angabe (W2-Recht Ä2, AEAO zu § 146a Nr. 1.16.3.1): Ereignis korrektur mit Frist (korrekturEreignis).
+// Welche der beiden es ist, sagt der Nutzer (aenderung_art). Pflicht ist die Antwort bei den Feldern des Assistenten „Angaben für die Meldung“ (K3_KORREKTUR_FELDER);
+// 'art' ändert auch der Stammdaten-Dialog (datierter Wechsel), dort bleibt es ohne Antwort bei „empfohlen“.
 const EMPFOHLEN_FELDER = ['art', 'software', 'hersteller', 'modell', 'seriennummer', 'in_betrieb_am', 'miete_leasing', 'tse', 'meldung_bemerkung'];
+const K3_KORREKTUR_FELDER = EMPFOHLEN_FELDER.filter((f) => f !== 'art');
+export const AENDERUNG_ARTEN = Object.freeze(['korrektur', 'aenderung']);
 const gleich = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+// Muss der Nutzer bei der Änderung alt -> neu sagen, ob sie eine Korrektur oder eine Änderung ist? Rein, App gleich (Vertragstest). Nur bei einer gemeldeten,
+// meldepflichtigen Kasse, wenn das Anschaffungsereignis gleich bleibt (ein geändertes Datum ist ohnehin eine Korrektur) und eine K3-Angabe sich ändert.
+export function aenderungArtNoetig(alt, neu) {
+  if (!istObjekt(alt) || !istObjekt(neu) || typeof neu.gemeldet_am !== 'string' || meldeAbleitung(neu).meldepflichtig !== true) return false;
+  const a0 = anschaffungsEreignis(alt);
+  const a1 = anschaffungsEreignis(neu);
+  if (a0.am !== a1.am || a0.anlass !== a1.anlass) return false;
+  return K3_KORREKTUR_FELDER.some((f) => !gleich(alt[f], neu[f]));
+}
+// Ereignis für die Korrektur einer anderen Angabe als des Datums (W2-Recht Ä2; auch Betriebsstätte, Nr. 1.16.3.2). Ein offenes Ereignis im selben Platz geht in der
+// Korrektur auf: seine Frist bleibt, wenn sie früher endet (nie später), und das Ereignis liegt nicht vor ihm (eine Meldung davor umfasste es nicht).
+export function angabeKorrektur(offen, anschaffungAm, heute, elsterAm = null) {
+  const e = korrekturEreignis(anschaffungAm, heute, elsterAm);
+  if (!offen) return e;
+  const am = typeof offen.am === 'string' && offen.am > e.am ? offen.am : e.am;
+  return nieSpaeter({ ...e, am }, offen);
+}
 // Meldefolge einer Stammdatenänderung (/kasse aendern): neu = Kasse mit den Änderungen (rein).
 //   Anschaffungsdatum geleert: ein offenes Ereignis bleibt mit seiner Frist (Hinweis anschaffung_fehlt), es wird nie gelöscht (O8 H1); ohne offenes Ereignis nach einer
 //     Meldung nur „Aktualisierung empfohlen“.
 //   Nach einer Meldung, die das bisherige Datum schon umfasste: Korrektur (korrekturEreignis); erstmals eingetragenes Datum bis zum Meldedatum ist von der Meldung gedeckt.
 //   Sonst (noch nicht gemeldet bzw. Ereignis nach dem Meldedatum): Ereignis aus dem neuen Datum; Wechsel Anschaffung <-> TSE-Ausrüstung behält die frühere Frist (O8 M5).
 //   Außerbetriebnahme des Geräts (geraet_endgueltig, geraet_ausser_betrieb_am) neu oder geändert: Ereignis neu, solange sie nicht gemeldet ist (O8 M2).
-export function meldeNachAenderung(alt, neu, heute, { korrekturElsterAm = null } = {}) {
+//   Andere Angaben nach einer Meldung (W2-Recht Ä2): aenderungArt 'korrektur' -> Ereignis korrektur (angabeKorrektur), sonst „Aktualisierung empfohlen“.
+export function meldeNachAenderung(alt, neu, heute, { korrekturElsterAm = null, aenderungArt = null } = {}) {
   let ev = ereignisseAus(alt);
   let empfohlen = typeof alt.aenderung_empfohlen_seit === 'string' ? alt.aenderung_empfohlen_seit : null;
   const gemeldet = typeof neu.gemeldet_am === 'string';
@@ -195,7 +242,10 @@ export function meldeNachAenderung(alt, neu, heute, { korrekturElsterAm = null }
       const e = ereignis(a1.anlass, a1.am);
       ev = ereignisSetzen(ev, offen && offen.anlass !== a1.anlass ? nieSpaeter(e, offen) : nieHeilen(e, offen, heute));
     }
-  } else if (gemeldet && EMPFOHLEN_FELDER.some((f) => !gleich(alt[f], neu[f]))) empfohlen = empfohlen || heute;
+  } else if (gemeldet && EMPFOHLEN_FELDER.some((f) => !gleich(alt[f], neu[f]))) {
+    if (aenderungArt === 'korrektur') ev = ereignisSetzen(ev, angabeKorrektur(offen, a1.am, heute, korrekturElsterAm));
+    else empfohlen = empfohlen || heute;
+  }
   const ab0 = geraetAusserBetriebAm(alt);
   const ab1 = geraetAusserBetriebAm(neu);
   // Antwort im Altfall geändert (O8 M1): „nein“ hatte die Ereignisse geleert, also die Außerbetriebnahme aus dem Datum wiederherstellen
@@ -245,7 +295,7 @@ export function inaktivAngaben(alt, felder) {
 
 // System-Angaben einer Kasse (vor W2-W2 fehlten sie): leer, wenn nichts erfasst ist. Ein Wechsel der Kassenart über die Meldepflicht-Grenze (offen <-> elektronisch)
 // über /kasse aendern geht nur, solange es nichts zu bewahren gibt; sonst über system_wechseln, damit das alte System als Register-Eintrag bleibt.
-const SYSTEM_DATEN = ['software', 'software_version', 'hersteller', 'modell', 'seriennummer', 'angeschafft_am', 'in_betrieb_am', 'tse'];
+const SYSTEM_DATEN = ['software', 'software_version', 'hersteller', 'modell', 'seriennummer', 'angeschafft_am', 'in_betrieb_am', 'tse', 'in_verkehr_gebracht'];
 export const ohneSystemDaten = (k) => typeof k.gemeldet_am !== 'string' && SYSTEM_DATEN.every((f) => k[f] === undefined || k[f] === null);
 
 // Vorgaben für eine neue Kasse (anlegen): alle Register-Felder vorhanden, Meldestatus abgeleitet
@@ -253,7 +303,7 @@ export const K3_LEER = Object.freeze({
   software: null, software_version: null, hersteller: null, modell: null, seriennummer: null, angeschafft_am: null, in_betrieb_am: null, miete_leasing: null, tse: null,
   meldeweg: null, betriebsstaette_id: null, meldepflicht_bestaetigt_am: null, tse_bestaetigt_am: null, meldung_bemerkung: null,
   ausser_betrieb_am: null, ausser_betrieb_grund: null, ausser_betrieb_text: null, ausser_betrieb_gemeldet_in: null, gemeldet_am: null, letzte_meldung_id: null,
-  geraet_endgueltig: null, geraet_ausser_betrieb_am: null, altfall_anschaffung_gemeldet: null,
+  geraet_endgueltig: null, geraet_ausser_betrieb_am: null, altfall_anschaffung_gemeldet: null, in_verkehr_gebracht: null,
 });
 
 // Zuordnung einer Kasse zu einer Betriebsstätte prüfen (anlegen, aendern). Eine schon gemeldete Kasse wechselt die Betriebsstätte nicht über aendern: rechtlich ist
@@ -283,7 +333,11 @@ export const AUSSER_BETRIEB_GRUENDE = Object.freeze(['defekt', 'verkauft', 'aufg
 export const AUSSER_BETRIEB_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'ausser_betrieb_am', 'ausser_betrieb_grund', 'ausser_betrieb_text', 'geraet_endgueltig', 'altfall_anschaffung_gemeldet']);
 export const AUFHEBEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'grund']);
 export const BS_ANLEGEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'bezeichnung', 'anschrift', 'bemerkung', 'geschaeftsleitung']);
-export const BS_AENDERN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'betriebsstaette_id', 'bezeichnung', 'anschrift', 'bemerkung', 'geschaeftsleitung', 'aufgegeben_am']);
+// aenderung_art, korrektur_elster_am (W2-Recht Ä2): Antwort „Korrektur oder Änderung?“ bei Bezeichnung, Anschrift oder Bemerkung einer schon gemeldeten Betriebsstätte (BS_MELDE_FELDER)
+export const BS_AENDERN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'betriebsstaette_id', 'bezeichnung', 'anschrift', 'bemerkung', 'geschaeftsleitung', 'aufgegeben_am', 'aenderung_art', 'korrektur_elster_am']);
+// Angaben der Betriebsstätte, die in der Mitteilung stehen (die Ausfüllhilfe der App führt Bezeichnung, Anschrift und Bemerkung als Felder des ELSTER-Formulars;
+// Geschäftsleitung führt nur Kontolux, die Aufgabe ist eine Außerbetriebnahme mit eigenem Weg)
+export const BS_MELDE_FELDER = Object.freeze(['bezeichnung', 'anschrift', 'bemerkung']);
 export const ANSCHRIFT_SCHLUESSEL = Object.freeze(['strasse', 'plz', 'ort']);
 export const MELDUNG_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'betriebsstaette_id', 'gemeldet_am', 'protokoll_pfad', 'meldeweg']);
 export const BETRIEBSSTAETTEN_MAX = 20;
@@ -340,7 +394,14 @@ export function pruefeBetriebsstaette(body, aktion, { heute }) {
     if (body.aufgegeben_am !== null && !(istDatum(body.aufgegeben_am) && body.aufgegeben_am >= K3_DATUM_MIN && body.aufgegeben_am <= heute)) return fehl('aufgegeben_am');
     w.felder.aufgegeben_am = body.aufgegeben_am;
   }
-  if (aktion === 'betriebsstaette_aendern' && !Object.keys(w.felder).length) return fehl('felder');
+  if (aktion === 'betriebsstaette_aendern') {
+    if (body.aenderung_art !== undefined && body.aenderung_art !== null) { if (!AENDERUNG_ARTEN.includes(body.aenderung_art)) return fehl('aenderung_art'); w.aenderung_art = body.aenderung_art; }
+    if (body.korrektur_elster_am !== undefined && body.korrektur_elster_am !== null) {
+      if (!istDatum(body.korrektur_elster_am) || body.korrektur_elster_am > heute) return fehl('korrektur_elster_am');
+      w.korrektur_elster_am = body.korrektur_elster_am;
+    }
+    if (!Object.keys(w.felder).length) return fehl('felder');
+  }
   return ok(w);
 }
 
@@ -551,16 +612,44 @@ export async function betriebsstaette(c, h, aktion) {
       const spaetestens = hier.map((d) => d.daten.ausser_betrieb_am).filter((x) => typeof x === 'string').sort().pop();
       if (spaetestens && w.felder.aufgegeben_am < spaetestens) return { antwort: h.formFehler({ code: 'FORMAT', feld: 'aufgegeben_am', grund: 'vor_ausser_betrieb', erwartet_ab: spaetestens }, cors) };
     }
+    // W2-Recht Ä2 (AEAO zu § 146a Nr. 1.16.3.2): Bezeichnung, Anschrift oder Bemerkung einer schon gemeldeten Betriebsstätte geändert -> der Nutzer sagt, ob die gemeldete
+    // Angabe falsch war (Korrektur, mit Frist) oder sich geändert hat. Die Korrektur bekommt jede gemeldete, meldepflichtige Kasse der Stätte, deren
+    // Außerbetriebnahme noch nicht gemeldet ist, als Ereignis (die nächste Meldung der Stätte erledigt es, Bruttomethode). korrektur_elster_am nur bei Korrektur,
+    // nicht vor der letzten Meldung der Stätte.
+    const meldePflicht = typeof alt.gemeldet_am === 'string' && geaendert.some((f) => BS_MELDE_FELDER.includes(f));
+    if (meldePflicht && !w.aenderung_art) return { antwort: h.formFehler({ code: 'FORMAT', feld: 'aenderung_art', grund: 'pflicht' }, cors) };
+    const korrektur = meldePflicht && w.aenderung_art === 'korrektur';
+    const kea = w.korrektur_elster_am ?? null;
+    if (kea && !korrektur) return { antwort: h.formFehler({ code: 'FORMAT', feld: 'korrektur_elster_am', grund: 'keine_korrektur' }, cors) };
+    if (kea && kea < alt.gemeldet_am) return { antwort: h.formFehler({ code: 'FORMAT', feld: 'korrektur_elster_am', grund: 'vor_meldung', gemeldet_am: alt.gemeldet_am }, cors) };
+    const kassenWrites = [];
+    const korrigiert = [];
+    if (korrektur) {
+      const betroffen = (await kassenLesen(fs, uid)).filter((d) => d.daten.betriebsstaette_id === id && typeof d.daten.gemeldet_am === 'string'
+        && typeof d.daten.ausser_betrieb_gemeldet_in !== 'string' && meldeAbleitung(d.daten).meldepflichtig === true).sort((a, b) => (idVon(a) < idVon(b) ? -1 : 1));
+      for (const d of betroffen) {
+        const k = d.daten;
+        const kid = idVon(d);
+        const basis = meldeAbleitung(k).melde_ereignisse;
+        const offen = basis.find((e) => slot(e.anlass) === 'anschaffung') || null;
+        const roh = { ...k, melde_ereignisse: ereignisSetzen(basis, angabeKorrektur(offen, anschaffungsEreignis(k).am, heute, kea)) };
+        const m = meldeAbleitung(roh);
+        const v = h.verlaufFortschreiben(uid, kid, k, ['meldestatus'], ts);
+        kassenWrites.push(schreibe.setzen(P.kasse(uid, kid), { ...roh, ...m, geaendert_am: ts, verlauf: v.verlauf, ...v.extra }, { updateTime: d.updateTime }), ...v.writes);
+        korrigiert.push(kid);
+      }
+    }
     const neu = { ...alt, ...w.felder, geaendert_am: ts };
-    const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{ aktion: 'betriebsstaette_aendern', ziel: `betriebsstaetten/${id}`, vorher: alt, nachher: neu, details: { betriebsstaette_id: id, felder: geaendert } }], zeit);
-    return { writes: [schreibe.setzen(P.betriebsstaette(uid, id), neu, { updateTime: bd.updateTime }), ...audit.writes], erfolg: () => antwort({ ok: true, betriebsstaette_id: id }, 200, cors) };
+    const details = { betriebsstaette_id: id, felder: geaendert, ...(meldePflicht ? { aenderung_art: w.aenderung_art, kassen_korrektur: korrigiert } : {}), ...(kea ? { korrektur_elster_am: kea } : {}) };
+    const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{ aktion: 'betriebsstaette_aendern', ziel: `betriebsstaetten/${id}`, vorher: alt, nachher: neu, details }], zeit);
+    return { writes: [schreibe.setzen(P.betriebsstaette(uid, id), neu, { updateTime: bd.updateTime }), ...kassenWrites, ...audit.writes], erfolg: () => antwort({ ok: true, betriebsstaette_id: id, ...(korrektur ? { kassen_korrektur: korrigiert } : {}) }, 200, cors) };
   });
 }
 
 // Schnappschuss je Kasse: genau die Angaben der Ausfüllanleitung (System, TSE, Daten) plus Status vor der Meldung
 const SCHNAPPSCHUSS_FELDER = ['bezeichnung', 'art', 'aktiv', 'kassenbuch', 'software', 'software_version', 'hersteller', 'modell', 'seriennummer', 'angeschafft_am', 'in_betrieb_am',
   'miete_leasing', 'tse', 'ausser_betrieb_am', 'ausser_betrieb_grund', 'ausser_betrieb_text', 'meldung_bemerkung', 'meldeweg', 'nachfolger_kasse_id',
-  'geraet_endgueltig', 'geraet_ausser_betrieb_am', 'altfall_anschaffung_gemeldet'];
+  'geraet_endgueltig', 'geraet_ausser_betrieb_am', 'altfall_anschaffung_gemeldet', 'in_verkehr_gebracht'];
 const schnappschuss = (d) => {
   const k = d.daten;
   const m = meldeAbleitung(k);

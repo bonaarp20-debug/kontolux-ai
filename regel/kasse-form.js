@@ -258,8 +258,11 @@ export const TSE_BAUFORMEN = Object.freeze(['keine', 'sd', 'usb', 'cloud']);
 export const TSE_SCHLUESSEL = Object.freeze(['seriennummer_hex', 'bsi_id', 'bauform', 'aktiviert_am']);
 export const BETRIEBSSTAETTE_ID_MUSTER = /^b[a-z0-9]{8}$/;
 export const K3_DATUM_MIN = '1990-01-01'; // Anschaffung einer alten Registrierkasse kann vor 2020 liegen
+// in_verkehr_gebracht (W2-Recht Ä5, nur Wegstreckenzähler): erstmals in Verkehr gebracht ab dem 01.07.2024? 'ab_2024_07' | 'vor_2024_07' | 'unbekannt' | null
+// (BMF 28.06.2024 II, letzter Absatz; Ableitung in kasse-register.js wegstreckeOhnePflicht)
+export const IN_VERKEHR_WERTE = Object.freeze(['ab_2024_07', 'vor_2024_07', 'unbekannt']);
 export const K3_SCHLUESSEL = Object.freeze([...SYSTEM_TEXTFELDER, 'angeschafft_am', 'in_betrieb_am', 'miete_leasing', 'tse', 'meldeweg', 'betriebsstaette_id',
-  'meldepflicht_bestaetigt_am', 'tse_bestaetigt_am', 'meldung_bemerkung']);
+  'meldepflicht_bestaetigt_am', 'tse_bestaetigt_am', 'meldung_bemerkung', 'in_verkehr_gebracht']);
 // O8 M1/M2: Antworten zur Außerbetriebnahme (nur an einer Kasse außer Betrieb, regel/kasse-register.js inaktivAngaben): Gerät endgültig außer Betrieb (ja/nein,
 // Datum) und, für den Altfall vor dem 01.07.2025, ob die Anschaffung vorher schon gemeldet war
 export const INAKTIV_FRAGEN_SCHLUESSEL = Object.freeze(['geraet_endgueltig', 'geraet_ausser_betrieb_am', 'altfall_anschaffung_gemeldet']);
@@ -268,9 +271,11 @@ export const K3_INAKTIV_ERLAUBT = Object.freeze(['bezeichnung', ...K3_SCHLUESSEL
 export const ANLEGEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'bezeichnung', 'kuerzel', 'art', 'grundaufzeichnung', 'datenquelle', 'anfangsbestand_cent', 'anfangsbestand_am',
   'anfangsbestand_herkunft', 'anfangsbestand_nachweis', 'karte_ueber_integration', 'ruhetage_wochentage', 'kassenbuch', 'bestand_in_kasse_id', 'datev_konto', ...K3_SCHLUESSEL]);
 export const AENDERN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'bezeichnung', 'ruhetage_wochentage', 'datev_konto', 'karte_ueber_integration', 'art', 'art_ab',
-  'grundaufzeichnung', 'grundaufzeichnung_ab', 'datenquelle', 'datenquelle_ab', 'bestand_in_kasse_id', ...K3_SCHLUESSEL, ...INAKTIV_FRAGEN_SCHLUESSEL, 'korrektur_elster_am']);
+  'grundaufzeichnung', 'grundaufzeichnung_ab', 'datenquelle', 'datenquelle_ab', 'bestand_in_kasse_id', ...K3_SCHLUESSEL, ...INAKTIV_FRAGEN_SCHLUESSEL, 'korrektur_elster_am', 'aenderung_art']);
+// aenderung_art (W2-Recht Ä2): „Korrektur oder Änderung?“ nach einer Meldung (Pflicht siehe kasse-register.js aenderungArtNoetig, Prüfung im Handler)
+export const AENDERUNG_ARTEN = Object.freeze(['korrektur', 'aenderung']);
 // system_wechseln: die Angaben des NEUEN Systems; nicht genannte System-Angaben (Anschaffung, Inbetriebnahme, Miete, TSE, Bestätigungen) werden geleert (sie gehörten zum alten System)
-export const WECHSELN_K3 = Object.freeze(['angeschafft_am', 'in_betrieb_am', 'miete_leasing', 'tse', 'meldepflicht_bestaetigt_am', 'tse_bestaetigt_am']);
+export const WECHSELN_K3 = Object.freeze(['angeschafft_am', 'in_betrieb_am', 'miete_leasing', 'tse', 'meldepflicht_bestaetigt_am', 'tse_bestaetigt_am', 'in_verkehr_gebracht']);
 // altgeraet_endgueltig (O8 M2, freiwillig): ist das alte Gerät endgültig außer Betrieb? Ohne Angabe bleibt die Frage offen (Frist läuft vorsichtig, die App fragt nach)
 export const WECHSELN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'gueltig_ab', 'art', 'grundaufzeichnung', 'datenquelle', ...SYSTEM_TEXTFELDER, ...WECHSELN_K3, 'altgeraet_endgueltig']);
 
@@ -323,6 +328,9 @@ export function k3Pruefen(body, { heute, erlaubt = K3_SCHLUESSEL }) {
     } else if (f === 'meldung_bemerkung') {
       if (v !== null && !textOk(v, 1, 200)) return fehl(f);
       w[f] = v === null ? null : v.trim();
+    } else if (f === 'in_verkehr_gebracht') {
+      if (v !== null && !IN_VERKEHR_WERTE.includes(v)) return fehl(f);
+      w[f] = v;
     }
   }
   // Inbetriebnahme nicht vor der Anschaffung (nur wenn beide hier genannt sind; gegen die gespeicherten Werte prüft regel/kasse-register.js k3Konsistenz)
@@ -419,6 +427,10 @@ export function pruefeKasse(body, aktion, { heute }) {
     if (body.korrektur_elster_am !== undefined && body.korrektur_elster_am !== null) {
       if (!istDatum(body.korrektur_elster_am) || body.korrektur_elster_am > heute) return fehl('korrektur_elster_am');
       w.korrektur_elster_am = body.korrektur_elster_am;
+    }
+    if (body.aenderung_art !== undefined && body.aenderung_art !== null) {
+      if (!AENDERUNG_ARTEN.includes(body.aenderung_art)) return fehl('aenderung_art');
+      w.aenderung_art = body.aenderung_art;
     }
     if (!Object.keys(w.felder).length) return fehl('felder');
     return ok(w);

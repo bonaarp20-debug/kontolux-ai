@@ -22,7 +22,7 @@ import { legacyHash } from './drift.js';
 import { heuteBerlin } from './oss-meldung.js';
 import { KASSE_PFADE, FEATURE, aufbewahrungBis, anhaengePruefen, nachweisPflicht, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, pruefeBewegung, kernFassung, stammKombination, PRIVAT_ARTEN, K3_INAKTIV_ERLAUBT, INAKTIV_FRAGEN_SCHLUESSEL } from './kasse-form.js';
 import {
-  ausserBetrieb, ausserBetriebAufheben, betriebsstaette, kassenmeldungGemeldet, protokollNachreichen, inaktivAngaben, meldeAbleitung, meldeNachAenderung, korrekturFaellt, k3Konsistenz, betriebsstaetteZuordnung, meldepflichtigArt,
+  ausserBetrieb, ausserBetriebAufheben, betriebsstaette, kassenmeldungGemeldet, protokollNachreichen, inaktivAngaben, meldeAbleitung, meldeNachAenderung, korrekturFaellt, aenderungArtNoetig, k3Konsistenz, betriebsstaetteZuordnung, meldepflichtigArt,
   ohneSystemDaten, ereignis, ereignisSetzen, anschaffungsEreignis, K3_LEER,
 } from './kasse-register.js';
 import {
@@ -310,10 +310,13 @@ async function kasseAktion(c, aktion) {
       if (k3f) return { antwort: formFehler(k3f, cors) };
       // Meldestatus und Frist (Anschaffung neu/geändert -> Frist aus dem Kern; sonst nach einer Meldung „Aktualisierung empfohlen“)
       // O9a M1: korrektur_elster_am nur bei einer echten Korrektur und nicht vor der Meldung, die das alte Datum trug (sonst 400, nichts geschrieben)
+      // W2-Recht Ä2: nach einer Meldung bei geänderten K3-Angaben Pflicht-Antwort aenderung_art (Korrektur mit Frist oder Änderung ohne Frist)
+      const aart = w.aenderung_art ?? null;
+      if (!aart && aenderungArtNoetig(alt, { ...alt, ...neu })) return { antwort: formFehler({ code: 'FORMAT', feld: 'aenderung_art', grund: 'pflicht' }, cors) };
       const kea = w.korrektur_elster_am ?? null;
-      if (kea && !korrekturFaellt(alt, { ...alt, ...neu })) return { antwort: formFehler({ code: 'FORMAT', feld: 'korrektur_elster_am', grund: 'keine_korrektur' }, cors) };
+      if (kea && !korrekturFaellt(alt, { ...alt, ...neu }, { aenderungArt: aart })) return { antwort: formFehler({ code: 'FORMAT', feld: 'korrektur_elster_am', grund: 'keine_korrektur' }, cors) };
       if (kea && kea < alt.gemeldet_am) return { antwort: formFehler({ code: 'FORMAT', feld: 'korrektur_elster_am', grund: 'vor_meldung', gemeldet_am: alt.gemeldet_am }, cors) };
-      const m = meldeNachAenderung(alt, { ...alt, ...neu }, heute, { korrekturElsterAm: kea });
+      const m = meldeNachAenderung(alt, { ...alt, ...neu }, heute, { korrekturElsterAm: kea, aenderungArt: aart });
       Object.assign(neu, m);
       if (m.meldestatus !== alt.meldestatus || m.frist_bis !== (alt.frist_bis ?? null)) geaendert.push('meldestatus');
     } else {
@@ -365,7 +368,7 @@ async function kasseAktion(c, aktion) {
     writes.push(schreibe.setzen(P.kasse(uid, id), neuKasse, { updateTime: kasseDok.updateTime }));
     if (archiv) writes.push(schreibe.anlegen(P.kasse(uid, archiv.id), archiv.daten));
     const aktionAudit = aktion === 'aendern' ? 'kasse_aendern' : 'kasse_system_wechseln';
-    const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{ aktion: aktionAudit, ziel: `kassen/${id}`, vorher: alt, nachher: neuKasse, details: { kasse_id: id, felder: [...new Set(geaendert)].sort().slice(0, 20), ...(w.korrektur_elster_am ? { korrektur_elster_am: w.korrektur_elster_am } : {}) } }], zeit);
+    const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{ aktion: aktionAudit, ziel: `kassen/${id}`, vorher: alt, nachher: neuKasse, details: { kasse_id: id, felder: [...new Set(geaendert)].sort().slice(0, 20), ...(w.korrektur_elster_am ? { korrektur_elster_am: w.korrektur_elster_am } : {}), ...(w.aenderung_art ? { aenderung_art: w.aenderung_art } : {}) } }], zeit);
     return { writes: [...writes, ...audit.writes], erfolg: () => antwort({ ok: true, kasse_id: id, ...(archiv ? { archiv_kasse_id: archiv.id } : {}) }, 200, cors) };
   });
 }
