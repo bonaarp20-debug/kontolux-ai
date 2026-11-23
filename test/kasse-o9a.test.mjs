@@ -132,6 +132,9 @@ test('O9a M4 (Etappen): großes Konto, drei Kassen, erschöpftes Budget -> die e
   // Etappen bis zum Ende
   const tage = new Map(d.kassentage.map((x) => [x.id, x]));
   const bew = new Map(d.kassenbewegungen.map((x) => [x.id, x]));
+  // O10 N6: die Maps verdecken doppelt gelieferte Dokumente; deshalb zusätzlich die Summe der gelieferten Längen zählen
+  let summeTage = d.kassentage.length;
+  let summeBew = d.kassenbewegungen.length;
   let fz = d.kassen_fortsetzung;
   let etappen = 0;
   let vorher = d.kassen_unvollstaendig_ab;
@@ -140,6 +143,8 @@ test('O9a M4 (Etappen): großes Konto, drei Kassen, erschöpftes Budget -> die e
     assert.equal(e.fehler, undefined);
     for (const x of e.kassentage) tage.set(x.id, x);
     for (const x of e.kassenbewegungen) bew.set(x.id, x);
+    summeTage += e.kassentage.length;
+    summeBew += e.kassenbewegungen.length;
     if (e.kassen_unvollstaendig_ab) for (const [kid, ab] of Object.entries(e.kassen_unvollstaendig_ab)) assert.ok(ab === null || vorher[kid] === null || ab <= vorher[kid], 'die Grenze wandert nur nach vorn in der Zeit');
     vorher = e.kassen_unvollstaendig_ab || {};
     fz = e.kassen_fortsetzung;
@@ -148,6 +153,7 @@ test('O9a M4 (Etappen): großes Konto, drei Kassen, erschöpftes Budget -> die e
   assert.ok(etappen > 1 && etappen < 100, `Etappen: ${etappen}`);
   assert.equal(tage.size, 3 * 1150);
   assert.equal(bew.size, 3 * 1150 * 4);
+  assert.deepEqual([summeTage, summeBew], [tage.size, bew.size], 'O10 N6: kein Dokument doppelt geliefert');
   assert.ok([...tage.values()].every((x) => x.fassungen.length === 1 && x.fassungen[0].aktiv === true));
 });
 
@@ -189,4 +195,111 @@ test('O9a M4 (Etappen) über den Router: /pruefer-kasse mit gültigem Prüfer-To
     assert.equal((await anfrage(env, { path: '/pruefer-kasse', body: { kassen_fortsetzung: d.kassen_fortsetzung }, headers: { Authorization: `Bearer ${'z'.repeat(32)}` }, ip })).status, 404);
     assert.equal((await anfrage(env, { path: '/pruefer-kasse', body: { kassen_fortsetzung: { 'ka_x': {} } }, headers: { Authorization: `Bearer ${token}` }, ip })).status, 400);
   } finally { globalThis.fetch = original; }
+});
+
+// ---------------------------------------------------------------------------------------------
+// O10 (docs/kassenbuch/o10-gegenlesung.md in der App): N6 Mandantentrennung /pruefer-kasse, M5/N1 Grenzen, N7 Kassen reihum bei mehr als 20 Kassen
+// ---------------------------------------------------------------------------------------------
+const UID_B = 'pruefO10UidB00000000002';
+function routerUmgebung(fs) {
+  const original = globalThis.fetch;
+  let firestoreAbfragen = 0;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.startsWith('https://oauth2.googleapis.com/token')) return new Response(JSON.stringify({ access_token: 'dienstkonto-test', expires_in: 3600 }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    if (url.startsWith('https://firestore.googleapis.com/')) { firestoreAbfragen += 1; return fs.fetchFn(input, init); }
+    return new Response('{}', { status: 200 });
+  };
+  return { zurueck: () => { globalThis.fetch = original; }, abfragen: () => firestoreAbfragen };
+}
+function zugang(fs, uid, token) {
+  fs.setze(`users/${uid}/profil/prueferZugang`, { token_hash: createHash('sha256').update(token).digest('hex'), aktiv: true, ablauf: new Date(Date.now() + 86400000).toISOString() });
+}
+
+test('O10 N6: Mandantentrennung /pruefer-kasse: Token von Konto A mit Kassen-IDs und Cursorn von Konto B liefert keine Daten von B', async () => {
+  const fs = konto({ kassen: { kaaaa1111: 3 }, bewegungen: 2 });
+  for (let i = 0; i < 5; i += 1) {
+    fs.setze(`users/${UID_B}/kassentage/kzzzz9999_${tag(i)}`, { kasse_id: 'kzzzz9999', geschaeftstag: tag(i), status: 'abgeschlossen', fassung_aktiv: 1, fassungen_kurz: [{ n: 1 }], geheim: 'B' });
+    fs.setze(`users/${UID_B}/kassentage/kzzzz9999_${tag(i)}/fassungen/1`, { n: 1, geheim: 'B' });
+    fs.setze(`users/${UID_B}/kassenbewegungen/kzzzz9999_${tag(i)}_001`, { kasse_id: 'kzzzz9999', geschaeftstag: tag(i), art: 'einlage', betrag_cent: 1, geheim: 'B' });
+    // dieselbe Kassen-ID wie A in Konto B
+    fs.setze(`users/${UID_B}/kassentage/kaaaa1111_${tag(100 + i)}`, { kasse_id: 'kaaaa1111', geschaeftstag: tag(100 + i), status: 'abgeschlossen', fassung_aktiv: 1, fassungen_kurz: [{ n: 1 }], geheim: 'B' });
+  }
+  const tokenA = 'a'.repeat(32);
+  zugang(fs, UID, tokenA);
+  zugang(fs, UID_B, 'b'.repeat(32));
+  fs.setze('config/features', { kern_max: 'an', features: { steuerprofil: 'an', kasse: 'an' } });
+  const u = routerUmgebung(fs);
+  try {
+    const env = await erzeugeTestEnv();
+    const ip = '203.0.113.90';
+    for (const fz of [{ kzzzz9999: { tage_ab: '', bew_ab: '' } }, { kzzzz9999: { tage_ab: `kzzzz9999_${tag(4)}`, bew_ab: `kzzzz9999_${tag(4)}_002` } }, { kaaaa1111: { tage_ab: '', bew_ab: '' } }, { kaaaa1111: { tage_ab: `kaaaa1111_${tag(200)}`, bew_ab: null } }]) {
+      const r = await anfrage(env, { path: '/pruefer-kasse', body: { kassen_fortsetzung: fz }, headers: { Authorization: `Bearer ${tokenA}` }, ip });
+      assert.equal(r.status, 200, JSON.stringify(fz));
+      const text = await r.text();
+      assert.ok(!text.includes('"geheim"'), `keine Daten von B: ${JSON.stringify(fz)}`);
+      const e = JSON.parse(text);
+      assert.ok([...e.kassentage, ...e.kassenbewegungen].every((x) => x.kasse_id !== 'kzzzz9999'));
+    }
+    // A sieht nur seine eigenen drei Tage
+    const eigen = await (await anfrage(env, { path: '/pruefer-kasse', body: { kassen_fortsetzung: { kaaaa1111: { tage_ab: '', bew_ab: '' } } }, headers: { Authorization: `Bearer ${tokenA}` }, ip })).json();
+    assert.deepEqual(eigen.kassentage.map((x) => x.geschaeftstag).sort(), [tag(0), tag(1), tag(2)]);
+  } finally { u.zurueck(); }
+});
+
+test('O10 M5: /pruefer-kasse Grenze je Zugang (60 je 10 min) über viele IPs; O10 N1: unbekannte Tokens je Quelle nach 10 Fehlversuchen ohne Firestore-Abfrage', async () => {
+  const fs = konto({ kassen: { kaaaa1111: 3 }, bewegungen: 2 });
+  const token = 'm'.repeat(32);
+  zugang(fs, UID, token);
+  fs.setze('config/features', { kern_max: 'an', features: { steuerprofil: 'an', kasse: 'an' } });
+  const u = routerUmgebung(fs);
+  try {
+    const env = await erzeugeTestEnv();
+    const fz = { kaaaa1111: { tage_ab: '', bew_ab: '' } };
+    const stati = [];
+    for (let i = 0; i < 62; i += 1) {
+      const r = await anfrage(env, { path: '/pruefer-kasse', body: { kassen_fortsetzung: fz }, headers: { Authorization: `Bearer ${token}` }, ip: `198.51.100.${(i % 50) + 1}` });
+      stati.push(r.status);
+    }
+    assert.equal(stati.filter((x) => x === 200).length, 60, 'genau 60 Etappen je Zugang in 10 min, auch über 50 IPs');
+    assert.deepEqual(stati.slice(60), [429, 429]);
+    // Fehlversuche je Quelle
+    const ip = '192.0.2.200';
+    const fehl = [];
+    for (let i = 0; i < 12; i += 1) {
+      const vorher = u.abfragen();
+      const r = await anfrage(env, { path: '/pruefer-kasse', body: { kassen_fortsetzung: fz }, headers: { Authorization: `Bearer ${String(i).padStart(2, '0')}${'x'.repeat(30)}` }, ip });
+      fehl.push([r.status, u.abfragen() > vorher]);
+    }
+    assert.deepEqual(fehl.slice(0, 10).map((x) => x[0]), Array(10).fill(404));
+    assert.deepEqual(fehl.slice(10), [[429, false], [429, false]], 'ab dem 11. unbekannten Token dieser IP keine Firestore-Abfrage mehr');
+    // eine andere Quelle bleibt frei
+    assert.equal((await anfrage(env, { path: '/pruefer-kasse', body: { kassen_fortsetzung: fz }, headers: { Authorization: `Bearer ${'y'.repeat(32)}` }, ip: '192.0.2.201' })).status, 404);
+  } finally { u.zurueck(); }
+});
+
+test('O10 N7: mehr als 20 Kassen -> Ströme ohne erste Seite kommen in der Etappe zuerst; jede Kasse hat nach wenigen Etappen ihren jüngsten Tag; alles lückenlos, nichts doppelt', async () => {
+  const kassen = Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`k${String(i).padStart(4, '0')}abcd`, 250]));
+  const fs = konto({ kassen, bewegungen: 2 });
+  const ids = Object.keys(kassen);
+  // 4 + je Kasse 3 = 34: nur die ersten 10 Kassen bekommen ihre erste Seite
+  const d = await kassenPrueferDaten(UID, 't', fs.fetchFn, { max: 34 });
+  const hatJuengsten = new Set(d.kassentage.filter((x) => x.geschaeftstag === tag(249)).map((x) => x.kasse_id));
+  assert.equal(hatJuengsten.size, 10);
+  const e = await kassenPrueferFortsetzung(UID, 't', fs.fetchFn, d.kassen_fortsetzung, { max: 40 });
+  const neu = new Set(e.kassentage.filter((x) => x.geschaeftstag === tag(249)).map((x) => x.kasse_id));
+  // 15 Kassen ohne erste Seite, je 3 Unteranfragen: 13 davon passen in 40, vor jeder zweiten Seite der ersten Kassen
+  assert.equal(neu.size, 13, `neue Kassen in Etappe 1: ${neu.size}`);
+  assert.ok(!e.kassentage.some((x) => hatJuengsten.has(x.kasse_id)), 'die ersten Kassen warten, bis jede Kasse ihre jüngsten Tage hat');
+  const e2 = await kassenPrueferFortsetzung(UID, 't', fs.fetchFn, e.kassen_fortsetzung, { max: 40 });
+  for (const x of e2.kassentage) if (x.geschaeftstag === tag(249)) neu.add(x.kasse_id);
+  assert.equal(new Set([...hatJuengsten, ...neu]).size, 25, 'nach zwei Etappen hat jede Kasse ihren jüngsten Tag');
+  // bis zum Ende: lückenlos, nichts doppelt
+  const alle = [...d.kassentage, ...e.kassentage, ...e2.kassentage];
+  let fz = e2.kassen_fortsetzung;
+  let n = 0;
+  while (fz && n < 100) { const x = await kassenPrueferFortsetzung(UID, 't', fs.fetchFn, fz, { max: 40 }); alle.push(...x.kassentage); fz = x.kassen_fortsetzung; n += 1; }
+  assert.equal(new Set(alle.map((x) => x.id)).size, 25 * 250);
+  assert.equal(alle.length, 25 * 250, 'nichts doppelt');
+  assert.ok(ids.length === 25);
 });

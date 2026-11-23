@@ -346,7 +346,8 @@ async function stroemeLesen(fs, uid, stroeme, budgetWeg) {
       const seitenTage = r.map((d) => tagAusId(idVon(d))).filter(Boolean);
       if (st.art === 'tage') {
         // Fassungen dieser Tage (alle, auch stornierte), je höchstens 100 Pfade in einem batchGet. Scheitert das, bleibt der Cursor stehen: die nächste Etappe liest
-        // diese Seite noch einmal (die Seite ersetzt die Tage dann über die ID).
+        // diese Seite noch einmal. O10 N6: die Tage dieser Seite gehen dann erst mit der nächsten Etappe hinaus (vollständig mit Fassungen), nie doppelt und nie als
+        // Tag ohne seine Fassungen.
         const pfade = r.flatMap((d) => (istObjektRoh(d.daten) ? fassungsNummern(d.daten).map((n) => P.fassung(uid, idVon(d), n)) : []));
         let fassungenOk = true;
         for (let i = 0; i < pfade.length && fassungenOk; i += PRUEFER_FASSUNGEN_JE_BATCH) {
@@ -360,8 +361,8 @@ async function stroemeLesen(fs, uid, stroeme, budgetWeg) {
             }
           } catch (e) { fassungenOk = false; merke(e, 'fassungen', st); }
         }
-        tage.push(...r);
         if (!fassungenOk) continue;
+        tage.push(...r);
         if (r.length < seite) { st.fertig = true; continue; }
         st.vollAb = seitenTage[seitenTage.length - 1] || st.vollAb;
       } else {
@@ -426,6 +427,9 @@ export async function kassenPrueferFortsetzung(uid, token, fetchFn = globalThis.
     if (x.tage_ab !== null) stroeme.push(neuerStrom(x.kid, 'tage', x.tage_ab || null));
     if (x.bew_ab !== null) stroeme.push(neuerStrom(x.kid, 'bew', x.bew_ab || null));
   }
+  // O10 N7: Ströme ohne erste Seite (Cursor '') zuerst (stabil sortiert). Bei mehr als 20 Kassen (2 Ströme je Kasse, Budget 40) bekommt so jede Kasse ihre jüngsten Tage
+  // spätestens nach wenigen Etappen, statt hinter den ersten Kassen mit vielen Seiten zu warten. Die nächste kassen_fortsetzung folgt dieser Reihenfolge.
+  stroeme.sort((a, b) => (a.ab === null ? 0 : 1) - (b.ab === null ? 0 : 1));
   const r = await stroemeLesen(fs, uid, stroeme, () => benutzt >= max);
   const aus = { kassentage: r.kassentage, kassenbewegungen: r.kassenbewegungen, kassen_unvollstaendig: r.fehlt.length > 0 };
   if (r.fehlt.length) {

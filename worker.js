@@ -824,7 +824,7 @@ export default {
       // H1-Fix: Datei des Prüferzugangs per POST (Token im Header, Pfad im Körper, nichts in der Adresse); gleicher Zugangsnachweis wie /pruefer-daten
       if (url.pathname === '/pruefer-datei') return handlePrueferDatei(body, env, cors, authHeader, limitIP);
       // O9a M4: weitere Etappe der Kassendaten (gleicher Zugangsnachweis wie /pruefer-daten)
-      if (url.pathname === '/pruefer-kasse') return handlePrueferKasse(body, env, cors, authHeader);
+      if (url.pathname === '/pruefer-kasse') return handlePrueferKasse(body, env, cors, authHeader, limitIP);
       if (url.pathname === '/freigabe-status') {
         return new Response(JSON.stringify({ status: (await freigabeStatus(verifiedUid, env)) || 'frei' }), {
           status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
@@ -4517,13 +4517,30 @@ async function handlePrueferDatei(body, env, cors, authHeader, quelle = 'unknown
 // O9a M4: /pruefer-kasse liest die Kassendaten an den Cursorn aus kassen_fortsetzung weiter (vorige Antwort von /pruefer-daten oder /pruefer-kasse). Gleicher
 // Zugangsnachweis wie /pruefer-daten (Token im Authorization-Header, gleiche generische Antwort bei unbekanntem Token), eigenes Ratenlimit, eigenes Budget je Etappe.
 // Nur Lesen; Dateiadressen wie bei /pruefer-daten durch Speicherpfade ersetzt.
-async function handlePrueferKasse(body, env, cors = {}, authHeader = null) {
+// O10 M5/N1: Grenzen wie /pruefer-datei (siehe dort): je IP ROUTEN_LIMITS['/pruefer-kasse'] (60 je 10 min); je Zugang (Hash des Tokens) PRUEFER_KASSE_JE_ZUGANG, damit
+// ein gültiger Link nicht beliebig viele teure Etappen (bis etwa 12.000 Lesevorgänge je Etappe) über viele IPs auslösen kann; Fehlversuche unbekannter Tokens je Quelle
+// (gemeinsamer Zähler mit /pruefer-datei: nach 10 abgelehnten Tokens in 10 min fragt der Worker für unbekannte Tokens dieser IP nicht mehr bei Firestore nach) und
+// über alle Quellen nur gedrosselt. Die App lädt automatisch höchstens 15 Etappen, danach auf Knopfdruck; 60 je 10 min reichen für eine Prüfung.
+const PRUEFER_KASSE_JE_ZUGANG = { limit: 60, windowMs: 10 * 60 * 1000 };
+async function handlePrueferKasse(body, env, cors = {}, authHeader = null, quelle = 'unknown') {
   const json = (o, status) => new Response(JSON.stringify(o), { status, headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
-  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const token = prueferBearer(authHeader);
   if (!token || token.length < 16 || token.length > 64) return json({ error: 'invalid' }, 400);
+  const tokenHash = await sha256Hex(token);
+  const zugangSchluessel = `/pruefer-kasse|zugang|${tokenHash}`;
+  const bekannt = prueferZugangBekannt(tokenHash);
+  const quelleSchluessel = prueferQuelleSchluessel(quelle);
+  if (bekannt && !checkRateLimit(zugangSchluessel, PRUEFER_KASSE_JE_ZUGANG.limit, PRUEFER_KASSE_JE_ZUGANG.windowMs)) return json({ error: 'zu_viele' }, 429);
+  if (!bekannt && prueferZaehlerVoll(quelleSchluessel, PRUEFER_FEHL_JE_QUELLE.limit, PRUEFER_FEHL_JE_QUELLE.windowMs)) return json({ error: 'bitte_neu_oeffnen' }, 429);
+  if (!bekannt && prueferZaehlerVoll(PRUEFER_FEHL_SCHLUESSEL, PRUEFER_FEHL_ISOLAT.schwelle, PRUEFER_FEHL_ISOLAT.windowMs)) await new Promise((r) => setTimeout(r, PRUEFER_FEHL_ISOLAT.verzoegerungMs));
   try {
     const zugang = await prueferZugangPruefen(token, env);
-    if (!zugang) return json({ error: 'invalid' }, 404);
+    if (!zugang) {
+      checkRateLimit(quelleSchluessel, PRUEFER_FEHL_JE_QUELLE.limit, PRUEFER_FEHL_JE_QUELLE.windowMs);
+      checkRateLimit(PRUEFER_FEHL_SCHLUESSEL, PRUEFER_FEHL_ISOLAT.schwelle, PRUEFER_FEHL_ISOLAT.windowMs);
+      return json({ error: 'invalid' }, 404);
+    }
+    if (!bekannt && !checkRateLimit(zugangSchluessel, PRUEFER_KASSE_JE_ZUGANG.limit, PRUEFER_KASSE_JE_ZUGANG.windowMs)) return json({ error: 'zu_viele' }, 429);
     const kasse = await kassenPrueferFortsetzung(zugang.uid, zugang.adminToken, (...a) => fetch(...a), body && body.kassen_fortsetzung);
     if (kasse.fehler) return json({ error: 'format' }, 400);
     return json(prueferLinksErsetzen(kasse, zugang.uid), 200);
