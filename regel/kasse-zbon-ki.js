@@ -19,9 +19,12 @@
 // Denken: Standard ist thinking 'disabled' (wie /document, Haiku 5.5). Die Alternative "adaptiv, effort low" ist über deps.denken = 'low'
 // schaltbar. Die Wahl nach Messwerten legt der Eval fest (test/kasse-zbon-eval.mjs); bis dahin gilt 'aus' (schneller, billiger, kein Denken in
 // max_tokens). Messwerte stehen nach dem ersten Eval-Lauf hier und im Stand-Dokument.
-// Kosten: Text höchstens 32 KB, PDF höchstens 5 Seiten, dazu eine Schätzung der Eingabe-Token mit Obergrenze 20.000 (ZBON_ZU_GROSS vor Zähler und Aufruf).
-// Vision: Fotos verkleinert der Browser auf höchstens 2000 px lange Kante (2.14 Ablauf 2). Der Höchstwert für Haiku 5.5 ist gegen die
-// Vision-Doku (https://docs.claude.com/en/docs/build-with-claude/vision) vor O4 zu prüfen; der Worker lässt Bilder bis 10 MB durch.
+// Kosten: Text höchstens 32 KB, PDF höchstens 5 Seiten, dazu eine Schätzung der Eingabe-Token mit Obergrenze 32.000 (ZBON_ZU_GROSS vor Zähler und Aufruf).
+// Vision (O4-Fix M1/N3/N4, Anthropic-Doku „Vision“, abgerufen am 23.11.2026, https://platform.claude.com/docs/en/build-with-claude/vision, Abschnitte
+// „Resolution and token cost“ und „Request limits“): Haiku 5.5 gehört zur Stufe „High-resolution“ (Claude 4.7 und neuer): längste Kante 2.576 px, höchstens
+// 4.784 visuelle Token (⌈B/28⌉ × ⌈H/28⌉); erst darüber verkleinert die API. Die App verkleinert Fotos genau auf diese Grenzen (regel/kasse-zbon-ui.js
+// zielGroesse, JPEG 0,9), damit die API nicht ein zweites Mal neu rechnet. Je Bild höchstens 10 MB base64 (= 7,5 MB roh) und 8000 × 8000 px: darüber
+// ZBON_ZU_GROSS vor Zähler und Aufruf (sonst Anthropic 400 und eine irreführende „geht gerade nicht“-Meldung).
 // Structured Outputs: JSON-Schema ohne maxLength/maxItems/minimum/maximum (die API bildet sie nicht ab); der Worker prüft sie (siehe unten).
 import { PDFArray, PDFDict, PDFName, PDFNumber, PDFRawStream } from 'pdf-lib';
 import { ladePdfBegrenzt, stromLaengeBegrenzt, PDF_STROM_MAX, PDF_ENTPACKT_MAX, PDF_XREF_EINTRAEGE_MAX } from './pdf-sicher.js';
@@ -47,10 +50,17 @@ export const ZBON_DATEI_MAX_BYTES = 10 * 1024 * 1024;
 export const ZBON_TEXT_MAX_BYTES = 32 * 1024; // O4-W A-M2: ein echter Tagesbericht hat unter 10 KB
 // Eingabe-Token-Obergrenze (O4-W A-M2): darüber ZBON_ZU_GROSS, noch vor Zähler und Aufruf. Schätzung konservativ (der count_tokens-Endpunkt steht dem
 // Worker-Muster nicht zur Verfügung: deps.kiAufruf geht nur an /v1/messages). Preisgrenze der API: ab 100.000 Prompt-Token das Fünffache.
-export const ZBON_EINGABE_TOKEN_MAX = 20000;
-export const ZBON_FEST_TOKEN = 2000;       // System-Prompt (zbon-2, rund 500 bis 700 Token) + Schema + Kontextzeile, aufgerundet
-export const ZBON_BILD_TOKEN = 2000;       // die API verkleinert Bilder auf höchstens etwa 1.600 Token
-export const ZBON_PDF_SEITE_TOKEN = 2500;  // je Seite: Seitenbild plus Rahmen
+// O4-Fix N4: mit 5.000 Token je Bild und je PDF-Seite (High-resolution-Stufe, siehe Kopf) passt ein PDF mit 5 Seiten nur mit 32.000 unter die Grenze
+// (2.000 + 5 x 5.000 + Textebene). Teuerste Lesung: 32.000 x 0,10 $/MTok = 0,32 Cent Eingabe plus höchstens 2.048 Ausgabe-Token (0,1 Cent), weit unter dem
+// Fünffach-Preis ab 100.000 Token. Liegt der echte Verbrauch (usage.input_tokens) über der Grenze, schreibt logge() eine Warnzeile (Schätzung zu niedrig).
+export const ZBON_EINGABE_TOKEN_MAX = 32000;
+export const ZBON_FEST_TOKEN = 2000;       // System-Prompt (zbon-4, rund 700 bis 1.200 Token) + Schema + Kontextzeile, aufgerundet
+export const ZBON_BILD_KANTE_MAX = 2576;   // High-resolution-Stufe (Haiku 5.5): längste Kante, darüber verkleinert die API
+export const ZBON_BILD_VISUELL_TOKEN_MAX = 4784; // High-resolution-Stufe: höchstens so viele visuelle Token (⌈B/28⌉ × ⌈H/28⌉) je Bild
+export const ZBON_BILD_TOKEN = 5000;       // Schätzung je Bild: 4.784 visuelle Token aufgerundet
+export const ZBON_PDF_SEITE_TOKEN = 5000;  // je Seite: Seitenbild (bis 4.784) plus Rahmen; die Textebene zählt extra
+export const ZBON_BILD_MAX_BYTES = 7500000; // 10 MB base64 je Bild (API-Grenze) = 7,5 MB roh
+export const ZBON_BILD_PIXEL_MAX = 8000;    // API-Grenze je Kante
 export const ZBON_PDF_INHALT_MAX_ROH = 32 * 1024; // Seiteninhalt (komprimiert) darüber: zu groß, ohne ihn zu entpacken (Schutz vor Entpack-Bomben)
 // G2-Fix M-2 (Entpack-Bombe): jeder Strom, den der Worker oder pdf-lib entpackt (Objekt- und XRef-Ströme beim Laden, Seiteninhalte und XObjects beim Zählen),
 // wird gezählt und begrenzt entpackt: höchstens 4 MB je Strom und 16 MB je Datei, Abbruch beim Überschreiten (der Entpacker selbst stoppt, kein volles Entpacken).
@@ -64,6 +74,7 @@ export const ZBON_ERLAUBTE_TYPEN = Object.freeze(['application/pdf', 'image/jpeg
 // Entscheidung: obere Grenze je Betrag 1.000.000 EUR in Cent (strenger als BELEG_MAX_BETRAG = 10.000.000 EUR in worker.js; ein Tagesabschluss
 // einer Ladenkasse liegt weit darunter, ein höherer Wert ist fast sicher ein Lesefehler).
 export const ZBON_MAX_CENT = 100000000;
+export const ZBON_BETRAG_KLEIN_CENT = 1000; // K16 (O4-Fix N1): unter 10 EUR
 export const ZBON_STRING_MAX = 20;
 export const ZBON_LISTE_MAX = 6;
 export const ZBON_ZAHLARTEN_MAX = 20; // echte Bons nennen oft mehr als 6 Zahlarten: bis 20 Einträge, Summe je Art (O4-W A-N2, Delta C-N1)
@@ -174,6 +185,7 @@ const PRUEF_TEXTE = Object.freeze({
   K14_KORREKTUR_LEER: 'Retouren/Rabatte: bitte nur eintragen, wenn der Satzumsatz oben vor dem Abzug steht.',
   K15_GUTSCHEIN_SELBST: 'Gutscheinverkauf bitte selbst einordnen: Einzweck oder Mehrzweck. Verkauf und Einlösung trägst du selbst ein.',
   K12_LESBARKEIT: 'Der Bon ist nur teilweise lesbar. Vergleiche jeden Wert genau mit deinem Bon.',
+  K16_BETRAG_KLEIN: 'Die Beträge sind sehr klein. Prüfe am Bon, ob Euro und Cent richtig gelesen sind (zum Beispiel 1,20 € statt 120,00 €).',
   SPERRE_X_BERICHT: 'Das ist ein Zwischenbericht (X). Für den Tagesabschluss brauchst du den Z-Bericht.',
   SPERRE_EINZELBON: 'Das sieht aus wie ein einzelner Kassenbon. Im Kassenbuch überträgst du nur den Tagesabschluss deiner Kasse.',
   SPERRE_OHNE_ZNUMMER: 'Auf dem Bon ist keine Z-Nummer lesbar und es gibt nur eine Summenzeile. Bitte trag die Werte selbst ein.', // G2-Fix N-2: neutral, kein Einzelbon-Vorwurf
@@ -409,6 +421,12 @@ export function pruefeZbonVorschlag(roh, ctx = {}) {
   if (zeit && (zeit.stunde < 6 || (tag && zeit.tag > tag))) pruefungen.push({ code: 'K4_NACHT', stufe: 'hinweis', felder: ['geschaeftstag'] });
   // K5 (Regelbesteuerung ohne Satz) steht oben als K10; K7: mehrere Abschlüsse
   if (r.mehrere_abschluesse === true) pruefungen.push({ code: 'K7_MEHRERE', stufe: 'hinweis', felder: [] });
+  // K16 (O4-Fix N1): Euro statt Cent oder abgeschnittene Nachkommastellen fallen K1/K2/K3 nicht auf, wenn sie durchgängig auftreten (alle Summen stimmen
+  // untereinander). Hinweis, wenn alle gelesenen Beträge unter 10 EUR liegen, oder wenn alle volle Euro sind und mindestens einer unter 10 EUR liegt.
+  const betraege = [gesamt, ...saetze.map((s) => (bruttoOk(s) ? s.brutto : null)), zahlen.bar, zahlen.karte, zahlen.sonstig].filter((x) => typeof x === 'number' && x > 0);
+  if (betraege.length && (Math.max(...betraege) < ZBON_BETRAG_KLEIN_CENT || (betraege.every((x) => x % 100 === 0) && betraege.some((x) => x < ZBON_BETRAG_KLEIN_CENT)))) {
+    pruefungen.push({ code: 'K16_BETRAG_KLEIN', stufe: 'hinweis', felder: ['umsaetze_je_satz', 'zbon_gesamt_cent'] });
+  }
 
   // Sperre: schlechte Lesbarkeit und mehr als die Hälfte der Felder null
   const kern = [r.z_nummer, r.geschaeftstag, r.gesamt_brutto_cent, ...saetzeRoh.map((s) => s.brutto_cent), ...zahlRoh.map((z) => z.betrag_cent)];
@@ -484,6 +502,41 @@ async function sha256Bytes(bytes) {
 const beginnt = (bytes, ...muster) => muster.some((m) => m.every((b, i) => bytes[i] === b));
 const istExportInhalt = (bytes) => beginnt(bytes, [0x50, 0x4B, 0x03, 0x04], [0x1F, 0x8B]) || (bytes.length > 262 && String.fromCharCode(...bytes.slice(257, 262)) === 'ustar');
 const WEBP = (b) => b.length > 12 && String.fromCharCode(...b.slice(0, 4)) === 'RIFF' && String.fromCharCode(...b.slice(8, 12)) === 'WEBP';
+
+// O4-Fix N3: Pixelmaße aus dem Dateikopf (JPEG: erster SOF-Marker; PNG: IHDR; WebP: VP8, VP8L, VP8X). { breite, hoehe } oder null (nicht lesbar). Rein, ohne Dekodieren.
+export function zbonBildMasse(bytes, type) {
+  try {
+    const b = bytes; const n = b.length;
+    const u16 = (i) => (b[i] << 8) | b[i + 1];
+    if (type === 'image/png') {
+      if (n < 24 || String.fromCharCode(...b.slice(12, 16)) !== 'IHDR') return null;
+      const u32 = (i) => ((b[i] << 24) >>> 0) + (b[i + 1] << 16) + (b[i + 2] << 8) + b[i + 3];
+      return { breite: u32(16), hoehe: u32(20) };
+    }
+    if (type === 'image/jpeg') {
+      let i = 2;
+      while (i + 3 < n) {
+        if (b[i] !== 0xFF) return null;
+        const m = b[i + 1];
+        if (m === 0xFF) { i += 1; continue; } // Füllbyte
+        if (m === 0xD8 || m === 0x01 || (m >= 0xD0 && m <= 0xD7)) { i += 2; continue; } // ohne Länge
+        if (m === 0xD9 || m === 0xDA) return null; // Bildende oder Bilddaten vor einem SOF: unklar
+        const len = u16(i + 2);
+        if (len < 2) return null;
+        if (m >= 0xC0 && m <= 0xCF && m !== 0xC4 && m !== 0xC8 && m !== 0xCC) return i + 8 < n ? { breite: u16(i + 7), hoehe: u16(i + 5) } : null;
+        i += 2 + len;
+      }
+      return null;
+    }
+    if (type === 'image/webp' && n >= 30) {
+      const art = String.fromCharCode(...b.slice(12, 16));
+      if (art === 'VP8 ') return { breite: (b[26] | (b[27] << 8)) & 0x3FFF, hoehe: (b[28] | (b[29] << 8)) & 0x3FFF };
+      if (art === 'VP8L' && b[20] === 0x2F) return { breite: 1 + (((b[22] & 0x3F) << 8) | b[21]), hoehe: 1 + (((b[24] & 0x0F) << 10) | (b[23] << 2) | ((b[22] & 0xC0) >> 6)) };
+      if (art === 'VP8X') return { breite: 1 + (b[24] | (b[25] << 8) | (b[26] << 16)), hoehe: 1 + (b[27] | (b[28] << 8) | (b[29] << 16)) };
+    }
+    return null;
+  } catch { return null; }
+}
 
 // Schätzung der Eingabe-Token einer Datei (rein, konservativ): Text 1 Token je 2 Byte; Bild pauschal; PDF je Seite pauschal plus Textebene
 // (entpackte Seiteninhalte, 1 Token je 2 Byte). Unbekanntes (Fehler beim Entpacken) zählt als zu groß.
@@ -598,6 +651,10 @@ export async function pruefeZbonDatei(datei, { validateDatei, ladePdf } = {}) {
   }
   const magisch = type === 'image/jpeg' ? beginnt(bytes, [0xFF, 0xD8, 0xFF]) : type === 'image/png' ? beginnt(bytes, [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) : WEBP(bytes);
   if (!magisch) return FORMAT();
+  // O4-Fix N3: API-Grenzen je Bild (10 MB base64, 8000 px je Kante) vor Zähler und Aufruf. Maße nur, wenn der Dateikopf sie hergibt (sonst entscheidet die API).
+  if (bytes.length > ZBON_BILD_MAX_BYTES) return ZU_GROSS();
+  const masse = zbonBildMasse(bytes, type);
+  if (masse && (masse.breite > ZBON_BILD_PIXEL_MAX || masse.hoehe > ZBON_BILD_PIXEL_MAX)) return ZU_GROSS();
   return { ok: true, art: 'bild', type, bytes, sha256, token: zbonEingabeTokens('bild') };
 }
 
@@ -636,8 +693,9 @@ export function zbonAntwortText(data) {
 }
 
 // Eigene Kostenschätzung (Rückfall, wenn deps.estimateCostCents aus worker.js fehlt; auch vom Eval benutzt): Haiku 5.5, 0,10 / 0,50 $ je MTok, ab 100.000 Prompt-Token das Fünffache.
-// Kostenobergrenze je Lesung (O4-W A-M2): Eingabe höchstens ZBON_EINGABE_TOKEN_MAX = 20.000 Token (geschätzt, vor dem Aufruf) = 0,2 Cent plus Ausgabe höchstens 2.048 Token (0,1 Cent);
-// bei 5 Lesungen je Tag und 31 Tagen also unter 0,5 EUR je Konto und Monat, nie im 5-fachen Preisbereich (über 100.000 Token).
+// Kostenobergrenze je Lesung (O4-W A-M2, O4-Fix N4): Eingabe höchstens ZBON_EINGABE_TOKEN_MAX = 32.000 Token (geschätzt, vor dem Aufruf) = 0,32 Cent plus Ausgabe höchstens 2.048 Token
+// (0,1 Cent); ein Foto liegt bei rund 7.000 Token (0,07 Cent). Bei 5 Lesungen je Tag und 31 Tagen höchstens etwa 0,65 EUR je Konto und Monat (nur bei lauter 5-Seiten-PDFs),
+// nie im 5-fachen Preisbereich (über 100.000 Token).
 export function zbonKostenCent(usage) {
   const i = usage.input_tokens || 0; const cw = usage.cache_creation_input_tokens || 0; const cr = usage.cache_read_input_tokens || 0; const o = usage.output_tokens || 0;
   const lang = i + cw + cr > 100000;
@@ -802,5 +860,8 @@ function logge(deps, data, ergebnis) {
     const stop = istObjekt(data) && /^[a-z_]{1,20}$/.test(String(data.stop_reason)) ? data.stop_reason : '?';
     const zeile = `[chat-usage:kasse-zbon] model=${ZBON_MODELL} prompt_version=${ZBON_PROMPT_VERSION} stop=${stop} in=${Number(u.input_tokens) || 0} out=${Number(u.output_tokens) || 0} costCents=${kosten} codes=${codes.join(',') || '-'}`;
     (typeof deps.log === 'function' ? deps.log : console.log)(zeile);
+    // O4-Fix N4: echte Eingabe über der geschätzten Obergrenze: Warnzeile (die Schätzung ist zu niedrig), ohne Kundendaten
+    const ein = (Number(u.input_tokens) || 0) + (Number(u.cache_creation_input_tokens) || 0) + (Number(u.cache_read_input_tokens) || 0);
+    if (ein > ZBON_EINGABE_TOKEN_MAX) (typeof deps.log === 'function' ? deps.log : console.warn)(`[kasse-zbon] Warnung: Eingabe ${ein} Token über der Obergrenze ${ZBON_EINGABE_TOKEN_MAX} (Schätzung prüfen)`);
   } catch { /* Logfehler dürfen die Antwort nie ändern */ }
 }

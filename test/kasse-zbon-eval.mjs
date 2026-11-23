@@ -9,9 +9,19 @@
 //       ANTHROPIC_API_KEY=... node test/kasse-zbon-eval.mjs --echt
 //   Vergleich "Denken aus" gegen "adaptiv, effort low" (Entscheidung laut 2.14, die Messwerte kommen ins Modulkopf und ins Stand-Dokument):
 //       ANTHROPIC_API_KEY=... node test/kasse-zbon-eval.mjs --echt --denken=low
-//   Schema-Rückfall (falls die API die Typ-Arrays/enum mit null ablehnt, HTTP 400): zweite Schreibweise mit anyOf, ohne Codeänderung:
-//       ANTHROPIC_API_KEY=... node test/kasse-zbon-eval.mjs --echt --schema=anyof      (Standard: --schema=standard)
+//   Schema: es gibt nur noch die Schreibweise 'anyof' (Typ-Arrays mit enum lehnt die API ab, Eval 22.11.); --schema=anyof bleibt als Option, ist aber der Standard.
 //   Optionen: --fall=3 (nur ein Fall), --fixtures=/Pfad (anderer Fixture-Ordner), --leise (nur Zusammenfassung)
+//
+//   --wie-app (O4-Fix M4): Fotos (JPEG, PNG, WebP) gehen NICHT roh an die API, sondern wie in der App verkleinert: dieselbe Funktion zielGroesse und dieselbe
+//   JPEG-Qualität aus ../Kontolux/regel/kasse-zbon-ui.js (längste Kante 2.576 px, höchstens 4.784 visuelle Token, JPEG 0,9, weiß hinterlegt, EXIF-Drehung
+//   angewandt, EXIF weg). Statt Canvas rechnet sharp (libvips); die Pixel weichen vom Browser leicht ab, Größe und Qualität sind gleich. PDF und Text gehen
+//   unverändert, wie in der App. Ohne --echt (Trockenlauf) wird trotzdem verkleinert und je Foto Original, Zielgröße, visuelle Token und Bytes ausgegeben:
+//   kostenlos, ohne Schlüssel. sharp ist keine Abhängigkeit des Workers: falls es fehlt, einmal `npm install --no-save sharp` im Ordner KontoluxWorker.
+//       node test/kasse-zbon-eval.mjs --wie-app --fixtures=/Pfad/zu/echten-bons                    (Trockenlauf: nur Verkleinern und Größen)
+//       ANTHROPIC_API_KEY=... node test/kasse-zbon-eval.mjs --echt --wie-app --fixtures=/Pfad/zu/echten-bons
+//       ANTHROPIC_API_KEY=... node test/kasse-zbon-eval.mjs --echt --wie-app --kante=1568 --fixtures=...   (Vergleich mit der alten Grenze 1.568 px, ohne Token-Grenze)
+//   --ablage=/Pfad: legt die verkleinerten Bilder dort ab (die Doku rät, die tatsächlich gesendeten Bilder anzusehen).
+//   Echte Fotos stehen NIE im Repo (Namen, Betriebsdaten): eigener Ordner außerhalb, je Bild eine Datei *.erwartet.json im Format der Fixtures.
 //
 // Gemessen wird dieselbe Kette wie im Endpunkt: pruefeZbonDatei, zbonKiAnfrage, zbonAntwortText, pruefeZbonVorschlag. Je Fall werden die Felder der Erwartung
 // (*.erwartet.json im App-Paar) mit dem Vorschlag verglichen. Abnahme (2.14): saubere Dateien >= 98 % der Felder genau, gestörte Fotos >= 90 %, Fälle 7, 8, 9, 14,
@@ -19,6 +29,7 @@
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve, dirname, join } from 'node:path';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { pruefeZbonDatei, zbonKiAnfrage, zbonAntwortText, pruefeZbonVorschlag, zbonKostenCent, ZBON_MODELL, ZBON_PROMPT_VERSION, ZBON_SCHEMA_VARIANTE, ZBON_SCHEMA_VARIANTEN } from '../regel/kasse-zbon-ki.js';
 
 const hier = dirname(fileURLToPath(import.meta.url));
@@ -31,6 +42,31 @@ if (arg('schema') && !ZBON_SCHEMA_VARIANTEN.includes(arg('schema'))) { console.e
 const nurFall = arg('fall') ? Number(arg('fall')) : null;
 const ordner = resolve(arg('fixtures') || process.env.ZBON_FIXTURES || join(hier, '../../Kontolux/scripts/fixtures/kasse-zbon'));
 const apiKey = process.env.ANTHROPIC_API_KEY || '';
+const wieApp = process.argv.includes('--wie-app');
+const kante = arg('kante') ? Number(arg('kante')) : null;
+const ablage = arg('ablage') ? resolve(arg('ablage')) : null;
+if (kante !== null && !(Number.isInteger(kante) && kante >= 200 && kante <= 8000)) { console.error(`--kante muss eine ganze Zahl zwischen 200 und 8000 sein (zum Beispiel 1568)`); process.exit(2); }
+if ((kante !== null || ablage) && !wieApp) { console.error('--kante und --ablage gelten nur zusammen mit --wie-app'); process.exit(2); }
+
+// --wie-app: dieselbe Größenregel wie die App (Import aus dem App-Paar), sharp statt Canvas
+let appBild = null;
+if (wieApp) {
+  const appModul = join(hier, '../../Kontolux/regel/kasse-zbon-ui.js');
+  if (!existsSync(appModul)) { console.error(`App-Modul nicht gefunden: ${appModul} (App-Paar daneben unter ../Kontolux)`); process.exit(2); }
+  const ZUI = await import(appModul);
+  let sharp;
+  try { sharp = (await import('sharp')).default; } catch { console.error('Für --wie-app fehlt sharp: einmal `npm install --no-save sharp` im Ordner KontoluxWorker.'); process.exit(2); }
+  const grenzen = kante ? { kante, token: Number.MAX_SAFE_INTEGER } : { kante: ZUI.BILD_KANTE_MAX, token: ZUI.BILD_TOKEN_MAX };
+  appBild = { ZUI, grenzen, verkleinere: async (bytes) => {
+    const gedreht = sharp(bytes, { failOn: 'error' }).rotate(); // EXIF-Ausrichtung wie imageOrientation: 'from-image'
+    const { data: roh, info } = await gedreht.raw().toBuffer({ resolveWithObject: true });
+    const z = ZUI.zielGroesse(info.width, info.height, grenzen);
+    const jpeg = await sharp(roh, { raw: { width: info.width, height: info.height, channels: info.channels } })
+      .flatten({ background: '#ffffff' }).resize(z.breite, z.hoehe, { fit: 'fill' }).jpeg({ quality: Math.round(ZUI.JPEG_QUALITAET * 100) }).toBuffer();
+    return { bytes: jpeg, original: [info.width, info.height], ziel: [z.breite, z.hoehe], token: ZUI.visuelleToken(z.breite, z.hoehe) };
+  } };
+  if (ablage) mkdirSync(ablage, { recursive: true });
+}
 
 if (echt && !apiKey) { console.error('Für --echt fehlt die Umgebungsvariable ANTHROPIC_API_KEY (der Schlüssel steht nie im Repo).'); process.exit(2); }
 if (!existsSync(ordner)) { console.error(`Fixture-Ordner nicht gefunden: ${ordner} (Erzeugung: node scripts/erzeuge-zbon-fixtures.mjs im App-Paar)`); process.exit(2); }
@@ -53,8 +89,17 @@ for (const f of dateien) {
   const x = JSON.parse(readFileSync(join(ordner, f), 'utf8'));
   if (nurFall && x.fall !== nurFall) continue;
   const r = { fall: x.fall, name: x.datei, gruppe: x.gruppe, treffer: 0, felder: 0, probleme: [], falschOhneMarkierung: 0, kostenCent: 0 };
-  const bytes = readFileSync(join(ordner, x.datei));
-  const datei = await pruefeZbonDatei({ name: x.datei, type: x.typ, base64: bytes.toString('base64') });
+  let bytes = readFileSync(join(ordner, x.datei));
+  let typ = x.typ;
+  if (appBild && /^image\/(jpeg|png|webp)$/.test(typ)) { // wie die App: verkleinern, JPEG
+    try {
+      const v = await appBild.verkleinere(bytes);
+      r.bild = `${v.original.join('×')} -> ${v.ziel.join('×')} px, ${v.token} visuelle Token, ${(bytes.length / 1024).toFixed(0)} -> ${(v.bytes.length / 1024).toFixed(0)} KB`;
+      bytes = v.bytes; typ = 'image/jpeg';
+      if (ablage) writeFileSync(join(ablage, `${x.datei.replace(/\.[^.]+$/, '')}.wie-app.jpg`), bytes);
+    } catch (e) { r.probleme.push(`Verkleinern wie die App fehlgeschlagen: ${String(e.message).slice(0, 120)}`); r.felder = 1; faelle.push(r); continue; }
+  }
+  const datei = await pruefeZbonDatei({ name: x.datei, type: typ, base64: bytes.toString('base64') });
   if (x.erwartet.fehlercode) { // der Worker weist vor dem Modell ab
     r.felder = 1; if (!datei.ok && datei.code === x.erwartet.fehlercode) r.treffer = 1; else r.probleme.push(`Fehlercode ${datei.ok ? 'keiner' : datei.code} statt ${x.erwartet.fehlercode}`);
     faelle.push(r); continue;
@@ -100,9 +145,10 @@ for (const f of dateien) {
 
 // ---- Ausgabe ----
 const prozent = (t, n) => (n ? `${((t / n) * 100).toFixed(1)} %` : '-');
-console.log(`Eval Z-Bon lesen | Modell ${ZBON_MODELL} | Prompt ${ZBON_PROMPT_VERSION} | Denken ${denken === 'low' ? 'adaptiv effort low' : 'aus'} | Schema ${schema} | ${echt ? 'ECHTER API-Lauf' : 'Trockenlauf (Soll-Ausgabe der Fixtures, keine API)'}`);
+const bildText = !appBild ? 'Fotos roh (ohne App-Verkleinerung)' : kante ? `Fotos wie die App, aber Kante ${kante} px ohne Token-Grenze (Vergleich)` : `Fotos wie die App (${appBild.grenzen.kante} px, ${appBild.grenzen.token} Token, JPEG ${appBild.ZUI.JPEG_QUALITAET})`;
+console.log(`Eval Z-Bon lesen | Modell ${ZBON_MODELL} | Prompt ${ZBON_PROMPT_VERSION} | Denken ${denken === 'low' ? 'adaptiv effort low' : 'aus'} | Schema ${schema} | ${bildText} | ${echt ? 'ECHTER API-Lauf' : 'Trockenlauf (Soll-Ausgabe der Fixtures, keine API)'}`);
 if (!leise) {
-  for (const r of faelle) console.log(`  Fall ${String(r.fall).padStart(2)} ${r.name.padEnd(36)} [${r.gruppe}] ${r.treffer}/${r.felder} ${prozent(r.treffer, r.felder)}${echt ? `  ${r.kostenCent.toFixed(3)} ct` : ''}${r.probleme.length ? '\n      ' + r.probleme.join('\n      ') : ''}`);
+  for (const r of faelle) console.log(`  Fall ${String(r.fall).padStart(2)} ${r.name.padEnd(36)} [${r.gruppe}] ${r.treffer}/${r.felder} ${prozent(r.treffer, r.felder)}${echt ? `  ${r.kostenCent.toFixed(3)} ct` : ''}${r.bild ? `\n      Bild: ${r.bild}` : ''}${r.probleme.length ? '\n      ' + r.probleme.join('\n      ') : ''}`);
 }
 const gruppe = (g) => { const l = faelle.filter((r) => r.gruppe === g); return { t: l.reduce((a, r) => a + r.treffer, 0), n: l.reduce((a, r) => a + r.felder, 0), faelle: l.length }; };
 const sauber = gruppe('sauber'); const gestoert = gruppe('gestoert'); const sonder = gruppe('sonder'); const kein = gruppe('kein_vorschlag');

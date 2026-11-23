@@ -8,6 +8,7 @@ import { PDFDocument, PDFName } from 'pdf-lib';
 import {
   regelKasseZbonLesen, regelKasseZbon, pruefeZbonVorschlag, pruefeZbonDatei, zbonKiAnfrage, zbonSystemPrompt, reserviereKasseZbon, ZBON_SCHEMA,
   ZBON_SCHEMA_VARIANTE, ZBON_UNION_MAX, ZBON_PROMPT_VERSION, ZBON_MODELL, ZBON_TEXT_MAX_BYTES, ZBON_EINGABE_TOKEN_MAX, zbonEingabeTokens, ZBON_TAGESLIMIT, KASSE_ZBON_PFAD, limitPfad, zNummerNormiert,
+  zbonBildMasse, ZBON_BILD_TOKEN, ZBON_PDF_SEITE_TOKEN, ZBON_BILD_KANTE_MAX, ZBON_BILD_VISUELL_TOKEN_MAX, ZBON_BILD_MAX_BYTES, ZBON_BILD_PIXEL_MAX, ZBON_PDF_SEITEN_MAX, ZBON_FEST_TOKEN,
 } from '../regel/kasse-zbon-ki.js';
 import { kassenSteuerJeSatz } from '../steuerkern/kasse.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
@@ -663,7 +664,7 @@ test('A-M1: Gutscheine werden nie als Einzweck/vorab versteuert vorbefüllt (Ste
   const k = pr({ gutschein_einloesung_cent: -5 }); assert.equal(k.vorschlag.vorab_versteuert_cent, null); assert.equal(stufe(k, 'K2_ZAHLARTEN_GESAMT'), 'hinweis');
 });
 
-test('A-M2: Eingabe-Token gedeckelt (Text höchstens 32 KB, PDF-Textebene und Seiten geschätzt, Obergrenze 20.000): ZBON_ZU_GROSS vor Zähler und Aufruf', async () => {
+test('A-M2: Eingabe-Token gedeckelt (Text höchstens 32 KB, PDF-Textebene und Seiten geschätzt, Obergrenze 32.000 seit O4-Fix N4): ZBON_ZU_GROSS vor Zähler und Aufruf', async () => {
   assert.equal(ZBON_TEXT_MAX_BYTES, 32 * 1024);
   const u = umgebung();
   const d = (type, base64) => ({ datei: { name: 'x', type, base64 } });
@@ -685,7 +686,7 @@ test('A-M2: Eingabe-Token gedeckelt (Text höchstens 32 KB, PDF-Textebene und Se
   };
   const u2 = umgebung();
   await abgelehnt(u2, d('application/pdf', await pdfMitText(1, 40 * 1024)), 400, 'ZBON_ZU_GROSS');
-  await abgelehnt(u2, d('application/pdf', await pdfMitText(5, 6000)), 400, 'ZBON_ZU_GROSS'); // 5 x 2.500 + 15.000 Token Textebene > 20.000
+  await abgelehnt(u2, d('application/pdf', await pdfMitText(5, 6000)), 400, 'ZBON_ZU_GROSS'); // 2.000 + 5 x 5.000 + 15.000 Token Textebene > 32.000
   assert.equal((await u.rufe(d('application/pdf', await pdfMitText(2, 3000)))).status, 200); // normaler Tagesbericht: weit darunter
   assert.equal((await u.rufe(d('application/pdf', await pdfB64(5)))).status, 200);
   // direkt: die Datei trägt ihre Schätzung
@@ -809,7 +810,7 @@ test('Delta C-M1: Text in Form-XObjects zählt zur Token-Schätzung (dasselbe XO
     return Buffer.from(await doc.save()).toString('base64');
   };
   const d = (base64) => ({ datei: { name: 'x', type: 'application/pdf', base64 } });
-  // 5 Seiten mit 5 KB Text im XObject: 5 x 5.000 / 2 = 12.500 + 12.500 + 2.000 > 20.000 (vor dem Fix: Schätzung unter 15.000, angenommen)
+  // 5 Seiten mit 5 KB Text im XObject: 5 x 5.000 / 2 = 12.500 + 25.000 + 2.000 > 32.000 (vor dem Fix: Schätzung unter 15.000, angenommen)
   const u = umgebung(); await abgelehnt(u, d(await pdfMitForm(5, 5000)), 400, 'ZBON_ZU_GROSS');
   await abgelehnt(u, d(await pdfMitForm(1, 40 * 1024)), 400, 'ZBON_ZU_GROSS');
   // kleines XObject (Logo, Kopfzeile) bleibt erlaubt
@@ -854,11 +855,11 @@ test('G2-Fix N-3: Kachelmuster (/PatternType 1), Type3-Glyphen (/CharProcs, auch
   const typ3 = (n) => (doc) => ({ Font: { T3: { Type: 'Font', Subtype: 'Type3', FontBBox: [0, 0, 1, 1], FontMatrix: [1, 0, 0, 1, 0, 0], CharProcs: { a: doc.context.register(doc.context.stream(text(n))) }, Encoding: { Type: 'Encoding', Differences: [97, 'a'] }, FirstChar: 97, LastChar: 97, Widths: [1] } } });
   const formIndirekt = (n) => (doc) => ({ XObject: { X0: doc.context.register(doc.context.stream(text(n), { Type: 'XObject', Subtype: doc.context.register(PDFName.of('Form')), BBox: [0, 0, 200, 200] })) } });
   for (const [name, mach] of [['Kachelmuster', muster], ['Type3', typ3], ['Form mit indirektem Subtype', formIndirekt]]) {
-    // 5 Seiten, 5.000 Zeichen im Strom: 12.500 + 12.500 + 2.000 > 20.000 (vor dem Fix: nur Seiten, angenommen)
+    // 5 Seiten, 5.000 Zeichen im Strom: 12.500 + 25.000 + 2.000 > 32.000 (vor dem Fix: nur Seiten, angenommen)
     assert.equal((await bau(5, mach(5000))).code, 'ZBON_ZU_GROSS', name);
     const klein = await bau(2, mach(200));
     assert.equal(klein.ok, true, name);
-    assert.ok(klein.token >= 2000 + 2 * 2500 + 200, `${name}: Strom zählt mit (${klein.token})`);
+    assert.ok(klein.token >= 2000 + 2 * 5000 + 200, `${name}: Strom zählt mit (${klein.token})`);
   }
 });
 
@@ -887,4 +888,67 @@ test('M1-Fix G: echte Kette: Isolat per begrenztem Laden gefüllt, danach liefer
   const p = spawnSync(process.execPath, ['--max-old-space-size=256', '--input-type=module', '-e', code], { cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8', timeout: 120000 });
   assert.equal(p.status, 0, (p.stderr || '').slice(0, 500));
   assert.deepEqual(JSON.parse(p.stdout.trim()), { voll: true, status: 503, code: 'ZBON_ISOLAT_VOLL', ok: false });
+});
+
+// ---------------------------------------------------------------------------------------------
+// O4-Fix (Gegenlesung O4, 23.11.2026): M1 Bildgrenzen, N1 Euro statt Cent, N3 API-Grenzen je Bild, N4 Token-Schätzung
+// ---------------------------------------------------------------------------------------------
+const pngKopf = (b, h) => { const x = Buffer.alloc(40); Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).copy(x, 0); x.writeUInt32BE(13, 8); x.write('IHDR', 12, 'latin1'); x.writeUInt32BE(b, 16); x.writeUInt32BE(h, 20); return x; };
+const jpegKopf = (b, h) => Buffer.concat([Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x4A, 0x46, 0xFF, 0xFF, 0xDB, 0x00, 0x03, 0x00, 0xFF, 0xC2, 0x00, 0x11, 0x08, h >> 8, h & 255, b >> 8, b & 255, 3]), Buffer.alloc(40, 0)]);
+const webpKopf = (art, b, h) => { const x = Buffer.alloc(40); x.write('RIFF', 0, 'latin1'); x.write('WEBP', 8, 'latin1'); x.write(art, 12, 'latin1');
+  if (art === 'VP8X') { x.writeUIntLE(b - 1, 24, 3); x.writeUIntLE(h - 1, 27, 3); }
+  if (art === 'VP8 ') { x.writeUInt16LE(b, 26); x.writeUInt16LE(h, 28); }
+  if (art === 'VP8L') { x[20] = 0x2F; const w = b - 1; const hh = h - 1; x[21] = w & 0xFF; x[22] = ((w >> 8) & 0x3F) | ((hh & 3) << 6); x[23] = (hh >> 2) & 0xFF; x[24] = (hh >> 10) & 0x0F; }
+  return x; };
+
+test('O4-Fix M1/N4: Grenzen laut Vision-Doku (High-resolution-Stufe für Haiku 5.5: 2.576 px, 4.784 Token); Schätzung 5.000 je Bild und je PDF-Seite, ein PDF mit 5 leeren Seiten passt unter die Obergrenze', () => {
+  assert.equal(ZBON_BILD_KANTE_MAX, 2576); assert.equal(ZBON_BILD_VISUELL_TOKEN_MAX, 4784);
+  assert.ok(ZBON_BILD_TOKEN >= ZBON_BILD_VISUELL_TOKEN_MAX); assert.ok(ZBON_PDF_SEITE_TOKEN >= ZBON_BILD_VISUELL_TOKEN_MAX);
+  assert.equal(zbonEingabeTokens('bild'), ZBON_FEST_TOKEN + 5000);
+  assert.ok(zbonEingabeTokens('pdf', { seiten: ZBON_PDF_SEITEN_MAX, inhaltBytes: 0 }) <= ZBON_EINGABE_TOKEN_MAX, 'leeres PDF mit höchster Seitenzahl bleibt lesbar');
+  assert.ok(ZBON_EINGABE_TOKEN_MAX < 100000, 'nie im Fünffach-Preisbereich');
+  const q = readFileSync(new URL('../regel/kasse-zbon-ki.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(q, /vor O4 zu prüfen|etwa 1\.600 Token|höchstens 2000 px/, 'veraltete Kommentare (N9) sind weg');
+});
+
+test('O4-Fix N3: Bild über 7,5 MB roh (10 MB base64) oder über 8000 px je Kante: ZBON_ZU_GROSS vor Zähler und Aufruf; Maße aus JPEG/PNG/WebP-Kopf', async () => {
+  assert.equal(ZBON_BILD_MAX_BYTES, 7500000); assert.equal(ZBON_BILD_PIXEL_MAX, 8000);
+  assert.ok(Math.ceil(ZBON_BILD_MAX_BYTES / 3) * 4 <= 10000000, '7,5 MB roh sind höchstens 10 MB base64');
+  assert.deepEqual(zbonBildMasse(pngKopf(3024, 4032), 'image/png'), { breite: 3024, hoehe: 4032 });
+  assert.deepEqual(zbonBildMasse(jpegKopf(4000, 9000), 'image/jpeg'), { breite: 4000, hoehe: 9000 });
+  for (const art of ['VP8X', 'VP8 ', 'VP8L']) assert.deepEqual(zbonBildMasse(webpKopf(art, 1652, 2203), 'image/webp'), { breite: 1652, hoehe: 2203 }, art);
+  assert.equal(zbonBildMasse(Buffer.from(JPEG, 'base64'), 'image/jpeg'), null, 'ohne SOF: unbekannt (die API entscheidet)');
+  assert.equal(zbonBildMasse(Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00]), 'image/jpeg'), null, 'abgeschnitten: wirft nicht');
+  const u = umgebung();
+  const d = (type, buf) => ({ datei: { name: 'x', type, base64: buf.toString('base64') } });
+  await abgelehnt(u, d('image/png', pngKopf(8001, 100)), 400, 'ZBON_ZU_GROSS');
+  await abgelehnt(u, d('image/jpeg', jpegKopf(4000, 9000)), 400, 'ZBON_ZU_GROSS');
+  await abgelehnt(u, d('image/webp', webpKopf('VP8X', 100, 8500)), 400, 'ZBON_ZU_GROSS');
+  await abgelehnt(u, d('image/jpeg', Buffer.concat([jpegKopf(2000, 2000), Buffer.alloc(ZBON_BILD_MAX_BYTES, 1)])), 400, 'ZBON_ZU_GROSS');
+  assert.equal(u.aufrufe.length, 0); assert.equal(u.zaehler(), 0);
+  assert.equal((await u.rufe(d('image/jpeg', jpegKopf(1652, 2203)))).status, 200, 'Größe wie aus der App: angenommen');
+  assert.equal((await u.rufe(d('image/png', pngKopf(8000, 8000)))).status, 200, 'genau 8000 px: erlaubt');
+});
+
+test('O4-Fix N4: echte Eingabe über der Obergrenze: Warnzeile ohne Kundendaten; darunter keine', async () => {
+  const hoch = umgebung({ ki: () => antwortKi(BAECKEREI(), { usage: { input_tokens: ZBON_EINGABE_TOKEN_MAX + 1, output_tokens: 10 } }) });
+  assert.equal((await hoch.rufe()).status, 200);
+  const w = hoch.logs.filter((z) => z.includes('über der Obergrenze'));
+  assert.equal(w.length, 1, hoch.logs.join('|'));
+  assert.doesNotMatch(w[0], /Z98765|12050|bon\.pdf/);
+  const normal = umgebung();
+  assert.equal((await normal.rufe()).status, 200);
+  assert.equal(normal.logs.filter((z) => z.includes('über der Obergrenze')).length, 0);
+});
+
+test('O4-Fix N1: K16 Euro statt Cent: alle Beträge unter 10 EUR oder nur volle Euro mit einem Betrag unter 10 EUR -> Hinweis; normaler Bon und runde große Beträge ohne Hinweis', () => {
+  const euro = pr({ saetze: [{ satz_prozent: 19, brutto_cent: 120, netto_cent: null, steuer_cent: null }, { satz_prozent: 7, brutto_cent: 80, netto_cent: null, steuer_cent: null }], zahlarten: [{ art: 'bar', betrag_cent: 150 }, { art: 'karte', betrag_cent: 50 }], gesamt_brutto_cent: 200 });
+  assert.equal(stufe(euro, 'K1_SAETZE_GESAMT'), 'ok', 'K1 merkt es nicht'); assert.equal(stufe(euro, 'K16_BETRAG_KLEIN'), 'hinweis');
+  assert.ok(euro.hinweise.some((t) => /Euro und Cent/.test(t)));
+  const f = euro.pruefungen.find((p) => p.code === 'K16_BETRAG_KLEIN'); assert.deepEqual(f.felder, ['umsaetze_je_satz', 'zbon_gesamt_cent']);
+  const rund = pr({ saetze: [{ satz_prozent: 19, brutto_cent: 12000, netto_cent: null, steuer_cent: null }, { satz_prozent: 7, brutto_cent: 800, netto_cent: null, steuer_cent: null }], zahlarten: [{ art: 'bar', betrag_cent: 12800 }], gesamt_brutto_cent: 12800 });
+  assert.equal(stufe(rund, 'K16_BETRAG_KLEIN'), 'hinweis', 'volle Euro und ein Betrag unter 10 EUR');
+  assert.equal(stufe(pr({}), 'K16_BETRAG_KLEIN'), undefined, 'Bäckerei: kein Hinweis');
+  const grossRund = pr({ saetze: [{ satz_prozent: 19, brutto_cent: 12000, netto_cent: null, steuer_cent: null }, { satz_prozent: 7, brutto_cent: 8000, netto_cent: null, steuer_cent: null }], zahlarten: [{ art: 'bar', betrag_cent: 20000 }], gesamt_brutto_cent: 20000 });
+  assert.equal(stufe(grossRund, 'K16_BETRAG_KLEIN'), undefined, 'runde Beträge über 10 EUR: kein Hinweis');
 });
