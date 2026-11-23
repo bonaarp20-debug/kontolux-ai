@@ -2744,3 +2744,88 @@ test('K1-Fix N-1: system_wechseln mit unveränderter Art bei voller Liste geht (
   // die Kasse liest sich weiter (Abschluss mit Historie)
   assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200);
 });
+
+// ---------------------------------------------------------------------------------------------
+// W2-W1 Block 1: Belegdatei an der Barausgabe, leistungsmonat, sperrgrund nie still verworfen
+// ---------------------------------------------------------------------------------------------
+test('W2-W1 Ausgabe mit beleg_anhang: storage_url am Beleg, Pfad an der Bewegung, ein Commit; ohne Anhang bleibt storage_url null', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const tag = '2026-11-02';
+  const a = anhang(id, tag, 'quittung.jpg');
+  const vor = u.fs.log.commits;
+  const r = await u.bewRufe(bewegung(id, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG(), beleg_anhang: a }));
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(u.fs.log.commits - vor, 1);
+  assert.equal(u.fs.lies(P(`dokumente/${r.json.beleg_id}`)).storage_url, a.url);
+  assert.equal(u.fs.lies(P(`kassenbewegungen/${r.json.bewegung_id}`)).beleg_anhang_pfad, a.pfad);
+  const o = await u.bewRufe(bewegung(id, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG() }));
+  assert.equal(o.status, 200, JSON.stringify(o.json));
+  assert.equal(u.fs.lies(P(`dokumente/${o.json.beleg_id}`)).storage_url, null, 'ohne Datei bleibt es erlaubt');
+  assert.equal('beleg_anhang_pfad' in u.fs.lies(P(`kassenbewegungen/${o.json.bewegung_id}`)), false);
+  // beleg_anhang: null gilt wie weggelassen
+  const n = await u.bewRufe(bewegung(id, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG(), beleg_anhang: null }));
+  assert.equal(n.status, 200, JSON.stringify(n.json));
+});
+
+test('W2-W1 beleg_anhang: nur eigener Pfad unter kasse/{kasse_id}/{tag}/ mit passender URL (400 ANHANG_FREMD, feld beleg_anhang), Form 400 FORMAT, nur bei ausgabe, fail-closed ohne storageUrlOk', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const tag = '2026-11-02';
+  const gut = anhang(id, tag);
+  const fremdePfad = `users/anderer0Nutzer000001/kasse/${id}/${tag}/x.jpg`;
+  const fremd = [
+    { pfad: gut.pfad, url: 'https://evil.example/o/' + encodeURIComponent(gut.pfad) },
+    { pfad: gut.pfad, url: `${BUCKET}users%2Fanderer0Nutzer000001%2Fkasse%2F${id}%2F${tag}%2Fx.jpg?alt=media` },
+    { pfad: fremdePfad, url: `${BUCKET}${encodeURIComponent(fremdePfad)}?alt=media` },
+    anhang(id, '2026-11-03'),
+    anhang('kandere99', tag),
+    { pfad: gut.pfad, url: `${BUCKET}${encodeURIComponent(anhang(id, tag, 'anders.jpg').pfad)}?alt=media` },
+    { pfad: `users/${UID}/kasse/${id}/${tag}/../x.jpg`, url: gut.url },
+    { pfad: `users/${UID}/kasse/${id}/${tag}/`, url: gut.url },
+  ];
+  const vor = u.fs.log.commits;
+  for (const a of fremd) {
+    const r = await u.bewRufe(bewegung(id, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG(), beleg_anhang: a }));
+    assert.equal(r.status, 400, JSON.stringify(a));
+    assert.equal(r.json.fehler[0].code, 'ANHANG_FREMD');
+    assert.equal(r.json.feld, 'beleg_anhang');
+  }
+  for (const a of ['text', 5, [gut], { pfad: gut.pfad }, { pfad: gut.pfad, url: gut.url, extra: 1 }, { pfad: '', url: '' }]) {
+    const r = await u.bewRufe(bewegung(id, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG(), beleg_anhang: a }));
+    assert.equal(r.status, 400, JSON.stringify(a));
+    assert.equal(r.json.fehler[0].code, 'FORMAT');
+    assert.equal(r.json.feld, 'beleg_anhang');
+  }
+  // nur bei ausgabe
+  for (const art of ['entnahme', 'geldtransit_bank_ein']) {
+    const r = await u.bewRufe(bewegung(id, tag, art, 100, { beleg_anhang: gut, ...(art === 'entnahme' ? { eigenbeleg_pfad: eigen(id, tag) } : {}) }));
+    assert.equal(r.status, 400, art);
+    assert.equal(r.json.feld, 'beleg_anhang');
+  }
+  const ohne = await u.rufeRoh('/kassenbewegung', bewegung(id, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG(), beleg_anhang: gut }), { ...u.deps, storageUrlOk: undefined });
+  assert.equal(ohne.json.fehler[0].code, 'ANHANG_FREMD');
+  assert.equal(u.fs.log.commits, vor, 'bei jedem Fehler nichts geschrieben');
+  assert.deepEqual(u.fs.pfade(P('dokumente/')), []);
+});
+
+test('W2-W1 leistungsmonat erreicht den Kern (Leistungszeitraum = Monat), sperrgrund und die übrigen Formular-Schlüssel ohne Positivlisten-Platz ergeben 400 FORMAT statt stillem Verwerfen', async () => {
+  const u = umgebung();
+  const id = await u.legeKasseAn();
+  const tag = '2026-11-02';
+  const mit = await u.bewRufe(bewegung(id, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG({ leistungsmonat: '2026-10' }) }));
+  assert.equal(mit.status, 200, JSON.stringify(mit.json));
+  const ohne = await u.bewRufe(bewegung(id, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG() }));
+  const l1 = u.fs.lies(P(`dokumente/${mit.json.beleg_id}`)).steuer.leistung;
+  const l0 = u.fs.lies(P(`dokumente/${ohne.json.beleg_id}`)).steuer.leistung;
+  assert.deepEqual([l1.von, l1.bis], ['2026-10-01', '2026-10-31'], JSON.stringify(l1));
+  assert.notDeepEqual(l1, l0, 'ohne leistungsmonat rechnet der Kern anders');
+  const vor = u.fs.log.commits;
+  for (const k of ['sperrgrund', 'herkunft', 'weg', 'zahlungen', 'erfasst_am', 'leistungsart']) {
+    const r = await u.bewRufe(bewegung(id, tag, 'ausgabe', 11900, { beleg: AUSGABE_BELEG({ [k]: k === 'zahlungen' ? [] : 'x' }) }));
+    assert.equal(r.status, 400, k);
+    assert.equal(r.json.fehler[0].code, 'FORMAT');
+    assert.equal(r.json.feld, `beleg.${k}`);
+  }
+  assert.equal(u.fs.log.commits, vor);
+});

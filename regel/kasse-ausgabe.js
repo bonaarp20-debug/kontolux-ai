@@ -11,10 +11,10 @@ import { kodiereFelder, zeitstempel } from './firestore.js';
 import { istObjekt } from './gemeinsam.js';
 import { aufbewahrungBis } from './kasse-form.js';
 
-// ctx: { fs, uid, profil, kernOptionen, festPerioden, heute, zeit, tag, belegId, kasseId, bewegungId, nummer, text }
+// ctx: { fs, uid, profil, kernOptionen, festPerioden, heute, zeit, tag, belegId, kasseId, bewegungId, nummer, text, anhang } (anhang: { pfad, url } oder null, vom Aufrufer geprüft)
 // Ergebnis: { fehler: { code, feld } } (400) | { ablehnen: true, codes, perioden } | { ablehnen: false, beleg, dok, brutto_cent, nach_festschreibung, codes, warnung }
 export async function kassenAusgabeBeleg(eingabe, ctx) {
-  const { fs, uid, profil, kernOptionen, festPerioden = [], heute, zeit, tag, belegId, kasseId, bewegungId, nummer, text } = ctx;
+  const { fs, uid, profil, kernOptionen, festPerioden = [], heute, zeit, tag, belegId, kasseId, bewegungId, nummer, text, anhang = null } = ctx;
   if (!istObjekt(eingabe) || !istObjekt(eingabe.gegenpartei)) return { fehler: { code: 'FORMAT', feld: 'beleg' } };
   const absender = String(eingabe.gegenpartei.name || '').trim();
   if (!absender) return { fehler: { code: 'FORMAT', feld: 'beleg.gegenpartei.name' } };
@@ -59,7 +59,7 @@ export async function kassenAusgabeBeleg(eingabe, ctx) {
     betrag: alt.betrag, betrag_netto: alt.betrag_netto, mwst_satz: alt.mwst_satz, kx_mwst_text: alt.kx_mwst_text,
     ...(kategorie ? { kategorie } : {}), ...(lf.ust_unklar === true ? { ust_unklar: true } : {}),
     buchungstext: String(text || '').slice(0, 300),
-    createdAt: zeitstempel(zeit), schema_version: 2, gesperrt: true, gesperrt_durch: ['kasse'], storage_url: null, aufbewahrung_bis: aufbewahrungBis(tag),
+    createdAt: zeitstempel(zeit), schema_version: 2, gesperrt: true, gesperrt_durch: ['kasse'], storage_url: anhang && typeof anhang.url === 'string' ? anhang.url : null, aufbewahrung_bis: aufbewahrungBis(tag),
     steuer,
   };
   if (e.nach_festschreibung && e.nach_festschreibung.length) dok.nach_festschreibung = { perioden: e.nach_festschreibung, erkannt_am: zeit };

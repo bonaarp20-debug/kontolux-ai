@@ -856,7 +856,7 @@ const naechsteNr = (liste) => liste.reduce((m, d) => Math.max(m, Number(String(d
 
 async function bewegungAnlegen(c) {
   const { fs, uid, body, cors, zeit, heute, profil, config, deps } = c;
-  const f = pruefeBewegung(body, 'anlegen', { uid, heute });
+  const f = pruefeBewegung(body, 'anlegen', { uid, heute, storageUrlOk: deps.storageUrlOk });
   if (f.fehler) return formFehler(f.fehler, cors);
   const w = f.wert;
   const kasseId = w.kasse_id;
@@ -896,7 +896,7 @@ async function bewegungAnlegen(c) {
     if (w.art === 'ausgabe') {
       belegId = `kasse_${bewegungId}_beleg`;
       const festPerioden = await festPeriodenLesen(fs, uid);
-      const a = await deps.kassenAusgabeBeleg(w.beleg, { fs, uid, profil, kernOptionen, festPerioden, heute, zeit, tag, belegId, kasseId, bewegungId, nummer, text: w.text });
+      const a = await deps.kassenAusgabeBeleg(w.beleg, { fs, uid, profil, kernOptionen, festPerioden, heute, zeit, tag, belegId, kasseId, bewegungId, nummer, text: w.text, anhang: w.beleg_anhang });
       if (a.fehler) return { antwort: formFehler(a.fehler, cors) };
       if (a.ablehnen) {
         const gesperrtP = (a.perioden || []).filter((p) => festPerioden.includes(p));
@@ -921,6 +921,7 @@ async function bewegungAnlegen(c) {
     }
     const bewegung = {
       kasse_id: kasseId, geschaeftstag: tag, art: w.art, betrag_cent: w.betrag_cent, text: w.text, beleg_id: belegId, eigenbeleg_pfad: w.eigenbeleg_pfad,
+      ...(w.beleg_anhang ? { beleg_anhang_pfad: w.beleg_anhang.pfad } : {}),
       privatvorgang_id: privatId, gegenkasse_id: w.gegenkasse_id, storno_von: null, storno_art: null, storno_grund: null, kontoauszug_abgleich: null,
       kassennummer: nummer, erfasst_am: ts, anfrage_id: body.anfrage_id, aufbewahrung_bis: aufbewahrungBis(tag),
     };

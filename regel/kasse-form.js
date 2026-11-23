@@ -341,12 +341,13 @@ export function pruefeKasse(body, aktion, { heute }) {
 export const BEWEGUNG_ARTEN_NEU = Object.freeze(['ausgabe', 'entnahme', 'einlage', 'wechselgeld_einlage', 'geldtransit_bank_ein', 'geldtransit_bank_aus',
   'geldtransit_kasse_ein', 'geldtransit_kasse_aus', 'trinkgeld_ma_auszahlung']); // 'storno' entsteht nur über stornieren
 export const PRIVAT_ARTEN = Object.freeze(['entnahme', 'einlage', 'wechselgeld_einlage']); // erzeugen einen Privatvorgang (zahlweg 'kasse') und brauchen den Eigenbeleg
-const BEWEGUNG_ANLEGEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'geschaeftstag', 'art', 'betrag_cent', 'text', 'beleg', 'gegenkasse_id', 'eigenbeleg_pfad']);
+const BEWEGUNG_ANLEGEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'geschaeftstag', 'art', 'betrag_cent', 'text', 'beleg', 'beleg_anhang', 'gegenkasse_id', 'eigenbeleg_pfad']);
 const BEWEGUNG_STORNO_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'bewegung_id', 'grund']);
 export const BEWEGUNG_ID_MUSTER = /^(k[a-z0-9]{8})_(\d{4}-\d{2}-\d{2})_(\d{3})$/;
 // Kern-Eingabe des Beleg-Formulars v2 (Richtung Eingang): nur diese Schlüssel. Nie vom Nutzer: id, weg, herkunft, zahlungen (der Worker setzt Zahlung bar am
-// Geschäftstag), wirkdatum, bezug, korrektur_grund, rueckzahlung, sperrgrund, fa_*, bestaetigt.
-export const AUSGABE_BELEG_SCHLUESSEL = Object.freeze(['beleg_art', 'richtung', 'steuerwahl', 'satz_bp', 'betrag', 'positionen', 'rechnungsdatum', 'leistung', 'leistungsdatum', 'erhalt',
+// Geschäftstag), wirkdatum, bezug, korrektur_grund, rueckzahlung, sperrgrund, fa_*, bestaetigt. Ein solcher Schlüssel ergibt 400 FORMAT mit feld 'beleg.<name>'
+// (nie still verworfen); die App schickt nur diese Liste (kassenAusgabeEingabe). W2-W1: 'leistungsmonat' (Wahl „Monat“ im Formular) ist dabei.
+export const AUSGABE_BELEG_SCHLUESSEL = Object.freeze(['beleg_art', 'richtung', 'steuerwahl', 'satz_bp', 'betrag', 'positionen', 'rechnungsdatum', 'leistung', 'leistungsdatum', 'leistungsmonat', 'erhalt',
   'kategorie', 'gegenpartei', 'rechnungsnr', 'waehrung', 'bewirtung', 'geschenk', 'kein_vorsteuerabzug', 'kein_anlagegut', 'anlagegut', 'ohne_ust_grund', 'ohne_rechnung',
   'bewirtungsnachweis_vollstaendig', 'bestaetigung_12_abs_3', 'empfaenger', 'bezeichnung']);
 
@@ -356,7 +357,8 @@ export function eigenbelegPfadPruefen(pfad, { uid, kasseId, tag }) {
   return true;
 }
 
-export function pruefeBewegung(body, aktion, { uid, heute }) {
+// ctx: { uid, heute, storageUrlOk } (storageUrlOk nur für beleg_anhang; fehlt es, wird jeder Anhang abgelehnt, fail-closed)
+export function pruefeBewegung(body, aktion, { uid, heute, storageUrlOk }) {
   if (aktion === 'stornieren') {
     if (!istObjekt(body) || !nurSchluessel(body, BEWEGUNG_STORNO_SCHLUESSEL)) return fehl(istObjekt(body) ? Object.keys(body).find((x) => !BEWEGUNG_STORNO_SCHLUESSEL.includes(x)) || 'body' : 'body');
     if (typeof body.kasse_id !== 'string' || !KASSE_ID_MUSTER.test(body.kasse_id)) return fehl('kasse_id');
@@ -371,7 +373,7 @@ export function pruefeBewegung(body, aktion, { uid, heute }) {
   if (!BEWEGUNG_ARTEN_NEU.includes(body.art)) return fehl('art');
   if (!centOk(body.betrag_cent) || body.betrag_cent <= 0) return fehl('betrag_cent');
   if (!textOk(body.text, 1, 200)) return fehl('text');
-  const w = { kasse_id: body.kasse_id, geschaeftstag: body.geschaeftstag, art: body.art, betrag_cent: body.betrag_cent, text: body.text.trim(), beleg: null, gegenkasse_id: null, eigenbeleg_pfad: null };
+  const w = { kasse_id: body.kasse_id, geschaeftstag: body.geschaeftstag, art: body.art, betrag_cent: body.betrag_cent, text: body.text.trim(), beleg: null, beleg_anhang: null, gegenkasse_id: null, eigenbeleg_pfad: null };
   if (body.art === 'ausgabe') {
     const b = body.beleg;
     if (!istObjekt(b) || !nurSchluessel(b, AUSGABE_BELEG_SCHLUESSEL)) return fehl(istObjekt(b) ? `beleg.${Object.keys(b).find((x) => !AUSGABE_BELEG_SCHLUESSEL.includes(x))}` : 'beleg');
@@ -380,7 +382,15 @@ export function pruefeBewegung(body, aktion, { uid, heute }) {
     if (!istDatum(b.rechnungsdatum)) return fehl('beleg.rechnungsdatum');
     if (!istObjekt(b.gegenpartei) || !textOk(b.gegenpartei.name, 1, 100)) return fehl('beleg.gegenpartei.name');
     w.beleg = b;
+    // W2-W1: Belegdatei (Foto/PDF der Quittung) der Barausgabe, eine Datei unter users/{uid}/kasse/{kasse_id}/{tag}/ mit eigener URL (wie anhaenge). Optional:
+    // ohne Datei bleibt die Ausgabe erlaubt (die App weist darauf hin). Größe (< 10 MB) und Typ erzwingen die Storage-Regeln beim Hochladen; der Worker kann beides nicht prüfen.
+    if (body.beleg_anhang !== undefined && body.beleg_anhang !== null) {
+      const an = anhaengePruefen([body.beleg_anhang], { uid, kasseId: w.kasse_id, tag: w.geschaeftstag, storageUrlOk });
+      if (an.fehler) return fehl('beleg_anhang', an.fehler.code);
+      w.beleg_anhang = an.wert[0];
+    }
   } else if (body.beleg !== undefined && body.beleg !== null) return fehl('beleg');
+  else if (body.beleg_anhang !== undefined && body.beleg_anhang !== null) return fehl('beleg_anhang');
   if (body.art === 'geldtransit_kasse_ein' || body.art === 'geldtransit_kasse_aus') {
     if (typeof body.gegenkasse_id !== 'string' || !KASSE_ID_MUSTER.test(body.gegenkasse_id) || body.gegenkasse_id === body.kasse_id) return fehl('gegenkasse_id');
     w.gegenkasse_id = body.gegenkasse_id;
