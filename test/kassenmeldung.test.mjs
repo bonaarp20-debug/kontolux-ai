@@ -346,3 +346,62 @@ test('IDs: Meldung und Betriebsstätte deterministisch aus uid und anfrage_id (A
   assert.notEqual(m.slice(1), k.slice(1));
 });
 
+// =============================================================================================
+// Block 2: Betriebsstätten
+// =============================================================================================
+test('Betriebsstätte anlegen/ändern: Felder, Anschrift optional (PLZ 5 Ziffern), Wiederholung idempotent, unveraendert, Audit', async () => {
+  const u = umgebung();
+  const anfrageId = 'bs-anlegen-0001';
+  const r = await u.kasse({ aktion: 'betriebsstaette_anlegen', anfrage_id: anfrageId, bezeichnung: ' Bäckerei Nord ', bemerkung: 'Filiale', geschaeftsleitung: true });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  const id = r.json.betriebsstaette_id;
+  assert.equal(id, await betriebsstaetteIdAus(UID, anfrageId));
+  const d = u.lies(`betriebsstaetten/${id}`);
+  assert.deepEqual([d.bezeichnung, d.anschrift, d.bemerkung, d.geschaeftsleitung, d.aufgegeben_am, d.gemeldet_am], ['Bäckerei Nord', null, 'Filiale', true, null, null]);
+  const w = await u.kasse({ aktion: 'betriebsstaette_anlegen', anfrage_id: anfrageId, bezeichnung: 'Bäckerei Nord' });
+  assert.deepEqual([w.status, w.json.idempotent], [200, true]);
+  for (const [anschrift, feld] of [[{ strasse: 'A 1', plz: '1011', ort: 'B' }, 'anschrift.plz'], [{ strasse: '', plz: '10115', ort: 'B' }, 'anschrift.strasse'], [{ strasse: 'A', plz: '10115', ort: 'B', land: 'DE' }, 'anschrift']]) {
+    const x = await u.kasse({ aktion: 'betriebsstaette_aendern', betriebsstaette_id: id, anschrift });
+    assert.deepEqual([x.status, code(x), x.json.feld], [400, 'FORMAT', feld]);
+  }
+  assert.equal((await u.kasse({ aktion: 'betriebsstaette_aendern', betriebsstaette_id: id, anschrift: { strasse: 'Weg 2', plz: '01067', ort: 'Dresden' } })).status, 200);
+  assert.equal(u.lies(`betriebsstaetten/${id}`).anschrift.plz, '01067');
+  assert.equal((await u.kasse({ aktion: 'betriebsstaette_aendern', betriebsstaette_id: id, bezeichnung: 'Bäckerei Nord' })).json.unveraendert, true);
+  assert.equal((await u.kasse({ aktion: 'betriebsstaette_aendern', betriebsstaette_id: 'bzzzzzzzz', bezeichnung: 'X' })).status, 404);
+  assert.deepEqual(u.audit().map((e) => e.aktion), ['betriebsstaette_anlegen', 'betriebsstaette_aendern']);
+});
+
+test('Betriebsstätte: höchstens eine aktive Geschäftsleitung (409 GESCHAEFTSLEITUNG_VORHANDEN); Zuordnung einer Kasse nur zu einer bekannten, nicht aufgegebenen Stätte', async () => {
+  const u = umgebung();
+  const a = await u.neueStaette({ geschaeftsleitung: true });
+  const r = await u.kasse({ aktion: 'betriebsstaette_anlegen', bezeichnung: 'Zweite', geschaeftsleitung: true });
+  assert.deepEqual([r.status, code(r), r.json.betriebsstaette_id], [409, 'GESCHAEFTSLEITUNG_VORHANDEN', a]);
+  const b = await u.neueStaette({ bezeichnung: 'Markt' });
+  assert.equal(code(await u.kasse({ aktion: 'betriebsstaette_aendern', betriebsstaette_id: b, geschaeftsleitung: true })), 'GESCHAEFTSLEITUNG_VORHANDEN');
+  const k404 = await u.kasse({ ...KASSE, betriebsstaette_id: 'bzzzzzzzz' });
+  assert.deepEqual([k404.status, code(k404), k404.json.feld], [404, 'BETRIEBSSTAETTE_UNBEKANNT', 'betriebsstaette_id']);
+  assert.equal((await u.kasse({ aktion: 'betriebsstaette_aendern', betriebsstaette_id: b, aufgegeben_am: '2026-11-10' })).status, 200);
+  const k422 = await u.kasse({ ...KASSE, betriebsstaette_id: b });
+  assert.deepEqual([k422.status, code(k422)], [422, 'BETRIEBSSTAETTE_AUFGEGEBEN']);
+  assert.deepEqual(u.fs.pfade(P('kassen/')), []);
+});
+
+test('Betriebsstätte aufgeben nur ohne aktive Kassen (409 BETRIEBSSTAETTE_HAT_KASSEN) und nicht vor der letzten Außerbetriebnahme; gemeldete Kasse wechselt die Stätte nicht über aendern (409)', async () => {
+  const u = umgebung();
+  const bs = await u.neueStaette();
+  const bs2 = await u.neueStaette({ bezeichnung: 'Zwei' });
+  const id = await u.neueKasse({ betriebsstaette_id: bs, angeschafft_am: '2026-10-01' });
+  const r = await u.kasse({ aktion: 'betriebsstaette_aendern', betriebsstaette_id: bs, aufgegeben_am: '2026-11-20' });
+  assert.deepEqual([r.status, code(r), r.json.kasse_ids], [409, 'BETRIEBSSTAETTE_HAT_KASSEN', [id]]);
+  // vor der Meldung: Stätte frei änderbar
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, betriebsstaette_id: bs2 })).status, 200);
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, betriebsstaette_id: bs })).status, 200);
+  assert.equal((await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2026-11-19' })).status, 200);
+  const g = await u.kasse({ aktion: 'aendern', kasse_id: id, betriebsstaette_id: bs2 });
+  assert.deepEqual([g.status, code(g)], [409, 'BETRIEBSSTAETTE_GEMELDET']);
+  assert.equal((await u.kasse({ aktion: 'ausser_betrieb', kasse_id: id, ausser_betrieb_am: '2026-11-15', ausser_betrieb_grund: 'defekt' })).status, 200);
+  const frueh = await u.kasse({ aktion: 'betriebsstaette_aendern', betriebsstaette_id: bs, aufgegeben_am: '2026-11-14' });
+  assert.deepEqual([frueh.status, frueh.json.feld, frueh.json.grund, frueh.json.erwartet_ab], [400, 'aufgegeben_am', 'vor_ausser_betrieb', '2026-11-15']);
+  assert.equal((await u.kasse({ aktion: 'betriebsstaette_aendern', betriebsstaette_id: bs, aufgegeben_am: '2026-11-15' })).status, 200);
+});
+
