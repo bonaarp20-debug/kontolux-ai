@@ -1,7 +1,7 @@
 // regel/kasse-daten.js (KASSE-P1b): Pfade, ID-Bereichs-Abfragen und Lesehelfer des Kassenbuchs (nur Lesen, keine Schreibvorgänge).
 // Listen laufen über den Dokument-ID-Bereich ({kasseId}_{JJJJ-MM-TT}), damit keine neuen Firestore-Indexe nötig sind (Baukonzept 2.3 „Keine neuen Indexe“).
 import { vollerName, erzeugeSchicht, dekodiereFelder } from './firestore.js';
-import { sha256Hex, listeAlle } from './gemeinsam.js';
+import { sha256Hex } from './gemeinsam.js';
 import { untersammlungLesen } from './archiv.js';
 import * as Steuerkern from '../steuerkern/index.js';
 
@@ -227,55 +227,82 @@ export function bewegungFuerKern(d) {
 // { pfad, url } in den Fassungen, der Kassenbeleg trägt storage_url (in dokumente). Fassungen und verlauf über untersammlungLesen: eine Anfrage je 300 Dokumente
 // (nicht eine Liste je Kassentag). Unteranfragen sind begrenzt (Free-Plan 50 je Aufruf, der Prüfer-Handler braucht selbst rund 10): reicht das Budget nicht,
 // kommt das Gelesene mit kassen_unvollstaendig: true statt eines Abbruchs (ein Prüfer sieht dann den Hinweis, nie stillschweigend weniger).
+// O7a H2: Jede Sammlung wird einzeln gelesen und ihr Teilergebnis behalten (auch die schon gelesenen Seiten einer Sammlung, die das Budget nicht ganz schafft).
+// aus.kassen steht sofort nach dem Lesen der Kassen fest (der Prüfer-Tab erscheint also auch bei erschöpftem Budget, mit dem Hinweis). Reihenfolge nach Bedarf:
+// erst die kleinen Sammlungen (Kassen, Betriebsstätten, Meldungen, Verlauf), dann Tage, Fassungen, Bewegungen. kassen_unvollstaendig_teile nennt, was fehlt.
 // ---------------------------------------------------------------------------------------------
 export const PRUEFER_UNTERANFRAGEN_MAX = 30;
 const mitId = (d) => ({ id: idVon(d), ...d.daten });
 const pfadTeile = (rohName) => { const i = String(rohName).indexOf('/documents/'); return (i >= 0 ? rohName.slice(i + '/documents/'.length) : '').split('/'); };
 
+// Wie listeAlle, aber die gelesenen Seiten bleiben erhalten: { dokumente, vollstaendig }
+async function listeTeil(fs, pfad, maxSeiten) {
+  const dokumente = [];
+  let token = null;
+  try {
+    for (let i = 0; i < maxSeiten; i += 1) {
+      const r = await fs.list(pfad, token ? { pageSize: 300, pageToken: token } : { pageSize: 300 });
+      dokumente.push(...(Array.isArray(r && r.dokumente) ? r.dokumente : []));
+      token = r && r.naechste ? r.naechste : null;
+      if (!token) return { dokumente, vollstaendig: true };
+    }
+  } catch (e) {
+    console.warn('pruefer_kasse_teil ' + JSON.stringify({ pfad: String(pfad).split('/').pop(), art: String(e?.name || 'Error').slice(0, 40) }));
+  }
+  return { dokumente, vollstaendig: false };
+}
+
 export async function kassenPrueferDaten(uid, token, fetchFn = globalThis.fetch, { max = PRUEFER_UNTERANFRAGEN_MAX } = {}) {
   let benutzt = 0;
   const zaehlend = (...a) => { if (benutzt >= max) throw new Error('Prüfer-Kassendaten: Unteranfragen-Budget erschöpft'); benutzt += 1; return fetchFn(...a); };
-  const leer = { kassen: [], kassentage: [], kassenbewegungen: [], betriebsstaetten: [], kassenmeldungen: [], kassen_unvollstaendig: false };
+  const aus = { kassen: [], kassentage: [], kassenbewegungen: [], betriebsstaetten: [], kassenmeldungen: [], kassen_unvollstaendig: false };
+  const fehlt = [];
   const fs = erzeugeSchicht({ token, fetchFn: zaehlend, budget: max });
-  const aus = { ...leer };
-  try {
-    const kassen = (await listeAlle(fs, `users/${uid}/kassen`, { maxSeiten: 5 })).dokumente;
-    if (!kassen.length) return aus;
-    const [tage, bewegungen, stellen, meldungen] = [
-      (await listeAlle(fs, `users/${uid}/kassentage`, { maxSeiten: 30 })).dokumente,
-      (await listeAlle(fs, `users/${uid}/kassenbewegungen`, { maxSeiten: 30 })).dokumente,
-      (await listeAlle(fs, `users/${uid}/betriebsstaetten`, { maxSeiten: 3 })).dokumente,
-      (await listeAlle(fs, `users/${uid}/kassenmeldungen`, { maxSeiten: 3 })).dokumente,
-    ];
-    const fassungen = (await untersammlungLesen(uid, 'fassungen', token, zaehlend)).filter((d) => pfadTeile(d.name)[2] === 'kassentage');
-    const verlauf = (await untersammlungLesen(uid, 'verlauf', token, zaehlend)).filter((d) => pfadTeile(d.name)[2] === 'kassen');
-    const fassungenJeTag = new Map();
-    for (const d of fassungen) {
-      const t = pfadTeile(d.name);
-      if (!fassungenJeTag.has(t[3])) fassungenJeTag.set(t[3], []);
-      fassungenJeTag.get(t[3]).push({ n: Number(t[5]), ...dekodiereFelder(d.fields) });
+  const untersammlung = async (name, eltern) => {
+    try { return { dokumente: (await untersammlungLesen(uid, name, token, zaehlend)).filter((d) => pfadTeile(d.name)[2] === eltern), vollstaendig: true }; } catch (e) {
+      console.warn('pruefer_kasse_teil ' + JSON.stringify({ pfad: name, art: String(e?.name || 'Error').slice(0, 40) }));
+      return { dokumente: [], vollstaendig: false };
     }
-    const verlaufJeKasse = new Map();
-    for (const d of verlauf) {
-      const t = pfadTeile(d.name);
-      if (!verlaufJeKasse.has(t[3])) verlaufJeKasse.set(t[3], []);
-      verlaufJeKasse.get(t[3]).push({ n: Number(String(t[5]).replace(/^v/, '')), ...dekodiereFelder(d.fields) });
-    }
-    aus.kassen = kassen.map((d) => {
-      const archiv = (verlaufJeKasse.get(idVon(d)) || []).sort((a, b) => a.n - b.n).map(({ n, ...rest }) => rest);
-      const inline = Array.isArray(d.daten.verlauf) ? d.daten.verlauf : [];
-      return { id: idVon(d), ...d.daten, verlauf: [...archiv, ...inline] };
-    });
-    aus.kassentage = tage.map((d) => {
-      const alle = (fassungenJeTag.get(idVon(d)) || []).sort((a, b) => a.n - b.n).map((f) => ({ ...f, aktiv: f.n === d.daten.fassung_aktiv }));
-      return { ...mitId(d), fassungen: alle };
-    });
-    aus.kassenbewegungen = bewegungen.map(mitId);
-    aus.betriebsstaetten = stellen.map(mitId);
-    aus.kassenmeldungen = meldungen.map(mitId);
-  } catch (e) {
+  };
+  const k = await listeTeil(fs, `users/${uid}/kassen`, 5);
+  if (!k.vollstaendig) fehlt.push('kassen');
+  const kassen = k.dokumente;
+  if (!kassen.length) {
+    if (fehlt.length) { aus.kassen_unvollstaendig = true; aus.kassen_unvollstaendig_teile = fehlt; }
+    return aus;
+  }
+  const kasseAus = (d, archiv) => ({ id: idVon(d), ...d.daten, verlauf: [...archiv, ...(Array.isArray(d.daten.verlauf) ? d.daten.verlauf : [])] });
+  aus.kassen = kassen.map((d) => kasseAus(d, [])); // sofort: ohne ausgelagerten Verlauf, der folgt unten
+  const lies = async (name, maxSeiten) => { const r = await listeTeil(fs, `users/${uid}/${name}`, maxSeiten); if (!r.vollstaendig) fehlt.push(name); return r.dokumente; };
+  aus.betriebsstaetten = (await lies('betriebsstaetten', 3)).map(mitId);
+  aus.kassenmeldungen = (await lies('kassenmeldungen', 3)).map(mitId);
+  const verlauf = await untersammlung('verlauf', 'kassen');
+  if (!verlauf.vollstaendig) fehlt.push('verlauf');
+  const verlaufJeKasse = new Map();
+  for (const d of verlauf.dokumente) {
+    const t = pfadTeile(d.name);
+    if (!verlaufJeKasse.has(t[3])) verlaufJeKasse.set(t[3], []);
+    verlaufJeKasse.get(t[3]).push({ n: Number(String(t[5]).replace(/^v/, '')), ...dekodiereFelder(d.fields) });
+  }
+  aus.kassen = kassen.map((d) => kasseAus(d, (verlaufJeKasse.get(idVon(d)) || []).sort((a, b) => a.n - b.n).map(({ n, ...rest }) => rest)));
+  const tage = await lies('kassentage', 30);
+  const fassungen = await untersammlung('fassungen', 'kassentage');
+  if (!fassungen.vollstaendig) fehlt.push('fassungen');
+  const fassungenJeTag = new Map();
+  for (const d of fassungen.dokumente) {
+    const t = pfadTeile(d.name);
+    if (!fassungenJeTag.has(t[3])) fassungenJeTag.set(t[3], []);
+    fassungenJeTag.get(t[3]).push({ n: Number(t[5]), ...dekodiereFelder(d.fields) });
+  }
+  aus.kassentage = tage.map((d) => {
+    const alle = (fassungenJeTag.get(idVon(d)) || []).sort((a, b) => a.n - b.n).map((f) => ({ ...f, aktiv: f.n === d.daten.fassung_aktiv }));
+    return { ...mitId(d), fassungen: alle };
+  });
+  aus.kassenbewegungen = (await lies('kassenbewegungen', 30)).map(mitId);
+  if (fehlt.length) {
     aus.kassen_unvollstaendig = true;
-    console.warn('pruefer_kasse_unvollstaendig ' + JSON.stringify({ art: String(e?.name || 'Error').slice(0, 40) }));
+    aus.kassen_unvollstaendig_teile = fehlt;
+    console.warn('pruefer_kasse_unvollstaendig ' + JSON.stringify({ teile: fehlt }));
   }
   return aus;
 }
