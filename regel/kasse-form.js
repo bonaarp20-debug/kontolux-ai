@@ -5,7 +5,7 @@
 import * as Steuerkern from '../steuerkern/index.js';
 import { istObjekt, istDatum, nurSchluessel } from './gemeinsam.js';
 
-export const KASSE_PFADE = Object.freeze(['/kasse', '/kassentag', '/kassenbewegung']); // '/kassenmeldung' kommt mit P4
+export const KASSE_PFADE = Object.freeze(['/kasse', '/kassentag', '/kassenbewegung', '/kassenmeldung']); // '/kassenmeldung': W2-W2 (P4, Meldehilfe ohne Übermittlung)
 export const FEATURE = 'kasse';
 export const CENT_MAX = 1e11; // 1 Mrd. EUR in Cent, weit über jedem Tagesumsatz, sicher ganzzahlig und summierbar
 export const KASSE_ID_MUSTER = /^k[a-z0-9]{8}$/;
@@ -247,12 +247,84 @@ export const ANFANGSBESTAND_HERKUENFTE = Object.freeze(['einlage_privat', 'bank'
 // W2-W1 (E2, Gegenlesung M-4): Nachweis des Anfangsbestands ist Pflicht bei Übernahme aus einem alten Kassenbuch (letzte Seite/Endbestand) und bei einer Privateinlage
 // über 0 (Eigenbeleg), jeweils nur für eine Kasse mit eigenem Kassenbuch (ohne eigenes Kassenbuch gibt es weder Übernahme noch Privatvorgang). Bei 'bank' freiwillig.
 export const nachweisPflicht = (w) => w.kassenbuch === true && (w.anfangsbestand_herkunft === 'uebernahme' || (w.anfangsbestand_herkunft === 'einlage_privat' && w.anfangsbestand_cent > 0));
-export const ANLEGEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'bezeichnung', 'kuerzel', 'art', 'grundaufzeichnung', 'datenquelle', 'anfangsbestand_cent', 'anfangsbestand_am',
-  'anfangsbestand_herkunft', 'anfangsbestand_nachweis', 'karte_ueber_integration', 'ruhetage_wochentage', 'kassenbuch', 'bestand_in_kasse_id', 'datev_konto']);
-export const AENDERN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'bezeichnung', 'ruhetage_wochentage', 'datev_konto', 'karte_ueber_integration', 'art', 'art_ab',
-  'grundaufzeichnung', 'grundaufzeichnung_ab', 'datenquelle', 'datenquelle_ab', 'bestand_in_kasse_id']);
-export const WECHSELN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'gueltig_ab', 'art', 'grundaufzeichnung', 'datenquelle', 'software', 'software_version', 'hersteller', 'modell', 'seriennummer']);
 export const SYSTEM_TEXTFELDER = Object.freeze(['software', 'software_version', 'hersteller', 'modell', 'seriennummer']);
+// ---------------------------------------------------------------------------------------------
+// W2-W2 (P4, 03-kassenmeldung.md 3.2/3.5, welle2-konzept 3.5): Register-Felder K3 einer Kasse für die Meldehilfe nach § 146a Abs. 4 AO.
+// Felder wie die BMF-Ausfüllanleitung (Stand 02.12.2024): System (Software, Version, Seriennummer, Hersteller, Modell, Anschaffung, Inbetriebnahme, Bemerkung),
+// TSE (Seriennummer 64 Hex in Großbuchstaben, BSI-ID NNNN-JJJJ, Bauform, Aktivierung). null löscht einen Wert. Kontolux übermittelt nichts (E4).
+// ---------------------------------------------------------------------------------------------
+export const MELDEWEGE = Object.freeze(['selbst_elster', 'kassenanbieter', 'steuerberater']);
+export const TSE_BAUFORMEN = Object.freeze(['keine', 'sd', 'usb', 'cloud']);
+export const TSE_SCHLUESSEL = Object.freeze(['seriennummer_hex', 'bsi_id', 'bauform', 'aktiviert_am']);
+export const BETRIEBSSTAETTE_ID_MUSTER = /^b[a-z0-9]{8}$/;
+export const K3_DATUM_MIN = '1990-01-01'; // Anschaffung einer alten Registrierkasse kann vor 2020 liegen
+export const K3_SCHLUESSEL = Object.freeze([...SYSTEM_TEXTFELDER, 'angeschafft_am', 'in_betrieb_am', 'miete_leasing', 'tse', 'meldeweg', 'betriebsstaette_id',
+  'meldepflicht_bestaetigt_am', 'tse_bestaetigt_am', 'meldung_bemerkung']);
+// Diese Felder darf auch eine Kasse außer Betrieb noch ändern (Angaben für die Mitteilung der Außerbetriebnahme vervollständigen), dazu die Bezeichnung
+export const K3_INAKTIV_ERLAUBT = Object.freeze(['bezeichnung', ...K3_SCHLUESSEL]);
+export const ANLEGEN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'bezeichnung', 'kuerzel', 'art', 'grundaufzeichnung', 'datenquelle', 'anfangsbestand_cent', 'anfangsbestand_am',
+  'anfangsbestand_herkunft', 'anfangsbestand_nachweis', 'karte_ueber_integration', 'ruhetage_wochentage', 'kassenbuch', 'bestand_in_kasse_id', 'datev_konto', ...K3_SCHLUESSEL]);
+export const AENDERN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'bezeichnung', 'ruhetage_wochentage', 'datev_konto', 'karte_ueber_integration', 'art', 'art_ab',
+  'grundaufzeichnung', 'grundaufzeichnung_ab', 'datenquelle', 'datenquelle_ab', 'bestand_in_kasse_id', ...K3_SCHLUESSEL]);
+// system_wechseln: die Angaben des NEUEN Systems; nicht genannte System-Angaben (Anschaffung, Inbetriebnahme, Miete, TSE, Bestätigungen) werden geleert (sie gehörten zum alten System)
+export const WECHSELN_K3 = Object.freeze(['angeschafft_am', 'in_betrieb_am', 'miete_leasing', 'tse', 'meldepflicht_bestaetigt_am', 'tse_bestaetigt_am']);
+export const WECHSELN_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'gueltig_ab', 'art', 'grundaufzeichnung', 'datenquelle', ...SYSTEM_TEXTFELDER, ...WECHSELN_K3]);
+
+const k3DatumOk = (d, heute) => istDatum(d) && d >= K3_DATUM_MIN && d <= heute;
+function tsePruefen(t, heute) {
+  if (t === null) return ok(null);
+  if (!istObjekt(t) || !nurSchluessel(t, TSE_SCHLUESSEL)) return fehl('tse');
+  if (!TSE_BAUFORMEN.includes(t.bauform)) return fehl('tse.bauform');
+  const sn = t.seriennummer_hex ?? null;
+  const bsi = t.bsi_id ?? null;
+  if (t.bauform === 'keine') {
+    // „keine Angabe“ nur bei einem bevorrateten System ohne TSE (Ausfüllanleitung 02.12.2024): dann gibt es keine TSE-Daten
+    if (sn !== null) return fehl('tse.seriennummer_hex', 'FORMAT', { grund: 'bauform_keine' });
+    if (bsi !== null) return fehl('tse.bsi_id', 'FORMAT', { grund: 'bauform_keine' });
+  } else {
+    // 64 Zeichen 0-9 und A-F (FAQ Mitteilungspflicht 8: Hex, nicht Base64); Kleinbuchstaben werden abgelehnt (Baukonzept 4 P4), nie still umgewandelt
+    if (typeof sn !== 'string' || !/^[0-9A-F]{64}$/.test(sn)) return fehl('tse.seriennummer_hex');
+    if (typeof bsi !== 'string' || !/^\d{4}-\d{4}$/.test(bsi)) return fehl('tse.bsi_id');
+  }
+  const akt = t.aktiviert_am ?? null;
+  if (akt !== null && !k3DatumOk(akt, heute)) return fehl('tse.aktiviert_am');
+  return ok({ seriennummer_hex: sn, bsi_id: bsi, bauform: t.bauform, aktiviert_am: akt });
+}
+
+// Nur die im Körper genannten K3-Felder (undefined = nicht genannt), geprüft und normalisiert; null löscht
+export function k3Pruefen(body, { heute, erlaubt = K3_SCHLUESSEL }) {
+  const w = {};
+  for (const f of erlaubt) {
+    const v = body[f];
+    if (v === undefined) continue;
+    if (SYSTEM_TEXTFELDER.includes(f)) {
+      if (v !== null && !textOk(v, 1, 60)) return fehl(f);
+      w[f] = v === null ? null : v.trim();
+    } else if (f === 'angeschafft_am' || f === 'in_betrieb_am' || f === 'meldepflicht_bestaetigt_am' || f === 'tse_bestaetigt_am') {
+      if (v !== null && !k3DatumOk(v, heute)) return fehl(f);
+      w[f] = v;
+    } else if (f === 'miete_leasing') {
+      if (v !== null && typeof v !== 'boolean') return fehl(f);
+      w[f] = v;
+    } else if (f === 'tse') {
+      const t = tsePruefen(v, heute);
+      if (t.fehler) return t;
+      w[f] = t.wert;
+    } else if (f === 'meldeweg') {
+      if (v !== null && !MELDEWEGE.includes(v)) return fehl(f);
+      w[f] = v;
+    } else if (f === 'betriebsstaette_id') {
+      if (v !== null && !(typeof v === 'string' && BETRIEBSSTAETTE_ID_MUSTER.test(v))) return fehl(f);
+      w[f] = v;
+    } else if (f === 'meldung_bemerkung') {
+      if (v !== null && !textOk(v, 1, 200)) return fehl(f);
+      w[f] = v === null ? null : v.trim();
+    }
+  }
+  // Inbetriebnahme nicht vor der Anschaffung (nur wenn beide hier genannt sind; gegen die gespeicherten Werte prüft regel/kasse-register.js k3Konsistenz)
+  if (typeof w.angeschafft_am === 'string' && typeof w.in_betrieb_am === 'string' && w.in_betrieb_am < w.angeschafft_am) return fehl('in_betrieb_am', 'FORMAT', { grund: 'vor_anschaffung' });
+  return ok(w);
+}
 
 function wochentagePruefen(x) {
   if (!Array.isArray(x) || x.length > 7 || !x.every((n) => Number.isInteger(n) && n >= 0 && n <= 6) || new Set(x).size !== x.length) return null;
@@ -295,10 +367,13 @@ export function pruefeKasse(body, aktion, { heute }) {
     // DK-FIX (A-N2 c): vierstellig wie die Sachkontenlänge im DATEV-Kopf und wie der Export (datevKontoVierstellig); 5 bis 8 Stellen nahm der Export nie an (Rückfall mit Warnung)
     const konto = body.datev_konto === undefined ? null : body.datev_konto;
     if (konto !== null && !(typeof konto === 'string' && /^\d{4}$/.test(konto))) return fehl('datev_konto');
+    // W2-W2: Register-Angaben (K3) gleich beim Anlegen, damit Assistent und SumUp-TSE-Frage (tse_bestaetigt_am, Pflichtpunkt 28) in EINEM Commit landen
+    const k3 = k3Pruefen(body, { heute });
+    if (k3.fehler) return k3;
     return ok({
       bezeichnung: body.bezeichnung.trim(), kuerzel: body.kuerzel, art: body.art, grundaufzeichnung: body.grundaufzeichnung, datenquelle: body.datenquelle === undefined ? 'manuell' : body.datenquelle,
       anfangsbestand_cent: body.anfangsbestand_cent, anfangsbestand_am: body.anfangsbestand_am, anfangsbestand_herkunft: body.anfangsbestand_herkunft, anfangsbestand_nachweis: nachweis,
-      karte_ueber_integration: karte, ruhetage_wochentage: ruhe, kassenbuch: body.kassenbuch !== false, bestand_in_kasse_id: bestandIn, datev_konto: konto,
+      karte_ueber_integration: karte, ruhetage_wochentage: ruhe, kassenbuch: body.kassenbuch !== false, bestand_in_kasse_id: bestandIn, datev_konto: konto, k3: k3.wert,
     });
   }
   if (aktion === 'aendern') {
@@ -324,6 +399,10 @@ export function pruefeKasse(body, aktion, { heute }) {
       w.felder[f] = body[f];
       w.felder[`${f}_ab`] = body[`${f}_ab`];
     }
+    // W2-W2: Register-Angaben (K3)
+    const k3 = k3Pruefen(body, { heute });
+    if (k3.fehler) return k3;
+    Object.assign(w.felder, k3.wert);
     if (!Object.keys(w.felder).length) return fehl('felder');
     return ok(w);
   }
@@ -339,6 +418,10 @@ export function pruefeKasse(body, aktion, { heute }) {
       if (!textOk(body[f], 1, 60)) return fehl(f);
       sys[f] = body[f].trim();
     }
+    // W2-W2: Angaben des neuen Systems; nicht genannte werden geleert (sie gehörten zum alten System, das als Archiv-Eintrag bleibt)
+    const k3 = k3Pruefen(body, { heute, erlaubt: WECHSELN_K3 });
+    if (k3.fehler) return k3;
+    for (const f of WECHSELN_K3) sys[f] = k3.wert[f] === undefined ? null : k3.wert[f];
     return ok({ kasse_id: body.kasse_id, gueltig_ab: body.gueltig_ab, art: body.art, grundaufzeichnung: body.grundaufzeichnung, datenquelle: body.datenquelle, system: sys });
   }
   return fehl('aktion', 'AKTION_UNBEKANNT');

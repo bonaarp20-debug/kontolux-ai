@@ -18,7 +18,9 @@ export const AUDIT_AKTIONEN = ['steuerprofil_anlegen', 'steuerprofil_eintrag', '
   'oss_abgabe',
   // KASSE-P1b (Baukonzept 2.12 M13): Kassenbuch, details nur mit Zählern und IDs, keine Beträge
   'kasse_anlegen', 'kasse_aendern', 'kasse_system_wechseln', 'kassentag_abschluss', 'kassentag_storno', 'kassentag_ruhetag', 'kassentag_ruhetage', 'kassentag_ruhetag_aufgehoben',
-  'kassentag_aehnlich_trotzdem', 'kassenbewegung', 'kassenbewegung_storno', 'kassenmeldung'];
+  'kassentag_aehnlich_trotzdem', 'kassenbewegung', 'kassenbewegung_storno', 'kassenmeldung',
+  // W2-W2 (welle2-konzept 3.5): Außerbetriebnahme und Rücknahme, Betriebsstätten (details nur mit IDs und Gründen, keine Beträge)
+  'kasse_ausser_betrieb', 'kasse_ausser_betrieb_aufgehoben', 'betriebsstaette_anlegen', 'betriebsstaette_aendern'];
 
 export function kopfPfad(uid) {
   return `users/${uid}/audit_v2/_kopf`;

@@ -17,13 +17,21 @@ export const P = {
   beleg: (uid, id) => `users/${uid}/dokumente/${id}`,
   privat: (uid, id) => `users/${uid}/privatvorgaenge/${id}`,
   festschreibungen: (uid) => `users/${uid}/festschreibung`,
+  betriebsstaette: (uid, id) => `users/${uid}/betriebsstaetten/${id}`, // W2-W2
+  meldung: (uid, id) => `users/${uid}/kassenmeldungen/${id}`, // W2-W2, unveränderlich
 };
 
-// Kasse-ID aus UID und anfrage_id (Idempotenz ohne eigenen Zustand: dieselbe anfrage_id ergibt dieselbe Kasse): 'k' + 8 Zeichen [a-z0-9]
-export async function kasseIdAus(uid, anfrageId) {
-  const hex = await sha256Hex(`kasse|${uid}|${anfrageId}`);
-  return 'k' + BigInt('0x' + hex.slice(0, 16)).toString(36).padStart(8, '0').slice(0, 8);
+// IDs aus UID und anfrage_id (Idempotenz ohne eigenen Zustand: dieselbe anfrage_id ergibt dieselbe ID): Präfix + 8 Zeichen [a-z0-9].
+// Die App rechnet dieselbe Formel (crypto.subtle), z. B. um eine Datei vorab unter der späteren ID hochzuladen (W2-W1 Nachweis, W2-W2 ELSTER-Protokoll).
+async function idAusHash(praefix, art, uid, anfrageId) {
+  const hex = await sha256Hex(`${art}|${uid}|${anfrageId}`);
+  return praefix + BigInt('0x' + hex.slice(0, 16)).toString(36).padStart(8, '0').slice(0, 8);
 }
+// Kasse: 'k' + sha256('kasse|uid|anfrage_id') (unverändert seit P1b)
+export const kasseIdAus = (uid, anfrageId) => idAusHash('k', 'kasse', uid, anfrageId);
+// W2-W2: Betriebsstätte 'b' + sha256('betriebsstaette|uid|anfrage_id'), Kassenmeldung 'm' + sha256('kassenmeldung|uid|anfrage_id')
+export const betriebsstaetteIdAus = (uid, anfrageId) => idAusHash('b', 'betriebsstaette', uid, anfrageId);
+export const meldungIdAus = (uid, anfrageId) => idAusHash('m', 'kassenmeldung', uid, anfrageId);
 
 // Geschäftstag zu Kassennummer 'K-<KUERZEL>-<JJJJ>-<NNNN>' (Jahr des Geschäftstags, 4 Stellen, ab 10000 mehr)
 export const kassennummer = (kuerzel, jahr, n) => `K-${kuerzel}-${jahr}-${String(n).padStart(4, '0')}`;

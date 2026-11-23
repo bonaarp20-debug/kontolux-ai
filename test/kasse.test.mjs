@@ -94,8 +94,8 @@ const rid = (u, kasseId, tag) => u.fs.lies(P(`kassentage/${kasseId}_${tag}`))?.a
 // ---------------------------------------------------------------------------------------------
 // Router-Listen, Feature, Zugang
 // ---------------------------------------------------------------------------------------------
-test('Pfade: /kasse, /kassentag und /kassenbewegung; Feature-Namen kasse und kasse_ki, Standard aus (fehlender Name = aus), kasse hängt am Kern', () => {
-  assert.deepEqual([...KASSE_PFADE], ['/kasse', '/kassentag', '/kassenbewegung']);
+test('Pfade: /kasse, /kassentag, /kassenbewegung und /kassenmeldung (W2-W2); Feature-Namen kasse und kasse_ki, Standard aus (fehlender Name = aus), kasse hängt am Kern', () => {
+  assert.deepEqual([...KASSE_PFADE], ['/kasse', '/kassentag', '/kassenbewegung', '/kassenmeldung']);
   assert.deepEqual([...FEATURES_KASSE], ['kasse', 'kasse_ki']);
   for (const name of FEATURES_KASSE) {
     assert.equal(featureAktiv(null, name), false, `${name}: ohne Konfiguration aus`);
@@ -154,7 +154,8 @@ test('unbekannte aktion 400 AKTION_UNBEKANNT; fremde Schlüssel 400 FORMAT mit f
   const u = umgebung();
   const id = await u.legeKasseAn();
   assert.equal((await u.tagRufe({ aktion: 'loeschen' })).json.fehler[0].code, 'AKTION_UNBEKANNT');
-  assert.equal((await u.rufeRoh('/kasse', { aktion: 'ausser_betrieb' })).json.fehler[0].code, 'AKTION_UNBEKANNT');
+  assert.equal((await u.rufeRoh('/kasse', { aktion: 'loeschen' })).json.fehler[0].code, 'AKTION_UNBEKANNT');
+  assert.equal((await u.rufeRoh('/kassenmeldung', { aktion: 'uebermitteln' })).json.fehler[0].code, 'AKTION_UNBEKANNT'); // W2-W2: Kontolux übermittelt nie (E4)
   const faelle = [
     ['/kassentag', abschluss(id, '2026-11-02', { geheim: 1 }), 'geheim'],
     ['/kassentag', abschluss(id, '2026-11-02', { z_nummer: 'Z-1' }), 'z_nummer'], // altes Feld, ersetzt durch z_nummern
@@ -745,7 +746,7 @@ test('/kasse aendern: Verlauf höchstens 200, ältere Einträge landen create-on
   assert.deepEqual(u.fs.lies(P(`kassen/${id}/verlauf/v000001`)).felder, ['f0']);
 });
 
-test('/kasse system_wechseln: altes System bleibt als Eintrag mit kassenbuch false, Kasse behält Bestand und bekommt neue Daten, Meldestatus aenderung_offen; Wiederholung idempotent', async () => {
+test('/kasse system_wechseln: altes System bleibt als Eintrag mit kassenbuch false, Kasse behält Bestand und bekommt neue Daten; Meldestatus mit Frist (W2-W2: nie gemeldet = offen, Archiv-Eintrag mit Frist der Außerbetriebnahme); Wiederholung idempotent', async () => {
   const u = umgebung();
   const id = await u.legeKasseAn();
   assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200);
@@ -756,9 +757,14 @@ test('/kasse system_wechseln: altes System bleibt als Eintrag mit kassenbuch fal
   const r = await u.kasse(body);
   assert.equal(r.status, 200, JSON.stringify(r.json));
   const neu = u.fs.lies(P(`kassen/${id}`));
-  assert.deepEqual([neu.art, neu.art_ab, neu.software, neu.hersteller, neu.meldestatus, neu.kassenbuch, neu.anfangsbestand_cent], ['pc_kasse', '2026-11-03', 'NeuKasse', 'Firma X', 'aenderung_offen', true, 10000]);
+  assert.deepEqual([neu.art, neu.art_ab, neu.software, neu.hersteller, neu.meldestatus, neu.kassenbuch, neu.anfangsbestand_cent], ['pc_kasse', '2026-11-03', 'NeuKasse', 'Firma X', 'offen', true, 10000]);
+  // W2-W2: ohne Anschaffungsdatum des neuen Systems zählt der Wechseltag (03.11.2026 + 1 Monat = Do 03.12.2026) mit Hinweis anschaffung_fehlt
+  assert.equal(neu.frist_bis, '2026-12-03');
+  assert.deepEqual(neu.melde_ereignisse, [{ anlass: 'anschaffung', am: '2026-11-03', frist_bis: '2026-12-03', hinweis: 'anschaffung_fehlt' }]);
   const alt = u.fs.lies(P(`kassen/${r.json.archiv_kasse_id}`));
   assert.deepEqual([alt.kassenbuch, alt.art, alt.aktiv, alt.nachfolger_kasse_id, alt.ausser_betrieb_am, alt.ausser_betrieb_grund, alt.bestand_in_kasse_id], [false, 'registrierkasse', false, id, '2026-11-02', 'systemwechsel', id]);
+  // Archiv-Eintrag: Außerbetriebnahme am 02.11.2026 -> Frist Mi 02.12.2026 (Gegenlesung M-3: frist_bis auch bei system_wechseln)
+  assert.deepEqual([alt.meldestatus, alt.frist_bis], ['offen', '2026-12-02']);
   const wieder = await u.kasse(body);
   assert.equal(wieder.json.idempotent, true);
   assert.equal(u.fs.pfade(P('kassen/')).length, 2);

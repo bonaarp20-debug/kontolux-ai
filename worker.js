@@ -458,6 +458,8 @@ const UID_LIMITS = {
   '/kassentag':                      { limit: 60, windowMs: 10 * 60 * 1000 },
   '/kasse':                          { limit: 30, windowMs: 10 * 60 * 1000 },
   '/kassenbewegung':                 { limit: 120, windowMs: 10 * 60 * 1000 },
+  // W2-W2: „Ich habe gemeldet“ (Kassenmeldung) selten
+  '/kassenmeldung':                  { limit: 10, windowMs: 10 * 60 * 1000 },
   // KASSE-P5-KI (2.14): „Z-Bon lesen“ kostet je Aufruf einen Haiku-Aufruf: 10 je 10 Minuten, dazu das Tageslimit 5 im Modul (atomar, fail-closed)
   [KASSE_ZBON_PFAD]:                 { limit: 10, windowMs: 10 * 60 * 1000 },
   // G6-M5: kostenpflichtige Datei-Aufrufe je Nutzer (zusätzlich zum atomaren Monatskontingent)

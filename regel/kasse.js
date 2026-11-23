@@ -1,5 +1,6 @@
 // regel/kasse.js (KASSE-P1b, Baukonzept docs/kassenbuch/08-baukonzept.md 2.3 und 2.11 C, Vertrag docs/kassenbuch/stand-kasse.md): Worker-Endpunkte des Kassenbuchs.
-//   POST /kasse        { aktion: 'anlegen' | 'aendern' | 'system_wechseln', ... }
+//   POST /kasse        { aktion: 'anlegen' | 'aendern' | 'system_wechseln' | 'ausser_betrieb' | 'ausser_betrieb_aufheben' | 'betriebsstaette_anlegen' | 'betriebsstaette_aendern', ... }
+//   POST /kassenmeldung { aktion: 'gemeldet', ... }   (W2-W2, Register und Meldehilfe in regel/kasse-register.js; keine Übermittlung)
 //   POST /kassentag    { aktion: 'abschliessen' | 'ruhetag' | 'ruhetage' | 'stornieren' | 'ruhetag_aufheben', ... }
 //   POST /kassenbewegung { aktion: 'anlegen' | 'stornieren', ... }
 // Alle Kassen-Sammlungen schreibt nur der Worker (Firestore-Regeln: Eigentümer liest). UID nur aus dem Token (setzt der Router).
@@ -19,7 +20,11 @@ import { auditKette, kopfPfad, eintragPfad } from './audit.js';
 import { profilBereit, wirkPerioden, nachFestschreibungAntwort, festPruefungMarkieren } from './schreibweg-v2.js';
 import { legacyHash } from './drift.js';
 import { heuteBerlin } from './oss-meldung.js';
-import { KASSE_PFADE, FEATURE, aufbewahrungBis, anhaengePruefen, nachweisPflicht, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, pruefeBewegung, kernFassung, stammKombination, PRIVAT_ARTEN } from './kasse-form.js';
+import { KASSE_PFADE, FEATURE, aufbewahrungBis, anhaengePruefen, nachweisPflicht, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, pruefeBewegung, kernFassung, stammKombination, PRIVAT_ARTEN, K3_INAKTIV_ERLAUBT } from './kasse-form.js';
+import {
+  ausserBetrieb, ausserBetriebAufheben, betriebsstaette, kassenmeldungGemeldet, meldeAbleitung, meldeNachAenderung, k3Konsistenz, betriebsstaetteZuordnung, meldepflichtigArt,
+  ohneSystemDaten, ereignis, ereignisSetzen, anschaffungsEreignis, K3_LEER,
+} from './kasse-register.js';
 import {
   P, kasseIdAus, kassennummer, zeigerAus, zeigerPasst, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern, ohneStornoPaare, KasseLesefehler,
   STAMM_FELDER, STAMMDATEN_VERLAUF_MAX, stammVerlaufAus, stammAm, stammVerlaufMit, stammVerlaufStart, stammVerlaufVerdichten,
@@ -34,7 +39,14 @@ const BODY_MAX_ZEICHEN = 30000;
 const VERLAUF_MAX = 200;
 const SPERRENDE = ['festgeschrieben', 'sperre_laeuft'];
 const STAMMDATEN_AB = Object.freeze(['art_ab', 'grundaufzeichnung_ab', 'datenquelle_ab']); // Stammdaten mit Gültigkeitsbeginn (Wechsel nur ab dem nächsten freien Tag)
-const AKTIONEN = { '/kasse': ['anlegen', 'aendern', 'system_wechseln'], '/kassentag': ['abschliessen', 'ruhetag', 'ruhetage', 'stornieren', 'ruhetag_aufheben'], '/kassenbewegung': ['anlegen', 'stornieren'] };
+// W2-W2 (Gegenlesung M-3): Jeder Pfad aus KASSE_PFADE braucht hier einen Eintrag, sonst wäre die Prüfung unten kein 400 (der Verteiler prüft fehlende Einträge
+// zusätzlich fail-closed, Test „AKTIONEN deckt KASSE_PFADE“)
+export const AKTIONEN = Object.freeze({
+  '/kasse': ['anlegen', 'aendern', 'system_wechseln', 'ausser_betrieb', 'ausser_betrieb_aufheben', 'betriebsstaette_anlegen', 'betriebsstaette_aendern'],
+  '/kassentag': ['abschliessen', 'ruhetag', 'ruhetage', 'stornieren', 'ruhetag_aufheben'],
+  '/kassenbewegung': ['anlegen', 'stornieren'],
+  '/kassenmeldung': ['gemeldet'],
+});
 // Abbildung der Kern-Prüfcodes auf HTTP (stand-kasse.md 5): FORMAT-Gruppe 400 mit code FORMAT (kern_code nennt den Kern-Code), die übrigen gleichnamig
 const FORMAT_GRUPPE = ['FORMAT', 'STEUERFALL_UNZULAESSIG', 'KU_MEHRERE_SAETZE', 'DIFFERENZ_OHNE_GRUND', 'ZBON_SUMME_ABWEICHUNG', 'RETROGRAD_DIFFERENZ'];
 const KERN_STATUS = { ANHANG_ODER_BESTAETIGUNG: [422, 'ANHANG_FEHLT'], TAGESSALDO_NEGATIV: [422], BESTAND_NEGATIV: [422], DATENQUELLE_SUMUP: [422], KARTE_UEBER_INTEGRATION: [422],
@@ -100,9 +112,16 @@ export async function regelKasse(pfad, body, env, cors = {}, deps = {}) {
     const fassungen = await agbFassungenLaden(uid, { fs, streng: true });
     if (!fassungen.some((v) => (agbFassungVergleich(v, AGB_MINDESTFASSUNG_KASSE) ?? -1) >= 0)) return fehlerAntwort(403, 'AGB_FEHLT', cors);
     const aktion = body.aktion;
-    if (typeof aktion !== 'string' || !AKTIONEN[pfad].includes(aktion)) return fehlerAntwort(400, 'AKTION_UNBEKANNT', cors);
+    if (typeof aktion !== 'string' || !Array.isArray(AKTIONEN[pfad]) || !AKTIONEN[pfad].includes(aktion)) return fehlerAntwort(400, 'AKTION_UNBEKANNT', cors);
     const c = { fs, uid, body, cors, zeit, heute, profil, config, deps, env };
-    if (pfad === '/kasse') return await kasseAktion(c, aktion);
+    const h = { mitWiederholung, formFehler, verlaufFortschreiben };
+    if (pfad === '/kassenmeldung') return await kassenmeldungGemeldet(c, h);
+    if (pfad === '/kasse') {
+      if (aktion === 'ausser_betrieb') return await ausserBetrieb(c, h);
+      if (aktion === 'ausser_betrieb_aufheben') return await ausserBetriebAufheben(c, h);
+      if (aktion === 'betriebsstaette_anlegen' || aktion === 'betriebsstaette_aendern') return await betriebsstaette(c, h, aktion);
+      return await kasseAktion(c, aktion);
+    }
     if (pfad === '/kassentag') {
       if (aktion === 'abschliessen') return await abschliessen(c);
       if (aktion === 'stornieren') return await stornieren(c);
@@ -116,6 +135,21 @@ export async function regelKasse(pfad, body, env, cors = {}, deps = {}) {
     if (e instanceof KasseLesefehler) { console.warn(`regel_kasse_lesegrenze ${e.code}`); return fehlerAntwort(503, e.code, cors); }
     return regelFehler(e, 'kasse', cors);
   }
+}
+
+// Stammdaten-Verlauf der Kasse fortschreiben: ein Eintrag je Änderung, höchstens VERLAUF_MAX im Dokument, ältere wandern in kassen/{id}/verlauf/{n} (create-only).
+// Rückgabe { verlauf, writes, extra } (extra: verlauf_ausgelagert). Gemeinsam für aendern, system_wechseln und die W2-W2-Aktionen (kasse-register.js).
+function verlaufFortschreiben(uid, id, alt, felder, ts) {
+  const verlauf = Array.isArray(alt.verlauf) ? [...alt.verlauf] : [];
+  const writes = [];
+  let ausgelagert = Number.isSafeInteger(alt.verlauf_ausgelagert) ? alt.verlauf_ausgelagert : 0;
+  verlauf.push({ am: ts, felder: [...new Set(felder)].sort(), von: 'nutzer' });
+  while (verlauf.length > VERLAUF_MAX) {
+    const aus = verlauf.shift();
+    ausgelagert += 1;
+    writes.push(schreibe.anlegen(P.kassenVerlauf(uid, id, ausgelagert), aus));
+  }
+  return { verlauf, writes, extra: ausgelagert ? { verlauf_ausgelagert: ausgelagert } : {} };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -144,18 +178,24 @@ async function kasseAktion(c, aktion) {
       if (vorhanden.length >= KASSEN_MAX) return { antwort: fehlerAntwort(422, 'KASSEN_MAX', cors) };
       if (vorhanden.some((d) => d.daten.kuerzel === w.kuerzel && d.daten.kassenbuch !== false)) return { antwort: fehlerAntwort(409, 'KUERZEL_VERGEBEN', cors, { feld: 'kuerzel' }) };
       if (w.bestand_in_kasse_id && !vorhanden.some((d) => idVon(d) === w.bestand_in_kasse_id)) return { antwort: fehlerAntwort(404, 'KASSE_UNBEKANNT', cors, { feld: 'bestand_in_kasse_id' }) };
+      // W2-W2: Betriebsstätte muss existieren und darf nicht aufgegeben sein
+      const bsFehler = await betriebsstaetteZuordnung(fs, uid, null, w.k3.betriebsstaette_id ?? null, cors);
+      if (bsFehler) return { antwort: bsFehler };
       const ts = zeitstempel(zeit);
       const kasse = {
-        bezeichnung: w.bezeichnung, kuerzel: w.kuerzel, betriebsstaette_id: null,
+        ...K3_LEER, ...w.k3,
+        bezeichnung: w.bezeichnung, kuerzel: w.kuerzel, betriebsstaette_id: w.k3.betriebsstaette_id ?? null,
         art: w.art, art_ab: w.anfangsbestand_am, grundaufzeichnung: w.grundaufzeichnung, grundaufzeichnung_ab: w.anfangsbestand_am,
         datenquelle: w.datenquelle, datenquelle_ab: w.anfangsbestand_am,
         anfangsbestand_cent: w.anfangsbestand_cent, anfangsbestand_am: w.anfangsbestand_am, anfangsbestand_herkunft: w.anfangsbestand_herkunft,
         anfangsbestand_nachweis: nachweis,
         kassenbuch: w.kassenbuch, bestand_in_kasse_id: w.bestand_in_kasse_id, karte_ueber_integration: w.karte_ueber_integration, karte_ueber_integration_ab: w.anfangsbestand_am,
-        ruhetage_wochentage: w.ruhetage_wochentage, datev_konto: w.datev_konto, meldepflicht_bestaetigt_am: null,
+        ruhetage_wochentage: w.ruhetage_wochentage, datev_konto: w.datev_konto, meldepflicht_bestaetigt_am: w.k3.meldepflicht_bestaetigt_am ?? null,
         aktiv: true, erstellt_am: ts, geaendert_am: ts, verlauf: [],
         letzter_abschluss: null, // Zeiger auf den letzten Abschluss (hyg H2), kein Stammdatum
       };
+      // W2-W2: Meldestatus und Frist abgeleitet (meldepflichtig = elektronisches System; Frist aus der Anschaffung, ohne Datum keine Frist und Hinweis)
+      Object.assign(kasse, meldeAbleitung(kasse));
       // Stammdaten-Historie (J1-Fix M-1/N-e): Startwerte ab dem Anfangsbestand
       kasse.stammdaten_verlauf = Object.fromEntries(STAMM_FELDER.map((x) => [x, [{ wert: kasse[x], ab: w.anfangsbestand_am, am: ts }]]));
       const writes = [schreibe.anlegen(P.kasse(uid, id), kasse)];
@@ -181,7 +221,14 @@ async function kasseAktion(c, aktion) {
     const kasseDok = docs.get(P.kasse(uid, id));
     if (!kasseDok || !istObjekt(kasseDok.daten)) return { antwort: fehlerAntwort(404, 'KASSE_UNBEKANNT', cors) };
     const alt = kasseDok.daten;
-    if (alt.aktiv === false) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors) };
+    // W2-W2: eine Kasse außer Betrieb (auch der Archiv-Eintrag eines Systemwechsels) darf nur noch ihre Register-Angaben vervollständigen (Mitteilung der
+    // Außerbetriebnahme), keine Stammdaten des Kassenbuchs
+    if (alt.aktiv === false && (aktion !== 'aendern' || Object.keys(w.felder).some((k) => !K3_INAKTIV_ERLAUBT.includes(k)))) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors) };
+    // W2-W2: Kassenart über die Meldepflicht-Grenze (offene Ladenkasse <-> elektronisches System) nur, solange nichts gemeldet und nichts erfasst ist (Korrektur);
+    // sonst über system_wechseln, damit das alte System als Register-Eintrag für die Mitteilung bleibt
+    if (aktion === 'aendern' && w.felder.art !== undefined && meldepflichtigArt(w.felder.art) !== meldepflichtigArt(alt.art) && !ohneSystemDaten(alt)) {
+      return { antwort: formFehler({ code: 'FORMAT', feld: 'art', grund: 'nur_ueber_system_wechseln' }, cors) };
+    }
     const neu = {};
     let archiv = null;
     const geaendert = [];
@@ -244,23 +291,45 @@ async function kasseAktion(c, aktion) {
         if (neu.bestand_in_kasse_id === id || !liste.dokumente.some((d) => idVon(d) === neu.bestand_in_kasse_id)) return { antwort: fehlerAntwort(404, 'KASSE_UNBEKANNT', cors, { feld: 'bestand_in_kasse_id' }) };
       }
       if (!geaendert.length) return { antwort: antwort({ ok: true, kasse_id: id, unveraendert: true }, 200, cors) };
+      // W2-W2: Betriebsstätte (existiert, nicht aufgegeben; eine gemeldete Kasse wechselt sie nicht über aendern)
+      if (geaendert.includes('betriebsstaette_id')) {
+        const bsFehler = await betriebsstaetteZuordnung(fs, uid, alt, neu.betriebsstaette_id, cors);
+        if (bsFehler) return { antwort: bsFehler };
+      }
+      // Eine neue Kassenart braucht eine neue Bestätigung der Meldepflicht-Regel (07 3(c) Nr. 3), außer sie kommt mit
+      if (geaendert.includes('art') && w.felder.meldepflicht_bestaetigt_am === undefined && alt.meldepflicht_bestaetigt_am) { neu.meldepflicht_bestaetigt_am = null; geaendert.push('meldepflicht_bestaetigt_am'); }
+      const k3f = k3Konsistenz({ ...alt, ...neu });
+      if (k3f) return { antwort: formFehler(k3f, cors) };
+      // Meldestatus und Frist (Anschaffung neu/geändert -> Frist aus dem Kern; sonst nach einer Meldung „Aktualisierung empfohlen“)
+      const m = meldeNachAenderung(alt, { ...alt, ...neu }, heute);
+      Object.assign(neu, m);
+      if (m.meldestatus !== alt.meldestatus || m.frist_bis !== (alt.frist_bis ?? null)) geaendert.push('meldestatus');
     } else {
       // system_wechseln: das alte System bleibt als eigener Eintrag (kassenbuch false) erhalten, die Kasse behält Bestand und Kassenbuch (2.11 C.11)
       const alterTag = Steuerkern.addiereTage(w.gueltig_ab, -1);
-      archiv = {
-        id: archivId,
-        daten: {
-          bezeichnung: alt.bezeichnung, kuerzel: alt.kuerzel, betriebsstaette_id: alt.betriebsstaette_id ?? null,
-          art: alt.art, grundaufzeichnung: alt.grundaufzeichnung, datenquelle: alt.datenquelle, anfangsbestand_cent: 0, anfangsbestand_am: alt.anfangsbestand_am,
-          anfangsbestand_herkunft: alt.anfangsbestand_herkunft, kassenbuch: false, bestand_in_kasse_id: id, karte_ueber_integration: alt.karte_ueber_integration ?? 'keine',
-          ruhetage_wochentage: [], datev_konto: null, meldepflicht_bestaetigt_am: null,
-          ...Object.fromEntries(['software', 'software_version', 'hersteller', 'modell', 'seriennummer'].map((x) => [x, alt[x] ?? null])),
-          aktiv: false, ausser_betrieb_am: alterTag, ausser_betrieb_grund: 'systemwechsel', nachfolger_kasse_id: id,
-          erstellt_am: zeitstempel(zeit), geaendert_am: zeitstempel(zeit), verlauf: [], letzter_abschluss: null,
-        },
+      // W2-W2: der Eintrag trägt ALLE Register-Angaben des alten Systems und dessen Meldestand; die Außerbetriebnahme (letzter Tag des alten Systems) ist ein
+      // Meldeereignis mit Frist (Gegenlesung M-3: frist_bis auch bei system_wechseln). Eine offene Anschaffung des alten Systems bleibt mit ihrer früheren Frist.
+      const altM = meldeAbleitung(alt);
+      const archivRoh = {
+        ...K3_LEER, ...Object.fromEntries(Object.keys(K3_LEER).map((x) => [x, alt[x] ?? null])),
+        bezeichnung: alt.bezeichnung, kuerzel: alt.kuerzel, betriebsstaette_id: alt.betriebsstaette_id ?? null,
+        art: alt.art, grundaufzeichnung: alt.grundaufzeichnung, datenquelle: alt.datenquelle, anfangsbestand_cent: 0, anfangsbestand_am: alt.anfangsbestand_am,
+        anfangsbestand_herkunft: alt.anfangsbestand_herkunft, kassenbuch: false, bestand_in_kasse_id: id, karte_ueber_integration: alt.karte_ueber_integration ?? 'keine',
+        ruhetage_wochentage: [], datev_konto: null, meldepflicht_bestaetigt_am: alt.meldepflicht_bestaetigt_am ?? null,
+        aktiv: false, ausser_betrieb_am: alterTag, ausser_betrieb_grund: 'systemwechsel', ausser_betrieb_text: null, ausser_betrieb_gemeldet_in: null, nachfolger_kasse_id: id,
+        erstellt_am: zeitstempel(zeit), geaendert_am: zeitstempel(zeit), verlauf: [], letzter_abschluss: null,
+        melde_ereignisse: altM.meldepflichtig ? ereignisSetzen(altM.melde_ereignisse, ereignis('ausserbetriebnahme', alterTag)) : [],
+        aenderung_empfohlen_seit: alt.aenderung_empfohlen_seit ?? null,
       };
+      archiv = { id: archivId, daten: { ...archivRoh, ...meldeAbleitung(archivRoh) } };
       for (const [k, v] of Object.entries(w.system)) { neu[k] = v; geaendert.push(k); }
-      neu.meldestatus = 'aenderung_offen';
+      // Das neue System: Anschaffung (bei Taxameter ggf. TSE-Ausrüstung) als Ereignis; ohne Anschaffungsdatum zählt der Wechseltag mit Hinweis anschaffung_fehlt
+      // (die App fragt das Datum nach; die Außerbetriebnahme des alten Systems in derselben Betriebsstätte hat die frühere Frist). Kein Altstand übernommen.
+      const k3f = k3Konsistenz({ ...alt, ...neu, ausser_betrieb_am: null });
+      if (k3f) return { antwort: formFehler(k3f, cors) };
+      const a = anschaffungsEreignis({ ...alt, ...neu });
+      const nRoh = { ...alt, ...neu, melde_ereignisse: [ereignis(a.anlass, a.am || w.gueltig_ab, { anschaffungFehlt: !a.am })], aenderung_empfohlen_seit: null };
+      Object.assign(neu, meldeAbleitung(nRoh));
       geaendert.push('meldestatus');
     }
     if (geaendert.some((x) => STAMM_FELDER.includes(x))) {
@@ -271,17 +340,10 @@ async function kasseAktion(c, aktion) {
       neu.stammdaten_verlauf = sv;
     }
     const ts = zeitstempel(zeit);
-    const verlauf = Array.isArray(alt.verlauf) ? [...alt.verlauf] : [];
-    const writes = [];
-    let ausgelagert = Number.isSafeInteger(alt.verlauf_ausgelagert) ? alt.verlauf_ausgelagert : 0;
-    verlauf.push({ am: ts, felder: [...new Set(geaendert)].sort(), von: 'nutzer' });
-    while (verlauf.length > VERLAUF_MAX) {
-      // ältere Einträge wandern in kassen/{id}/verlauf/{n} (create-only), das Stammdatenfeld bleibt bei höchstens 200
-      const aus = verlauf.shift();
-      ausgelagert += 1;
-      writes.push(schreibe.anlegen(P.kassenVerlauf(uid, id, ausgelagert), aus));
-    }
-    const neuKasse = { ...alt, ...neu, geaendert_am: ts, verlauf, ...(ausgelagert ? { verlauf_ausgelagert: ausgelagert } : {}) };
+    // ältere Verlaufseinträge wandern in kassen/{id}/verlauf/{n} (create-only), das Stammdatenfeld bleibt bei höchstens 200
+    const v = verlaufFortschreiben(uid, id, alt, geaendert, ts);
+    const writes = [...v.writes];
+    const neuKasse = { ...alt, ...neu, geaendert_am: ts, verlauf: v.verlauf, ...v.extra };
     writes.push(schreibe.setzen(P.kasse(uid, id), neuKasse, { updateTime: kasseDok.updateTime }));
     if (archiv) writes.push(schreibe.anlegen(P.kasse(uid, archiv.id), archiv.daten));
     const aktionAudit = aktion === 'aendern' ? 'kasse_aendern' : 'kasse_system_wechseln';
@@ -883,6 +945,8 @@ async function bewegungAnlegen(c) {
     const kasseDok = docs.get(P.kasse(uid, kasseId));
     if (!kasseDok || !istObjekt(kasseDok.daten)) return { antwort: fehlerAntwort(404, 'KASSE_UNBEKANNT', cors) };
     if (w.gegenkasse_id && !docs.get(P.kasse(uid, w.gegenkasse_id))) return { antwort: fehlerAntwort(404, 'KASSE_UNBEKANNT', cors, { feld: 'gegenkasse_id' }) };
+    // W2-W2: kein Geldtransit mit einer Kasse außer Betrieb (ihr Bestand ist 0 und bleibt es; Geld dorthin wäre nirgends mehr gezählt)
+    if (w.gegenkasse_id && docs.get(P.kasse(uid, w.gegenkasse_id)).daten?.aktiv === false) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors, { feld: 'gegenkasse_id' }) };
     const bisher = await bewegungenDesTages(fs, uid, kasseId, tag);
     // Wiederholung derselben Anfrage (Netzabbruch): bestätigen, nie ein zweites Mal schreiben
     const gleiche = bisher.find((d) => d.daten.anfrage_id === body.anfrage_id);
