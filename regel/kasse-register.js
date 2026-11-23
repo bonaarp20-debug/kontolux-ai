@@ -529,7 +529,7 @@ const schnappschuss = (d) => {
 };
 
 // /kassenmeldung gemeldet (3.5): „Ich habe gemeldet“. Nutzerangabe mit Datum und optional dem ELSTER-Protokoll (vorher hochgeladen nach
-// users/{uid}/kasse/meldungen/{meldung_id}_{name}; meldung_id = meldungIdAus(uid, anfrage_id), die App rechnet sie vorab). Schreibt einen unveränderlichen
+// users/{uid}/kasse/meldungen/{meldung_id}_{versuch}_{name}, O8 M6; meldung_id = meldungIdAus(uid, anfrage_id), die App rechnet sie vorab). Schreibt einen unveränderlichen
 // Schnappschuss ALLER meldepflichtigen Kassen der Betriebsstätte (Bruttomethode) und setzt bei jeder Kasse die Ereignisse bis einschließlich gemeldet_am als
 // erledigt; Ereignisse nach dem Meldedatum bleiben offen (kassen_offen). Der Status heißt in der App immer „laut deiner Angabe“ (07 3(b)).
 export async function kassenmeldungGemeldet(c, h) {
