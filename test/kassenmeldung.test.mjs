@@ -405,3 +405,154 @@ test('Betriebsstätte aufgeben nur ohne aktive Kassen (409 BETRIEBSSTAETTE_HAT_K
   assert.equal((await u.kasse({ aktion: 'betriebsstaette_aendern', betriebsstaette_id: bs, aufgegeben_am: '2026-11-15' })).status, 200);
 });
 
+// =============================================================================================
+// Block 3: ausser_betrieb, ausser_betrieb_aufheben, system_wechseln mit Frist
+// =============================================================================================
+test('ausser_betrieb: Restbestand > 0 -> 409 RESTBESTAND mit bestand_cent; nach Ausbuchen per Geldtransit und Abschluss mit 0 geht es; Frist der Außerbetriebnahme; danach KASSE_INAKTIV', async () => {
+  const u = umgebung();
+  const id = await u.neueKasse({ anfangsbestand_cent: 5000, angeschafft_am: '2026-10-01' });
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, meldeweg: 'selbst_elster' })).status, 200);
+  assert.equal((await u.ruf('/kassentag', abschluss(id, '2026-11-10', 5000), { am: '2026-11-10' })).status, 200);
+  const rest = await u.kasse({ aktion: 'ausser_betrieb', kasse_id: id, ausser_betrieb_am: '2026-11-12', ausser_betrieb_grund: 'verkauft' });
+  assert.deepEqual([rest.status, code(rest), rest.json.bestand_cent, rest.json.letzter_tag], [409, 'RESTBESTAND', 5000, '2026-11-10']);
+  assert.equal((await u.ruf('/kassenbewegung', { aktion: 'anlegen', kasse_id: id, geschaeftstag: '2026-11-11', art: 'geldtransit_bank_aus', betrag_cent: 5000, text: 'Bank' }, { am: '2026-11-11' })).status, 200);
+  // Bewegung an einem offenen Tag -> erst abschließen
+  const offen = await u.kasse({ aktion: 'ausser_betrieb', kasse_id: id, ausser_betrieb_am: '2026-11-12', ausser_betrieb_grund: 'verkauft' });
+  assert.deepEqual([offen.status, code(offen), offen.json.tage], [409, 'OFFENE_BEWEGUNGEN_VORTAG', ['2026-11-11']]);
+  assert.equal((await u.ruf('/kassentag', abschluss(id, '2026-11-11', 0), { am: '2026-11-11' })).status, 200);
+  const r = await u.kasse({ aktion: 'ausser_betrieb', kasse_id: id, ausser_betrieb_am: '2026-11-12', ausser_betrieb_grund: 'verkauft' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  // offene Anschaffung (Frist 03.11.2026, schon überfällig) bleibt die früheste Frist; die Außerbetriebnahme 12.11. -> Sa 12.12. -> Mo 14.12.2026 steht daneben
+  assert.deepEqual([r.json.meldestatus, r.json.frist_bis, r.json.letzter_abschluss_tag], ['offen', '2026-11-02', '2026-11-11']);
+  const k = u.lies(`kassen/${id}`);
+  assert.deepEqual([k.aktiv, k.ausser_betrieb_am, k.ausser_betrieb_grund], [false, '2026-11-12', 'verkauft']);
+  assert.deepEqual(k.melde_ereignisse.map((e) => [e.anlass, e.frist_bis]), [['anschaffung', '2026-11-02'], ['ausserbetriebnahme', '2026-12-14']]);
+  assert.equal(code(await u.ruf('/kassentag', abschluss(id, '2026-11-13', 0), { am: '2026-11-13' })), 'KASSE_INAKTIV');
+  assert.equal(code(await u.ruf('/kassentag', { aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-13' }, { am: '2026-11-13' })), 'KASSE_INAKTIV');
+  assert.equal(code(await u.ruf('/kassenbewegung', { aktion: 'anlegen', kasse_id: id, geschaeftstag: '2026-11-13', art: 'geldtransit_bank_aus', betrag_cent: 100, text: 'x' }, { am: '2026-11-13' })), 'KASSE_INAKTIV');
+  assert.equal(code(await u.kasse({ aktion: 'aendern', kasse_id: id, ruhetage_wochentage: [0] })), 'KASSE_INAKTIV');
+  // Register-Angaben darf sie noch vervollständigen (für die Mitteilung der Außerbetriebnahme)
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, seriennummer: 'SN-9', angeschafft_am: '2026-10-05' })).status, 200);
+  assert.equal(u.lies(`kassen/${id}`).frist_bis, '2026-11-05');
+  // Anschaffung nach der Außerbetriebnahme ist widersprüchlich
+  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, angeschafft_am: '2026-11-13' })).json.grund, 'nach_ausser_betrieb');
+  assert.deepEqual(u.audit().map((e) => e.aktion).filter((a) => a.startsWith('kasse_')), ['kasse_anlegen', 'kasse_aendern', 'kasse_ausser_betrieb', 'kasse_aendern']);
+});
+
+test('ausser_betrieb: Datum vor dem letzten Abschluss, vor der Anschaffung oder in der Zukunft 400; Bewegung nach dem Datum 409 mit grund; ohne Abschluss und Bestand 0 sofort möglich', async () => {
+  const u = umgebung();
+  const id = await u.neueKasse({ angeschafft_am: '2026-10-20' });
+  assert.equal((await u.ruf('/kassentag', abschluss(id, '2026-11-05', 0), { am: '2026-11-05' })).status, 200);
+  const vor = await u.kasse({ aktion: 'ausser_betrieb', kasse_id: id, ausser_betrieb_am: '2026-11-04', ausser_betrieb_grund: 'defekt' });
+  assert.deepEqual([vor.status, vor.json.grund, vor.json.letzter_tag], [400, 'vor_letztem_abschluss', '2026-11-05']);
+  const zukunft = await u.kasse({ aktion: 'ausser_betrieb', kasse_id: id, ausser_betrieb_am: '2026-11-21', ausser_betrieb_grund: 'defekt' });
+  assert.deepEqual([zukunft.status, zukunft.json.grund], [400, 'zukunft']);
+  const sonstig = await u.kasse({ aktion: 'ausser_betrieb', kasse_id: id, ausser_betrieb_am: '2026-11-06', ausser_betrieb_grund: 'sonstig' });
+  assert.deepEqual([sonstig.status, sonstig.json.feld], [400, 'ausser_betrieb_text']);
+  assert.equal((await u.kasse({ aktion: 'ausser_betrieb', kasse_id: id, ausser_betrieb_am: '2026-11-06', ausser_betrieb_grund: 'gestohlen' })).json.feld, 'ausser_betrieb_grund');
+  assert.equal((await u.ruf('/kassenbewegung', { aktion: 'anlegen', kasse_id: id, geschaeftstag: '2026-11-08', art: 'geldtransit_bank_ein', betrag_cent: 100, text: 'x' }, { am: '2026-11-08' })).status, 200);
+  const nach = await u.kasse({ aktion: 'ausser_betrieb', kasse_id: id, ausser_betrieb_am: '2026-11-06', ausser_betrieb_grund: 'defekt' });
+  assert.deepEqual([nach.status, code(nach), nach.json.tage, nach.json.grund], [409, 'OFFENE_BEWEGUNGEN_VORTAG', ['2026-11-08'], 'nach_ausser_betrieb']);
+  const anschaffung = await u.neueKasse({ kuerzel: 'AN', angeschafft_am: '2026-11-10' });
+  const vorAn = await u.kasse({ aktion: 'ausser_betrieb', kasse_id: anschaffung, ausser_betrieb_am: '2026-11-09', ausser_betrieb_grund: 'defekt' });
+  assert.deepEqual([vorAn.status, vorAn.json.grund], [400, 'vor_anschaffung']);
+  const sofort = await u.kasse({ aktion: 'ausser_betrieb', kasse_id: anschaffung, ausser_betrieb_am: '2026-11-20', ausser_betrieb_grund: 'sonstig', ausser_betrieb_text: 'Fehlkauf, zurückgegeben' });
+  assert.equal(sofort.status, 200, JSON.stringify(sofort.json));
+  assert.equal(u.lies(`kassen/${anschaffung}`).ausser_betrieb_text, 'Fehlkauf, zurückgegeben');
+});
+
+test('ausser_betrieb: aktive Kasse ohne eigenes Kassenbuch zählt ihren Bestand hier -> 409 KASSE_REFERENZIERT; Archiv-Einträge aus system_wechseln zählen nicht; Geldtransit zu einer Kasse außer Betrieb 422', async () => {
+  const u = umgebung();
+  const haupt = await u.neueKasse({ angeschafft_am: '2026-10-01' });
+  const neben = await u.neueKasse({ kuerzel: 'NB', kassenbuch: false, bestand_in_kasse_id: haupt });
+  const r = await u.kasse({ aktion: 'ausser_betrieb', kasse_id: haupt, ausser_betrieb_am: '2026-11-20', ausser_betrieb_grund: 'ersetzt' });
+  assert.deepEqual([r.status, code(r), r.json.kasse_ids], [409, 'KASSE_REFERENZIERT', [neben]]);
+  // die Nebenkasse ohne Kassenbuch selbst: kein Bestand, keine Bewegungen -> sofort
+  assert.equal((await u.kasse({ aktion: 'ausser_betrieb', kasse_id: neben, ausser_betrieb_am: '2026-11-20', ausser_betrieb_grund: 'aufgegeben' })).status, 200);
+  const andere = await u.neueKasse({ kuerzel: 'AND' });
+  assert.equal((await u.ruf('/kassentag', abschluss(haupt, '2026-11-02', 0), { am: '2026-11-02' })).status, 200);
+  const w = await u.kasse({ aktion: 'system_wechseln', kasse_id: haupt, gueltig_ab: '2026-11-03', art: 'pc_kasse', grundaufzeichnung: 'tse_kasse', datenquelle: 'manuell', angeschafft_am: '2026-11-01' });
+  assert.equal(w.status, 200, JSON.stringify(w.json));
+  assert.equal((await u.kasse({ aktion: 'ausser_betrieb', kasse_id: haupt, ausser_betrieb_am: '2026-11-20', ausser_betrieb_grund: 'aufgegeben' })).status, 200, 'Archiv-Eintrag (inaktiv) verweist auf die Kasse, zählt aber nicht');
+  const transit = await u.ruf('/kassenbewegung', { aktion: 'anlegen', kasse_id: andere, geschaeftstag: '2026-11-20', art: 'geldtransit_kasse_aus', betrag_cent: 100, text: 'x', gegenkasse_id: haupt });
+  assert.deepEqual([transit.status, code(transit), transit.json.feld], [422, 'KASSE_INAKTIV', 'gegenkasse_id']);
+});
+
+test('ausser_betrieb_aufheben: Rücknahme bei Irrtum stellt Kasse und Meldestand her (Frist der Außerbetriebnahme fällt weg), Audit mit Grund; Wiederholungen idempotent', async () => {
+  const u = umgebung();
+  const id = await u.neueKasse({ angeschafft_am: '2026-11-05' });
+  const vorher = u.lies(`kassen/${id}`);
+  const ab = await u.kasse({ aktion: 'ausser_betrieb', anfrage_id: 'aus-betrieb-0001', kasse_id: id, ausser_betrieb_am: '2026-11-20', ausser_betrieb_grund: 'defekt' });
+  assert.equal(ab.status, 200);
+  const wieder = await u.kasse({ aktion: 'ausser_betrieb', anfrage_id: 'aus-betrieb-0001', kasse_id: id, ausser_betrieb_am: '2026-11-20', ausser_betrieb_grund: 'defekt' });
+  assert.deepEqual([wieder.status, wieder.json.idempotent], [200, true]);
+  assert.equal(code(await u.kasse({ aktion: 'ausser_betrieb_aufheben', kasse_id: id, grund: 'kurz' })), 'FORMAT');
+  const r = await u.kasse({ aktion: 'ausser_betrieb_aufheben', anfrage_id: 'aufheben-00001', kasse_id: id, grund: 'Falsche Kasse gewählt' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  const k = u.lies(`kassen/${id}`);
+  assert.deepEqual([k.aktiv, k.ausser_betrieb_am, k.ausser_betrieb_grund, k.meldestatus, k.frist_bis], [true, null, null, vorher.meldestatus, vorher.frist_bis]);
+  assert.deepEqual(k.melde_ereignisse, vorher.melde_ereignisse);
+  assert.equal((await u.kasse({ aktion: 'ausser_betrieb_aufheben', anfrage_id: 'aufheben-00001', kasse_id: id, grund: 'Falsche Kasse gewählt' })).json.idempotent, true);
+  assert.equal(code(await u.kasse({ aktion: 'ausser_betrieb_aufheben', kasse_id: id, grund: 'nochmal bitte' })), 'NICHT_AUSSER_BETRIEB');
+  const e = u.audit().find((x) => x.aktion === 'kasse_ausser_betrieb_aufgehoben');
+  assert.deepEqual(e.details, { kasse_id: id, ausser_betrieb_am: '2026-11-20', grund: 'Falsche Kasse gewählt' });
+  assert.equal(k.verlauf.length, 2, 'Verlauf-Einträge bleiben');
+  // danach wieder normal nutzbar
+  assert.equal((await u.ruf('/kassentag', abschluss(id, '2026-11-20', 0))).status, 200);
+});
+
+test('ausser_betrieb_aufheben: nicht nach einer Meldung der Außerbetriebnahme (409 AUSSERBETRIEB_GEMELDET) und nicht für den Archiv-Eintrag eines Systemwechsels (409)', async () => {
+  const u = umgebung();
+  const bs = await u.neueStaette();
+  const id = await u.neueKasse({ betriebsstaette_id: bs, angeschafft_am: '2026-11-01' });
+  assert.equal((await u.kasse({ aktion: 'ausser_betrieb', kasse_id: id, ausser_betrieb_am: '2026-11-10', ausser_betrieb_grund: 'defekt' })).status, 200);
+  const m = await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2026-11-15' });
+  assert.equal(m.status, 200);
+  assert.deepEqual(u.lies(`kassenmeldungen/${m.json.meldung_id}`).anlaesse, ['anschaffung', 'ausserbetriebnahme']);
+  assert.deepEqual([u.lies(`kassen/${id}`).meldestatus, u.lies(`kassen/${id}`).ausser_betrieb_gemeldet_in], ['gemeldet', m.json.meldung_id]);
+  const r = await u.kasse({ aktion: 'ausser_betrieb_aufheben', kasse_id: id, grund: 'doch weiter nutzen' });
+  assert.deepEqual([r.status, code(r), r.json.meldung_id], [409, 'AUSSERBETRIEB_GEMELDET', m.json.meldung_id]);
+  const k2 = await u.neueKasse({ kuerzel: 'K2' });
+  const w = await u.kasse({ aktion: 'system_wechseln', kasse_id: k2, gueltig_ab: '2026-11-01', art: 'pc_kasse', grundaufzeichnung: 'tse_kasse', datenquelle: 'manuell' });
+  const x = await u.kasse({ aktion: 'ausser_betrieb_aufheben', kasse_id: w.json.archiv_kasse_id, grund: 'doch weiter nutzen' });
+  assert.deepEqual([x.status, code(x)], [409, 'AUSSERBETRIEB_SYSTEMWECHSEL']);
+});
+
+test('ausser_betrieb atomar: Konflikt bis zur Grenze -> 409 KONFLIKT, Kasse unverändert aktiv, kein Audit', async () => {
+  const u = umgebung();
+  const id = await u.neueKasse();
+  const vorher = u.lies(`kassen/${id}`);
+  const kopf = u.lies('audit_v2/_kopf');
+  let m = 0;
+  u.fs.haken.vorCommit = async (writes, api) => { if (writes.some((w) => String(w.update && w.update.name).endsWith(`/kassen/${id}`))) { m += 1; api.setze(P(`kassen/${id}`), { ...u.lies(`kassen/${id}`), bezeichnung: `X${m}` }); } };
+  const r = await u.kasse({ aktion: 'ausser_betrieb', kasse_id: id, ausser_betrieb_am: '2026-11-20', ausser_betrieb_grund: 'defekt' });
+  u.fs.haken.vorCommit = null;
+  assert.deepEqual([r.status, code(r), m], [409, 'KONFLIKT', 4]);
+  assert.deepEqual([u.lies(`kassen/${id}`).aktiv, u.lies(`kassen/${id}`).ausser_betrieb_am], [true, vorher.ausser_betrieb_am]);
+  assert.deepEqual(u.lies('audit_v2/_kopf'), kopf);
+});
+
+test('system_wechseln: Archiv-Eintrag trägt alle Register-Angaben des alten Systems; neues System übernimmt keine alte Anschaffung/TSE; mit Anschaffungsdatum Frist aus diesem', async () => {
+  const u = umgebung();
+  const bs = await u.neueStaette();
+  const id = await u.neueKasse({ betriebsstaette_id: bs, angeschafft_am: '2025-03-01', tse: TSE, seriennummer: 'ALT-1', meldeweg: 'kassenanbieter', miete_leasing: true });
+  assert.equal((await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2025-07-20' })).status, 200);
+  const r = await u.kasse({ aktion: 'system_wechseln', kasse_id: id, gueltig_ab: '2026-11-01', art: 'app_kasse', grundaufzeichnung: 'tse_kasse', datenquelle: 'manuell', seriennummer: 'NEU-1', angeschafft_am: '2026-10-28' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  const neu = u.lies(`kassen/${id}`);
+  assert.deepEqual([neu.seriennummer, neu.angeschafft_am, neu.tse, neu.miete_leasing, neu.meldeweg, neu.betriebsstaette_id, neu.meldestatus, neu.frist_bis],
+    ['NEU-1', '2026-10-28', null, null, 'kassenanbieter', bs, 'aenderung_offen', '2026-11-30']); // 28.11. Sa -> Mo 30.11.
+  const alt = u.lies(`kassen/${r.json.archiv_kasse_id}`);
+  assert.deepEqual([alt.seriennummer, alt.angeschafft_am, alt.tse.seriennummer_hex, alt.miete_leasing, alt.betriebsstaette_id, alt.gemeldet_am, alt.meldestatus, alt.frist_bis],
+    ['ALT-1', '2025-03-01', 'A'.repeat(64), true, bs, '2025-07-20', 'aenderung_offen', '2026-11-30']); // Außerbetriebnahme 31.10. -> 30.11.
+  // Bruttomethode: eine Meldung erledigt beide
+  const m = await u.melden({ betriebsstaette_id: bs, gemeldet_am: '2026-11-20' });
+  assert.deepEqual(m.json.kassen_ids.sort(), [id, r.json.archiv_kasse_id].sort());
+  assert.equal(u.lies(`kassen/${r.json.archiv_kasse_id}`).ausser_betrieb_gemeldet_in, m.json.meldung_id);
+});
+
+test('Altfall Außerbetriebnahme vor 01.07.2025: Frist 31.07.2025 mit Hinweis altfall_ausserbetrieb (nur zu melden, wenn die Anschaffung schon gemeldet war, BMF 28.06.2024)', () => {
+  const m = meldeAbleitung({ art: 'registrierkasse', gemeldet_am: '2025-02-01', melde_ereignisse: [{ anlass: 'ausserbetriebnahme', am: '2025-05-10', frist_bis: '2025-07-31', hinweis: 'altfall_ausserbetrieb' }] });
+  assert.deepEqual([m.meldestatus, m.frist_bis], ['aenderung_offen', '2025-07-31']);
+});
+
