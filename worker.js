@@ -23,7 +23,7 @@ import { kassenPrueferDaten, kassenPrueferFortsetzung } from './regel/kasse-date
 import { kassenAusgabeBeleg } from './regel/kasse-ausgabe.js'; // KASSE-P1b-4: Ausgabe aus der Kasse über den Beleg-Schreibweg v2
 import { regelEzbKurs } from './regel/ezb-kurs.js'; // WORKER-C (Release C, BP-29)
 import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // KX-WC2 (Release C, BP-30 DATEV-Teil)
-import { rechnungsnrDuplikat, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c)
+import { rechnungsnrDuplikat, rechnungsnrVarianten, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c); O11 N2 Varianten
 import { datevMischsatzGruppen, datevKorrekturGruppen, KORREKTUR_BELEG_ARTEN } from './regel/datev-mischsatz.js'; // Branch datev-mischsatz: Belege mit mehreren Steuersätzen je Satz buchen
 import { dekodiereFelder as datevDekodiereFelder } from './regel/firestore.js';
 import { DATEV_KASSE_KONTEN, KASSE_UMSATZ_STEUERFAELLE, KASSE_DURCHLAUF_KONTO, KASSE_ERLOES_0_KONTO, KASSE_MEHRZWECK_KONTO, kassenKontoWahl, istKasseTagesbeleg, kasseBelegPlan, kasseBewegungBuchung, kasseBewegungOhneBuchung, kasseGeldtransitGegenbein, kasseTagesPosten, istSumupBarbeleg, sumupKasseWahl } from './regel/datev-kasse.js'; // Kassenbuch P1b-5: DATEV-Kassenzweig
@@ -3187,6 +3187,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
   if (textEingabenUngueltig(body)) return ungueltigeEingabeAntwort(cors);
   let { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz, datum, content, sellerNameHint, e_rechnung_format, duplikatBestaetigt, kategorie, sachkonto, buchungstext, betrag_netto, bezahlt_am: bezahlt_am_client } = body;
   const belegAnfrageId = belegAnfrageIdAus(body); // ZUV-G5 M3
+  if (typeof rechnungsnr === 'string') rechnungsnr = rechnungsnr.trim(); // O11 N2: Rechnungsnummer ohne Leerzeichen am Rand speichern und vergleichen
   // Grenzen gegen überlange Eingaben und unrealistische Beträge (Security-Audit 2026-10-16).
   const MAX_BETRAG = 10000000;
   if (betrag !== undefined && betrag !== null && betrag !== '' && Math.abs(parseFloat(betrag)) > MAX_BETRAG) {
@@ -4943,27 +4944,34 @@ async function belegeSeit(userId, token, seitMs) {
   return Array.isArray(rows) ? rows.filter(r => r.document).map(r => r.document) : [];
 }
 
-// Kassen-P0 0.5(c): Belege mit derselben Rechnungsnummer (Gleichheitsfilter auf ein Feld, kein zusammengesetzter Index nötig), höchstens 20.
-async function belegeMitRechnungsnr(userId, token, rechnungsnr) {
-  const res = await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${encodeURIComponent(userId)}:runQuery`, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ structuredQuery: {
-      from: [{ collectionId: 'dokumente' }],
-      where: { fieldFilter: { field: { fieldPath: 'rechnungsnr' }, op: 'EQUAL', value: { stringValue: String(rechnungsnr) } } },
-      limit: 20
-    } })
-  });
-  if (!res.ok) throw new Error(`Firestore-Abfrage fehlgeschlagen (${res.status})`);
-  const rows = await res.json();
-  return Array.isArray(rows) ? rows.filter(r => r.document).map(r => r.document) : [];
+// Kassen-P0 0.5(c): Belege mit derselben Rechnungsnummer (nur Gleichheits-/IN-Filter, kein zusammengesetzter Index nötig).
+// O11 N2 (wie die App): (1) gezielt Nummer + Absender, höchstens 20, damit viele Belege anderer Absender mit kurzer Nummer den richtigen nicht verdrängen;
+// (2) breit über die Schreibweisen der Nummer (Leerzeichen am Rand, Groß/Klein), höchstens 100.
+async function belegeMitRechnungsnr(userId, token, rechnungsnr, absender) {
+  const lauf = async (where, limit) => {
+    const res = await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${encodeURIComponent(userId)}:runQuery`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'dokumente' }], where, limit } })
+    });
+    if (!res.ok) throw new Error(`Firestore-Abfrage fehlgeschlagen (${res.status})`);
+    const rows = await res.json();
+    return Array.isArray(rows) ? rows.filter(r => r.document).map(r => r.document) : [];
+  };
+  const nr = String(rechnungsnr).trim();
+  const gleich = (feld, wert) => ({ fieldFilter: { field: { fieldPath: feld }, op: 'EQUAL', value: { stringValue: wert } } });
+  const [gezielt, breit] = await Promise.all([
+    lauf({ compositeFilter: { op: 'AND', filters: [gleich('rechnungsnr', nr), gleich('absender', String(absender).trim())] } }, 20),
+    lauf({ fieldFilter: { field: { fieldPath: 'rechnungsnr' }, op: 'IN', value: { arrayValue: { values: rechnungsnrVarianten(rechnungsnr).map((v) => ({ stringValue: v })) } } } }, 100),
+  ]);
+  return [...gezielt, ...breit];
 }
 
 // Warnung (nie Ablehnung), wenn dieselbe Nummer vom selben Absender mit gleichem Typ schon liegt. Fehler beim Lesen = keine Warnung.
 async function rechnungsnrDuplikatWarnung(userId, token, { rechnungsnr, absender, typ, mwst_satz }) {
   try {
     if (!rechnungsnr || !absender) return null;
-    const vorhanden = await belegeMitRechnungsnr(userId, token, String(rechnungsnr).trim());
+    const vorhanden = await belegeMitRechnungsnr(userId, token, rechnungsnr, absender);
     return rechnungsnrDuplikat(vorhanden, { rechnungsnr, absender, typ, mwst_satz }) ? RECHNUNGSNR_DUPLIKAT_WARNUNG : null;
   } catch (e) { console.warn('Duplikat-Check (Rechnungsnummer):', e.message); return null; }
 }
