@@ -132,7 +132,11 @@ test('O9a M4 (Etappen): großes Konto, drei Kassen, erschöpftes Budget -> die e
   // Etappen bis zum Ende
   const tage = new Map(d.kassentage.map((x) => [x.id, x]));
   const bew = new Map(d.kassenbewegungen.map((x) => [x.id, x]));
-  // O10 N6: die Maps verdecken doppelt gelieferte Dokumente; deshalb zusätzlich die Summe der gelieferten Längen zählen
+  // O10 N6: die Maps verdecken doppelt gelieferte Dokumente; deshalb zusätzlich jede Lieferung zählen. Erlaubt ist nur eine Wiederholung eines Tages, dessen frühere
+  // Lieferung ohne seine Fassungen kam (Budget endete beim Lesen der Fassungen, die nächste Etappe liest die Seite noch einmal, O7a H2); Bewegungen nie doppelt.
+  const lieferungen = new Map();
+  const zaehle = (liste, art) => { for (const x of liste) { const l = lieferungen.get(`${art}|${x.id}`) || []; l.push(x); lieferungen.set(`${art}|${x.id}`, l); } };
+  zaehle(d.kassentage, 'tag'); zaehle(d.kassenbewegungen, 'bew');
   let summeTage = d.kassentage.length;
   let summeBew = d.kassenbewegungen.length;
   let fz = d.kassen_fortsetzung;
@@ -145,6 +149,7 @@ test('O9a M4 (Etappen): großes Konto, drei Kassen, erschöpftes Budget -> die e
     for (const x of e.kassenbewegungen) bew.set(x.id, x);
     summeTage += e.kassentage.length;
     summeBew += e.kassenbewegungen.length;
+    zaehle(e.kassentage, 'tag'); zaehle(e.kassenbewegungen, 'bew');
     if (e.kassen_unvollstaendig_ab) for (const [kid, ab] of Object.entries(e.kassen_unvollstaendig_ab)) assert.ok(ab === null || vorher[kid] === null || ab <= vorher[kid], 'die Grenze wandert nur nach vorn in der Zeit');
     vorher = e.kassen_unvollstaendig_ab || {};
     fz = e.kassen_fortsetzung;
@@ -153,7 +158,15 @@ test('O9a M4 (Etappen): großes Konto, drei Kassen, erschöpftes Budget -> die e
   assert.ok(etappen > 1 && etappen < 100, `Etappen: ${etappen}`);
   assert.equal(tage.size, 3 * 1150);
   assert.equal(bew.size, 3 * 1150 * 4);
-  assert.deepEqual([summeTage, summeBew], [tage.size, bew.size], 'O10 N6: kein Dokument doppelt geliefert');
+  assert.equal(summeBew, bew.size, 'O10 N6: keine Bewegung doppelt geliefert');
+  let wiederholt = 0;
+  for (const [schluessel, l] of lieferungen) {
+    if (l.length < 2) continue;
+    assert.ok(schluessel.startsWith('tag|'), `doppelt: ${schluessel}`);
+    assert.ok(l.slice(0, -1).every((x) => x.fassungen.length === 0) && l[l.length - 1].fassungen.length === 1, `nur ein Tag ohne Fassungen darf wiederkommen: ${schluessel}`);
+    wiederholt += l.length - 1;
+  }
+  assert.equal(summeTage - wiederholt, tage.size, 'O10 N6: außer diesen Wiederholungen kein Tag doppelt');
   assert.ok([...tage.values()].every((x) => x.fassungen.length === 1 && x.fassungen[0].aktiv === true));
 });
 
@@ -287,12 +300,12 @@ test('O10 N7: mehr als 20 Kassen -> Ströme ohne erste Seite kommen in der Etapp
   const hatJuengsten = new Set(d.kassentage.filter((x) => x.geschaeftstag === tag(249)).map((x) => x.kasse_id));
   assert.equal(hatJuengsten.size, 10);
   const e = await kassenPrueferFortsetzung(UID, 't', fs.fetchFn, d.kassen_fortsetzung, { max: 40 });
-  const neu = new Set(e.kassentage.filter((x) => x.geschaeftstag === tag(249)).map((x) => x.kasse_id));
-  // 15 Kassen ohne erste Seite, je 3 Unteranfragen: 13 davon passen in 40, vor jeder zweiten Seite der ersten Kassen
+  const neu = new Set(e.kassentage.filter((x) => x.geschaeftstag === tag(249) && x.fassungen.length === 1).map((x) => x.kasse_id));
+  // 15 Kassen ohne erste Seite, je 3 Unteranfragen: 13 davon passen vollständig in 40, vor jeder zweiten Seite der ersten Kassen
   assert.equal(neu.size, 13, `neue Kassen in Etappe 1: ${neu.size}`);
   assert.ok(!e.kassentage.some((x) => hatJuengsten.has(x.kasse_id)), 'die ersten Kassen warten, bis jede Kasse ihre jüngsten Tage hat');
   const e2 = await kassenPrueferFortsetzung(UID, 't', fs.fetchFn, e.kassen_fortsetzung, { max: 40 });
-  for (const x of e2.kassentage) if (x.geschaeftstag === tag(249)) neu.add(x.kasse_id);
+  for (const x of e2.kassentage) if (x.geschaeftstag === tag(249) && x.fassungen.length === 1) neu.add(x.kasse_id);
   assert.equal(new Set([...hatJuengsten, ...neu]).size, 25, 'nach zwei Etappen hat jede Kasse ihren jüngsten Tag');
   // bis zum Ende: lückenlos, nichts doppelt
   const alle = [...d.kassentage, ...e.kassentage, ...e2.kassentage];
@@ -300,6 +313,8 @@ test('O10 N7: mehr als 20 Kassen -> Ströme ohne erste Seite kommen in der Etapp
   let n = 0;
   while (fz && n < 100) { const x = await kassenPrueferFortsetzung(UID, 't', fs.fetchFn, fz, { max: 40 }); alle.push(...x.kassentage); fz = x.kassen_fortsetzung; n += 1; }
   assert.equal(new Set(alle.map((x) => x.id)).size, 25 * 250);
-  assert.equal(alle.length, 25 * 250, 'nichts doppelt');
+  const ohneFassung = alle.filter((x) => x.fassungen.length === 0).length;
+  assert.equal(alle.length - ohneFassung, 25 * 250, 'nichts doppelt außer wiederholten Tagen ohne Fassungen');
+  assert.ok(alle.filter((x) => x.fassungen.length === 1).every((x, _, a) => a.filter((y) => y.id === x.id).length === 1));
   assert.ok(ids.length === 25);
 });

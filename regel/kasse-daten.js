@@ -346,8 +346,8 @@ async function stroemeLesen(fs, uid, stroeme, budgetWeg) {
       const seitenTage = r.map((d) => tagAusId(idVon(d))).filter(Boolean);
       if (st.art === 'tage') {
         // Fassungen dieser Tage (alle, auch stornierte), je höchstens 100 Pfade in einem batchGet. Scheitert das, bleibt der Cursor stehen: die nächste Etappe liest
-        // diese Seite noch einmal. O10 N6: die Tage dieser Seite gehen dann erst mit der nächsten Etappe hinaus (vollständig mit Fassungen), nie doppelt und nie als
-        // Tag ohne seine Fassungen.
+        // diese Seite noch einmal (die Seite ersetzt die Tage dann über die ID). Die gelesenen Tage bleiben trotzdem in dieser Antwort (O7a H2: Teilergebnisse bleiben,
+        // der Tag trägt seine Summen; „fassungen“ steht in kassen_unvollstaendig_teile). O10 N6: das ist die einzige erlaubte doppelte Lieferung (Test kasse-o9a).
         const pfade = r.flatMap((d) => (istObjektRoh(d.daten) ? fassungsNummern(d.daten).map((n) => P.fassung(uid, idVon(d), n)) : []));
         let fassungenOk = true;
         for (let i = 0; i < pfade.length && fassungenOk; i += PRUEFER_FASSUNGEN_JE_BATCH) {
@@ -361,8 +361,8 @@ async function stroemeLesen(fs, uid, stroeme, budgetWeg) {
             }
           } catch (e) { fassungenOk = false; merke(e, 'fassungen', st); }
         }
-        if (!fassungenOk) continue;
         tage.push(...r);
+        if (!fassungenOk) continue;
         if (r.length < seite) { st.fertig = true; continue; }
         st.vollAb = seitenTage[seitenTage.length - 1] || st.vollAb;
       } else {
