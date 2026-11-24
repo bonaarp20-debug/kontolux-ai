@@ -219,7 +219,7 @@ function kasseRetourePlan(d, kassennummer) {
   const storniert = d.storniert === true;
   const sn = storniert && ISTOBJEKT(d.retoure_storno) && typeof d.retoure_storno.kassennummer === 'string' ? d.retoure_storno.kassennummer.trim() : '';
   if (storniert && !sn) return offen('storno_kassennummer_fehlt');
-  return { datum: st.wirkdatum, kassennummer, korrektur: true, einnahme: true, kategorie: '', ku, art: 'retoure', gutschein_cent: 0, kanaele, storno: storniert ? { kassennummer: sn, datum: st.wirkdatum } : null };
+  return { datum: st.wirkdatum, kassennummer, korrektur: true, einnahme: true, kategorie: '', ku, art: 'retoure', art_detail: r.art === 'pfand' ? 'pfand' : 'retoure', gutschein_cent: 0, kanaele, storno: storniert ? { kassennummer: sn, datum: st.wirkdatum } : null };
 }
 
 // Bewegung des Kassenbuchs mit eigener Buchung (bewegung: dekodiertes Dokument aus kassenbewegungen). Richtung aus Sicht der Kasse: _ein = Geld kommt in die Kasse

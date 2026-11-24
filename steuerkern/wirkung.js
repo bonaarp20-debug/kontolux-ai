@@ -2270,7 +2270,8 @@ function kassenStornoWirkungen(s, profil, ctx, opt, out, orig) {
 // korrekturWirkungen jede A_KU-Korrektur aus (HN_NOCH_NICHT_UNTERSTUETZT). Der Kleinunternehmer hat keine Umsatzsteuer berechnet (§ 19 Abs. 1 UStG), es gibt also
 // nichts nach § 17 UStG zu berichtigen. Die Rückzahlung ist eine Betriebsausgabe im Jahr der Rückzahlung (§ 11 Abs. 2 EStG; Ausweis Kz 183 wie R-ZP-25 aller
 // Rückzahlungen im Kern, sb-antworten.md SB-8: Zeitpunkt A, Ausweis C, Gewinn gleich) und mindert den Gesamtumsatz nach § 19 Abs. 2 UStG (vereinnahmte Entgelte)
-// im Jahr der Rückzahlung (Vermerk ku_umsatz_minderung, Status information, auswertung.js umsatzPosten). Greift nur, wenn ALLES zutrifft: beleg_art 'korrektur',
+// im Jahr der Rückzahlung, aber nur bei einem Verkauf im selben Kalenderjahr (O14 M1, sonst Hinweis HN_KU_RETOURE_VORJAHR; Vermerk ku_umsatz_minderung, Status
+// information, auswertung.js umsatzPosten). Greift nur, wenn ALLES zutrifft: beleg_art 'korrektur',
 // Grund rueckabwicklung oder preisnachlass, Ausgang, Steuerfall A_KU, Bezug korrigiert_beleg_id mit Präfix 'kasse_' auf ein gefundenes Original (gleiche ID)
 // mit Belegart tagesabschluss und A_KU, eigene ID eine Retouren-ID des Workers (kasse_<Kasse>_<Tag>_r<NNN>), Positionen ohne Steuer und nie positiv, Summe < 0, Rückzahlung am Wirkdatum in Höhe der Summe. Jede andere
 // A_KU-Korrektur bleibt unverändert ausgeschlossen (Rückfall test-steuerkern-r15.mjs).
@@ -2307,7 +2308,7 @@ function kuKassenRetoureWirkungen(s, profil, ctx, out, orig) {
   const jahr = String(jahrVon(rz.datum));
   out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: rz.datum, kz: 183, netto_cent: brutto, betrag_cent: brutto, rolle: 'ausgabe', spalte: 'ausgabe', regel_id: 'R-ZP-25', hinweise: ['HN_EUER_RUECKZAHLUNG_K20'] }));
   // O14 M1 (vorsichtig bis zur Antwort des Steuerberaters): den Gesamtumsatz § 19 Abs. 2 mindert nur eine Retoure auf einen Verkauf DESSELBEN Kalenderjahres.
-  // Ob die Rückgewähr eines Vorjahresentgelts den Gesamtumsatz des laufenden Jahres mindert, ist nicht belegt (UStAE 19.3 Abs. 1: vereinnahmte Entgelte „für“
+  // Ob die Rückgewähr eines Vorjahresentgelts den Gesamtumsatz des laufenden Jahres mindert, ist nicht belegt (UStAE 19.2 Abs. 1: vereinnahmte Entgelte „für“
   // Umsätze; 19.7 Abs. 3 S. 2 schließt nur eine Rückwirkung aus). Ohne Minderung bleibt die laufende Summe höher, die Grenze greift höchstens früher, nie später.
   const tagOrig = istObjekt(orig) && istObjekt(orig.steuer) && istObjekt(orig.steuer.leistung) && istDatum(orig.steuer.leistung.bis) ? orig.steuer.leistung.bis : null;
   if (tagOrig !== null && jahrVon(tagOrig) === jahrVon(rz.datum)) {

@@ -1132,7 +1132,7 @@ async function retoure(c) {
     const ts = zeitstempel(zeit);
     const zeilenDok = w.zeilen.map((z) => ({ steuerfall: z.steuerfall, satz_bp: rest.zeilen.find((x) => x.steuerfall === z.steuerfall).satz_bp, bar_cent: z.bar_cent, unbar_cent: z.unbar_cent }));
     const dok = {
-      ...dokumentAus(kandidat, { zeit, kasse, kasseId, tagId, n: null, nummer, anhaenge: null, tag, einnahme: false, name: `${w.art === 'pfand' ? 'Pfandrückgabe' : 'Rückgabe'} ${kassennamen(kasse)} ${datumDe(tag)} (${w.art === 'pfand' ? 'Bezug' : 'Verkauf'} vom ${datumDe(w.verkaufstag)})` }),
+      ...dokumentAus(kandidat, { zeit, kasse, kasseId, tagId, n: null, nummer, anhaenge: null, tag, einnahme: false, name: `${w.art === 'pfand' ? 'Pfandrückgabe' : 'Rückgabe'} ${kassennamen(kasse)} ${datumDe(tag)} (${w.art === 'pfand' ? `Bezugstag ${datumDe(w.verkaufstag)}` : `Verkauf vom ${datumDe(w.verkaufstag)}`})` }),
       // Felder außerhalb des Drift-Hashes: Verkaufstag und Aufteilung bar/Karte je Satz (DATEV, Kassenbuch, Rest), Bewegung, Anfrage (Wiederholung)
       retoure: { art: w.art, verkaufstag: w.verkaufstag, verkauf_kassentag_id: vTagId, verkauf_fassung: vTag.fassung_aktiv, verkauf_beleg_id: origId, zeilen: zeilenDok, bar_cent: bar, unbar_cent: unbar, bewegung_id: bewegungId, anfrage_id: body.anfrage_id },
       ...nachFest,
@@ -1144,7 +1144,7 @@ async function retoure(c) {
     let bewegung = null;
     if (bewegungId) {
       bewegung = {
-        kasse_id: kasseId, geschaeftstag: tag, art: 'retoure_auszahlung', betrag_cent: bar, text: w.art === 'pfand' ? `Pfandrückgabe (Bezug ${datumDe(w.verkaufstag)})` : `Rückgabe aus Verkauf vom ${datumDe(w.verkaufstag)}`, beleg_id: retoureId, eigenbeleg_pfad: null,
+        kasse_id: kasseId, geschaeftstag: tag, art: 'retoure_auszahlung', betrag_cent: bar, text: w.art === 'pfand' ? `Pfandrückgabe (Bezugstag ${datumDe(w.verkaufstag)})` : `Rückgabe aus Verkauf vom ${datumDe(w.verkaufstag)}`, beleg_id: retoureId, eigenbeleg_pfad: null,
         privatvorgang_id: null, gegenkasse_id: null, storno_von: null, storno_art: null, storno_grund: null, kontoauszug_abgleich: null,
         kassennummer: nummer, erfasst_am: ts, anfrage_id: body.anfrage_id, aufbewahrung_bis: aufbewahrungBis(tag),
       };

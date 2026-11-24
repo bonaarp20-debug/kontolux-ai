@@ -1042,4 +1042,7 @@ test('R1.5 kasseBelegPlan (rein): Retoure mit Satz je Kanal aus dem Feld retoure
   assert.equal(kasseBelegPlan({ ...d, betrag: 129.6 }).grund, 'betrag_abweichend');
   assert.equal(kasseBelegPlan({ ...d, storniert: true }).grund, 'storno_kassennummer_fehlt');
   assert.deepEqual(kasseBelegPlan({ ...d, storniert: true, retoure_storno: { kassennummer: 'K-THK-2026-0003' } }).storno, { kassennummer: 'K-THK-2026-0003', datum: '2026-11-03' });
+  // O15 N-3: Pfand wird im Buchungstext „Pfandrückgabe“ genannt
+  assert.equal(p.art_detail, 'retoure');
+  assert.equal(kasseBelegPlan({ ...d, retoure: { ...d.retoure, art: 'pfand' } }).art_detail, 'pfand');
 });

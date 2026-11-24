@@ -3335,9 +3335,9 @@ test('O14 Pfand ohne Verkaufstag (art pfand): gleicher Weg wie die Retoure, Bele
   const r = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(238)], { art: 'pfand' }));
   assert.equal(r.status, 200, JSON.stringify(r.json));
   const d = u.fs.lies(P(`dokumente/${r.json.retoure_beleg_id}`));
-  assert.equal(d.retoure.art, 'pfand'); assert.match(d.name, /^Pfandrückgabe Theke 03\.11\.2026/);
+  assert.equal(d.retoure.art, 'pfand'); assert.equal(d.name, 'Pfandrückgabe Theke 03.11.2026 (Bezugstag 02.11.2026)');
   assert.deepEqual(d.steuer.positionen.map((p) => [p.bez, p.netto_cent, p.ust_cent]), [['Pfandrückgabe 19 %', -200, -38]]);
-  assert.match(u.fs.lies(P(`kassenbewegungen/${r.json.bewegung_id}`)).text, /^Pfandrückgabe/);
+  assert.equal(u.fs.lies(P(`kassenbewegungen/${r.json.bewegung_id}`)).text, 'Pfandrückgabe (Bezugstag 02.11.2026)');
   const x = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(100)], { art: 'leergut' }));
   assert.equal(x.status, 400); assert.equal(x.json.feld, 'art');
 });

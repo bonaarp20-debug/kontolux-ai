@@ -5457,7 +5457,7 @@ async function handleDatevExport(body, env, cors = {}) {
         const datumKasse = new Date(plan.datum + 'T00:00:00');
         const kasseKto = await kassenKonto(kd.kasse_id);
         const absenderKasse = String(kd.absender || '').trim();
-        const textKasse = ({ umsatz: 'Tagesabschluss', mehrzweck: 'Mehrzweck-Gutscheine', fehlbetrag: 'Kassendifferenz (Fehlbetrag)', ueberschuss: 'Kassendifferenz (Überschuss)', retoure: 'Rückgabe' })[plan.art];
+        const textKasse = ({ umsatz: 'Tagesabschluss', mehrzweck: 'Mehrzweck-Gutscheine', fehlbetrag: 'Kassendifferenz (Fehlbetrag)', ueberschuss: 'Kassendifferenz (Überschuss)', retoure: plan.art_detail === 'pfand' ? 'Pfandrückgabe' : 'Rückgabe' })[plan.art]; // O15 N-3: Pfand sprachlich richtig
         for (const k of plan.kanaele) {
           // A-N1: 0 % auf 8290/4290 (Konto je Gruppe); A-H1: Einlösung eines Mehrzweck-Gutscheins als Umbuchung vom Mehrzweck-Konto auf das Erlöskonto des Satzes
           const gruppenKasse = k.gruppen.map((g) => (g.konto0 ? { ...g, konto: KASSE_ERLOES_0_KONTO[skrK0] } : g));
@@ -5474,7 +5474,7 @@ async function handleDatevExport(body, env, cors = {}) {
             const gruppenKasse = k.gruppen.map((g) => (g.konto0 ? { ...g, konto: KASSE_ERLOES_0_KONTO[skrK0] } : g));
             bucheGruppen({
               gruppen: gruppenKasse, korrektur: false, ku: plan.ku, istEinnahme: true, kategorie: '', belegDatum: new Date(plan.storno.datum + 'T00:00:00'), belegfeld1: plan.storno.kassennummer,
-              textBasis: `Storno Rückgabe ${absenderKasse}`.trim(), diverseAdressnummer: '', buchungskonto: k.kanal === 'karte' ? geldtransitkonto : kasseKto, markeZusatz: k.kanal === 'karte' ? ' Karte' : ''
+              textBasis: `Storno ${textKasse} ${absenderKasse}`.trim(), diverseAdressnummer: '', buchungskonto: k.kanal === 'karte' ? geldtransitkonto : kasseKto, markeZusatz: k.kanal === 'karte' ? ' Karte' : ''
             });
           }
         }
