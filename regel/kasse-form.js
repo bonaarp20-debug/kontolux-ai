@@ -3,7 +3,7 @@
 // fehler null oder { code, feld, ... } (code FORMAT oder ANHANG_FREMD), wert = die bereinigte, normalisierte Eingabe (nur geprüfte Felder, feste Form).
 // Fachliche Prüfungen (Kern: Steuerfall am Geschäftstag, Kontrollsumme, Bestand ...) laufen danach in regel/kasse.js über Steuerkern.pruefeKassentag.
 import * as Steuerkern from '../steuerkern/index.js';
-import { istObjekt, istDatum, nurSchluessel } from './gemeinsam.js';
+import { istObjekt, istDatum, nurSchluessel, FEATURE_KASSE_RETOURE } from './gemeinsam.js';
 
 export const KASSE_PFADE = Object.freeze(['/kasse', '/kassentag', '/kassenbewegung', '/kassenmeldung']); // '/kassenmeldung': W2-W2 (P4, Meldehilfe ohne Übermittlung)
 export const FEATURE = 'kasse';
@@ -236,6 +236,58 @@ export function pruefeStorno(body, { heute }) {
   if (!geschaeftstagOk(body.geschaeftstag, heute)) return fehl('geschaeftstag');
   if (typeof body.grund !== 'string' || body.grund.trim().length < 5 || body.grund.trim().length > 300) return fehl('grund');
   return ok({ kasse_id: body.kasse_id, geschaeftstag: body.geschaeftstag, grund: body.grund.trim() });
+}
+
+// ---------------------------------------------------------------------------------------------
+// R1.5 /kassentag retoure | retoure_stornieren (Baukonzept 08 2.13, stand-kasse.md Abschnitt 9 Eintrag R1.5)
+//   retoure: geschaeftstag = Retourentag (offener Tag), verkaufstag (früherer abgeschlossener Tag derselben Kasse), zeilen je Satz { steuerfall, bar_cent,
+//   unbar_cent } (1 bis 4, je Steuerfall einmal, Summe je Zeile > 0), korrektur_grund aus Steuerkern.KASSEN_RETOURE_GRUENDE, notiz optional (bis 300 Zeichen)
+//   retoure_stornieren: retoure_beleg_id (kasse_<kasse_id>_<Retourentag>_r<NNN>), grund 5 bis 300 Zeichen
+// Feature: retoure nur mit kasse UND kasse_retoure (fehlend = aus); retoure_stornieren nur mit kasse (Ausweg auch bei ausgeschaltetem kasse_retoure).
+// ---------------------------------------------------------------------------------------------
+export const FEATURE_RETOURE = FEATURE_KASSE_RETOURE;
+export const RETOURE_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'geschaeftstag', 'verkaufstag', 'zeilen', 'korrektur_grund', 'notiz']);
+export const RETOURE_ZEILE_SCHLUESSEL = Object.freeze(['steuerfall', 'bar_cent', 'unbar_cent']);
+export const RETOURE_STORNO_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'retoure_beleg_id', 'grund']);
+export const RETOURE_BELEG_ID_MUSTER = /^kasse_(k[a-z0-9]{8})_(\d{4}-\d{2}-\d{2})_r(\d{3})$/;
+export function pruefeRetoure(body, { heute }) {
+  if (!istObjekt(body) || !nurSchluessel(body, RETOURE_SCHLUESSEL)) return fehl(istObjekt(body) ? Object.keys(body).find((x) => !RETOURE_SCHLUESSEL.includes(x)) || 'body' : 'body');
+  if (typeof body.kasse_id !== 'string' || !KASSE_ID_MUSTER.test(body.kasse_id)) return fehl('kasse_id');
+  if (!geschaeftstagOk(body.geschaeftstag, heute)) return fehl('geschaeftstag');
+  if (typeof body.verkaufstag !== 'string' || !istDatum(body.verkaufstag) || body.verkaufstag < GESCHAEFTSTAG_MIN) return fehl('verkaufstag');
+  if (body.verkaufstag >= body.geschaeftstag) return fehl('verkaufstag', 'FORMAT', { grund: 'nicht_vor_retourentag' });
+  if (!Array.isArray(body.zeilen) || body.zeilen.length < 1 || body.zeilen.length > 4) return fehl('zeilen');
+  const gesehen = new Set();
+  const zeilen = [];
+  for (let i = 0; i < body.zeilen.length; i += 1) {
+    const z = body.zeilen[i];
+    if (!istObjekt(z) || !nurSchluessel(z, RETOURE_ZEILE_SCHLUESSEL)) return fehl(`zeilen[${i}]`);
+    if (!Steuerkern.KASSE_STEUERFAELLE.includes(z.steuerfall) || gesehen.has(z.steuerfall)) return fehl(`zeilen[${i}].steuerfall`);
+    gesehen.add(z.steuerfall);
+    const bar = z.bar_cent === undefined || z.bar_cent === null ? 0 : z.bar_cent;
+    const unbar = z.unbar_cent === undefined || z.unbar_cent === null ? 0 : z.unbar_cent;
+    if (!centOk(bar)) return fehl(`zeilen[${i}].bar_cent`);
+    if (!centOk(unbar)) return fehl(`zeilen[${i}].unbar_cent`);
+    if (bar + unbar <= 0) return fehl(`zeilen[${i}]`, 'FORMAT', { grund: 'betrag_null' });
+    zeilen.push({ steuerfall: z.steuerfall, bar_cent: bar, unbar_cent: unbar });
+  }
+  if (!Steuerkern.KASSEN_RETOURE_GRUENDE.includes(body.korrektur_grund)) return fehl('korrektur_grund');
+  let notiz = null;
+  if (body.notiz !== undefined && body.notiz !== null) {
+    if (typeof body.notiz !== 'string' || body.notiz.length > 300) return fehl('notiz');
+    notiz = body.notiz.trim() || null;
+  }
+  // Reihenfolge wie KASSE_STEUERFAELLE (Kern), damit Beleg, Bewegung und Antwort stabil sind
+  zeilen.sort((a, b) => Steuerkern.KASSE_STEUERFAELLE.indexOf(a.steuerfall) - Steuerkern.KASSE_STEUERFAELLE.indexOf(b.steuerfall));
+  return ok({ kasse_id: body.kasse_id, geschaeftstag: body.geschaeftstag, verkaufstag: body.verkaufstag, zeilen, korrektur_grund: body.korrektur_grund, notiz });
+}
+export function pruefeRetoureStorno(body) {
+  if (!istObjekt(body) || !nurSchluessel(body, RETOURE_STORNO_SCHLUESSEL)) return fehl(istObjekt(body) ? Object.keys(body).find((x) => !RETOURE_STORNO_SCHLUESSEL.includes(x)) || 'body' : 'body');
+  if (typeof body.kasse_id !== 'string' || !KASSE_ID_MUSTER.test(body.kasse_id)) return fehl('kasse_id');
+  const m = typeof body.retoure_beleg_id === 'string' ? RETOURE_BELEG_ID_MUSTER.exec(body.retoure_beleg_id) : null;
+  if (!m || m[1] !== body.kasse_id || !geschaeftstagOk(m[2], '2100-12-31') || m[3] === '000') return fehl('retoure_beleg_id');
+  if (typeof body.grund !== 'string' || body.grund.trim().length < 5 || body.grund.trim().length > 300) return fehl('grund');
+  return ok({ kasse_id: body.kasse_id, retoure_beleg_id: body.retoure_beleg_id, geschaeftstag: m[2], grund: body.grund.trim() });
 }
 
 // ---------------------------------------------------------------------------------------------

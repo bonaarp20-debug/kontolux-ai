@@ -5457,7 +5457,7 @@ async function handleDatevExport(body, env, cors = {}) {
         const datumKasse = new Date(plan.datum + 'T00:00:00');
         const kasseKto = await kassenKonto(kd.kasse_id);
         const absenderKasse = String(kd.absender || '').trim();
-        const textKasse = ({ umsatz: 'Tagesabschluss', mehrzweck: 'Mehrzweck-Gutscheine', fehlbetrag: 'Kassendifferenz (Fehlbetrag)', ueberschuss: 'Kassendifferenz (Überschuss)' })[plan.art];
+        const textKasse = ({ umsatz: 'Tagesabschluss', mehrzweck: 'Mehrzweck-Gutscheine', fehlbetrag: 'Kassendifferenz (Fehlbetrag)', ueberschuss: 'Kassendifferenz (Überschuss)', retoure: 'Rückgabe' })[plan.art];
         for (const k of plan.kanaele) {
           // A-N1: 0 % auf 8290/4290 (Konto je Gruppe); A-H1: Einlösung eines Mehrzweck-Gutscheins als Umbuchung vom Mehrzweck-Konto auf das Erlöskonto des Satzes
           const gruppenKasse = k.gruppen.map((g) => (g.konto0 ? { ...g, konto: KASSE_ERLOES_0_KONTO[skrK0] } : g));
@@ -5466,6 +5466,16 @@ async function handleDatevExport(body, env, cors = {}) {
             gruppen: gruppenKasse, korrektur: plan.korrektur, ku: plan.ku, istEinnahme: plan.einnahme, kategorie: plan.kategorie, belegDatum: datumKasse, belegfeld1: plan.kassennummer,
             textBasis: `${textKasse} ${absenderKasse}`.trim(), diverseAdressnummer: '', buchungskonto: kanalKonto, markeZusatz: k.kanal === 'karte' ? ' Karte' : k.kanal === 'gutschein' ? ' Gutschein-Einlösung' : ''
           });
+        }
+        // R1.5: stornierte Retoure: die Retoure bleibt im Stapel, die Gegenbuchung (Richtung des Verkaufs) folgt am selben Tag mit der Kassennummer des Stornos
+        if (plan.art === 'retoure' && plan.storno) {
+          for (const k of plan.kanaele) {
+            const gruppenKasse = k.gruppen.map((g) => (g.konto0 ? { ...g, konto: KASSE_ERLOES_0_KONTO[skrK0] } : g));
+            bucheGruppen({
+              gruppen: gruppenKasse, korrektur: false, ku: plan.ku, istEinnahme: true, kategorie: '', belegDatum: new Date(plan.storno.datum + 'T00:00:00'), belegfeld1: plan.storno.kassennummer,
+              textBasis: `Storno Rückgabe ${absenderKasse}`.trim(), diverseAdressnummer: '', buchungskonto: k.kanal === 'karte' ? geldtransitkonto : kasseKto, markeZusatz: k.kanal === 'karte' ? ' Karte' : ''
+            });
+          }
         }
         if (plan.gutschein_cent > 0 && !plan.korrektur) kasseEinloesung.push({ nr: plan.kassennummer, cent: plan.gutschein_cent });
         if (plan.art === 'mehrzweck') kasseMehrzweck++;

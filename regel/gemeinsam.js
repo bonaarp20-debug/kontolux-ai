@@ -168,6 +168,12 @@ export function featureAktiv(config, name) {
 // FEATURE_STANDARD); in der App (Lader) gilt ein fehlender Name als an: das Drehbuch setzt beide Namen vor dem App-Deploy ausdrücklich auf 'aus'.
 // 'kasse' hängt am Kern (KERN_ABHAENGIG: kern_max 'aus' schaltet das Kassenbuch mit ab). Die Liste schaltet nichts; sie dient Drehbuch und Paritätstest.
 export const FEATURES_KASSE = Object.freeze(['kasse', 'kasse_ki']);
+// R1.5 (Welle 3, Baukonzept 08 2.13, Jona: Variante B mit Release 1): Schalter „Rückgabe aus früherem Tag“ (POST /kassentag retoure). Fehlend = aus (featureAktiv,
+// nicht in FEATURE_STANDARD), wirkt nur zusammen mit kasse (der Kassen-Router prüft kasse zuerst) und nur mit Zustimmung ab AGB_MINDESTFASSUNG_KASSE (dieselbe
+// Prüfung wie kasse). Absichtlich (noch) nicht in FEATURES_KASSE: der Paritätstest der App (scripts/test-eb-loader.mjs) vergleicht FEATURES_KASSE mit dem Lader
+// FEATURES_AGB_KASSE; die App (Phase 2, UI-Agent) nimmt kasse_retoure in den Lader auf (FEATURES, STANDARD_AUS, FEATURES_AGB_KASSE, nur mit kasse) und zieht
+// dann beide Listen gemeinsam nach (stand-kasse.md Abschnitt 9, Eintrag R1.5).
+export const FEATURE_KASSE_RETOURE = 'kasse_retoure';
 // KASSE-P1b (M15): Mindestfassung der Nutzungsbedingungen für das Kassenbuch (Zustimmungsnachweis users/{uid}/agb_zustimmung, wie OSS). P6-Fassungs-Commit
 // (23.11.2026): echte Fassung mit den Kassenbuch-Texten (Nutzungsbedingungen 2b/2c, Stand 14. Dezember 2026), gleich App AGB_VERSION und Lader
 // AGB_MINDESTFASSUNG_KASSE (scripts/rollout-vorpruefung.mjs). Das Datum darf nicht nach dem Deploy-Tag liegen (agbZustimmungPruefen in worker.js lehnt

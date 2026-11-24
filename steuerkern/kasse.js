@@ -12,6 +12,8 @@
 //   kassenDifferenzEingabe(differenz_cent, profil, tag, optionen)  Kern-Eingabe des Fehlbetrag-/Überschussbelegs (Kap. 6 Nr. 19) oder null
 //   kassenbelegAltfelder(steuer)                        Altfelder betrag, betrag_netto, mwst_satz ('gemischt'), kx_mwst_text (2.12 M10)
 //   kassenStornoEingabe(originalSteuer, optionen)       fertiger Steuerteil des Kassen-Stornos (Kap. 6 Nr. 22, Wirkung über den Kassen-Storno-Zweig)
+//   kassenRetoureRest(originalSteuer, fruehere)         R1.5: noch möglicher Rest je Satz eines Verkaufstags (Brutto, Netto, Steuer) nach früheren Retouren
+//   kassenRetoureEingabe(originalSteuer, optionen)      R1.5: fertiger Steuerteil der Retoure auf einen früheren Verkaufstag (Korrektur am Retourentag)
 //   kassenmeldeFrist(ereignisDatum)                     Frist der Kassenmeldung (§ 146a Abs. 4 AO, § 108 AO, §§ 187, 188 BGB; 09 #F1)
 // Beträge immer als ganze Cent (Number.isSafeInteger). Unzulässige Eingaben (kein Cent, unbekannte Art) werfen TypeError: der Worker prüft die Form
 // vorher (400 FORMAT); pruefeKassentag meldet sie als Code FORMAT statt zu werfen.
@@ -59,6 +61,8 @@ export const BEWEGUNG_VORZEICHEN = Object.freeze({
   ausgabe: -1, entnahme: -1, einlage: 1, wechselgeld_einlage: 1,
   geldtransit_bank_ein: 1, geldtransit_bank_aus: -1, geldtransit_kasse_ein: 1, geldtransit_kasse_aus: -1,
   trinkgeld_ma_auszahlung: -1,
+  // R1.5 (08 2.13): Barauszahlung einer Retoure auf einen früheren Verkaufstag; entsteht nur über /kassentag retoure (Worker), nie über /kassenbewegung anlegen
+  retoure_auszahlung: -1,
 });
 export const BEWEGUNG_ARTEN = Object.freeze([...Object.keys(BEWEGUNG_VORZEICHEN), 'storno']);
 // Prüfcodes von pruefeKassentag (fehler: speichern nicht möglich; hinweise: speichern möglich). HTTP-Status setzt der Worker (stand-kasse.md).
@@ -568,6 +572,138 @@ export function kassenStornoEingabe(originalSteuer, optionen) {
     wirkdatum: o.geschaeftstag, korrektur_grund: 'rueckabwicklung', korrektur_notiz: grund.slice(0, 500),
   };
   if (nichtLeer(os.kategorie)) steuer.kategorie = os.kategorie;
+  return steuer;
+}
+
+// ---------------------------------------------------------------------------------------------
+// R1.5 „Retoure auf Vortag“ (Baukonzept 08 2.13, Kap. 6 Nr. 20; Vertrag stand-kasse.md Abschnitt 9, Eintrag R1.5). Ein Kunde gibt an einem späteren Tag etwas
+// zurück, das er an einem früheren Tag (Verkaufstag) gekauft hat. Die Rückgabe wirkt an IHREM Tag (§ 17 Abs. 1 S. 8 UStG: Berichtigung im Zeitraum der Änderung;
+// das Entgelt war bezahlt, die Minderung tritt mit der Rückzahlung ein, UStAE 17.1, R-KOR-13; EÜR-Abfluss im Jahr der Rückzahlung, § 11 Abs. 2 EStG). Der
+// Verkaufstag bleibt unverändert. Korrekturbeleg (beleg_art 'korrektur', Ausgang) mit Bezug auf den Tagesabschluss-Beleg der aktiven Fassung des Verkaufstags,
+// Positionen je Satz negativ, wirkdatum und rueckzahlung.datum = Retourentag (Summe bar und Karte). Regelbesteuerung: gewöhnlicher Korrekturweg R-KOR-01/13
+// (Kz 81/86/87 negativ im Zeitraum der Retoure, EÜR Kz 183 brutto, R-ZP-25). Kleinunternehmer (Original A_KU): enger Zweig in wirkung.js
+// (kuKassenRetoureWirkungen). Altfeld typ 'storno' (legacy_typ, wie der Korrekturdialog der App): im Altpfad reine Dokumentation, nie eine Einnahme.
+// ---------------------------------------------------------------------------------------------
+export const KASSEN_RETOURE_GRUENDE = Object.freeze(['rueckabwicklung', 'preisnachlass']); // aus KORREKTUR_GRUENDE: Rückgabe bzw. nachträglicher Rabatt
+export const KASSEN_RETOURE_NR_MAX = 999;
+const SATZ_ZU_STEUERFALL = Object.freeze({ [String(SATZ_REGEL_BP)]: 'A_INLAND_19', [String(SATZ_ERMAESSIGT_BP)]: 'A_INLAND_7', [String(SATZ_NULL_BP)]: 'A_INLAND_0_PV' });
+const RUECKGABE_BEZ = Object.freeze({ A_INLAND_19: 'Rückgabe 19 %', A_INLAND_7: 'Rückgabe 7 %', A_INLAND_0_PV: 'Rückgabe 0 % (§ 12 Abs. 3 UStG)', A_KU: 'Rückgabe (Kleinunternehmer, § 19 UStG)' });
+
+// Beleg-ID der Retoure: 'kasse_' + Tagesplatz des RETOURENTAGS + '_r' + dreistellige laufende Nummer je Retourentag (1 bis 999)
+export function kassenRetoureBelegId(kassentagIdWert, nr) {
+  if (!nichtLeer(kassentagIdWert) || !Number.isSafeInteger(nr) || nr < 1 || nr > KASSEN_RETOURE_NR_MAX) throw new TypeError('kassentag-ID und Nummer 1 bis 999 nötig');
+  return `${KASSEN_BELEG_PRAEFIX}${kassentagIdWert}_r${String(nr).padStart(3, '0')}`;
+}
+
+// kassenRetoureRest(originalSteuer, fruehere): Rest je Satz des Verkaufstags. originalSteuer = steuer des Tagesabschluss-Belegs der aktiven Fassung,
+// fruehere = steuer-Teile der früheren, NICHT stornierten Retouren auf dasselbe Original (Positionen negativ). Rückgabe { zeilen: [{ steuerfall, satz_bp,
+// verkauf_brutto_cent, verkauf_netto_cent, verkauf_ust_cent, rest_brutto_cent, rest_netto_cent, rest_ust_cent }], ueberzogen } in der Reihenfolge
+// KASSE_STEUERFAELLE (steuerfall je Satz: A_INLAND_19/_7/_0_PV bzw. A_KU). Der Rest ist das, was der Verkaufstag je Satz noch hergibt (Netto und Steuer getrennt,
+// damit die letzte Retoure eines Satzes genau auf das Original aufgeht). ueberzogen: true, wenn frühere Retouren schon mehr als das Original mindern (Datenfehler):
+// dann ist jeder Rest 0. Wirft TypeError bei unzulässiger Form.
+export function kassenRetoureRest(originalSteuer, fruehere) {
+  const os = originalSteuer;
+  if (!istObjekt(os) || os.beleg_art !== 'tagesabschluss' || os.richtung !== 'ausgang' || !KASSE_STEUERFAELLE.includes(os.steuerfall) || !Array.isArray(os.positionen) || !os.positionen.length) {
+    throw new TypeError('originalSteuer: Tagesabschluss-Beleg (Ausgang, Steuerfall des Kassenbuchs) mit Positionen nötig');
+  }
+  const ku = os.steuerfall === 'A_KU';
+  const g = new Map();
+  os.positionen.forEach((p, i) => {
+    if (!istObjekt(p) || !istCent(p.netto_cent) || !istCent(p.ust_cent) || p.netto_cent < 0 || p.ust_cent < 0) throw new TypeError(`originalSteuer.positionen[${i}]: Cent >= 0`);
+    const sf = ku ? 'A_KU' : SATZ_ZU_STEUERFALL[String(p.satz_bp)];
+    if (!sf || (ku && p.ust_cent !== 0)) throw new TypeError(`originalSteuer.positionen[${i}].satz_bp unzulässig`);
+    const e = g.get(sf) || { n: 0, u: 0, fn: 0, fu: 0 };
+    e.n += p.netto_cent;
+    e.u += p.ust_cent;
+    g.set(sf, e);
+  });
+  const liste = fruehere === undefined || fruehere === null ? [] : fruehere;
+  if (!Array.isArray(liste)) throw new TypeError('fruehere: Liste der steuer-Teile früherer Retouren');
+  liste.forEach((f, j) => {
+    if (!istObjekt(f) || !Array.isArray(f.positionen)) throw new TypeError(`fruehere[${j}]: steuer mit Positionen`);
+    f.positionen.forEach((p, i) => {
+      if (!istObjekt(p) || !istCent(p.netto_cent) || !istCent(p.ust_cent) || p.netto_cent > 0 || p.ust_cent > 0) throw new TypeError(`fruehere[${j}].positionen[${i}]: Cent <= 0`);
+      const sf = ku ? 'A_KU' : SATZ_ZU_STEUERFALL[String(p.satz_bp)];
+      const e = sf ? g.get(sf) : null;
+      if (!e) throw new TypeError(`fruehere[${j}].positionen[${i}]: Satz, den der Verkaufstag nicht hat`);
+      e.fn += 0 - p.netto_cent;
+      e.fu += 0 - p.ust_cent;
+    });
+  });
+  let ueberzogen = false;
+  for (const e of g.values()) if (e.fn > e.n || e.fu > e.u) ueberzogen = true;
+  const zeilen = [];
+  for (const sf of KASSE_STEUERFAELLE) {
+    if (!g.has(sf)) continue;
+    const e = g.get(sf);
+    const rn = ueberzogen ? 0 : e.n - e.fn;
+    const ru = ueberzogen ? 0 : e.u - e.fu;
+    zeilen.push({ steuerfall: sf, satz_bp: SATZ_VON[sf], verkauf_brutto_cent: e.n + e.u, verkauf_netto_cent: e.n, verkauf_ust_cent: e.u, rest_brutto_cent: rn + ru, rest_netto_cent: rn, rest_ust_cent: ru });
+  }
+  return { zeilen, ueberzogen };
+}
+
+// kassenRetoureEingabe(originalSteuer, { original_id, verkaufstag, retourentag, zeilen: [{ steuerfall, bar_cent, unbar_cent }], korrektur_grund, notiz?, fruehere?,
+//   erfasst_am?, kern_version? }): fertiger Steuerteil der Retoure (wie kassenStornoEingabe kein Umweg über normalisiereEingabe: der Steuerfall folgt dem Original,
+//   nicht dem Status am Retourentag, und die Rundung geht gegen Original und frühere Retouren). Je Zeile eine Position mit dem Brutto der Zeile (bar + Karte),
+//   negativ; Steuer aus dem Brutto (ustAusBrutto), begrenzt auf den Rest: schließt die Zeile den Satz ab (Brutto = Rest), sind Netto und Steuer genau der Rest
+//   (Summe aller Retouren eines Satzes = Original auf den Cent). Wirft RangeError 'RETOURE_UEBER_VERKAUF: <steuerfall>' (höher als der Rest oder Satz nicht am
+//   Verkaufstag) und TypeError bei unzulässiger Form. Der Worker prüft das Ergebnis mit validiereBeleg und hängt die Altfelder an (legacyFelder, kassenbelegAltfelder).
+export function kassenRetoureEingabe(originalSteuer, optionen) {
+  const o = istObjekt(optionen) ? optionen : {};
+  const os = originalSteuer;
+  if (!nichtLeer(o.original_id) || o.original_id.slice(0, KASSEN_BELEG_PRAEFIX.length) !== KASSEN_BELEG_PRAEFIX) throw new TypeError(`original_id mit Präfix ${KASSEN_BELEG_PRAEFIX} nötig`);
+  if (!istDatum(o.verkaufstag) || !istDatum(o.retourentag)) throw new TypeError('verkaufstag und retourentag (JJJJ-MM-TT) nötig');
+  if (o.verkaufstag >= o.retourentag) throw new RangeError('RETOURE_CHRONOLOGIE: Verkaufstag muss vor dem Retourentag liegen');
+  if (!KASSEN_RETOURE_GRUENDE.includes(o.korrektur_grund)) throw new TypeError(`korrektur_grund: ${KASSEN_RETOURE_GRUENDE.join(' oder ')}`);
+  const rest = kassenRetoureRest(os, o.fruehere);
+  const tagOrig = istObjekt(os.leistung) && istDatum(os.leistung.bis) ? os.leistung.bis : null;
+  if (tagOrig !== o.verkaufstag) throw new TypeError('originalSteuer: Leistungstag ist nicht der Verkaufstag');
+  if (!Array.isArray(o.zeilen) || o.zeilen.length === 0 || o.zeilen.length > 4) throw new TypeError('zeilen: Liste mit 1 bis 4 Zeilen');
+  const gesehen = new Set();
+  const je = new Map();
+  o.zeilen.forEach((z, i) => {
+    if (!istObjekt(z) || typeof z.steuerfall !== 'string' || !KASSE_STEUERFAELLE.includes(z.steuerfall)) throw new TypeError(`zeilen[${i}].steuerfall unzulässig`);
+    if (gesehen.has(z.steuerfall)) throw new TypeError(`zeilen[${i}]: Steuerfall doppelt`);
+    gesehen.add(z.steuerfall);
+    const b = cent0(z.bar_cent, `zeilen[${i}].bar_cent`) + cent0(z.unbar_cent, `zeilen[${i}].unbar_cent`);
+    if (b <= 0) throw new TypeError(`zeilen[${i}]: Betrag > 0 nötig`);
+    je.set(z.steuerfall, b);
+  });
+  const notiz = nichtLeer(o.notiz) ? o.notiz.trim() : '';
+  if (notiz.length > 300) throw new TypeError('notiz: höchstens 300 Zeichen');
+  const positionen = [];
+  let summe = 0;
+  for (const sf of KASSE_STEUERFAELLE) {
+    if (!je.has(sf)) continue;
+    const b = je.get(sf);
+    const r = rest.zeilen.find((x) => x.steuerfall === sf);
+    // Nie mehr als der Verkaufstag je Satz hergibt (nach früheren Retouren); ein Satz, den der Verkaufstag nicht hat, hat den Rest 0
+    if (!r || b > r.rest_brutto_cent) throw new RangeError(`RETOURE_UEBER_VERKAUF: ${sf}`);
+    const satzR = SATZ_VON[sf];
+    const roh = satzR === null || satzR === 0 ? 0 : ustAusBrutto(b, satzR);
+    // Rundung gegen Original und frühere Retouren: Steuer höchstens der Steuer-Rest, Netto höchstens der Netto-Rest (b - ust <= rest_netto). Schließt die Zeile
+    // den Satz ab (b = Rest), ist das Intervall ein Punkt: genau der Rest.
+    const ust = Math.min(Math.max(roh, b - r.rest_netto_cent), r.rest_ust_cent);
+    positionen.push({ bez: RUECKGABE_BEZ[sf], netto_cent: 0 - (b - ust), satz_bp: satzR, ust_cent: 0 - ust });
+    summe += b;
+  }
+  let netto = 0;
+  let ust = 0;
+  for (const p of positionen) { netto += p.netto_cent; ust += p.ust_cent; }
+  // Wirkdatum und Rückzahlung am Retourentag (§ 17 Abs. 1 S. 8 UStG, R-KOR-13): nie am Verkaufstag
+  const tagWirk = o.retourentag;
+  const steuer = {
+    richtung: 'ausgang', beleg_art: 'korrektur', steuerfall: os.steuerfall, steuerfall_herkunft: 'abgeleitet',
+    positionen, summe: { netto_cent: netto, ust_cent: ust, brutto_cent: netto + ust }, waehrung: 'EUR',
+    rechnungsdatum: null, leistung: null, leistung_flags: [], rechnung_erhalt_am: null, zahlungen: [],
+    gegenpartei: null, bezug: { korrigiert_beleg_id: o.original_id }, kennzeichen: [], ausschluss: null,
+    sperrgrund: null, unbekannt_grund: null, kleinbetrag: false, version: 1,
+    herkunft: { weg: 'kasse', erfasst_am: istDatum(o.erfasst_am) ? o.erfasst_am : null, erfasst_von: 'nutzer', kern_version: nichtLeer(o.kern_version) ? o.kern_version : null },
+    wirkdatum: tagWirk, korrektur_grund: o.korrektur_grund, rueckzahlung: { datum: tagWirk, betrag_cent: summe },
+    legacy_typ: 'storno',
+  };
+  if (notiz) steuer.korrektur_notiz = notiz.slice(0, 500);
   return steuer;
 }
 
