@@ -252,6 +252,13 @@ export function meldeNachAenderung(alt, neu, heute, { korrekturElsterAm = null, 
     if (aenderungArt === 'korrektur') ev = ereignisSetzen(ev, angabeKorrektur(offen, a1.am, heute, korrekturElsterAm));
     else empfohlen = empfohlen || heute;
   }
+  // O12a M2: Wechsel über die Meldepflicht-Grenze (offene Ladenkasse -> elektronisches System) ohne Anschaffungsdatum: das Gerät war spätestens am Tag des
+  // Wechsels (art_ab) angeschafft, die Monatsfrist läuft also spätestens ab da (§ 146a Abs. 4 Satz 2 AO). Wie system_wechseln: Ereignis am Wechseltag mit Hinweis
+  // anschaffung_fehlt (die App fragt das Datum nach; ein späteres früheres Datum zieht die Frist nur nach vorn, eine abgelaufene bleibt über nieHeilen).
+  // Ein offenes Ereignis mit früherer Frist bleibt (nieSpaeter).
+  if (!meldepflichtigArt(alt.art) && meldepflichtigArt(neu.art) && !a1.am && istDatum(neu.art_ab)) {
+    ev = ereignisSetzen(ev, nieSpaeter(ereignis(a1.anlass, neu.art_ab, { anschaffungFehlt: true }), ev.find((e) => slot(e.anlass) === 'anschaffung') || null));
+  }
   // O10 M2: Ein Wegstreckenzähler „vor dem 01.07.2024“ war nicht mitzuteilen; eine Meldung der Betriebsstätte umfasste ihn deshalb nicht (kassenmeldungGemeldet
   // nimmt ihn nicht auf, Altdaten vor diesem Fix trugen trotzdem gemeldet_am). Wird er später meldepflichtig (andere Antwort oder andere Art), gilt er als nie
   // gemeldet: das Anschaffungsereignis kommt wieder (Frist aus dem Datum, auch schon abgelaufen; mit vermerkter Meldung Status aenderung_offen).
@@ -429,11 +436,16 @@ export function protokollPfadOk(pfad, { uid, meldungId }) {
 // Protokoll ließe sich nie mehr anhängen: der Pfad ist endgültig). c.deps.storageVorhanden(pfad) -> true | false, wirft bei Speicherfehlern. Fehlt die Abhängigkeit
 // oder scheitert die Prüfung: 503, nichts geschrieben (fail-closed). Löschen erlauben die Storage-Rules nicht: eine einmal geprüfte Datei bleibt.
 export async function protokollPruefen(c, pfad) {
+  return dateiImSpeicher(c, pfad, { feld: 'protokoll_pfad', fehltCode: 'PROTOKOLL_FEHLT' });
+}
+// O12a N2: gemeinsame Existenzprüfung einer Datei im Speicher (ELSTER-Protokoll, Eigenbeleg einer Bewegung). null = liegt vor; sonst die fertige Antwort:
+// 422 fehltCode (Datei fehlt) oder 503 SPEICHER_NICHT_ERREICHBAR (Prüfung nicht möglich oder Abhängigkeit fehlt), jeweils mit feld. Fail-closed.
+export async function dateiImSpeicher(c, pfad, { feld, fehltCode }) {
   const f = c.deps && typeof c.deps.storageVorhanden === 'function' ? c.deps.storageVorhanden : null;
-  if (!f) return fehlerAntwort(503, 'SPEICHER_NICHT_ERREICHBAR', c.cors, { feld: 'protokoll_pfad' });
+  if (!f) return fehlerAntwort(503, 'SPEICHER_NICHT_ERREICHBAR', c.cors, { feld });
   let da;
-  try { da = await f(pfad); } catch { return fehlerAntwort(503, 'SPEICHER_NICHT_ERREICHBAR', c.cors, { feld: 'protokoll_pfad' }); }
-  return da === true ? null : fehlerAntwort(422, 'PROTOKOLL_FEHLT', c.cors, { feld: 'protokoll_pfad' });
+  try { da = await f(pfad); } catch { return fehlerAntwort(503, 'SPEICHER_NICHT_ERREICHBAR', c.cors, { feld }); }
+  return da === true ? null : fehlerAntwort(422, fehltCode, c.cors, { feld });
 }
 
 export function pruefeMeldung(body, { heute }) {

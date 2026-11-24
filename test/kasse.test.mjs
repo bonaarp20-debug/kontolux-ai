@@ -46,6 +46,7 @@ const KASSE_ANLEGEN = { aktion: 'anlegen', bezeichnung: 'Theke', kuerzel: 'THK',
 
 function umgebung({ config = AN, profil = REGEL, agb = true, heute = HEUTE, budget, token = true } = {}) {
   const fs = fakeFirestore();
+  const dateienFehlen = new Set();
   if (config) fs.setze('config/features', config);
   if (profil) fs.setze(P('steuerprofil/aktuell'), profil);
   if (agb) fs.setze(P('agb_zustimmung/z1'), { version: typeof agb === 'string' ? agb : AGB_MINDESTFASSUNG_KASSE });
@@ -55,6 +56,8 @@ function umgebung({ config = AN, profil = REGEL, agb = true, heute = HEUTE, budg
   const deps = {
     fetchFn: fs.fetchFn, adminToken: async () => 't', heute: () => heuteAkt, jetzt: () => new Date(Date.parse(`${heuteAkt}T09:00:00Z`) + (t++) * 1000).toISOString(),
     storageUrlOk, kassenAusgabeBeleg, ...(budget ? { budget } : {}),
+    // O12a N2: Eigenbelege müssen im Speicher liegen; dateienFehlen simuliert einen abgebrochenen Upload
+    storageVorhanden: async (p) => !dateienFehlen.has(p),
   };
   const rufeRoh = async (pfad, body, d = deps, optionen = {}) => {
     const tagWert = body.geschaeftstag || (Array.isArray(body.tage) ? body.tage[body.tage.length - 1] : null) || (typeof body.bewegung_id === 'string' ? body.bewegung_id.slice(10, 20) : null);
@@ -77,7 +80,7 @@ function umgebung({ config = AN, profil = REGEL, agb = true, heute = HEUTE, budg
     return r.json.kasse_id;
   };
   const audit = () => fs.pfade(P('audit_v2/e')).map((p) => fs.lies(p));
-  return { fs, deps, kasse, tagRufe, bewRufe, rufeRoh, legeKasseAn, audit };
+  return { fs, deps, kasse, tagRufe, bewRufe, rufeRoh, legeKasseAn, audit, dateienFehlen };
 }
 
 // Tagesabschluss-Körper: 19 % bar 500,00 + Karte 300,00 (brutto), 7 % bar 107,00; Soll = 100,00 + 607,00 = 707,00
@@ -682,7 +685,8 @@ test('J1-Fix M-1: Plausibilität eines rückwirkenden Wechsels an jedem Stichtag
   const id = await u.legeKasseAn({ art: 'offene_ladenkasse', grundaufzeichnung: 'papier_kassenbuch' });
   assert.equal((await u.tagRufe(abschluss(id, '2026-11-02'))).status, 200);
   assert.equal((await u.tagRufe(abschluss(id, '2026-11-03', { gezaehlt_cent: 70700 + 60700 }))).status, 200);
-  assert.equal((await u.kasse({ aktion: 'aendern', kasse_id: id, art: 'registrierkasse', art_ab: '2026-11-04', grundaufzeichnung: 'tse_kasse', grundaufzeichnung_ab: '2026-11-04' })).status, 200);
+  // O12a M1: nach erfassten Tagen geht der Wechsel über die Meldepflicht-Grenze nur über system_wechseln (vorher hier aendern)
+  assert.equal((await u.kasse({ aktion: 'system_wechseln', kasse_id: id, gueltig_ab: '2026-11-04', art: 'registrierkasse', grundaufzeichnung: 'tse_kasse', datenquelle: 'manuell', software: 'NeuKasse' })).status, 200);
   assert.equal((await u.tagRufe(stornoBody(id, '2026-11-03'))).status, 200);
   assert.equal((await u.tagRufe(stornoBody(id, '2026-11-02'))).status, 200);
   const vorher = u.fs.lies(P(`kassen/${id}`));

@@ -6,10 +6,11 @@
 // Alle Kassen-Sammlungen schreibt nur der Worker (Firestore-Regeln: Eigentümer liest). UID nur aus dem Token (setzt der Router).
 // Prüfreihenfolge: grundpruefung (anfrage_id, Größe) -> UID -> Feature kasse (503) -> Steuerprofil bestätigt (403 PROFIL_FEHLT) -> AGB-Mindestfassung
 // (403 AGB_FEHLT) -> aktion bekannt -> Positivliste je aktion (400 FORMAT mit feld) -> Formprüfung -> fachliche Prüfung mit dem Kern (Steuerkern.pruefeKassentag,
-// kassenSoll, validiereBeleg) -> Festschreibung (409 MONAT_FESTGESCHRIEBEN) -> EIN :commit (atomar, alle Vorbedingungen). Keine Beträge in Logs und Audit.
+// kassenSoll, validiereBeleg) -> Festschreibung (409 MONAT_FESTGESCHRIEBEN; Kern und, O12b M2, Monatsabschluss des Altpfads) -> EIN :commit (atomar, alle Vorbedingungen). Keine Beträge in Logs und Audit.
 // Letzter Abschluss: Zeiger kassen/{id}.letzter_abschluss (hyg H2/N4, kasse-daten.js zeigerAus), gepflegt im Commit von Abschluss und Storno; keine Suche über Tagesplätze.
 // Gleichzeitige Änderungen: updateTime-Vorbedingungen auf Tagesplatz, Zähler, Kasse (Stammdaten und Zeiger) und Audit-Kopf (serialisiert alle Kassen-Commits eines Kontos); bei Konflikt höchstens 3 Wiederholungen
-// (die ganze Prüfung läuft neu), danach 409 KONFLIKT. Unteranfragen: höchstens etwa 12 je Aufruf (REGEL_UNTERANFRAGEN_MAX = 35).
+// (die ganze Prüfung läuft neu), danach 409 KONFLIKT. Unteranfragen: höchstens etwa 14 je Aufruf (REGEL_UNTERANFRAGEN_MAX = 35; O12: dazu die Liste der
+// Monatsabschlüsse des Altpfads bei Belegwirkung, zwei kleine Abfragen beim Kassenart-Wechsel über die Meldepflicht-Grenze, zwei Duplikat-Abfragen bei der Ausgabe).
 import * as Steuerkern from '../steuerkern/index.js';
 import {
   antwort, fehlerAntwort, featureAusAntwort, grundpruefung, istObjekt, CONFIG_PFAD, configBereinigen, featureAktiv, agbFassungenLaden, agbFassungVergleich,
@@ -23,16 +24,32 @@ import { heuteBerlin } from './oss-meldung.js';
 import { KASSE_PFADE, FEATURE, aufbewahrungBis, anhaengePruefen, nachweisPflicht, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, pruefeBewegung, kernFassung, stammKombination, PRIVAT_ARTEN, K3_INAKTIV_ERLAUBT, INAKTIV_FRAGEN_SCHLUESSEL } from './kasse-form.js';
 import {
   ausserBetrieb, ausserBetriebAufheben, betriebsstaette, kassenmeldungGemeldet, protokollNachreichen, inaktivAngaben, meldeAbleitung, meldeNachAenderung, korrekturFaellt, aenderungArtNoetig, k3Konsistenz, betriebsstaetteZuordnung, meldepflichtigArt,
-  ohneSystemDaten, ereignis, ereignisSetzen, anschaffungsEreignis, K3_LEER,
+  ohneSystemDaten, ereignis, ereignisSetzen, anschaffungsEreignis, K3_LEER, dateiImSpeicher,
 } from './kasse-register.js';
 import {
-  P, kasseIdAus, kassennummer, zeigerAus, zeigerPasst, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern, ohneStornoPaare, KasseLesefehler,
+  P, kasseIdAus, kassennummer, idBereich, zeigerAus, zeigerPasst, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern, ohneStornoPaare, KasseLesefehler,
   STAMM_FELDER, STAMMDATEN_VERLAUF_MAX, stammVerlaufAus, stammAm, stammVerlaufMit, stammVerlaufStart, stammVerlaufVerdichten,
 } from './kasse-daten.js';
 
 export { KASSE_PFADE, FEATURE, aufbewahrungBis, pruefeKasse, pruefeKassentag };
 export const BEWEGUNGEN_MAX_JE_TAG = 999;
-export const KASSEN_MAX = 20; // Missbrauchsgrenze je Konto (Oberfläche: bis 3 Kassen, danach Hinweis)
+// O12a N3: Missbrauchsgrenzen je Konto. KASSEN_MAX zählt nur Kassen in Betrieb (aktiv !== false, mit oder ohne eigenes Kassenbuch; Oberfläche: bis 3 Kassen,
+// danach Hinweis): Kassen außer Betrieb und die Archiv-Einträge eines Systemwechsels (aktiv false) sperren keine neue Kasse. Damit Wechsel und Außerbetriebnahmen
+// nicht unbegrenzt Dokumente erzeugen, gilt für ALLE Kassen-Dokumente (auch Archiv-Einträge) KASSEN_EINTRAEGE_MAX, geprüft bei anlegen und system_wechseln
+// (422 KASSEN_MAX mit grund 'eintraege'). 200 reicht für jahrzehntelangen Betrieb (Kassen werden alle paar Jahre ersetzt) und bleibt unter einer Leseseite von
+// listeAlle (300); gelesen wird vollständig mit Weiterblättern (fail-closed über listeAlle).
+export const KASSEN_MAX = 20;
+export const KASSEN_EINTRAEGE_MAX = 200;
+const kassenLesen = async (fs, uid) => (await listeAlle(fs, `users/${uid}/kassen`)).dokumente.filter((d) => istObjekt(d.daten));
+// O12a N4: Ziel von bestand_in_kasse_id ist eine Kasse in Betrieb mit eigenem Kassenbuch (sonst sagt die App „Erfasse in …“ und dort käme 422: Sackgasse;
+// auch keine Ketten über Kassen ohne Kassenbuch). Rückgabe: null oder die Antwort (404 unbekannt, 400 FORMAT mit grund).
+function bestandZielFehler(liste, zielId, eigeneId, cors) {
+  const ziel = zielId === eigeneId ? null : liste.find((d) => idVon(d) === zielId);
+  if (!ziel) return fehlerAntwort(404, 'KASSE_UNBEKANNT', cors, { feld: 'bestand_in_kasse_id' });
+  if (ziel.daten.aktiv === false) return formFehler({ code: 'FORMAT', feld: 'bestand_in_kasse_id', grund: 'ziel_ausser_betrieb' }, cors);
+  if (ziel.daten.kassenbuch === false) return formFehler({ code: 'FORMAT', feld: 'bestand_in_kasse_id', grund: 'ziel_ohne_kassenbuch' }, cors);
+  return null;
+}
 export const FASSUNGEN_MAX = 3; // Original und zwei Neuerfassungen (Kap. 6 Nr. 18)
 export const WIEDERHOLUNGEN_MAX = 3; // Wiederholungen bei gleichzeitiger Änderung (2.3 Atomarer Commit, Zähler)
 const BODY_MAX_ZEICHEN = 30000;
@@ -54,6 +71,26 @@ const KERN_STATUS = { ANHANG_ODER_BESTAETIGUNG: [422, 'ANHANG_FEHLT'], TAGESSALD
 const idVon = (d) => String(d.pfad).split('/').pop();
 // Gesperrte Perioden (Festschreibung läuft oder festgeschrieben). Wird in JEDEM Versuch einer Wiederholung neu gelesen (O6 M3): startet zwischen Lesen und Commit eine Festschreibung, scheitert der Commit am Audit-Kopf und der nächste Versuch muss die neue Liste sehen.
 const festPeriodenLesen = async (fs, uid) => (await listeAlle(fs, P.festschreibungen(uid))).dokumente.filter((d) => SPERRENDE.includes(d.daten && d.daten.status)).map(idVon);
+// O12b M2: festgeschriebener Monatsabschluss des Altpfads (users/{uid}/monatsabschluesse). Die App speichert jeden Monatsabschluss mit festgeschrieben: true unter
+// der ID „<Monatsname>-<Jahr>“ (index.html maDocId, z. B. „November-2026“); Entsperren setzt festgeschrieben: false mit Grund. Die Übernahme in die Kern-Festschreibung
+// läuft nur einmal je Konto, spätere Monatsabschlüsse kennt der Kern nicht. Eine Erfassung im Kassenbuch (Abschluss, Nacherfassung, Storno, Ausgabe, Storno einer
+// Ausgabe) mit Belegwirkung in einem solchen Monat würde dessen Zahlen still veralten lassen: 409 MONAT_FESTGESCHRIEBEN mit quelle 'monatsabschluss' und
+// hinweis 'monatsabschluss_entsperren' (perioden bleibt leer: es ist kein Kern-Zeitraum, die Kern-Aktion „Monat entsperren“ hülfe nicht).
+// Wie der DATEV-Import der App (datevImportSperrenAus) zählt neben der ID auch jedes Dokument mit passenden Feldern monat/jahr (ältere Speicherwege). Gelesen wird die
+// ganze Sammlung (ein Dokument je Monat, eine Seite für 25 Jahre), in jedem Versuch neu; Lesefehler werfen (fail-closed, nie eine geratene Entwarnung).
+export const MA_MONATE = Object.freeze(['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember']);
+export const monatsabschlussId = (tag) => `${MA_MONATE[Number(tag.slice(5, 7)) - 1]}-${Number(tag.slice(0, 4))}`;
+const maMonatNorm = (m) => MA_MONATE.find((x) => x.toLowerCase() === String(m ?? '').trim().toLowerCase()) || null;
+async function altMonatsabschlussSperre(c, tag) {
+  const id = monatsabschlussId(tag);
+  const monat = MA_MONATE[Number(tag.slice(5, 7)) - 1];
+  const jahr = Number(tag.slice(0, 4));
+  const docs = (await listeAlle(c.fs, `users/${c.uid}/monatsabschluesse`)).dokumente;
+  const fest = docs.some((d) => istObjekt(d.daten) && d.daten.festgeschrieben === true
+    && (idVon(d) === id || (maMonatNorm(d.daten.monat) === monat && Number.parseInt(String(d.daten.jahr), 10) === jahr)));
+  if (!fest) return null;
+  return fehlerAntwort(409, 'MONAT_FESTGESCHRIEBEN', c.cors, { perioden: [], quelle: 'monatsabschluss', monatsabschluss_id: id, monat: tag.slice(0, 7), hinweis: 'monatsabschluss_entsperren' });
+}
 const kassennamen = (k) => (typeof k.bezeichnung === 'string' ? k.bezeichnung : 'Kasse');
 const datumDe = (tag) => `${tag.slice(8, 10)}.${tag.slice(5, 7)}.${tag.slice(0, 4)}`;
 
@@ -172,12 +209,12 @@ async function kasseAktion(c, aktion) {
     }
     if (!nachweis && nachweisPflicht(w)) return fehlerAntwort(422, 'ANHANG_FEHLT', cors, { feld: 'anfangsbestand_nachweis' });
     return mitWiederholung(fs, async () => {
-      const [docs, liste] = await Promise.all([fs.batchGet([P.kasse(uid, id), kopfPfad(uid)]), fs.list(`users/${uid}/kassen`, { pageSize: 100 })]);
+      const [docs, vorhanden] = await Promise.all([fs.batchGet([P.kasse(uid, id), kopfPfad(uid)]), kassenLesen(fs, uid)]);
       if (docs.get(P.kasse(uid, id))) return { antwort: antwort({ ok: true, kasse_id: id, idempotent: true }, 200, cors) };
-      const vorhanden = liste.dokumente.filter((d) => istObjekt(d.daten));
-      if (vorhanden.length >= KASSEN_MAX) return { antwort: fehlerAntwort(422, 'KASSEN_MAX', cors) };
+      if (vorhanden.filter((d) => d.daten.aktiv !== false).length >= KASSEN_MAX) return { antwort: fehlerAntwort(422, 'KASSEN_MAX', cors, { max: KASSEN_MAX }) };
+      if (vorhanden.length >= KASSEN_EINTRAEGE_MAX) return { antwort: fehlerAntwort(422, 'KASSEN_MAX', cors, { max: KASSEN_EINTRAEGE_MAX, grund: 'eintraege' }) };
       if (vorhanden.some((d) => d.daten.kuerzel === w.kuerzel && d.daten.kassenbuch !== false)) return { antwort: fehlerAntwort(409, 'KUERZEL_VERGEBEN', cors, { feld: 'kuerzel' }) };
-      if (w.bestand_in_kasse_id && !vorhanden.some((d) => idVon(d) === w.bestand_in_kasse_id)) return { antwort: fehlerAntwort(404, 'KASSE_UNBEKANNT', cors, { feld: 'bestand_in_kasse_id' }) };
+      if (w.bestand_in_kasse_id) { const bz = bestandZielFehler(vorhanden, w.bestand_in_kasse_id, id, cors); if (bz) return { antwort: bz }; }
       // W2-W2: Betriebsstätte muss existieren und darf nicht aufgegeben sein
       const bsFehler = await betriebsstaetteZuordnung(fs, uid, null, w.k3.betriebsstaette_id ?? null, cors);
       if (bsFehler) return { antwort: bsFehler };
@@ -225,8 +262,13 @@ async function kasseAktion(c, aktion) {
     // Außerbetriebnahme), keine Stammdaten des Kassenbuchs
     if (alt.aktiv === false && (aktion !== 'aendern' || Object.keys(w.felder).some((k) => !K3_INAKTIV_ERLAUBT.includes(k)))) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors) };
     // W2-W2: Kassenart über die Meldepflicht-Grenze (offene Ladenkasse <-> elektronisches System) nur, solange nichts gemeldet und nichts erfasst ist (Korrektur);
-    // sonst über system_wechseln, damit das alte System als Register-Eintrag für die Mitteilung bleibt
-    if (aktion === 'aendern' && w.felder.art !== undefined && meldepflichtigArt(w.felder.art) !== meldepflichtigArt(alt.art) && !ohneSystemDaten(alt)) {
+    // sonst über system_wechseln, damit das alte System als Register-Eintrag für die Mitteilung bleibt.
+    // O12a M1: „nichts erfasst“ heißt jetzt wirklich: keine Systemdaten, kein Zeiger auf einen Abschluss, kein Tagesplatz (abgeschlossen, Ruhetag oder storniert)
+    // und keine Bewegung der Kasse. Nur dann wirkt der Wechsel ab dem Anfangsbestand, also für die ganze Lebenszeit der Kasse (echte Korrektur einer falschen
+    // Angabe). Hat die Kasse schon einen Tag, gilt der Wechsel erst ab dem nächsten freien Tag; das System lief also bis dahin und muss als Register-Eintrag
+    // bleiben (Anschaffung und Außerbetriebnahme sind mitzuteilen, § 146a Abs. 4 AO). Zwei Unteranfragen (je limit 1), nur bei einem solchen Wechsel.
+    if (aktion === 'aendern' && w.felder.art !== undefined && meldepflichtigArt(w.felder.art) !== meldepflichtigArt(alt.art)
+      && (!ohneSystemDaten(alt) || !(await ohneErfassung(fs, uid, id, alt)))) {
       return { antwort: formFehler({ code: 'FORMAT', feld: 'art', grund: 'nur_ueber_system_wechseln' }, cors) };
     }
     const neu = {};
@@ -288,8 +330,8 @@ async function kasseAktion(c, aktion) {
         if (JSON.stringify(alt[k] ?? null) !== JSON.stringify(v)) { neu[k] = v; geaendert.push(k); }
       }
       if (neu.bestand_in_kasse_id) {
-        const liste = await fs.list(`users/${uid}/kassen`, { pageSize: 100 });
-        if (neu.bestand_in_kasse_id === id || !liste.dokumente.some((d) => idVon(d) === neu.bestand_in_kasse_id)) return { antwort: fehlerAntwort(404, 'KASSE_UNBEKANNT', cors, { feld: 'bestand_in_kasse_id' }) };
+        const bz = bestandZielFehler(await kassenLesen(fs, uid), neu.bestand_in_kasse_id, id, cors);
+        if (bz) return { antwort: bz };
       }
       // O8 M1/M2: Antworten zur Außerbetriebnahme (nur außer Betrieb; das Gerät nicht mehr nach gemeldeter Außerbetriebnahme), normalisiert
       const ia = inaktivAngaben(alt, w.felder);
@@ -321,6 +363,8 @@ async function kasseAktion(c, aktion) {
       if (m.meldestatus !== alt.meldestatus || m.frist_bis !== (alt.frist_bis ?? null)) geaendert.push('meldestatus');
     } else {
       // system_wechseln: das alte System bleibt als eigener Eintrag (kassenbuch false) erhalten, die Kasse behält Bestand und Kassenbuch (2.11 C.11)
+      // O12a N3: auch Archiv-Einträge zählen gegen KASSEN_EINTRAEGE_MAX (sonst erzeugten Wechsel unbegrenzt Dokumente)
+      if ((await kassenLesen(fs, uid)).length >= KASSEN_EINTRAEGE_MAX) return { antwort: fehlerAntwort(422, 'KASSEN_MAX', cors, { max: KASSEN_EINTRAEGE_MAX, grund: 'eintraege' }) };
       const alterTag = Steuerkern.addiereTage(w.gueltig_ab, -1);
       // W2-W2: der Eintrag trägt ALLE Register-Angaben des alten Systems und dessen Meldestand; die Außerbetriebnahme (letzter Tag des alten Systems) ist ein
       // Meldeereignis mit Frist (Gegenlesung M-3: frist_bis auch bei system_wechseln). Eine offene Anschaffung des alten Systems bleibt mit ihrer früheren Frist.
@@ -371,6 +415,17 @@ async function kasseAktion(c, aktion) {
     const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{ aktion: aktionAudit, ziel: `kassen/${id}`, vorher: alt, nachher: neuKasse, details: { kasse_id: id, felder: [...new Set(geaendert)].sort().slice(0, 20), ...(w.korrektur_elster_am ? { korrektur_elster_am: w.korrektur_elster_am } : {}), ...(w.aenderung_art ? { aenderung_art: w.aenderung_art } : {}) } }], zeit);
     return { writes: [...writes, ...audit.writes], erfolg: () => antwort({ ok: true, kasse_id: id, ...(archiv ? { archiv_kasse_id: archiv.id } : {}) }, 200, cors) };
   });
+}
+
+// O12a M1: Hat die Kasse noch nichts im Kassenbuch? Zeiger leer, kein Tagesplatz jeder Art (auch storniert) und keine Bewegung (auch storniert). Lesefehler
+// werfen (fail-closed, nie ein geratenes „nichts erfasst“). Ein ungültiger Zeiger wirft KasseLesefehler (503).
+async function ohneErfassung(fs, uid, kasseId, kasse) {
+  if (zeigerAus(kasse.letzter_abschluss)) return false;
+  const [tage, bew] = await Promise.all([
+    fs.runQuery(`users/${uid}`, idBereich(uid, 'kassentage', `${kasseId}_0000-00-00`, `${kasseId}_9999-99-99`, { limit: 1 })),
+    fs.runQuery(`users/${uid}`, idBereich(uid, 'kassenbewegungen', `${kasseId}_0000-00-00_000`, `${kasseId}_9999-99-99_999`, { limit: 1 })),
+  ]);
+  return tage.length === 0 && bew.length === 0;
 }
 
 // Nächster freier Tag der Kasse: der Tag nach dem letzten Tagesplatz mit status abgeschlossen oder ruhetag, sonst der Anfangsbestandstag
@@ -629,6 +684,8 @@ async function abschliessen(c) {
     const perioden = [...new Set(belege.flatMap((b) => wirkPerioden(b.beleg, profil, kernOptionen)))].sort();
     const gesperrt = perioden.filter((p) => festPerioden.includes(p));
     if (gesperrt.some((p) => p.startsWith('euer-'))) return { antwort: fehlerAntwort(409, 'MONAT_FESTGESCHRIEBEN', cors, { perioden: gesperrt }) };
+    // O12b M2: festgeschriebener Monatsabschluss des Altpfads (Monat des Geschäftstags, dort liegen alle Belege des Tages)
+    if (belege.length) { const alt = await altMonatsabschlussSperre(c, tag); if (alt) return { antwort: alt }; }
     const nachFest = gesperrt.length ? { nach_festschreibung: { perioden: gesperrt, erkannt_am: zeit } } : {};
     for (const b of belege) Object.assign(b.dok, nachFest);
 
@@ -882,6 +939,8 @@ async function stornieren(c) {
     const perioden = [...new Set(storni.flatMap((x) => x.perioden))].sort();
     const gesperrt = perioden.filter((p) => festPerioden.includes(p));
     if (gesperrt.some((p) => p.startsWith('euer-'))) return { antwort: fehlerAntwort(409, 'MONAT_FESTGESCHRIEBEN', cors, { perioden: gesperrt }) };
+    // O12b M2: der Storno wirkt im Monat des Geschäftstags; ein dort festgeschriebener Monatsabschluss des Altpfads sperrt ihn
+    if (storni.length) { const alt = await altMonatsabschlussSperre(c, tag); if (alt) return { antwort: alt }; }
     const nachFest = gesperrt.length ? { nach_festschreibung: { perioden: gesperrt, erkannt_am: zeit } } : {};
     const ts = zeitstempel(zeit);
     const stornoDocs = storni.map((x) => ({ id: x.id, dok: { ...dokumentAus(x.kandidat, { zeit, kasse, kasseId, tagId, n, nummer: nr, anhaenge: null, tag, einnahme: false, storno: true }), ...nachFest } }));
@@ -964,6 +1023,13 @@ async function bewegungAnlegen(c) {
     if (typeof deps.kassenAusgabeBeleg !== 'function') return fehlerAntwort(503, 'VORUEBERGEHEND_ABGESCHALTET', cors);
     kernOptionen = await kernOptionenFuerKontoLaden(uid, config, { fs, streng: true });
   }
+  // O12a N2: der Eigenbeleg (Entnahme, Einlage, Wechselgeld-Einlage) ist der einzige Beleg des Privatvorgangs; Bewegung und Privatvorgang sind danach
+  // unveränderlich. Er muss also wirklich im Speicher liegen (wie das ELSTER-Protokoll, O9a N4): fehlt er 422 ANHANG_FEHLT, ist der Speicher nicht prüfbar
+  // 503 SPEICHER_NICHT_ERREICHBAR, jeweils mit feld eigenbeleg_pfad und ohne Schreiben. Eine Prüfung je Aufruf (die Datei lässt sich nicht löschen, Storage-Regeln).
+  if (w.eigenbeleg_pfad) {
+    const fehlt = await dateiImSpeicher(c, w.eigenbeleg_pfad, { feld: 'eigenbeleg_pfad', fehltCode: 'ANHANG_FEHLT' });
+    if (fehlt) return fehlt;
+  }
   return mitWiederholung(fs, async () => {
     const docs = await fs.batchGet([P.kasse(uid, kasseId), P.kassentag(uid, tagId), P.zaehler(uid, kasseId, jahr), kopfPfad(uid), ...(w.gegenkasse_id ? [P.kasse(uid, w.gegenkasse_id)] : [])]);
     const kasseDok = docs.get(P.kasse(uid, kasseId));
@@ -971,6 +1037,8 @@ async function bewegungAnlegen(c) {
     if (w.gegenkasse_id && !docs.get(P.kasse(uid, w.gegenkasse_id))) return { antwort: fehlerAntwort(404, 'KASSE_UNBEKANNT', cors, { feld: 'gegenkasse_id' }) };
     // W2-W2: kein Geldtransit mit einer Kasse außer Betrieb (ihr Bestand ist 0 und bleibt es; Geld dorthin wäre nirgends mehr gezählt)
     if (w.gegenkasse_id && docs.get(P.kasse(uid, w.gegenkasse_id)).daten?.aktiv === false) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors, { feld: 'gegenkasse_id' }) };
+    // O12a N5: auch nicht mit einer Kasse ohne eigenes Kassenbuch (ihr Bestand steht in einer anderen Kasse und wird nie gezählt; der Betrag fehlte in jeder Soll-Rechnung)
+    if (w.gegenkasse_id && docs.get(P.kasse(uid, w.gegenkasse_id)).daten?.kassenbuch === false) return { antwort: fehlerAntwort(422, 'KASSE_OHNE_KASSENBUCH', cors, { feld: 'gegenkasse_id' }) };
     const bisher = await bewegungenDesTages(fs, uid, kasseId, tag);
     // Wiederholung derselben Anfrage (Netzabbruch): bestätigen, nie ein zweites Mal schreiben
     const gleiche = bisher.find((d) => d.daten.anfrage_id === body.anfrage_id);
@@ -1001,6 +1069,9 @@ async function bewegungAnlegen(c) {
         if (a.codes.includes('PF_ZAHLUNG_GESPERRT')) return { antwort: fehlerAntwort(409, 'MONAT_FESTGESCHRIEBEN', cors, { perioden: gesperrtP }) };
         return { antwort: fehlerAntwort(422, 'BELEG_UNGUELTIG', cors, { codes: a.codes.filter((x) => /^[A-Za-z0-9_]{1,64}$/.test(x)).slice(0, 10) }) };
       }
+      // O12b M2: die Barzahlung liegt am Geschäftstag; ein dort festgeschriebener Monatsabschluss des Altpfads sperrt die Ausgabe
+      const altSperre = await altMonatsabschlussSperre(c, tag);
+      if (altSperre) return { antwort: altSperre };
       // Die Bewegung ist die Barzahlung des ganzen Belegs: gleicher Betrag (sonst stimmt der Kassenbestand nicht mit der Buchung überein)
       if (a.brutto_cent !== w.betrag_cent) return { antwort: formFehler({ code: 'FORMAT', feld: 'betrag_cent', grund: 'beleg_summe', beleg_brutto_cent: a.brutto_cent }, cors) };
       gesperrt = a.nach_festschreibung || [];
@@ -1098,6 +1169,9 @@ async function bewegungStornieren(c) {
       const perioden = kb ? wirkPerioden(kb, profil, kernOptionen) : [];
       gesperrt = perioden.filter((p) => festPerioden.includes(p));
       if (gesperrt.some((p) => p.startsWith('euer-'))) return { antwort: fehlerAntwort(409, 'MONAT_FESTGESCHRIEBEN', cors, { perioden: gesperrt }) };
+      // O12b M2: der Storno der Ausgabe nimmt die Zahlung am Geschäftstag zurück; ein dort festgeschriebener Monatsabschluss des Altpfads sperrt ihn
+      const altSperre = await altMonatsabschlussSperre(c, tag);
+      if (altSperre) return { antwort: altSperre };
       writes.push(schreibe.aendern(P.beleg(uid, orig.beleg_id), {
         storniert: true, storniert_am: ts, storno_grund: grund, ...(gesperrt.length ? { nach_festschreibung: { perioden: gesperrt, erkannt_am: zeit } } : {}),
       }, ['storniert', 'storniert_am', 'storno_grund', ...(gesperrt.length ? ['nach_festschreibung'] : [])], { updateTime: bd.updateTime }));

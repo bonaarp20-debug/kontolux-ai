@@ -36,6 +36,7 @@ import {
 import { schreibe, vorbedingungAus } from './firestore.js';
 import { stammVerlaufAus, stammAm, idBereich } from './kasse-daten.js';
 import { heuteBerlin } from './oss-meldung.js';
+import { profilBereit } from './schreibweg-v2.js';
 
 export const KASSE_ZBON_PFAD = '/kasse-zbon-lesen';
 export const PFAD = KASSE_ZBON_PFAD;
@@ -786,9 +787,9 @@ export async function regelKasseZbonLesen(body, env, cors = {}, deps = {}) {
     // 3. Schalter kasse UND kasse_ki (fehlend = aus)
     const config = configBereinigen((await fs.get(CONFIG_PFAD))?.daten);
     if (!featureAktiv(config, 'kasse') || !featureAktiv(config, 'kasse_ki')) return featureAusAntwort(cors);
-    // 4. Steuerprofil bestätigt
+    // 4. Steuerprofil bestätigt. O12a N7: dieselbe Prüfung wie /kasse* (profilBereit: status_verlauf vorhanden und bestaetigt_am oder bestaetigt true)
     const profilDok = await fs.get(`users/${uid}/steuerprofil/aktuell`);
-    if (!profilDok || !istObjekt(profilDok.daten) || !profilDok.daten.bestaetigt_am) return fehler(403, 'PROFIL_FEHLT', cors);
+    if (!profilDok || !istObjekt(profilDok.daten) || !profilBereit(profilDok.daten)) return fehler(403, 'PROFIL_FEHLT', cors);
     // 5. AGB-Mindestfassung der Kassenbuch-Fassung (ohne bekannte Fassung: fail-closed)
     const fassung = deps.agbMindestfassungKasse;
     if (typeof fassung !== 'string' || !fassung || !(await agbZustimmungAb(uid, fassung, { fs, streng: true }))) return fehler(403, 'AGB_FEHLT', cors);
@@ -798,6 +799,10 @@ export async function regelKasseZbonLesen(body, env, cors = {}, deps = {}) {
     if (!kasseDok || !istObjekt(kasseDok.daten)) return fehler(404, 'KASSE_UNBEKANNT', cors);
     const kasse = kasseDok.daten;
     if (kasse.aktiv !== true) return fehler(422, 'KASSE_INAKTIV', cors);
+    // O12a N6: eine Kasse ohne eigenes Kassenbuch hat keinen Tagesabschluss (der Abschluss lehnt mit 422 KASSE_OHNE_KASSENBUCH ab): kein KI-Aufruf, kein Zähler.
+    // Code FORMAT (feld kasse_id, grund ohne_kassenbuch): ihn kennt der Z-Bon-Dialog der App schon (Text, kein „nochmal“); die App blendet den Knopf bei solchen
+    // Kassen ohnehin aus, es geht nur um den Selbstschutz des Workers.
+    if (kasse.kassenbuch === false) return fehler(400, 'FORMAT', cors, { feld: 'kasse_id', grund: 'ohne_kassenbuch' });
     // K1-Fix N-5 (Gegenlesung E): die Datenquelle AM GESCHÄFTSTAG des Dialogs (Stammdaten-Historie der Kasse), nicht die von heute: ein stornierter Tag aus der
     // manuellen Zeit einer Kasse, die heute über SumUp läuft, bekommt KI-Hilfe; ein Tag aus der SumUp-Zeit nicht. Ohne gültiges Datum (400 FORMAT folgt unten), ohne
     // Historie (Kasse vor J1) oder ohne Eintrag am Tag: der Wert der Kasse wie bisher (der Abschluss prüft danach selbst mit dem Wert am Tag). Historie unlesbar: 503.

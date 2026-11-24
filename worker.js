@@ -23,7 +23,7 @@ import { kassenPrueferDaten, kassenPrueferFortsetzung } from './regel/kasse-date
 import { kassenAusgabeBeleg } from './regel/kasse-ausgabe.js'; // KASSE-P1b-4: Ausgabe aus der Kasse über den Beleg-Schreibweg v2
 import { regelEzbKurs } from './regel/ezb-kurs.js'; // WORKER-C (Release C, BP-29)
 import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // KX-WC2 (Release C, BP-30 DATEV-Teil)
-import { rechnungsnrDuplikat, rechnungsnrVarianten, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c); O11 N2 Varianten
+import { rechnungsnrDuplikat, rechnungsnrAbfragen, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c); O11 N2 Varianten; O12a N1 gemeinsame Abfragen
 import { datevMischsatzGruppen, datevKorrekturGruppen, KORREKTUR_BELEG_ARTEN } from './regel/datev-mischsatz.js'; // Branch datev-mischsatz: Belege mit mehreren Steuersätzen je Satz buchen
 import { dekodiereFelder as datevDekodiereFelder } from './regel/firestore.js';
 import { DATEV_KASSE_KONTEN, KASSE_UMSATZ_STEUERFAELLE, KASSE_DURCHLAUF_KONTO, KASSE_ERLOES_0_KONTO, KASSE_MEHRZWECK_KONTO, kassenKontoWahl, istKasseTagesbeleg, kasseBelegPlan, kasseBewegungBuchung, kasseBewegungOhneBuchung, kasseGeldtransitGegenbein, kasseTagesPosten, istSumupBarbeleg, sumupKasseWahl } from './regel/datev-kasse.js'; // Kassenbuch P1b-5: DATEV-Kassenzweig
@@ -4958,13 +4958,9 @@ async function belegeMitRechnungsnr(userId, token, rechnungsnr, absender) {
     const rows = await res.json();
     return Array.isArray(rows) ? rows.filter(r => r.document).map(r => r.document) : [];
   };
-  const nr = String(rechnungsnr).trim();
-  const gleich = (feld, wert) => ({ fieldFilter: { field: { fieldPath: feld }, op: 'EQUAL', value: { stringValue: wert } } });
-  const [gezielt, breit] = await Promise.all([
-    lauf({ compositeFilter: { op: 'AND', filters: [gleich('rechnungsnr', nr), gleich('absender', String(absender).trim())] } }, 20),
-    lauf({ fieldFilter: { field: { fieldPath: 'rechnungsnr' }, op: 'IN', value: { arrayValue: { values: rechnungsnrVarianten(rechnungsnr).map((v) => ({ stringValue: v })) } } } }, 100),
-  ]);
-  return [...gezielt, ...breit];
+  // O12a N1: die Abfragen stehen in regel/duplikat.js (rechnungsnrAbfragen), dieselben nutzt die Ausgabe aus der Kasse
+  const ergebnisse = await Promise.all(rechnungsnrAbfragen(rechnungsnr, absender).map((q) => lauf(q.where, q.limit)));
+  return ergebnisse.flat();
 }
 
 // Warnung (nie Ablehnung), wenn dieselbe Nummer vom selben Absender mit gleichem Typ schon liegt. Fehler beim Lesen = keine Warnung.

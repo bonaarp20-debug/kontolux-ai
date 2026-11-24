@@ -1002,3 +1002,21 @@ test('O9a N8: JPEG mit APP1/EXIF-Vorschaubild (eigener SOF im Segment) vor dem e
   const progressiv = Buffer.concat([Buffer.from([0xFF, 0xD8]), seg(0xE0, [...Buffer.from('JFIF\0'), 1, 1, 0, 0, 1, 0, 1, 0, 0]), dqt, dht, sof(0xC2, 9000, 2000), dht, Buffer.from([0xFF, 0xDA])]);
   assert.deepEqual(zbonBildMasse(progressiv, 'image/jpeg'), { breite: 9000, hoehe: 2000 });
 });
+
+// O12a N6/N7 (Gesamtlesung O12a): Kasse ohne eigenes Kassenbuch vor KI-Aufruf und Zähler 422; Steuerprofil wie /kasse* (profilBereit)
+test('O12a N6: Kasse ohne eigenes Kassenbuch 400 FORMAT (feld kasse_id, grund ohne_kassenbuch), kein KI-Aufruf, kein Zähler', async () => {
+  const r = await abgelehnt(umgebung({ kasse: { kassenbuch: false, bestand_in_kasse_id: 'kziel0001' } }), {}, 400, 'FORMAT');
+  assert.deepEqual([r.json.feld, r.json.grund], ['kasse_id', 'ohne_kassenbuch']);
+  const ok = umgebung({ kasse: { kassenbuch: true } });
+  assert.equal((await ok.rufe()).status, 200);
+});
+
+test('O12a N7: Steuerprofil wie /kasse* (profilBereit): Altform bestaetigt true ohne bestaetigt_am geht; bestaetigt_am ohne status_verlauf 403 vor jedem Aufruf', async () => {
+  const alt = umgebung();
+  alt.fs.setze(`users/${UID}/steuerprofil/aktuell`, { bestaetigt: true, status_verlauf: [{ gueltig_ab: '2024-01-01', status: 'regel', grund: 'beginn' }] });
+  const r = await alt.rufe();
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  const leer = umgebung();
+  leer.fs.setze(`users/${UID}/steuerprofil/aktuell`, { bestaetigt_am: '2026-11-01T08:00:00.000Z', status_verlauf: [] });
+  await abgelehnt(leer, {}, 403, 'PROFIL_FEHLT');
+});

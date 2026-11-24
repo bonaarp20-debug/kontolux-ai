@@ -15,6 +15,18 @@ export function rechnungsnrVarianten(rechnungsnr) {
   if (!nr) return [];
   return [...new Set([nr, roh, nr + ' ', ' ' + nr, ' ' + nr + ' ', nr.toUpperCase(), nr.toLowerCase()])].filter(Boolean).slice(0, 10);
 }
+// O11 N2 / O12a N1: die beiden Abfragen der Duplikat-Prüfung (Chat, Belegarchiv und Ausgabe aus der Kasse gleich; nur Gleichheits-/IN-Filter, kein Index nötig):
+// (1) gezielt Nummer + Absender, höchstens 20, damit viele Belege anderer Absender mit kurzer Nummer den richtigen nicht verdrängen;
+// (2) breit über die Schreibweisen der Nummer (Leerzeichen am Rand, Groß/Klein), höchstens 100. Rückgabe: Liste von { where, limit } (structuredQuery-Teile).
+export function rechnungsnrAbfragen(rechnungsnr, absender) {
+  const nr = String(rechnungsnr ?? '').trim();
+  if (!nr) return [];
+  const gleich = (feld, wert) => ({ fieldFilter: { field: { fieldPath: feld }, op: 'EQUAL', value: { stringValue: wert } } });
+  return [
+    { where: { compositeFilter: { op: 'AND', filters: [gleich('rechnungsnr', nr), gleich('absender', String(absender ?? '').trim())] } }, limit: 20 },
+    { where: { fieldFilter: { field: { fieldPath: 'rechnungsnr' }, op: 'IN', value: { arrayValue: { values: rechnungsnrVarianten(rechnungsnr).map((v) => ({ stringValue: v })) } } } }, limit: 100 },
+  ];
+}
 export function rechnungsnrDuplikat(dokumente, { rechnungsnr, absender, typ, mwst_satz } = {}) {
   const nr = dupNorm(rechnungsnr);
   const ab = dupNorm(absender);

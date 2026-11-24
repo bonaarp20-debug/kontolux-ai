@@ -72,7 +72,7 @@ async function welt({ skr = 'SKR03', profil = REGEL, settings = {}, kasseExtra =
   fs.setze(P('profil/settings'), { datev_skr: skr, datev_bankkonto: skr === 'SKR04' ? '1800' : '1200', datev_berater_nr: '1001', datev_mandanten_nr: '1', kleinunternehmer: profil === KU ? 'Ja' : 'Nein', ...settings });
   let t = 0;
   let heuteAkt = HEUTE;
-  const deps = { fetchFn: fs.fetchFn, adminToken: async () => 't', heute: () => heuteAkt, jetzt: () => new Date(Date.parse(`${heuteAkt}T09:00:00Z`) + (t++) * 1000).toISOString(), storageUrlOk, kassenAusgabeBeleg };
+  const deps = { fetchFn: fs.fetchFn, adminToken: async () => 't', heute: () => heuteAkt, jetzt: () => new Date(Date.parse(`${heuteAkt}T09:00:00Z`) + (t++) * 1000).toISOString(), storageUrlOk, kassenAusgabeBeleg, storageVorhanden: async () => true };
   const ruf = async (pfad, body) => {
     const tag = body.geschaeftstag || null;
     heuteAkt = typeof tag === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(tag) && tag <= HEUTE ? tag : HEUTE;

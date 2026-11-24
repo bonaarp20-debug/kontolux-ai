@@ -6,7 +6,7 @@
 // Die Zahlung ist immer eine Barzahlung (kanal 'bar') über den ganzen Betrag am Geschäftstag; Zahlungen aus der Eingabe werden ignoriert.
 import * as Steuerkern from '../steuerkern/index.js';
 import { v2Entscheiden } from './schreibweg-v2.js';
-import { rechnungsnrDuplikat, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './duplikat.js';
+import { rechnungsnrDuplikat, rechnungsnrAbfragen, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './duplikat.js';
 import { kodiereFelder, zeitstempel } from './firestore.js';
 import { istObjekt } from './gemeinsam.js';
 import { aufbewahrungBis } from './kasse-form.js';
@@ -63,11 +63,12 @@ export async function kassenAusgabeBeleg(eingabe, ctx) {
     steuer,
   };
   if (e.nach_festschreibung && e.nach_festschreibung.length) dok.nach_festschreibung = { perioden: e.nach_festschreibung, erkannt_am: zeit };
-  // Duplikat-Backstop (0.5 c): gleiche Rechnungsnummer vom selben Absender, nur Warnung
+  // Duplikat-Backstop (0.5 c): gleiche Rechnungsnummer vom selben Absender, nur Warnung. O12a N1: dieselben Abfragen wie Chat und Belegarchiv (O11 N2: gezielt
+  // Nummer + Absender, breit über die Schreibweisen der Nummer) und derselbe normalisierte Vergleich; Lesefehler = keine Warnung (nie eine Ablehnung).
   let warnung = null;
   if (rechnungsnr && fs) {
     try {
-      const treffer = await fs.runQuery(`users/${uid}`, { from: [{ collectionId: 'dokumente' }], where: { fieldFilter: { field: { fieldPath: 'rechnungsnr' }, op: 'EQUAL', value: { stringValue: rechnungsnr } } }, limit: 20 });
+      const treffer = (await Promise.all(rechnungsnrAbfragen(rechnungsnr, absender).map((q) => fs.runQuery(`users/${uid}`, { from: [{ collectionId: 'dokumente' }], where: q.where, limit: q.limit })))).flat();
       if (rechnungsnrDuplikat(treffer.map((d) => ({ fields: kodiereFelder(d.daten) })), { rechnungsnr, absender, typ: lf.typ, mwst_satz: alt.mwst_satz })) warnung = RECHNUNGSNR_DUPLIKAT_WARNUNG;
     } catch { warnung = null; }
   }
