@@ -361,3 +361,20 @@ test('O12b M2: Monatsabschlüsse nicht lesbar: fail-closed (Fehler, nichts gesch
   const k = await u.tag(abschluss(id, '2026-11-02'));
   assert.deepEqual([k.status, code(k), k.json.quelle, k.json.perioden], [409, 'MONAT_FESTGESCHRIEBEN', undefined, ['euer-2026-11']]);
 });
+
+// =============================================================================================
+// W3 N8 (O13): Absender über 100 Zeichen: Abfrage und Vergleich der Duplikat-Warnung wie beim Speichern gekürzt
+// =============================================================================================
+test('W3 N8: Absender über 100 Zeichen (Route lässt höchstens 100 zu, das Modul schützt sich selbst): zweite gleiche Rechnung löst die Duplikat-Warnung aus', async () => {
+  const u = umgebung();
+  const id = await u.neueKasse();
+  const lang = `Sehr langer Lieferantenname ${'X'.repeat(120)}`;
+  // die Route prüft den Namen auf höchstens 100 Zeichen; das Modul bekommt hier absichtlich einen längeren (Direktaufruf), wie ein späterer Aufrufer ihn liefern könnte
+  const deps = { ...u.deps, kassenAusgabeBeleg: (e, c) => kassenAusgabeBeleg({ ...e, gegenpartei: { name: lang } }, c) };
+  const e1 = await u.ruf('/kassenbewegung', bewegung(id, '2026-11-02', 'ausgabe', 11900, { beleg: AUSGABE({ rechnungsnr: 'LANG-1' }) }), deps);
+  assert.equal(e1.status, 200, JSON.stringify(e1.json));
+  assert.notEqual(e1.json.duplikat_warnung, true, 'erste Rechnung: keine Warnung');
+  const e2 = await u.ruf('/kassenbewegung', bewegung(id, '2026-11-02', 'ausgabe', 11900, { beleg: AUSGABE({ rechnungsnr: 'LANG-1' }) }), deps);
+  assert.equal(e2.status, 200, JSON.stringify(e2.json));
+  assert.equal(e2.json.duplikat_warnung, true, 'gleiche Nummer, gleicher (langer) Absender: Warnung');
+});

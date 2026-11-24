@@ -44,6 +44,8 @@ export async function kassenAusgabeBeleg(eingabe, ctx) {
   const kategorie = typeof steuer0.kategorie === 'string' && steuer0.kategorie ? steuer0.kategorie : null;
   const rechnungsnr = typeof eingabe.rechnungsnr === 'string' && eingabe.rechnungsnr.trim() ? eingabe.rechnungsnr.trim().slice(0, 100) : null;
   // Legacy-Felder des fertigen Dokuments (nur die, die in den legacy_hash eingehen); legacy_hash entsteht aus genau diesen Werten
+  // W3 N8 (O13): gespeichert wird der Absender auf 100 Zeichen gekürzt; Abfrage und Vergleich der Duplikat-Warnung nehmen dieselbe gekürzte Fassung, sonst trifft eine lange Eingabe den eigenen Beleg nie
+  const absenderGespeichert = absender.slice(0, 100);
   const legacy = {
     typ: lf.typ, betrag: alt.betrag, betrag_netto: alt.betrag_netto, mwst_satz: alt.mwst_satz, datum: lf.datum, bezahlt: true, bezahlt_am: tag,
     ...(kategorie ? { kategorie } : {}), ...(lf.ust_unklar === true ? { ust_unklar: true } : {}), quelle: 'kasse', createdAt: zeit,
@@ -54,7 +56,7 @@ export async function kassenAusgabeBeleg(eingabe, ctx) {
   const steuer = e.steuer;
   const dok = {
     quelle: 'kasse', kasse_id: kasseId, bewegung_id: bewegungId, kassennummer: nummer,
-    typ: lf.typ, name: `Beleg von ${absender}`.slice(0, 200), absender: absender.slice(0, 100), ...(rechnungsnr ? { rechnungsnr } : {}),
+    typ: lf.typ, name: `Beleg von ${absender}`.slice(0, 200), absender: absenderGespeichert, ...(rechnungsnr ? { rechnungsnr } : {}),
     datum: lf.datum, bezahlt: true, bezahlt_am: tag,
     betrag: alt.betrag, betrag_netto: alt.betrag_netto, mwst_satz: alt.mwst_satz, kx_mwst_text: alt.kx_mwst_text,
     ...(kategorie ? { kategorie } : {}), ...(lf.ust_unklar === true ? { ust_unklar: true } : {}),
@@ -68,8 +70,8 @@ export async function kassenAusgabeBeleg(eingabe, ctx) {
   let warnung = null;
   if (rechnungsnr && fs) {
     try {
-      const treffer = (await Promise.all(rechnungsnrAbfragen(rechnungsnr, absender).map((q) => fs.runQuery(`users/${uid}`, { from: [{ collectionId: 'dokumente' }], where: q.where, limit: q.limit })))).flat();
-      if (rechnungsnrDuplikat(treffer.map((d) => ({ fields: kodiereFelder(d.daten) })), { rechnungsnr, absender, typ: lf.typ, mwst_satz: alt.mwst_satz })) warnung = RECHNUNGSNR_DUPLIKAT_WARNUNG;
+      const treffer = (await Promise.all(rechnungsnrAbfragen(rechnungsnr, absenderGespeichert).map((q) => fs.runQuery(`users/${uid}`, { from: [{ collectionId: 'dokumente' }], where: q.where, limit: q.limit })))).flat();
+      if (rechnungsnrDuplikat(treffer.map((d) => ({ fields: kodiereFelder(d.daten) })), { rechnungsnr, absender: absenderGespeichert, typ: lf.typ, mwst_satz: alt.mwst_satz })) warnung = RECHNUNGSNR_DUPLIKAT_WARNUNG;
     } catch { warnung = null; }
   }
   return { ablehnen: false, beleg: { schema_version: 2, id: belegId, steuer }, dok, brutto_cent: steuer.summe.brutto_cent, nach_festschreibung: e.nach_festschreibung, codes: e.codes, warnung };
