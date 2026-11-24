@@ -99,7 +99,7 @@ const rid = (u, kasseId, tag) => u.fs.lies(P(`kassentage/${kasseId}_${tag}`))?.a
 // ---------------------------------------------------------------------------------------------
 test('Pfade: /kasse, /kassentag, /kassenbewegung und /kassenmeldung (W2-W2); Feature-Namen kasse und kasse_ki, Standard aus (fehlender Name = aus), kasse hängt am Kern', () => {
   assert.deepEqual([...KASSE_PFADE], ['/kasse', '/kassentag', '/kassenbewegung', '/kassenmeldung']);
-  assert.deepEqual([...FEATURES_KASSE], ['kasse', 'kasse_ki']);
+  assert.deepEqual([...FEATURES_KASSE], ['kasse', 'kasse_ki', 'kasse_retoure']);
   for (const name of FEATURES_KASSE) {
     assert.equal(featureAktiv(null, name), false, `${name}: ohne Konfiguration aus`);
     assert.equal(featureAktiv(configBereinigen({ kern_max: 'an', features: { steuerprofil: 'an' } }), name), false, `${name}: fehlender Name = aus`);
@@ -1005,6 +1005,9 @@ test('Differenzbelege (Nr. 19): Fehlbetrag = Eingang quittung E_INLAND_OHNE_VORS
   assert.equal(ohneGrund.json.fehler[0].code, 'FORMAT');
   assert.equal(ohneGrund.json.fehler[0].kern_code, 'DIFFERENZ_OHNE_GRUND');
   assert.equal(ohneGrund.json.fehler[0].feld, 'differenz_grund');
+  // W3 R1.5 Phase 2 (O12c N8): Betrag der Differenz und Soll-Bestand stehen in der Antwort (gezählt 705,00 gegen Soll 707,00)
+  assert.equal(ohneGrund.json.fehler[0].differenz_cent, -200);
+  assert.equal(ohneGrund.json.fehler[0].soll_endbestand_cent, 70700);
   // Fehlbetrag 2,00
   const fm = await u.tagRufe(abschluss(id, '2026-11-02', { gezaehlt_cent: 70500, differenz_grund: 'Wechselgeld falsch', differenz_grund_art: 'zaehl_wechselgeldfehler' }));
   assert.equal(fm.status, 200, JSON.stringify(fm.json));

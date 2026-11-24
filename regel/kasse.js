@@ -80,7 +80,7 @@ const festPeriodenLesen = async (fs, uid) => (await listeAlle(fs, P.festschreibu
 // Ausgabe) mit Belegwirkung in einem solchen Monat würde dessen Zahlen still veralten lassen: 409 MONAT_FESTGESCHRIEBEN mit quelle 'monatsabschluss' und
 // hinweis 'monatsabschluss_entsperren' (perioden bleibt leer: es ist kein Kern-Zeitraum, die Kern-Aktion „Monat entsperren“ hülfe nicht).
 // Wie der DATEV-Import der App (datevImportSperrenAus) zählt neben der ID auch jedes Dokument mit passenden Feldern monat/jahr (ältere Speicherwege). Gelesen wird die
-// ganze Sammlung (ein Dokument je Monat, eine Seite für 25 Jahre), in jedem Versuch neu; Lesefehler werfen (fail-closed, nie eine geratene Entwarnung).
+// ganze Sammlung (ein Dokument je Monat; listeAlle liest vollständig mit Weiterblättern, bis zu 20 Seiten, und wirft erst danach), in jedem Versuch neu; Lesefehler werfen (fail-closed, nie eine geratene Entwarnung).
 export const MA_MONATE = Object.freeze(['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember']);
 export const monatsabschlussId = (tag) => `${MA_MONATE[Number(tag.slice(5, 7)) - 1]}-${Number(tag.slice(0, 4))}`;
 const maMonatNorm = (m) => MA_MONATE.find((x) => x.toLowerCase() === String(m ?? '').trim().toLowerCase()) || null;
@@ -104,11 +104,14 @@ function formFehler(f, cors) {
 }
 
 // Kern-Prüfcodes (Steuerkern.pruefeKassentag.fehler) -> Antwort. Status der ersten Meldung; alle Meldungen stehen in fehler[].
-function kernFehlerAntwort(fehlerListe, cors) {
+// W3 R1.5 Phase 2 (O12c N8): Bei DIFFERENZ_OHNE_GRUND nennt die Antwort neben differenz_cent (Kern) auch den Soll-Bestand (soll_endbestand_cent, aus werte.soll_cent),
+// damit die App den Betrag nicht erst nach dem Speichern zeigt (bei SumUp-Kassen ist er vor dem Speichern unbekannt).
+function kernFehlerAntwort(fehlerListe, cors, werte) {
   const eintraege = fehlerListe.map((f) => {
     if (FORMAT_GRUPPE.includes(f.code)) {
       const { code, grund, ...rest } = f;
-      return { code: 'FORMAT', kern_code: code, ...(grund !== undefined ? { grund } : {}), ...rest };
+      const soll = code === 'DIFFERENZ_OHNE_GRUND' && werte && Number.isSafeInteger(werte.soll_cent) ? { soll_endbestand_cent: werte.soll_cent } : {};
+      return { code: 'FORMAT', kern_code: code, ...(grund !== undefined ? { grund } : {}), ...rest, ...soll };
     }
     const [, name] = KERN_STATUS[f.code] || [];
     return name ? { ...f, kern_code: f.code, code: name } : f;
@@ -663,7 +666,7 @@ async function abschliessen(c) {
       ...(status === 'ku' ? { ku_summe_vor_tag_cent: memo.ku, gruendungsjahr: istObjekt(profil.gruendung) && typeof profil.gruendung.datum === 'string' && profil.gruendung.datum.slice(0, 4) === jahr } : {}),
     });
     if (pr.hinweise.some((h) => h.code === 'STATUS_UNBEKANNT')) return { antwort: fehlerAntwort(403, 'PROFIL_FEHLT', cors) };
-    if (!pr.ok) return { antwort: kernFehlerAntwort(pr.fehler, cors) };
+    if (!pr.ok) return { antwort: kernFehlerAntwort(pr.fehler, cors, pr.werte) };
     const wert = pr.werte;
     const differenz = wert.differenz_cent ?? 0;
     const nummerZaehler = Number.isSafeInteger(docs.get(P.zaehler(uid, kasseId, jahr))?.daten?.letzte) ? docs.get(P.zaehler(uid, kasseId, jahr)).daten.letzte : 0;
