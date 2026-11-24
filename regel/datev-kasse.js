@@ -98,6 +98,7 @@ export function kasseBelegPlan(d, original = null, fassungen = null) {
     // Das Storno spiegelt das Original (Kanal und Satz aus dem Original, das Storno trägt keine Zahlungen); Belegdatum = wirkdatum, Nummer = Kassennummer des Stornos
     return { ...op, datum: st.wirkdatum, kassennummer, korrektur: true };
   }
+  if (st.beleg_art === 'korrektur') return kasseRetourePlan(d, kassennummer);
   const fall = st.steuerfall;
   let art;
   if (fall === 'A_GUTSCHEIN_MEHRZWECK') art = 'mehrzweck';
@@ -164,6 +165,61 @@ export function kasseBelegPlan(d, original = null, fassungen = null) {
   if (karteGruppen.length) kanaele.push({ kanal: 'karte', gruppen: karteGruppen });
   if (gutscheinGruppen.length) kanaele.push({ kanal: 'gutschein', gruppen: gutscheinGruppen });
   return { datum: d.bezahlt_am, kassennummer, korrektur: false, einnahme: art !== 'fehlbetrag', kategorie: art === 'fehlbetrag' ? KASSEN_FEHLBETRAG : '', ku: fall === 'A_KU' && art !== 'mehrzweck', art, gutschein_cent: gutschein, kanaele };
+}
+
+// R1.5 (Baukonzept 08 2.13): Retoure auf Vortag (Korrekturbeleg der Kasse, beleg_art korrektur, Feld retoure mit bar/Karte je Satz). Erlösminderung je Satz am
+// Retourentag (wirkdatum = Rückzahlung) gegen die Kasse (bar) bzw. das Geldtransitkonto (Karte), Belegfeld 1 = Kassennummer; korrektur: true bucht wie der Kassen-Storno
+// die Gegenrichtung des Verkaufs (Erlöskonto Soll, Kasse/Geldtransit Haben). Kleinunternehmer: eine Zeile ohne Satz auf dem KU-Erlöskonto (Kontolux zeigt die
+// Rückzahlung in der EÜR als Kz 183, DATEV als Erlösminderung: Gewinn gleich, sb-antworten.md SB-8). Storniert (retoure_stornieren): storno = { kassennummer, datum }
+// mit der Kassennummer des Stornos; der Export bucht dann zusätzlich die Gegenbuchung am selben Tag (die Retoure bleibt im Stapel, wie beim Storno einer
+// Kassenausgabe). Nichts geraten: passt eine Summe nicht, bleibt der Beleg mit Grund aus dem Stapel (Warnung).
+function kasseRetourePlan(d, kassennummer) {
+  const st = d.steuer;
+  const r = d.retoure;
+  if (!ISTOBJEKT(r) || !Array.isArray(r.zeilen) || !r.zeilen.length) return offen('retoure_fehlt');
+  const fall = st.steuerfall;
+  if (!KASSE_UMSATZ_STEUERFAELLE.includes(fall)) return offen('steuerfall_unbekannt');
+  if (!DATUM.test(String(st.wirkdatum || ''))) return offen('wirkdatum_fehlt');
+  const rz = ISTOBJEKT(st.rueckzahlung) ? st.rueckzahlung : null;
+  if (!rz || rz.datum !== st.wirkdatum || !ISTCENT(rz.betrag_cent)) return offen('rueckzahlung_fehlt');
+  const ku = fall === 'A_KU';
+  const pos = Array.isArray(st.positionen) ? st.positionen : [];
+  if (!pos.length) return offen('zeilen_fehlen');
+  const je = new Map();
+  let brutto = 0;
+  for (const p of pos) {
+    if (!ISTOBJEKT(p) || !ISTCENT(p.netto_cent) || !ISTCENT(p.ust_cent)) return offen('zeilen_fehlen');
+    const k = ku ? 'keine' : satzSchluessel(p.satz_bp);
+    if (k === null) return offen('satz_nicht_deutsch');
+    const b = 0 - (p.netto_cent + p.ust_cent);
+    if (b <= 0) return offen('zeilen_fehlen');
+    je.set(k, (je.get(k) || 0) + b);
+    brutto += b;
+  }
+  if (!ISTOBJEKT(st.summe) || st.summe.brutto_cent !== 0 - brutto || rz.betrag_cent !== brutto) return offen('summe_abweichend');
+  if (!Number.isFinite(d.betrag) || Math.round(d.betrag * 100) !== brutto) return offen('betrag_abweichend');
+  const bar = new Map();
+  const karte = new Map();
+  for (const z of r.zeilen) {
+    if (!ISTOBJEKT(z) || !ISTCENT(z.bar_cent) || !ISTCENT(z.unbar_cent) || z.bar_cent < 0 || z.unbar_cent < 0) return offen('retoure_zeilen');
+    const k = ku ? 'keine' : satzSchluessel(z.satz_bp);
+    if (k === null || !je.has(k)) return offen('retoure_zeilen');
+    bar.set(k, (bar.get(k) || 0) + z.bar_cent);
+    karte.set(k, (karte.get(k) || 0) + z.unbar_cent);
+  }
+  for (const [k, b] of je) if ((bar.get(k) || 0) + (karte.get(k) || 0) !== b) return offen('retoure_zeilen');
+  const saetze = MISCHSATZ_REIHENFOLGE.filter((s) => je.has(s));
+  const konto0 = fall === 'A_INLAND_0_PV'; // 0 % auf 8290/4290 wie der Verkauf (A-N1)
+  const gr = (s, b) => ({ satz: s, brutto_cent: b, ...(konto0 && s === 'keine' ? { konto0: true } : {}) });
+  const kanaele = [];
+  const barGruppen = saetze.map((s) => gr(s, bar.get(s) || 0)).filter((g) => g.brutto_cent > 0);
+  const karteGruppen = saetze.map((s) => gr(s, karte.get(s) || 0)).filter((g) => g.brutto_cent > 0);
+  if (barGruppen.length) kanaele.push({ kanal: 'bar', gruppen: barGruppen });
+  if (karteGruppen.length) kanaele.push({ kanal: 'karte', gruppen: karteGruppen });
+  const storniert = d.storniert === true;
+  const sn = storniert && ISTOBJEKT(d.retoure_storno) && typeof d.retoure_storno.kassennummer === 'string' ? d.retoure_storno.kassennummer.trim() : '';
+  if (storniert && !sn) return offen('storno_kassennummer_fehlt');
+  return { datum: st.wirkdatum, kassennummer, korrektur: true, einnahme: true, kategorie: '', ku, art: 'retoure', art_detail: r.art === 'pfand' ? 'pfand' : 'retoure', gutschein_cent: 0, kanaele, storno: storniert ? { kassennummer: sn, datum: st.wirkdatum } : null };
 }
 
 // Bewegung des Kassenbuchs mit eigener Buchung (bewegung: dekodiertes Dokument aus kassenbewegungen). Richtung aus Sicht der Kasse: _ein = Geld kommt in die Kasse

@@ -2361,10 +2361,10 @@ test('hyg N4: die Zahl der Firestore-Anfragen eines Abschlusses hängt nicht von
     assert.equal(r.status, 200, JSON.stringify(r.json));
     return u.fs.log.anfragen - vor;
   };
-  // eine Lücke kostet genau eine Abfrage (O6 H1: Bewegungen in der Lücke), unabhängig von ihrer Länge
+  // eine Lücke kostet genau zwei Abfragen (O6 H1: Bewegungen in der Lücke; O14 M4: Retouren in der Lücke), unabhängig von ihrer Länge
   const kurz = await zaehle(1);
   assert.equal(await zaehle(300), kurz);
-  assert.equal(await zaehle(0), kurz - 1);
+  assert.equal(await zaehle(0), kurz - 2);
   assert.ok(kurz <= 20, `Anfragen ${kurz}`);
 });
 
@@ -2991,4 +2991,362 @@ test('W2-W1 Schlüssellisten sind exportiert und decken genau das, was die Prüf
   }
   const fremd = F.pruefeBewegung({ ...basis, beleg: { sperrgrund: 'x' } }, 'anlegen', { uid: UID, heute: HEUTE });
   assert.equal(fremd.fehler.feld, 'beleg.sperrgrund');
+});
+
+// ---------------------------------------------------------------------------------------------
+// R1.5 Retoure auf Vortag (Baukonzept 08 2.13, stand-kasse.md Abschnitt 9 Eintrag R1.5): /kassentag retoure und retoure_stornieren, RETOURE_VORHANDEN beim Storno des
+// Verkaufstags, retoure_auszahlung im Soll-Bestand, Festschreibung des Retourentags, Kleinunternehmer-Summe. Erwartungen von Hand gerechnet.
+// ---------------------------------------------------------------------------------------------
+const AN_R = { kern_max: 'an', features: { steuerprofil: 'an', kasse: 'an', kasse_retoure: 'an' } };
+const retoureBody = (kasseId, tag, verkaufstag, zeilen, extra = {}) => ({ aktion: 'retoure', kasse_id: kasseId, geschaeftstag: tag, verkaufstag, zeilen, korrektur_grund: 'rueckabwicklung', ...extra });
+const Z19 = (bar, unbar = 0) => ({ steuerfall: 'A_INLAND_19', bar_cent: bar, unbar_cent: unbar });
+const Z7 = (bar, unbar = 0) => ({ steuerfall: 'A_INLAND_7', bar_cent: bar, unbar_cent: unbar });
+// Verkaufstag 02.11.: 19 % 800,00 (bar 500, Karte 300), 7 % 107,00 bar; Bestand danach 707,00
+async function mitVerkauf(optionen = {}) {
+  const u = umgebung({ config: AN_R, ...optionen });
+  const id = await u.legeKasseAn();
+  const a = await u.tagRufe(abschluss(id, '2026-11-02'));
+  assert.equal(a.status, 200, JSON.stringify(a.json));
+  return { u, id, verkaufBeleg: a.json.beleg_id };
+}
+const dokKern = (u, id, profil = REGEL) => K.belegFuerKern({ ...u.fs.lies(P(`dokumente/${id}`)), id }, profil);
+
+test('R1.5 Retoure Regel: Korrekturbeleg, Bewegung retoure_auszahlung (nur bar), Zähler und Audit in EINEM Commit; Beleg gesperrt, typ storno, Drift ok; Wirkung Kz 81/86 am Retourentag, EÜR Kz 183', async () => {
+  const { u, id, verkaufBeleg } = await mitVerkauf();
+  const vor = u.fs.log.commits;
+  const r = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(11900), Z7(0, 1070)], { notiz: 'Pullover zurück' }));
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(u.fs.log.commits, vor + 1, 'ein Commit');
+  const rid = `kasse_${id}_2026-11-03_r001`;
+  assert.equal(r.json.retoure_beleg_id, rid);
+  assert.equal(r.json.bewegung_id, `${id}_2026-11-03_001`);
+  assert.equal(r.json.kassennummer, 'K-THK-2026-0002');
+  assert.equal(r.json.verkauf_beleg_id, verkaufBeleg);
+  assert.deepEqual([r.json.bar_cent, r.json.unbar_cent], [11900, 1070]);
+  assert.deepEqual(r.json.rest.map((z) => [z.steuerfall, z.verkauf_brutto_cent, z.rest_brutto_cent]), [['A_INLAND_19', 80000, 68100], ['A_INLAND_7', 10700, 9630]]);
+  const d = u.fs.lies(P(`dokumente/${rid}`));
+  assert.equal(d.quelle, 'kasse'); assert.equal(d.gesperrt, true); assert.deepEqual(d.gesperrt_durch, ['kasse']);
+  assert.equal(d.typ, 'storno', 'Altfeld typ storno: im Altpfad nie eine Einnahme');
+  assert.equal(d.datum, '2026-11-03'); assert.equal(d.bezahlt, true); assert.equal(d.kassentag_id, `${id}_2026-11-03`); assert.equal(d.kassennummer, 'K-THK-2026-0002');
+  assert.equal(d.betrag, 129.7); assert.equal(d.mwst_satz, 'gemischt');
+  assert.equal(d.steuer.beleg_art, 'korrektur'); assert.equal(d.steuer.steuerfall, 'A_INLAND_19'); assert.equal(d.steuer.wirkdatum, '2026-11-03');
+  assert.deepEqual(d.steuer.bezug, { korrigiert_beleg_id: verkaufBeleg });
+  assert.deepEqual(d.steuer.rueckzahlung, { datum: '2026-11-03', betrag_cent: 12970 });
+  assert.equal(d.steuer.korrektur_notiz, 'Pullover zurück');
+  assert.deepEqual(d.steuer.positionen.map((p) => [p.satz_bp, p.netto_cent, p.ust_cent]), [[1900, -10000, -1900], [700, -1000, -70]]);
+  assert.deepEqual(d.retoure.zeilen, [{ steuerfall: 'A_INLAND_19', satz_bp: 1900, bar_cent: 11900, unbar_cent: 0 }, { steuerfall: 'A_INLAND_7', satz_bp: 700, bar_cent: 0, unbar_cent: 1070 }]);
+  assert.equal(d.retoure.verkaufstag, '2026-11-02');
+  assert.equal(K.driftStatus(d), 'ok');
+  assert.equal(dokKern(u, rid).quelle, 'v2');
+  const b = u.fs.lies(P(`kassenbewegungen/${id}_2026-11-03_001`));
+  assert.deepEqual([b.art, b.betrag_cent, b.beleg_id, b.kassennummer], ['retoure_auszahlung', 11900, rid, 'K-THK-2026-0002']);
+  const a = u.audit().find((e) => e.aktion === 'kassentag_retoure');
+  assert.ok(a, 'Audit kassentag_retoure');
+  assert.equal(a.details.beleg_id, rid); assert.equal(a.details.verkaufstag, '2026-11-02');
+  assert.ok(!JSON.stringify(a.details).includes('11900'), 'keine Beträge im Audit-Detail');
+  // Wirkung über den Kern (Original und Retoure aus dem Speicher)
+  const belege = [dokKern(u, verkaufBeleg).beleg, dokKern(u, rid).beleg];
+  const w = K.alleWirkungen(belege, REGEL).filter((x) => x.beleg_id === rid && x.status === 'berechnet');
+  assert.deepEqual(w.filter((x) => x.welt === 'ust').map((x) => [x.periode, x.kz, x.netto_cent, x.ust_cent, x.datum_wirk]).sort(), [['2026-11', 81, -10000, -1900, '2026-11-03'], ['2026-11', 86, -1000, -70, '2026-11-03']]);
+  assert.deepEqual(w.filter((x) => x.welt === 'euer').map((x) => [x.kz, x.betrag_cent, x.datum_wirk]), [[183, 12970, '2026-11-03']]);
+});
+
+test('R1.5 Soll-Bestand: die Barauszahlung mindert den Bestand des Retourentags (Abschluss 03.11. mit gezählt 588,00 = 707,00 - 119,00 ohne Differenz); Kartenrückzahlung ohne Bewegung', async () => {
+  const { u, id } = await mitVerkauf();
+  assert.equal((await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(11900, 5000)]))).status, 200);
+  const r = await u.tagRufe(ohneUmsatz(id, '2026-11-03', { gezaehlt_cent: 58800 }));
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.deepEqual([r.json.soll_endbestand_cent, r.json.differenz_cent], [58800, 0]);
+  const { u: u2, id: id2 } = await mitVerkauf();
+  const k = await u2.tagRufe(retoureBody(id2, '2026-11-03', '2026-11-02', [Z7(0, 1070)]));
+  assert.equal(k.status, 200, JSON.stringify(k.json));
+  assert.equal(k.json.bewegung_id, null);
+  assert.equal(u2.fs.pfade(P('kassenbewegungen/')).length, 0, 'keine Bewegung bei Kartenrückzahlung');
+  assert.equal((await u2.tagRufe(ohneUmsatz(id2, '2026-11-03', { gezaehlt_cent: 70700 }))).json.differenz_cent, 0);
+});
+
+test('R1.5 Wiederholung derselben anfrage_id: 200 idempotent, kein zweiter Beleg und keine zweite Bewegung', async () => {
+  const { u, id } = await mitVerkauf();
+  const body = { ...retoureBody(id, '2026-11-03', '2026-11-02', [Z19(1000)]), anfrage_id: 'retoure-wdh-00000001' };
+  assert.equal((await u.tagRufe(body)).status, 200);
+  const vor = u.fs.log.commits;
+  const w = await u.tagRufe(body);
+  assert.equal(w.status, 200);
+  assert.equal(w.json.idempotent, true);
+  assert.equal(w.json.retoure_beleg_id, `kasse_${id}_2026-11-03_r001`);
+  assert.equal(u.fs.log.commits, vor);
+  assert.equal(u.fs.pfade(P(`dokumente/kasse_${id}_2026-11-03_r`)).length, 1);
+});
+
+test('R1.5 RETOURE_UEBER_VERKAUF: je Satz höchstens der Rest nach früheren Retouren (auch an anderen Tagen); genau der Rest geht, danach Rest 0; Satz, den der Verkaufstag nicht hat: 422; nichts geschrieben', async () => {
+  const { u, id } = await mitVerkauf();
+  assert.equal((await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(11900)]))).status, 200);
+  let vor = u.fs.log.commits;
+  const zuviel = await u.tagRufe(retoureBody(id, '2026-11-04', '2026-11-02', [Z19(68101)]));
+  assert.equal(zuviel.status, 422);
+  assert.equal(zuviel.json.fehler[0].code, 'RETOURE_UEBER_VERKAUF');
+  assert.equal(zuviel.json.steuerfall, 'A_INLAND_19');
+  assert.equal(zuviel.json.rest_cent, 68100);
+  assert.deepEqual(zuviel.json.rest.map((z) => [z.steuerfall, z.rest_brutto_cent]), [['A_INLAND_19', 68100], ['A_INLAND_7', 10700]]);
+  assert.equal(u.fs.log.commits, vor, 'nichts geschrieben');
+  const genau = await u.tagRufe(retoureBody(id, '2026-11-04', '2026-11-02', [Z19(68100), Z7(10700)]));
+  assert.equal(genau.status, 200, JSON.stringify(genau.json));
+  assert.deepEqual(genau.json.rest.map((z) => z.rest_brutto_cent), [0, 0]);
+  // Summe der Retouren = Original auf den Cent (Netto und Steuer je Satz)
+  const pos = [1, 2].flatMap((n) => u.fs.lies(P(`dokumente/kasse_${id}_2026-11-0${n + 2}_r001`)).steuer.positionen);
+  const s19 = pos.filter((p) => p.satz_bp === 1900).reduce((a, p) => [a[0] + p.netto_cent, a[1] + p.ust_cent], [0, 0]);
+  assert.deepEqual(s19, [-67227, -12773], '19 %: 800,00 = 672,27 + 127,73');
+  vor = u.fs.log.commits;
+  const leer = await u.tagRufe(retoureBody(id, '2026-11-05', '2026-11-02', [Z19(1)]));
+  assert.equal(leer.status, 422); assert.equal(leer.json.rest_cent, 0);
+  const satz = await u.tagRufe(retoureBody(id, '2026-11-05', '2026-11-02', [{ steuerfall: 'A_INLAND_0_PV', bar_cent: 100 }]));
+  assert.equal(satz.status, 422); assert.equal(satz.json.fehler[0].code, 'RETOURE_UEBER_VERKAUF'); assert.equal(satz.json.rest_cent, 0);
+  const ku = await u.tagRufe(retoureBody(id, '2026-11-05', '2026-11-02', [{ steuerfall: 'A_KU', bar_cent: 100 }]));
+  assert.equal(ku.status, 422);
+  assert.equal(u.fs.log.commits, vor);
+});
+
+test('R1.5 RETOURE_VORHANDEN: der Verkaufstag lässt sich erst nach dem Storno der Retoure stornieren; der Storno der Retoure nimmt die Bewegung mit (Storno-Bewegung, storniert am Beleg, Kern wirkungslos)', async () => {
+  const { u, id, verkaufBeleg } = await mitVerkauf();
+  const r = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(11900, 100)]));
+  assert.equal(r.status, 200);
+  let vor = u.fs.log.commits;
+  const s = await u.tagRufe({ aktion: 'stornieren', kasse_id: id, geschaeftstag: '2026-11-02', grund: 'Z-Bon falsch abgetippt' });
+  assert.equal(s.status, 409);
+  assert.equal(s.json.fehler[0].code, 'RETOURE_VORHANDEN');
+  assert.deepEqual(s.json.retouren, [r.json.retoure_beleg_id]);
+  assert.equal(u.fs.log.commits, vor);
+  const rs = await u.tagRufe({ aktion: 'retoure_stornieren', kasse_id: id, retoure_beleg_id: r.json.retoure_beleg_id, grund: 'falscher Verkaufstag gewählt' });
+  assert.equal(rs.status, 200, JSON.stringify(rs.json));
+  assert.equal(rs.json.storno_kassennummer, 'K-THK-2026-0003');
+  assert.equal(rs.json.bewegung_id, `${id}_2026-11-03_002`);
+  const sb = u.fs.lies(P(`kassenbewegungen/${id}_2026-11-03_002`));
+  assert.deepEqual([sb.art, sb.storno_art, sb.storno_von, sb.betrag_cent], ['storno', 'retoure_auszahlung', `${id}_2026-11-03_001`, 11900]);
+  const d = u.fs.lies(P(`dokumente/${r.json.retoure_beleg_id}`));
+  assert.equal(d.storniert, true); assert.equal(d.storno_grund, 'falscher Verkaufstag gewählt'); assert.equal(d.retoure_storno.kassennummer, 'K-THK-2026-0003');
+  const kern = dokKern(u, r.json.retoure_beleg_id);
+  assert.equal(kern.quelle, 'v2_zahlung');
+  assert.equal(kern.beleg.steuer.wirkungslos, true);
+  assert.deepEqual(K.alleWirkungen([dokKern(u, verkaufBeleg).beleg, kern.beleg], REGEL).filter((x) => x.beleg_id === r.json.retoure_beleg_id), []);
+  assert.ok(u.audit().some((e) => e.aktion === 'kassentag_retoure_storno' && e.details.beleg_id === r.json.retoure_beleg_id));
+  // Bestand wieder 707,00 (Bewegung und Storno heben sich auf), der Rest ist wieder voll
+  const neu = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(80000)]));
+  assert.equal(neu.status, 200, JSON.stringify(neu.json));
+  assert.equal(neu.json.retoure_beleg_id, `kasse_${id}_2026-11-03_r002`);
+  assert.equal((await u.tagRufe({ aktion: 'retoure_stornieren', kasse_id: id, retoure_beleg_id: neu.json.retoure_beleg_id, grund: 'doch nicht zurück' })).status, 200);
+  // Wiederholung des Stornos mit anderer anfrage_id: 409 RETOURE_STORNIERT; unbekannte Retoure: 404
+  const nochmal = await u.tagRufe({ aktion: 'retoure_stornieren', kasse_id: id, retoure_beleg_id: neu.json.retoure_beleg_id, grund: 'doch nicht zurück' });
+  assert.equal(nochmal.status, 409); assert.equal(nochmal.json.fehler[0].code, 'RETOURE_STORNIERT');
+  assert.equal((await u.tagRufe({ aktion: 'retoure_stornieren', kasse_id: id, retoure_beleg_id: `kasse_${id}_2026-11-03_r009`, grund: 'gibt es nicht' })).status, 404);
+  vor = u.fs.log.commits;
+  const s2 = await u.tagRufe({ aktion: 'stornieren', kasse_id: id, geschaeftstag: '2026-11-02', grund: 'Z-Bon falsch abgetippt' });
+  assert.equal(s2.status, 200, JSON.stringify(s2.json));
+  assert.equal(u.fs.log.commits, vor + 1);
+  // der stornierte Verkaufstag lässt sich neu erfassen (Fassung 2), die stornierten Retouren stören nicht
+  const neuV = await u.tagRufe(abschluss(id, '2026-11-02'));
+  assert.equal(neuV.status, 200, JSON.stringify(neuV.json)); assert.equal(neuV.json.fassung, 2);
+});
+
+test('R1.5 Storno-Kette: Retoure an abgeschlossenem Retourentag nicht stornierbar (TAG_ABGESCHLOSSEN); erst den Retourentag stornieren, dann die Retoure, dann den Tag neu erfassen', async () => {
+  const { u, id } = await mitVerkauf();
+  const r = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(11900)]));
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-03', { gezaehlt_cent: 58800 }))).status, 200);
+  const zu = await u.tagRufe({ aktion: 'retoure_stornieren', kasse_id: id, retoure_beleg_id: r.json.retoure_beleg_id, grund: 'falsche Ware gebucht' });
+  assert.equal(zu.status, 409); assert.equal(zu.json.fehler[0].code, 'TAG_ABGESCHLOSSEN');
+  // eine neue Retoure an diesem (abgeschlossenen) Tag ebenso nicht, und nicht vor dem letzten Abschluss
+  assert.equal((await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(100)]))).json.fehler[0].code, 'TAG_ABGESCHLOSSEN');
+  assert.equal((await u.tagRufe({ aktion: 'stornieren', kasse_id: id, geschaeftstag: '2026-11-03', grund: 'Retoure war falsch' })).status, 200);
+  assert.equal((await u.tagRufe({ aktion: 'retoure_stornieren', kasse_id: id, retoure_beleg_id: r.json.retoure_beleg_id, grund: 'falsche Ware gebucht' })).status, 200);
+  const neu = await u.tagRufe(ohneUmsatz(id, '2026-11-03', { gezaehlt_cent: 70700 }));
+  assert.equal(neu.status, 200, JSON.stringify(neu.json));
+  assert.equal(neu.json.fassung, 2);
+  assert.equal(neu.json.differenz_cent, 0);
+});
+
+test('R1.5 Chronologie und Verkaufstag: Verkaufstag nicht vor dem Retourentag 400 FORMAT; Retourentag vor dem letzten Abschluss 409 SPAETERE_TAGE; Verkaufstag ohne Abschluss, Ruhetag oder storniert 422 RETOURE_OHNE_VERKAUF', async () => {
+  const { u, id } = await mitVerkauf();
+  const f = await u.tagRufe(retoureBody(id, '2026-11-02', '2026-11-02', [Z19(100)]));
+  assert.equal(f.status, 400); assert.equal(f.json.feld, 'verkaufstag'); assert.equal(f.json.grund, 'nicht_vor_retourentag');
+  const { u: v, id: id2 } = await mitVerkauf();
+  assert.equal((await v.tagRufe(ohneUmsatz(id2, '2026-11-05', { gezaehlt_cent: 70700 }))).status, 200);
+  const spaet = await v.tagRufe(retoureBody(id2, '2026-11-04', '2026-11-02', [Z19(100)]));
+  assert.equal(spaet.status, 409); assert.equal(spaet.json.fehler[0].code, 'SPAETERE_TAGE');
+  const ohne = await v.tagRufe(retoureBody(id2, '2026-11-06', '2026-11-03', [Z19(100)]));
+  assert.equal(ohne.status, 422); assert.equal(ohne.json.fehler[0].code, 'RETOURE_OHNE_VERKAUF'); assert.equal(ohne.json.grund, 'nicht_abgeschlossen');
+  const leerTag = await v.tagRufe(retoureBody(id2, '2026-11-06', '2026-11-05', [Z19(100)]));
+  assert.equal(leerTag.status, 422); assert.equal(leerTag.json.grund, 'ohne_umsatzbeleg');
+  const fremd = await v.tagRufe(retoureBody('kzzzzzzzz', '2026-11-06', '2026-11-02', [Z19(100)]));
+  assert.equal(fremd.status, 404);
+});
+
+test('R1.5 Bewegungen: retoure_auszahlung entsteht nur über /kassentag retoure (anlegen 400 FORMAT art); ihr Storno nur über retoure_stornieren (409 RETOURE_BEWEGUNG)', async () => {
+  const { u, id } = await mitVerkauf();
+  const a = await u.bewRufe({ aktion: 'anlegen', kasse_id: id, geschaeftstag: '2026-11-03', art: 'retoure_auszahlung', betrag_cent: 100, text: 'direkt' });
+  assert.equal(a.status, 400); assert.equal(a.json.feld, 'art');
+  const r = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(500)]));
+  const s = await u.bewRufe({ aktion: 'stornieren', kasse_id: id, bewegung_id: r.json.bewegung_id, grund: 'nur die Bewegung' });
+  assert.equal(s.status, 409); assert.equal(s.json.fehler[0].code, 'RETOURE_BEWEGUNG'); assert.equal(s.json.retoure_beleg_id, r.json.retoure_beleg_id);
+});
+
+test('R1.5 Schalter: ohne kasse_retoure (fehlend oder aus) 503 VORUEBERGEHEND_ABGESCHALTET (grund FEATURE_AUS) ohne Schreiben; retoure_stornieren bleibt mit kasse allein möglich; RETOURE_VORHANDEN gilt auch bei ausgeschaltetem kasse_retoure', async () => {
+  const { u, id } = await mitVerkauf();
+  const r = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(500)]));
+  assert.equal(r.status, 200);
+  for (const config of [AN, { ...AN_R, features: { ...AN_R.features, kasse_retoure: 'aus' } }, { kern_max: 'aus', features: AN_R.features }]) {
+    u.fs.setze('config/features', config);
+    const vor = u.fs.log.commits;
+    const x = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(500)]));
+    assert.equal(x.status, 503, JSON.stringify(config)); assert.equal(x.json.fehler[0].code, 'VORUEBERGEHEND_ABGESCHALTET'); assert.equal(x.json.fehler[0].grund, 'FEATURE_AUS');
+    assert.equal(u.fs.log.commits, vor);
+  }
+  assert.equal(featureAktiv(configBereinigen(AN), 'kasse_retoure'), false, 'fehlend = aus');
+  u.fs.setze('config/features', AN);
+  assert.equal((await u.tagRufe({ aktion: 'stornieren', kasse_id: id, geschaeftstag: '2026-11-02', grund: 'Z-Bon falsch abgetippt' })).json.fehler[0].code, 'RETOURE_VORHANDEN');
+  assert.equal((await u.tagRufe({ aktion: 'retoure_stornieren', kasse_id: id, retoure_beleg_id: r.json.retoure_beleg_id, grund: 'Schalter aus, trotzdem' })).status, 200);
+  const G = await import('../regel/gemeinsam.js');
+  assert.equal(G.FEATURE_KASSE_RETOURE, 'kasse_retoure');
+});
+
+test('R1.5 Festschreibung des Retourentags: EÜR-Monat 409 (nichts geschrieben), Monatsabschluss des Altpfads 409, nur USt-Zeitraum speichert mit nach_festschreibung; ein festgeschriebener Verkaufsmonat stört nicht', async () => {
+  const { u, id } = await mitVerkauf();
+  u.fs.setze(P('festschreibung/euer-2026-11'), { status: 'festgeschrieben', periode: '2026-11' });
+  let vor = u.fs.log.commits;
+  const x = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(500)]));
+  assert.equal(x.status, 409); assert.equal(x.json.fehler[0].code, 'MONAT_FESTGESCHRIEBEN'); assert.deepEqual(x.json.perioden, ['euer-2026-11']);
+  assert.equal(u.fs.log.commits, vor);
+  u.fs.setze(P('festschreibung/euer-2026-11'), { status: 'entsperrt' });
+  u.fs.setze(P('monatsabschluesse/November-2026'), { festgeschrieben: true });
+  const ma = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(500)]));
+  assert.equal(ma.status, 409); assert.equal(ma.json.quelle, 'monatsabschluss');
+  u.fs.setze(P('monatsabschluesse/November-2026'), { festgeschrieben: false });
+  u.fs.setze(P('festschreibung/ust-2026-11'), { status: 'festgeschrieben', periode: '2026-11' });
+  const ust = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(500)]));
+  assert.equal(ust.status, 200, JSON.stringify(ust.json));
+  assert.deepEqual(ust.json.nach_festschreibung_perioden, ['ust-2026-11']);
+  assert.deepEqual(u.fs.lies(P(`dokumente/${ust.json.retoure_beleg_id}`)).nach_festschreibung.perioden, ['ust-2026-11']);
+  // Verkauf im Oktober festgeschrieben, Retoure im November: geht (der Verkaufstag bleibt unverändert, Kap. 6 Nr. 21)
+  const w = umgebung({ config: AN_R });
+  const id2 = await w.legeKasseAn({ anfangsbestand_am: '2026-10-01' });
+  assert.equal((await w.tagRufe(abschluss(id2, '2026-10-31'))).status, 200);
+  w.fs.setze(P('festschreibung/euer-2026-10'), { status: 'festgeschrieben', periode: '2026-10' });
+  w.fs.setze(P('festschreibung/ust-2026-10'), { status: 'festgeschrieben', periode: '2026-10' });
+  vor = w.fs.log.commits;
+  const ok = await w.tagRufe(retoureBody(id2, '2026-11-02', '2026-10-31', [Z19(500)]));
+  assert.equal(ok.status, 200, JSON.stringify(ok.json));
+  assert.equal(ok.json.nach_festschreibung, undefined);
+});
+
+test('R1.5 Kleinunternehmer: Retoure A_KU ohne USt, EÜR Kz 183; die Retoure mindert die Umsatzsumme vor einem späteren Tag (KU_GRENZE_AM_TAG erst über 100.000 EUR netto der Retouren)', async () => {
+  const u = umgebung({ config: AN_R, profil: KU });
+  const id = await u.legeKasseAn();
+  const ku = (tag, bar, gez) => abschluss(id, tag, { umsaetze: [{ steuerfall: 'A_KU', bar_cent: bar, unbar_cent: 0 }], gezaehlt_cent: gez });
+  assert.equal((await u.tagRufe(ku('2026-11-02', 9900000, 9910000))).status, 200);
+  const r = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [{ steuerfall: 'A_KU', bar_cent: 100000, unbar_cent: 0 }]));
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  const d = u.fs.lies(P(`dokumente/${r.json.retoure_beleg_id}`));
+  assert.equal(d.steuer.steuerfall, 'A_KU'); assert.equal(d.mwst_satz, 'keine');
+  assert.deepEqual(d.steuer.positionen.map((p) => [p.satz_bp, p.netto_cent, p.ust_cent]), [[null, -100000, 0]]);
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-03', { gezaehlt_cent: 9810000 }))).status, 200);
+  // vor dem 04.11.: 99.000 - 1.000 = 98.000; mit 1.500 am 04.11. = 99.500 <= 100.000 (ohne Retoure wären es 100.500 > Grenze)
+  const t4 = await u.tagRufe(ku('2026-11-04', 150000, 9960000));
+  assert.equal(t4.status, 200, JSON.stringify(t4.json));
+  const w = K.alleWirkungen([dokKern(u, d.steuer.bezug.korrigiert_beleg_id, KU).beleg, dokKern(u, r.json.retoure_beleg_id, KU).beleg], KU).filter((x) => x.beleg_id === r.json.retoure_beleg_id);
+  assert.deepEqual(w.filter((x) => x.status === 'berechnet').map((x) => [x.welt, x.kz, x.betrag_cent]), [['euer', 183, 100000]]);
+  assert.ok(!w.some((x) => x.welt === 'ust' && x.status === 'berechnet'));
+});
+
+test('R1.5 Steuerstatus und Karte: regelbesteuerter Verkauf, Kleinunternehmer am Retourentag 422 RETOURE_STATUS_GEWECHSELT; Karte über eine Integration 422 KARTE_UEBER_INTEGRATION (bar geht)', async () => {
+  const wechsel = { ...REGEL, status_verlauf: [{ gueltig_ab: '2025-01-01', status: 'regel', grund: 'beginn' }, { gueltig_ab: '2026-11-03', status: 'ku', grund: 'vorjahr_unter_25k' }] };
+  const { u, id } = await mitVerkauf({ profil: wechsel });
+  const s = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(500)]));
+  assert.equal(s.status, 422); assert.equal(s.json.fehler[0].code, 'RETOURE_STATUS_GEWECHSELT');
+  const { u: v, id: id2 } = await mitVerkauf();
+  assert.equal((await v.kasse({ aktion: 'aendern', kasse_id: id2, karte_ueber_integration: 'sumup' })).status, 200);
+  const k = await v.tagRufe(retoureBody(id2, '2026-11-03', '2026-11-02', [Z19(500, 100)]));
+  assert.equal(k.status, 422); assert.equal(k.json.fehler[0].code, 'KARTE_UEBER_INTEGRATION');
+  assert.equal((await v.tagRufe(retoureBody(id2, '2026-11-03', '2026-11-02', [Z19(500)]))).status, 200);
+});
+
+test('R1.5 Form: Positivliste (fremder Schlüssel, Zeile mit fremdem Schlüssel), Steuerfall doppelt, Betrag 0, Grund nicht aus der Liste, Notiz zu lang; Storno-Form', async () => {
+  const F = await import('../regel/kasse-form.js');
+  const b = retoureBody('kabcdefgh', '2026-11-03', '2026-11-02', [Z19(100)]);
+  assert.equal(F.pruefeRetoure(b, { heute: HEUTE }).fehler, null);
+  for (const [x, feld] of [[{ ...b, zzz: 1 }, 'zzz'], [{ ...b, zeilen: [{ ...Z19(100), satz_bp: 1900 }] }, 'zeilen[0]'], [{ ...b, zeilen: [Z19(100), Z19(1)] }, 'zeilen[1].steuerfall'],
+    [{ ...b, zeilen: [Z19(0, 0)] }, 'zeilen[0]'], [{ ...b, zeilen: [] }, 'zeilen'], [{ ...b, korrektur_grund: 'skonto' }, 'korrektur_grund'], [{ ...b, notiz: 'x'.repeat(301) }, 'notiz'],
+    [{ ...b, zeilen: [Z19(-1)] }, 'zeilen[0].bar_cent'], [{ ...b, geschaeftstag: '2026-11-21' }, 'geschaeftstag']]) {
+    assert.equal(F.pruefeRetoure(x, { heute: HEUTE }).fehler.feld, feld, JSON.stringify(x));
+  }
+  assert.deepEqual(F.pruefeRetoure({ ...b, zeilen: [Z7(5), Z19(100)] }, { heute: HEUTE }).wert.zeilen.map((z) => z.steuerfall), ['A_INLAND_19', 'A_INLAND_7'], 'Reihenfolge der Sätze');
+  assert.deepEqual([...F.RETOURE_SCHLUESSEL], ['userId', 'token', 'anfrage_id', 'aktion', 'kasse_id', 'geschaeftstag', 'verkaufstag', 'zeilen', 'korrektur_grund', 'notiz', 'art']);
+  assert.equal(F.pruefeRetoure({ ...b, art: 'leergut' }, { heute: HEUTE }).fehler.feld, 'art');
+  assert.equal(F.pruefeRetoure(b, { heute: HEUTE }).wert.art, 'retoure');
+  assert.deepEqual([...F.RETOURE_STORNO_SCHLUESSEL], ['userId', 'token', 'anfrage_id', 'aktion', 'kasse_id', 'retoure_beleg_id', 'grund']);
+  assert.equal(F.pruefeRetoureStorno({ aktion: 'retoure_stornieren', kasse_id: 'kabcdefgh', retoure_beleg_id: 'kasse_kandere00_2026-11-03_r001', grund: 'falsch gewählt' }).fehler.feld, 'retoure_beleg_id');
+  assert.equal(F.pruefeRetoureStorno({ aktion: 'retoure_stornieren', kasse_id: 'kabcdefgh', retoure_beleg_id: 'kasse_kabcdefgh_2026-11-03_r001', grund: 'kurz' }).fehler.feld, 'grund');
+  assert.deepEqual(F.pruefeRetoureStorno({ aktion: 'retoure_stornieren', kasse_id: 'kabcdefgh', retoure_beleg_id: 'kasse_kabcdefgh_2026-11-03_r001', grund: ' falsch gewählt ' }).wert, { kasse_id: 'kabcdefgh', retoure_beleg_id: 'kasse_kabcdefgh_2026-11-03_r001', geschaeftstag: '2026-11-03', grund: 'falsch gewählt' });
+  assert.ok(AUDIT_AKTIONEN.includes('kassentag_retoure') && AUDIT_AKTIONEN.includes('kassentag_retoure_storno'));
+  assert.equal(K.BEWEGUNG_VORZEICHEN.retoure_auszahlung, -1);
+});
+
+// ---------------------------------------------------------------------------------------------
+// O14-Fix (Gegenlesung zu R1.5): M1 KU-Summe, M4 Kartenretoure und Ruhetag/Lücke/Außerbetriebnahme, Pfand ohne Verkaufstag, N7 Lücken
+// ---------------------------------------------------------------------------------------------
+test('O14 M4: reine Kartenretoure (ohne Bewegung): ihr Tag wird kein Ruhetag (409 RUHETAG_MIT_BEWEGUNG, grund retoure) und bleibt vor einem späteren Abschluss nicht offen (409 OFFENE_BEWEGUNGEN_VORTAG, grund retoure); nach dem Storno der Retoure geht beides', async () => {
+  const { u, id } = await mitVerkauf();
+  const r = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(0, 5000)]));
+  assert.equal(r.status, 200); assert.equal(r.json.bewegung_id, null);
+  const rt = await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-03' });
+  assert.equal(rt.status, 409); assert.equal(rt.json.fehler[0].code, 'RUHETAG_MIT_BEWEGUNG'); assert.equal(rt.json.grund, 'retoure'); assert.equal(rt.json.geschaeftstag, '2026-11-03');
+  const rts = await u.tagRufe({ aktion: 'ruhetage', kasse_id: id, tage: ['2026-11-03', '2026-11-04'] });
+  assert.equal(rts.status, 409);
+  const sp = await u.tagRufe(ohneUmsatz(id, '2026-11-04', { gezaehlt_cent: 70700 }));
+  assert.equal(sp.status, 409); assert.equal(sp.json.fehler[0].code, 'OFFENE_BEWEGUNGEN_VORTAG'); assert.deepEqual(sp.json.tage, ['2026-11-03']); assert.equal(sp.json.grund, 'retoure');
+  const ab = await u.kasse({ aktion: 'ausser_betrieb', kasse_id: id, ausser_betrieb_am: '2026-11-04', ausser_betrieb_grund: 'defekt', geraet_endgueltig: true });
+  assert.equal(ab.status, 409); assert.equal(ab.json.fehler[0].code, 'OFFENE_BEWEGUNGEN_VORTAG');
+  // Ausweg ohne Sackgasse: Storno der Retoure am (noch offenen) Tag, danach Ruhetag bzw. Abschluss des Folgetags
+  assert.equal((await u.tagRufe({ aktion: 'retoure_stornieren', kasse_id: id, retoure_beleg_id: r.json.retoure_beleg_id, grund: 'doch kein Umtausch' })).status, 200);
+  assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-03' })).status, 200);
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-04', { gezaehlt_cent: 70700 }))).status, 200);
+});
+
+test('O14 M4: Retoure am Retourentag und Abschluss genau dieses Tages bleiben möglich; eine Retoure an einem abgeschlossenen Verkaufstag stört dessen Nachbarn nicht', async () => {
+  const { u, id } = await mitVerkauf();
+  assert.equal((await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(0, 5000)]))).status, 200);
+  const a = await u.tagRufe(ohneUmsatz(id, '2026-11-03', { gezaehlt_cent: 70700 }));
+  assert.equal(a.status, 200, JSON.stringify(a.json));
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-05', { gezaehlt_cent: 70700 }))).status, 200, 'Lücke 04.11. ohne Retoure');
+});
+
+test('O14 M1: Kleinunternehmer, Retoure im Januar auf einen Dezember-Verkauf mindert die Summe des neuen Jahres nicht (KU_GRENZE_AM_TAG greift bei 100.000,01 EUR)', async () => {
+  const u = umgebung({ config: AN_R, profil: KU, heute: '2027-01-10' });
+  const id = await u.legeKasseAn({ anfangsbestand_am: '2026-12-01' });
+  const ku = (tag, bar, gez) => abschluss(id, tag, { umsaetze: [{ steuerfall: 'A_KU', bar_cent: bar, unbar_cent: 0 }], gezaehlt_cent: gez });
+  assert.equal((await u.tagRufe(ku('2026-12-30', 5000000, 5010000))).status, 200);
+  const r = await u.tagRufe(retoureBody(id, '2027-01-02', '2026-12-30', [{ steuerfall: 'A_KU', bar_cent: 3000000, unbar_cent: 0 }]));
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2027-01-02', { gezaehlt_cent: 2010000 }))).status, 200);
+  const t3 = await u.tagRufe(ku('2027-01-03', 10000001, 12010001));
+  assert.equal(t3.status, 409, JSON.stringify(t3.json)); assert.equal(t3.json.fehler[0].code, 'KU_GRENZE_AM_TAG');
+  assert.equal(t3.json.fehler[0].summe_cent, 10000001, 'Vorjahresretoure nicht abgezogen');
+});
+
+test('O14 Pfand ohne Verkaufstag (art pfand): gleicher Weg wie die Retoure, Beleg „Pfandrückgabe“, Bewegung mit Pfand-Text, art im Beleg; art unbekannt 400', async () => {
+  const { u, id } = await mitVerkauf();
+  const r = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(238)], { art: 'pfand' }));
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  const d = u.fs.lies(P(`dokumente/${r.json.retoure_beleg_id}`));
+  assert.equal(d.retoure.art, 'pfand'); assert.equal(d.name, 'Pfandrückgabe Theke 03.11.2026 (Bezugstag 02.11.2026)');
+  assert.deepEqual(d.steuer.positionen.map((p) => [p.bez, p.netto_cent, p.ust_cent]), [['Pfandrückgabe 19 %', -200, -38]]);
+  assert.equal(u.fs.lies(P(`kassenbewegungen/${r.json.bewegung_id}`)).text, 'Pfandrückgabe (Bezugstag 02.11.2026)');
+  const x = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(100)], { art: 'leergut' }));
+  assert.equal(x.status, 400); assert.equal(x.json.feld, 'art');
+});
+
+test('O14 N7: retoure_stornieren mit Retouren-ID einer anderen Kasse 400 FORMAT, mit fremder Kasse 404', async () => {
+  const { u, id } = await mitVerkauf();
+  const r = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(500)]));
+  const fremd = await u.tagRufe({ aktion: 'retoure_stornieren', kasse_id: 'kzzzzzzzz', retoure_beleg_id: r.json.retoure_beleg_id, grund: 'andere Kasse' });
+  assert.equal(fremd.status, 400); assert.equal(fremd.json.feld, 'retoure_beleg_id');
+  const unbek = await u.tagRufe({ aktion: 'retoure_stornieren', kasse_id: 'kzzzzzzzz', retoure_beleg_id: 'kasse_kzzzzzzzz_2026-11-03_r001', grund: 'andere Kasse' });
+  assert.equal(unbek.status, 404);
 });

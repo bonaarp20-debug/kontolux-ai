@@ -1,7 +1,7 @@
 // regel/kasse.js (KASSE-P1b, Baukonzept docs/kassenbuch/08-baukonzept.md 2.3 und 2.11 C, Vertrag docs/kassenbuch/stand-kasse.md): Worker-Endpunkte des Kassenbuchs.
 //   POST /kasse        { aktion: 'anlegen' | 'aendern' | 'system_wechseln' | 'ausser_betrieb' | 'ausser_betrieb_aufheben' | 'betriebsstaette_anlegen' | 'betriebsstaette_aendern', ... }
 //   POST /kassenmeldung { aktion: 'gemeldet', ... }   (W2-W2, Register und Meldehilfe in regel/kasse-register.js; keine Übermittlung)
-//   POST /kassentag    { aktion: 'abschliessen' | 'ruhetag' | 'ruhetage' | 'stornieren' | 'ruhetag_aufheben', ... }
+//   POST /kassentag    { aktion: 'abschliessen' | 'ruhetag' | 'ruhetage' | 'stornieren' | 'ruhetag_aufheben' | 'retoure' | 'retoure_stornieren', ... }  (retoure: R1.5, Baukonzept 08 2.13)
 //   POST /kassenbewegung { aktion: 'anlegen' | 'stornieren', ... }
 // Alle Kassen-Sammlungen schreibt nur der Worker (Firestore-Regeln: Eigentümer liest). UID nur aus dem Token (setzt der Router).
 // Prüfreihenfolge: grundpruefung (anfrage_id, Größe) -> UID -> Feature kasse (503) -> Steuerprofil bestätigt (403 PROFIL_FEHLT) -> AGB-Mindestfassung
@@ -11,6 +11,9 @@
 // Gleichzeitige Änderungen: updateTime-Vorbedingungen auf Tagesplatz, Zähler, Kasse (Stammdaten und Zeiger) und Audit-Kopf (serialisiert alle Kassen-Commits eines Kontos); bei Konflikt höchstens 3 Wiederholungen
 // (die ganze Prüfung läuft neu), danach 409 KONFLIKT. Unteranfragen: höchstens etwa 14 je Aufruf (REGEL_UNTERANFRAGEN_MAX = 35; O12: dazu die Liste der
 // Monatsabschlüsse des Altpfads bei Belegwirkung, zwei kleine Abfragen beim Kassenart-Wechsel über die Meldepflicht-Grenze, zwei Duplikat-Abfragen bei der Ausgabe).
+// O14 N1 (R1.5): retoure braucht je Versuch etwa 10 Unteranfragen (Tagesplätze, Retouren des Tages, Zeiger, Original, Retouren des Originals, Bewegungen,
+// Festschreibungen, Monatsabschlüsse, commit); nach mehreren Konflikten am Audit-Kopf kann das Budget vor der dritten Wiederholung enden: dann 503 statt 409
+// KONFLIKT (fail-closed, nichts geschrieben, die App wiederholt). Abschluss, Ruhetage und Außerbetriebnahme lesen seit O14 M4 eine Abfrage mehr (Retouren im Bereich).
 import * as Steuerkern from '../steuerkern/index.js';
 import {
   antwort, fehlerAntwort, featureAusAntwort, grundpruefung, istObjekt, CONFIG_PFAD, configBereinigen, featureAktiv, agbFassungenLaden, agbFassungVergleich,
@@ -21,13 +24,13 @@ import { auditKette, kopfPfad, eintragPfad } from './audit.js';
 import { profilBereit, wirkPerioden, nachFestschreibungAntwort, festPruefungMarkieren } from './schreibweg-v2.js';
 import { legacyHash } from './drift.js';
 import { heuteBerlin } from './oss-meldung.js';
-import { KASSE_PFADE, FEATURE, aufbewahrungBis, anhaengePruefen, nachweisPflicht, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, pruefeBewegung, kernFassung, stammKombination, PRIVAT_ARTEN, K3_INAKTIV_ERLAUBT, INAKTIV_FRAGEN_SCHLUESSEL } from './kasse-form.js';
+import { KASSE_PFADE, FEATURE, aufbewahrungBis, anhaengePruefen, nachweisPflicht, pruefeKasse, pruefeKassentag, pruefeRuhetage, pruefeStorno, pruefeBewegung, kernFassung, stammKombination, PRIVAT_ARTEN, K3_INAKTIV_ERLAUBT, INAKTIV_FRAGEN_SCHLUESSEL, FEATURE_RETOURE, pruefeRetoure, pruefeRetoureStorno } from './kasse-form.js';
 import {
   ausserBetrieb, ausserBetriebAufheben, betriebsstaette, kassenmeldungGemeldet, protokollNachreichen, inaktivAngaben, meldeAbleitung, meldeNachAenderung, korrekturFaellt, aenderungArtNoetig, k3Konsistenz, betriebsstaetteZuordnung, meldepflichtigArt,
   ohneSystemDaten, ereignis, ereignisSetzen, anschaffungsEreignis, K3_LEER, dateiImSpeicher,
 } from './kasse-register.js';
 import {
-  P, kasseIdAus, kassennummer, idBereich, zeigerAus, zeigerPasst, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern, ohneStornoPaare, KasseLesefehler,
+  P, kasseIdAus, kassennummer, idBereich, zeigerAus, zeigerPasst, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern, ohneStornoPaare, KasseLesefehler, retourenTageImBereich,
   STAMM_FELDER, STAMMDATEN_VERLAUF_MAX, stammVerlaufAus, stammAm, stammVerlaufMit, stammVerlaufStart, stammVerlaufVerdichten,
 } from './kasse-daten.js';
 
@@ -60,7 +63,7 @@ const STAMMDATEN_AB = Object.freeze(['art_ab', 'grundaufzeichnung_ab', 'datenque
 // zusätzlich fail-closed, Test „AKTIONEN deckt KASSE_PFADE“)
 export const AKTIONEN = Object.freeze({
   '/kasse': ['anlegen', 'aendern', 'system_wechseln', 'ausser_betrieb', 'ausser_betrieb_aufheben', 'betriebsstaette_anlegen', 'betriebsstaette_aendern'],
-  '/kassentag': ['abschliessen', 'ruhetag', 'ruhetage', 'stornieren', 'ruhetag_aufheben'],
+  '/kassentag': ['abschliessen', 'ruhetag', 'ruhetage', 'stornieren', 'ruhetag_aufheben', 'retoure', 'retoure_stornieren'], // retoure, retoure_stornieren: R1.5 (08 2.13)
   '/kassenbewegung': ['anlegen', 'stornieren'],
   '/kassenmeldung': ['gemeldet', 'protokoll_nachreichen'],
 });
@@ -163,6 +166,9 @@ export async function regelKasse(pfad, body, env, cors = {}, deps = {}) {
       if (aktion === 'abschliessen') return await abschliessen(c);
       if (aktion === 'stornieren') return await stornieren(c);
       if (aktion === 'ruhetag_aufheben') return await ruhetagAufheben(c);
+      // R1.5: Retoure auf Vortag nur mit dem eigenen Schalter kasse_retoure (fehlend = aus); ihr Storno nur mit kasse (Ausweg, auch wenn kasse_retoure wieder aus ist)
+      if (aktion === 'retoure') return featureAktiv(config, FEATURE_RETOURE) ? await retoure(c) : featureAusAntwort(cors);
+      if (aktion === 'retoure_stornieren') return await retoureStornieren(c);
       return await ruhetage(c, aktion);
     }
     if (pfad === '/kassenbewegung') return aktion === 'anlegen' ? await bewegungAnlegen(c) : await bewegungStornieren(c);
@@ -490,6 +496,8 @@ async function kuSummeVorTag(c, tag, kernOptionen) {
     if (gelesen.size < n) throw new KasseLesefehler('KU_SUMME_UNVOLLSTAENDIG', 'KU-Summe: weniger Belege gelesen als gezählt');
   }
   const r = [...gelesen.values()];
+  // R1.5 / O14 M1: eine Retoure mindert die Summe nur, wenn ihr Verkaufstag im selben Jahr liegt (Kern kuKassenRetoureWirkungen); das Original liegt dann im
+  // Zeitraum dieser Abfrage. Retouren auf Vorjahresverkäufe mindern bis zur Antwort des Steuerberaters nicht (kein Nachlesen des Vorjahres-Originals).
   const belege = Steuerkern.belegeFuerKern(r.map((d) => ({ ...d.daten, id: idVon(d) })), profil, kernOptionen).belege;
   const wirkungen = Steuerkern.alleWirkungen(belege, profil, kernOptionen).filter((x) => !(typeof x.datum_wirk === 'string' && x.datum_wirk >= tag));
   const g = Steuerkern.grenzenFuerJahr(wirkungen, profil, jahr, null, {});
@@ -530,13 +538,13 @@ function belegBauen(eingabe, { profil, heute, zeit, kasse, kasseId, tagId, n, nu
 }
 
 // Fertiges Dokument. steuer.migration.legacy_hash wird zuletzt über das fertige Dokument berechnet (driftStatus 'ok').
-function dokumentAus(beleg, { zeit, kasse, kasseId, tagId, n, nummer, anhaenge, tag, einnahme, kern = Steuerkern.KERN_VERSION, storno = false }) {
+function dokumentAus(beleg, { zeit, kasse, kasseId, tagId, n, nummer, anhaenge, tag, einnahme, kern = Steuerkern.KERN_VERSION, storno = false, name = null }) {
   const steuer = { ...beleg.steuer, herkunft: { ...(istObjekt(beleg.steuer.herkunft) ? beleg.steuer.herkunft : {}), weg: 'kasse', kern_version: kern } };
   const lf = Steuerkern.legacyFelder({ schema_version: 2, id: beleg.id, steuer });
   const alt = Steuerkern.kassenbelegAltfelder(steuer);
   const dok = {
     quelle: 'kasse', kasse_id: kasseId, kassentag_id: tagId, kassen_fassung: n, kassennummer: nummer,
-    typ: lf.typ, name: `${storno ? 'Storno Tagesabschluss' : 'Tagesabschluss'} ${kassennamen(kasse)} ${datumDe(tag)}`, absender: kassennamen(kasse),
+    typ: lf.typ, name: name || `${storno ? 'Storno Tagesabschluss' : 'Tagesabschluss'} ${kassennamen(kasse)} ${datumDe(tag)}`, absender: kassennamen(kasse),
     // bezahlt und bezahlt_am stehen auch beim Storno gesetzt (O6 M1): die Rules erlauben dem Client an gesperrten Belegen bezahlt false -> true und bezahlt_am; ein
     // Storno mit bezahlt: false würde so verändert, sein Drift-Status wäre veraltet und der Kern rechnete die Altfelder (EÜR zeigte den Umsatz trotz Storno wieder).
     // Mit bezahlt: true (schon im Hash) bleibt für den Client nichts umzustellen. Das Feld ist ein Altfeld; die Wirkung des Stornos kommt aus steuer (Kern -26).
@@ -632,6 +640,11 @@ async function abschliessen(c) {
       const offen = ohneStornoPaare(gelesen).filter((d) => !randTag || d.daten.geschaeftstag < randTag);
       if (!offen.length && gelesen.unvollstaendig) return { antwort: fehlerAntwort(422, 'BEWEGUNGEN_ZU_VIELE', cors, { bis_tag: gelesen[gelesen.length - 1].daten.geschaeftstag }) };
       if (offen.length) return { antwort: fehlerAntwort(409, 'OFFENE_BEWEGUNGEN_VORTAG', cors, { tage: [...new Set(offen.map((d) => d.daten.geschaeftstag))].sort().slice(0, 31) }) };
+      // O14 M4 (R1.5): eine nicht stornierte Retoure (auch reine Kartenretoure ohne Bewegung) an einem offenen Tag davor: erst diesen Tag abschließen
+      const rt = await retourenTageImBereich(fs, uid, kasseId, lueckeVon, lueckeBis);
+      const rtTage = rt.tage.filter((d) => !rt.randTag || d < rt.randTag);
+      if (rtTage.length) return { antwort: fehlerAntwort(409, 'OFFENE_BEWEGUNGEN_VORTAG', cors, { tage: rtTage.slice(0, 31), grund: 'retoure' }) };
+      if (rt.unvollstaendig) return { antwort: fehlerAntwort(422, 'BEWEGUNGEN_ZU_VIELE', cors, { bis_tag: rt.randTag, grund: 'retoure' }) };
     }
     const anfangsbestand = letzter ? letzter.daten.gezaehlt_cent : kasse.anfangsbestand_cent;
     if (!Number.isSafeInteger(anfangsbestand) || anfangsbestand < 0) throw new Error('Anfangsbestand unlesbar');
@@ -791,6 +804,11 @@ async function ruhetage(c, aktion) {
     if (mit) return { antwort: fehlerAntwort(409, 'RUHETAG_MIT_BEWEGUNG', cors, { geschaeftstag: mit.daten.geschaeftstag }) };
     // B-N1: mehr als 300 Bewegungen im Bereich und das Gelesene entscheidet nicht: 422 (weniger Tage auf einmal bestätigen), nie 500 und nie ein ungeprüfter Ruhetag
     if (bew.unvollstaendig) return { antwort: fehlerAntwort(422, 'BEWEGUNGEN_ZU_VIELE', cors, { bis_tag: bew[bew.length - 1].daten.geschaeftstag }) };
+    // O14 M4 (R1.5): ein Tag mit einer nicht stornierten Retoure (auch reine Kartenretoure ohne Bewegung) ist kein Ruhetag
+    const rt = await retourenTageImBereich(fs, uid, kasseId, tage[0], tage[tage.length - 1]);
+    const rtTag = rt.tage.find((d) => tage.includes(d) && (!rt.randTag || d < rt.randTag));
+    if (rtTag) return { antwort: fehlerAntwort(409, 'RUHETAG_MIT_BEWEGUNG', cors, { geschaeftstag: rtTag, grund: 'retoure' }) };
+    if (rt.unvollstaendig) return { antwort: fehlerAntwort(422, 'BEWEGUNGEN_ZU_VIELE', cors, { bis_tag: rt.randTag, grund: 'retoure' }) };
     const ts = zeitstempel(zeit);
     const writes = tage.map((t, i) => schreibe.anlegen(P.kassentag(uid, ids[i]), {
       kasse_id: kasseId, geschaeftstag: t, status: 'ruhetag', fassung_aktiv: null, fassungen_kurz: [], anfangsbestand_cent: null, soll_endbestand_cent: null, gezaehlt_cent: null,
@@ -908,6 +926,12 @@ async function stornieren(c) {
     const n = tagAlt.fassung_aktiv;
     const kurz = kurzListe.find((x) => x.n === n);
     if (!kurz) throw new Error('Tagesplatz ohne Kurzeintrag der aktiven Fassung');
+    // R1.5 (08 2.13, Muster kxKorrekturVorhanden): ein Verkaufstag mit einer nicht stornierten Retoure auf seinen Umsatzbeleg lässt sich erst stornieren, wenn die
+    // Retoure storniert ist (sonst zeigte ihr Bezug auf einen stornierten Beleg und minderte doppelt). Gilt unabhängig vom Schalter kasse_retoure.
+    if (typeof kurz.beleg_id === 'string' && kurz.beleg_id) {
+      const rz = await retourenZu(fs, uid, kurz.beleg_id);
+      if (rz.aktiv.length) return { antwort: fehlerAntwort(409, 'RETOURE_VORHANDEN', cors, { kassentag_id: tagId, retouren: rz.aktiv.map(idVon).sort().slice(0, 10), anzahl: rz.aktiv.length }) };
+    }
     // Originalbelege der aktiven Fassung lesen (Umsatz, Mehrzweck-Verkauf, Differenz); sumup_integration hat evtl. keinen Umsatzbeleg
     const originale = [['storno', kurz.beleg_id], ['storno_gm', kurz.mehrzweck_beleg_id], [kurz.differenz_beleg_id && kurz.differenz_beleg_id.endsWith('_dm') ? 'storno_dm' : 'storno_dp', kurz.differenz_beleg_id]].filter(([, id]) => typeof id === 'string' && id);
     const belegDocs = originale.length ? await fs.batchGet(originale.map(([, id]) => P.beleg(uid, id))) : new Map();
@@ -971,6 +995,251 @@ async function stornieren(c) {
       erfolg: async () => {
         if (gesperrt.length) await festPruefungMarkieren({ uid, token: await deps.adminToken(), fetchFn: deps.fetchFn, perioden: gesperrt, zeit });
         return antwort({ ok: true, kassentag_id: tagId, fassung: n, storno_kassennummer: nr, storno_beleg_id: kurzNeu.storno_beleg_id, storno_beleg_ids: storni.map((x) => x.id), ...nachFestschreibungAntwort({ nach_festschreibung: gesperrt }) }, 200, cors);
+      },
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// R1.5 /kassentag retoure | retoure_stornieren (Baukonzept 08 2.13, Kap. 6 Nr. 20-22; Vertrag stand-kasse.md Abschnitt 9, Eintrag R1.5)
+// Ein Kunde gibt an einem späteren Tag (Retourentag = geschaeftstag, ein offener Tag nach dem letzten Abschluss, Chronologie wie eine Bewegung) etwas zurück, das er
+// an einem früheren Tag derselben Kasse (verkaufstag, abgeschlossen) gekauft hat. Der Verkaufstag bleibt unverändert. Ein :commit schreibt:
+//   - Korrekturbeleg dokumente/kasse_<kasseId>_<Retourentag>_r<NNN> (Kern kassenRetoureEingabe: Positionen je Satz negativ, Bezug korrigiert_beleg_id = Umsatzbeleg der
+//     AKTIVEN Fassung des Verkaufstags, wirkdatum und rueckzahlung.datum = Retourentag), Altfelder wie alle Kassenbelege (typ 'storno' aus legacy_typ, bezahlt true
+//     wie der Kassen-Storno O6 M1), Feld retoure (Verkaufstag, Zeilen mit bar/Karte je Satz für DATEV und Kassenbuch, anfrage_id)
+//   - nur bei Bar-Anteil: Bewegung art 'retoure_auszahlung' am Retourentag (mindert den Soll-Bestand dieses Tages, Kern BEWEGUNG_VORZEICHEN), beleg_id = Retoure
+//   - Zähler (Kassennummer, lückenlos) und Audit kassentag_retoure (Kopf-Vorbedingung serialisiert alle Kassen-Commits des Kontos: Rest, Storno des Verkaufstags
+//     und Abschluss des Retourentags können sich nicht überholen)
+// Prüfungen: Kasse in Betrieb mit Kassenbuch, Retourentag offen (offenerTag wie eine neue Bewegung), Verkaufstag abgeschlossen mit Umsatzbeleg (422 RETOURE_OHNE_VERKAUF),
+// Steuerstatus (Regel -> Kleinunternehmer zwischen Verkauf und Retoure: 422 RETOURE_STATUS_GEWECHSELT), Karte nicht über eine Integration (422 KARTE_UEBER_INTEGRATION),
+// je Satz höchstens der Rest des Verkaufstags nach früheren, nicht stornierten Retouren (422 RETOURE_UEBER_VERKAUF mit rest), Festschreibung des Retourentags
+// (EÜR-Monat 409 MONAT_FESTGESCHRIEBEN, Monatsabschluss des Altpfads wie O12b M2; nur USt-Zeitraum: speichern mit nach_festschreibung). Ein festgeschriebener
+// Verkaufstag stört nicht (das Original bleibt unverändert, Kap. 6 Nr. 21).
+// ---------------------------------------------------------------------------------------------
+export const RETOUREN_MAX_JE_VERKAUF = 100; // alle Retouren (auch stornierte) auf einen Tagesabschluss-Beleg
+// Retouren auf einen Tagesabschluss-Beleg (Bezug steuer.bezug.korrigiert_beleg_id; nur echte Kassenbelege mit Belegart korrektur). Liest höchstens
+// RETOUREN_MAX_JE_VERKAUF + 1 Dokumente; mehr: fail-closed 503 (nie eine geratene Entwarnung). Rückgabe { alle, aktiv } (aktiv = nicht storniert).
+async function retourenZu(fs, uid, origId) {
+  const r = await fs.runQuery(`users/${uid}`, { from: [{ collectionId: 'dokumente' }], where: { fieldFilter: { field: { fieldPath: 'steuer.bezug.korrigiert_beleg_id' }, op: 'EQUAL', value: { stringValue: origId } } }, limit: RETOUREN_MAX_JE_VERKAUF + 1 });
+  if (r.length > RETOUREN_MAX_JE_VERKAUF) throw new KasseLesefehler('RETOUREN_ZU_VIELE', 'Retouren: mehr als lesbar');
+  const alle = r.filter((d) => istObjekt(d.daten) && istEchterKassenbeleg(d.daten) && istObjekt(d.daten.steuer) && d.daten.steuer.beleg_art === 'korrektur' && d.daten.deleted !== true);
+  return { alle, aktiv: alle.filter((d) => d.daten.storniert !== true) };
+}
+// Retouren eines Retourentags (ID-Bereich kasse_<Tagesplatz>_r001 .. _r999)
+async function retourenAmTag(fs, uid, tagId) {
+  return fs.runQuery(`users/${uid}`, idBereich(uid, 'dokumente', `${Steuerkern.KASSEN_BELEG_PRAEFIX}${tagId}_r000`, `${Steuerkern.KASSEN_BELEG_PRAEFIX}${tagId}_r999`, { limit: Steuerkern.KASSEN_RETOURE_NR_MAX + 1 }));
+}
+// Perioden der Retoure für die Festschreibung: Wirkungen mit dem Original (USt-Zeitraum und EÜR-Monat der Rückzahlung), dazu immer der EÜR-Monat des Retourentags
+function retourePerioden(kandidat, origBeleg, profil, kernOptionen, tag) {
+  const p = new Set(wirkPerioden(kandidat, profil, { ...(kernOptionen || {}), originale: new Map([[origBeleg.id, origBeleg]]) }));
+  p.add(`euer-${tag.slice(0, 7)}`);
+  return [...p].sort();
+}
+const restAntwort = (rest) => rest.zeilen.map((z) => ({ steuerfall: z.steuerfall, satz_bp: z.satz_bp, verkauf_brutto_cent: z.verkauf_brutto_cent, rest_brutto_cent: z.rest_brutto_cent }));
+
+async function retoure(c) {
+  const { fs, uid, body, cors, zeit, heute, profil, config } = c;
+  const f = pruefeRetoure(body, { heute });
+  if (f.fehler) return formFehler(f.fehler, cors);
+  const w = f.wert;
+  const kasseId = w.kasse_id;
+  const tag = w.geschaeftstag;
+  const tagId = Steuerkern.kassentagId(kasseId, tag);
+  const vTagId = Steuerkern.kassentagId(kasseId, w.verkaufstag);
+  const jahr = tag.slice(0, 4);
+  const kernOptionen = await kernOptionenFuerKontoLaden(uid, config, { fs, streng: true });
+  return mitWiederholung(fs, async () => {
+    const docs = await fs.batchGet([P.kasse(uid, kasseId), P.kassentag(uid, tagId), P.kassentag(uid, vTagId), P.zaehler(uid, kasseId, jahr), kopfPfad(uid)]);
+    const kasseDok = docs.get(P.kasse(uid, kasseId));
+    if (!kasseDok || !istObjekt(kasseDok.daten)) return { antwort: fehlerAntwort(404, 'KASSE_UNBEKANNT', cors) };
+    const kasse = kasseDok.daten;
+    // Wiederholung derselben Anfrage (Netzabbruch): die Retoure steht schon unter dieser anfrage_id am Retourentag
+    const amTag = await retourenAmTag(fs, uid, tagId);
+    const gleiche = amTag.find((d) => istObjekt(d.daten) && istObjekt(d.daten.retoure) && d.daten.retoure.anfrage_id === body.anfrage_id);
+    if (gleiche) return { antwort: antwort({ ok: true, idempotent: true, retoure_beleg_id: idVon(gleiche), bewegung_id: gleiche.daten.retoure.bewegung_id ?? null, kassennummer: gleiche.daten.kassennummer ?? null }, 200, cors) };
+    // Retourentag: offen und nach dem letzten Abschluss (wie eine neue Bewegung: TAG_ABGESCHLOSSEN, SPAETERE_TAGE, VOR_ANFANGSBESTAND, STAMMDATEN_WECHSEL_SPAETER, FASSUNGEN_MAX)
+    const sperre = await offenerTag(c, kasseDok, docs.get(P.kassentag(uid, tagId)), tag, tagId, { neu: true });
+    if (sperre) return sperre;
+    // Verkaufstag: abgeschlossen, aktive Fassung mit Umsatzbeleg
+    const vDok = docs.get(P.kassentag(uid, vTagId));
+    const vTag = vDok && istObjekt(vDok.daten) ? vDok.daten : null;
+    if (!vTag || vTag.status !== 'abgeschlossen' || !Number.isSafeInteger(vTag.fassung_aktiv)) return { antwort: fehlerAntwort(422, 'RETOURE_OHNE_VERKAUF', cors, { feld: 'verkaufstag', grund: 'nicht_abgeschlossen', status: vTag ? (vTag.status ?? null) : null }) };
+    const vKurz = (Array.isArray(vTag.fassungen_kurz) ? vTag.fassungen_kurz : []).find((x) => istObjekt(x) && x.n === vTag.fassung_aktiv);
+    if (!vKurz) throw new Error('Tagesplatz ohne Kurzeintrag der aktiven Fassung');
+    if (typeof vKurz.beleg_id !== 'string' || !vKurz.beleg_id) return { antwort: fehlerAntwort(422, 'RETOURE_OHNE_VERKAUF', cors, { feld: 'verkaufstag', grund: 'ohne_umsatzbeleg' }) };
+    const origId = vKurz.beleg_id;
+    const origDok = await fs.get(P.beleg(uid, origId));
+    if (!origDok || !istObjekt(origDok.daten) || !istEchterKassenbeleg(origDok.daten) || !istObjekt(origDok.daten.steuer) || origDok.daten.steuer.beleg_art !== 'tagesabschluss') throw new Error('Umsatzbeleg des Verkaufstags fehlt');
+    const origSteuer = origDok.daten.steuer;
+    // Steuerstatus: der Steuerfall folgt dem Original. Regelbesteuerter Verkauf, Kleinunternehmer am Retourentag: die Steuer ist nach § 17 Abs. 1 S. 1, Abs. 2 UStG
+    // zu berichtigen (UStAE 19.7 Abs. 8, docs/quellen/ustae-stand-2026-10-19-19-1-bis-19-7.md Z. 261-265); das rechnet Kontolux noch nicht (wie und wo die
+    // Berichtigung als Kleinunternehmer erklärt wird, ist offen): vorsichtig ablehnen (422), der Text nennt die fehlende Minderung. Kleinunternehmer-Verkauf,
+    // regelbesteuert am Retourentag: geht (keine USt, UStAE 19.7 Abs. 3, Kz 183).
+    const statusTag = Steuerkern.statusAm(profil, tag).status;
+    if (statusTag === 'unbekannt') return { antwort: fehlerAntwort(403, 'PROFIL_FEHLT', cors) };
+    if (origSteuer.steuerfall !== 'A_KU' && statusTag === 'ku') return { antwort: fehlerAntwort(422, 'RETOURE_STATUS_GEWECHSELT', cors, { feld: 'verkaufstag' }) };
+    // Kartenzahlungen kommen über eine Integration (2.11 C.8): dann kommt auch die Kartenrückzahlung von dort, nie zusätzlich aus dem Kassenbuch
+    const sv = stammVerlaufAus(kasse);
+    const karteAmTag = sv ? stammAm(sv, tag).werte.karte_ueber_integration : (kasse.karte_ueber_integration || 'keine');
+    if (karteAmTag && karteAmTag !== 'keine' && w.zeilen.some((z) => z.unbar_cent > 0)) return { antwort: fehlerAntwort(422, 'KARTE_UEBER_INTEGRATION', cors, { feld: 'zeilen' }) };
+    // Rest je Satz nach früheren, nicht stornierten Retouren (Rundung gegen Original und frühere Retouren im Kern)
+    const fr = await retourenZu(fs, uid, origId);
+    if (fr.alle.length >= RETOUREN_MAX_JE_VERKAUF) return { antwort: fehlerAntwort(422, 'RETOUREN_MAX', cors, { max: RETOUREN_MAX_JE_VERKAUF }) };
+    const fruehere = fr.aktiv.map((d) => d.daten.steuer);
+    let rest;
+    try { rest = Steuerkern.kassenRetoureRest(origSteuer, fruehere); } catch (e) { throw new Error(`Rest des Verkaufstags nicht lesbar: ${String(e && e.message ? e.message : e).slice(0, 80)}`); }
+    for (const z of w.zeilen) {
+      const r = rest.zeilen.find((x) => x.steuerfall === z.steuerfall);
+      const b = z.bar_cent + z.unbar_cent;
+      if (!r || b > r.rest_brutto_cent) return { antwort: fehlerAntwort(422, 'RETOURE_UEBER_VERKAUF', cors, { steuerfall: z.steuerfall, rest_cent: r ? r.rest_brutto_cent : 0, rest: restAntwort(rest) }) };
+    }
+    // Nummern: Retoure je Retourentag (r001 ...), Bewegung je Tag (nur bei Bar-Anteil), Kassennummer aus dem Zähler der Kasse und des Jahres
+    const nrR = amTag.reduce((m, d) => { const x = /_r(\d{3})$/.exec(idVon(d)); return Math.max(m, x ? Number(x[1]) : 0); }, 0) + 1;
+    if (nrR > Steuerkern.KASSEN_RETOURE_NR_MAX) return { antwort: fehlerAntwort(422, 'RETOUREN_MAX', cors, { max: Steuerkern.KASSEN_RETOURE_NR_MAX, grund: 'retourentag' }) };
+    const retoureId = Steuerkern.kassenRetoureBelegId(tagId, nrR);
+    const bar = w.zeilen.reduce((s, z) => s + z.bar_cent, 0);
+    const unbar = w.zeilen.reduce((s, z) => s + z.unbar_cent, 0);
+    let bewegungId = null;
+    if (bar > 0) {
+      const nrB = naechsteNr(await bewegungenDesTages(fs, uid, kasseId, tag));
+      if (nrB > BEWEGUNGEN_MAX_JE_TAG) return { antwort: fehlerAntwort(422, 'BEWEGUNGEN_MAX', cors, { max: BEWEGUNGEN_MAX_JE_TAG }) };
+      bewegungId = `${kasseId}_${tag}_${String(nrB).padStart(3, '0')}`;
+    }
+    const zaehlerDok = docs.get(P.zaehler(uid, kasseId, jahr));
+    const nummerNeu = (Number.isSafeInteger(zaehlerDok?.daten?.letzte) ? zaehlerDok.daten.letzte : 0) + 1;
+    const nummer = kassennummer(kasse.kuerzel, jahr, nummerNeu);
+    let steuer;
+    try {
+      steuer = Steuerkern.kassenRetoureEingabe(origSteuer, { original_id: origId, verkaufstag: w.verkaufstag, retourentag: tag, zeilen: w.zeilen, korrektur_grund: w.korrektur_grund, notiz: w.notiz, art: w.art, fruehere, erfasst_am: heute, kern_version: Steuerkern.KERN_VERSION });
+    } catch (e) {
+      const m = String(e && e.message ? e.message : e);
+      if (m.startsWith('RETOURE_UEBER_VERKAUF')) return { antwort: fehlerAntwort(422, 'RETOURE_UEBER_VERKAUF', cors, { steuerfall: m.split(': ')[1] || null, rest: restAntwort(rest) }) };
+      return { antwort: fehlerAntwort(422, 'BELEG_UNGUELTIG', cors, { grund: m.slice(0, 80) }) };
+    }
+    const kandidat = { schema_version: 2, id: retoureId, steuer };
+    const v = Steuerkern.validiereBeleg(kandidat, { modus: 'streng', stichtag: heute });
+    const blocker = ((v && v.blocker) || []).map((x) => x && x.code).filter((x) => typeof x === 'string');
+    if (blocker.length) return { antwort: fehlerAntwort(422, 'BELEG_UNGUELTIG', cors, { codes: blocker.filter((x) => /^[A-Za-z0-9_]{1,64}$/.test(x)).slice(0, 10) }) };
+    // Festschreibung (Kap. 6 Nr. 21): der Zeitraum der RETOURE zählt (Retourentag); ein festgeschriebener Verkaufstag stört nicht
+    const origBeleg = Steuerkern.belegFuerKern({ ...origDok.daten, id: origId }, profil).beleg;
+    const festPerioden = await festPeriodenLesen(fs, uid);
+    const perioden = retourePerioden(kandidat, origBeleg || { id: origId, steuer: origSteuer }, profil, kernOptionen, tag);
+    const gesperrt = perioden.filter((p) => festPerioden.includes(p));
+    if (gesperrt.some((p) => p.startsWith('euer-'))) return { antwort: fehlerAntwort(409, 'MONAT_FESTGESCHRIEBEN', cors, { perioden: gesperrt }) };
+    const altSperre = await altMonatsabschlussSperre(c, tag);
+    if (altSperre) return { antwort: altSperre };
+    const nachFest = gesperrt.length ? { nach_festschreibung: { perioden: gesperrt, erkannt_am: zeit } } : {};
+    const ts = zeitstempel(zeit);
+    const zeilenDok = w.zeilen.map((z) => ({ steuerfall: z.steuerfall, satz_bp: rest.zeilen.find((x) => x.steuerfall === z.steuerfall).satz_bp, bar_cent: z.bar_cent, unbar_cent: z.unbar_cent }));
+    const dok = {
+      ...dokumentAus(kandidat, { zeit, kasse, kasseId, tagId, n: null, nummer, anhaenge: null, tag, einnahme: false, name: `${w.art === 'pfand' ? 'Pfandrückgabe' : 'Rückgabe'} ${kassennamen(kasse)} ${datumDe(tag)} (${w.art === 'pfand' ? `Bezugstag ${datumDe(w.verkaufstag)}` : `Verkauf vom ${datumDe(w.verkaufstag)}`})` }),
+      // Felder außerhalb des Drift-Hashes: Verkaufstag und Aufteilung bar/Karte je Satz (DATEV, Kassenbuch, Rest), Bewegung, Anfrage (Wiederholung)
+      retoure: { art: w.art, verkaufstag: w.verkaufstag, verkauf_kassentag_id: vTagId, verkauf_fassung: vTag.fassung_aktiv, verkauf_beleg_id: origId, zeilen: zeilenDok, bar_cent: bar, unbar_cent: unbar, bewegung_id: bewegungId, anfrage_id: body.anfrage_id },
+      ...nachFest,
+    };
+    const writes = [
+      schreibe.anlegen(P.beleg(uid, retoureId), dok),
+      schreibe.setzen(P.zaehler(uid, kasseId, jahr), { letzte: nummerNeu, aktualisiert_am: ts }, zaehlerDok ? { updateTime: zaehlerDok.updateTime } : { exists: false }),
+    ];
+    let bewegung = null;
+    if (bewegungId) {
+      bewegung = {
+        kasse_id: kasseId, geschaeftstag: tag, art: 'retoure_auszahlung', betrag_cent: bar, text: w.art === 'pfand' ? `Pfandrückgabe (Bezugstag ${datumDe(w.verkaufstag)})` : `Rückgabe aus Verkauf vom ${datumDe(w.verkaufstag)}`, beleg_id: retoureId, eigenbeleg_pfad: null,
+        privatvorgang_id: null, gegenkasse_id: null, storno_von: null, storno_art: null, storno_grund: null, kontoauszug_abgleich: null,
+        kassennummer: nummer, erfasst_am: ts, anfrage_id: body.anfrage_id, aufbewahrung_bis: aufbewahrungBis(tag),
+      };
+      writes.push(schreibe.anlegen(P.bewegung(uid, bewegungId), bewegung));
+    }
+    const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{
+      aktion: 'kassentag_retoure', ziel: `dokumente/${retoureId}`, vorher: null, nachher: { beleg_id: retoureId, bewegung_id: bewegungId, verkaufstag: w.verkaufstag, kassennummer: nummer },
+      details: { kasse_id: kasseId, kassentag_id: tagId, verkaufstag: w.verkaufstag, verkauf_beleg_id: origId, beleg_id: retoureId, bewegung_id: bewegungId, saetze: w.zeilen.map((z) => z.steuerfall), grund: w.korrektur_grund, art: w.art, nach_festschreibung: gesperrt.length > 0 },
+    }], zeit);
+    writes.push(...audit.writes);
+    // Rest nach dieser Retoure (für die Antwort, gleiche Kern-Rechnung)
+    const restNach = Steuerkern.kassenRetoureRest(origSteuer, [...fruehere, steuer]);
+    return {
+      writes,
+      erfolg: async () => {
+        if (gesperrt.length) await festPruefungMarkieren({ uid, token: await c.deps.adminToken(), fetchFn: c.deps.fetchFn, perioden: gesperrt, zeit });
+        return antwort({ ok: true, retoure_beleg_id: retoureId, bewegung_id: bewegungId, kassennummer: nummer, kassentag_id: tagId, verkaufstag: w.verkaufstag, verkauf_beleg_id: origId,
+          bar_cent: bar, unbar_cent: unbar, rest: restAntwort(restNach), ...nachFestschreibungAntwort({ nach_festschreibung: gesperrt }) }, 200, cors);
+      },
+    };
+  });
+}
+
+// R1.5 retoure_stornieren (Kap. 6 Nr. 22 sinngemäß): nimmt eine Retoure an IHREM Tag zurück, solange der Retourentag offen ist (wie der Storno einer Bewegung; sonst
+// 409 TAG_ABGESCHLOSSEN, der Weg geht über den Storno des Retourentags rückwärts). Kein Gegenbeleg: der Kern schlösse einen Storno auf eine Korrektur als
+// korrektur_auf_korrektur aus. Stattdessen wie beim Storno einer Kassenausgabe das Kennzeichen storniert am Korrekturbeleg (mit storniert_am, storno_grund,
+// retoure_storno; Kern belegFuerKern: wirkungslos, alle Wirkungen lagen am Retourentag) und die Storno-Bewegung der retoure_auszahlung im selben Commit.
+async function retoureStornieren(c) {
+  const { fs, uid, body, cors, zeit, profil, config } = c;
+  const f = pruefeRetoureStorno(body);
+  if (f.fehler) return formFehler(f.fehler, cors);
+  const { kasse_id: kasseId, retoure_beleg_id: retoureId, geschaeftstag: tag, grund } = f.wert;
+  const tagId = Steuerkern.kassentagId(kasseId, tag);
+  const jahr = tag.slice(0, 4);
+  const kernOptionen = await kernOptionenFuerKontoLaden(uid, config, { fs, streng: true });
+  return mitWiederholung(fs, async () => {
+    const docs = await fs.batchGet([P.kasse(uid, kasseId), P.kassentag(uid, tagId), P.zaehler(uid, kasseId, jahr), kopfPfad(uid), P.beleg(uid, retoureId)]);
+    const kasseDok = docs.get(P.kasse(uid, kasseId));
+    if (!kasseDok || !istObjekt(kasseDok.daten)) return { antwort: fehlerAntwort(404, 'KASSE_UNBEKANNT', cors) };
+    const rDok = docs.get(P.beleg(uid, retoureId));
+    const rd = rDok && istObjekt(rDok.daten) ? rDok.daten : null;
+    if (!rd || !istEchterKassenbeleg(rd) || !istObjekt(rd.steuer) || rd.steuer.beleg_art !== 'korrektur' || !istObjekt(rd.retoure) || rd.kasse_id !== kasseId) return { antwort: fehlerAntwort(404, 'RETOURE_UNBEKANNT', cors, { retoure_beleg_id: retoureId }) };
+    // Wiederholung derselben Anfrage nach Erfolg: nichts schreiben
+    if (rd.storniert === true && istObjekt(rd.retoure_storno) && rd.retoure_storno.anfrage_id === body.anfrage_id) return { antwort: antwort({ ok: true, idempotent: true, retoure_beleg_id: retoureId, storno_kassennummer: rd.retoure_storno.kassennummer ?? null, bewegung_id: rd.retoure_storno.bewegung_id ?? null }, 200, cors) };
+    if (rd.storniert === true) return { antwort: fehlerAntwort(409, 'RETOURE_STORNIERT', cors, { retoure_beleg_id: retoureId }) };
+    const sperre = await offenerTag(c, kasseDok, docs.get(P.kassentag(uid, tagId)), tag, tagId);
+    if (sperre) return sperre;
+    const kasse = kasseDok.daten;
+    // Festschreibung: der Storno wirkt im Zeitraum der Retoure (Retourentag)
+    const origId = istObjekt(rd.steuer.bezug) ? rd.steuer.bezug.korrigiert_beleg_id : null;
+    const origDok = typeof origId === 'string' ? await fs.get(P.beleg(uid, origId)) : null;
+    const origBeleg = origDok && istObjekt(origDok.daten) ? Steuerkern.belegFuerKern({ ...origDok.daten, id: origId }, profil).beleg : null;
+    const festPerioden = await festPeriodenLesen(fs, uid);
+    const perioden = retourePerioden({ schema_version: 2, id: retoureId, steuer: rd.steuer }, origBeleg || { id: String(origId), steuer: null }, profil, kernOptionen, tag);
+    const gesperrt = perioden.filter((p) => festPerioden.includes(p));
+    if (gesperrt.some((p) => p.startsWith('euer-'))) return { antwort: fehlerAntwort(409, 'MONAT_FESTGESCHRIEBEN', cors, { perioden: gesperrt }) };
+    const altSperre = await altMonatsabschlussSperre(c, tag);
+    if (altSperre) return { antwort: altSperre };
+    const zaehlerDok = docs.get(P.zaehler(uid, kasseId, jahr));
+    const nummerNeu = (Number.isSafeInteger(zaehlerDok?.daten?.letzte) ? zaehlerDok.daten.letzte : 0) + 1;
+    const nummer = kassennummer(kasse.kuerzel, jahr, nummerNeu);
+    const ts = zeitstempel(zeit);
+    const writes = [schreibe.setzen(P.zaehler(uid, kasseId, jahr), { letzte: nummerNeu, aktualisiert_am: ts }, zaehlerDok ? { updateTime: zaehlerDok.updateTime } : { exists: false })];
+    // Bar-Anteil: Storno der Bewegung retoure_auszahlung (gleicher Tag, Gegenvorzeichen) im selben Commit
+    let stornoBewId = null;
+    const bewId = typeof rd.retoure.bewegung_id === 'string' ? rd.retoure.bewegung_id : null;
+    if (bewId) {
+      const bisher = await bewegungenDesTages(fs, uid, kasseId, tag);
+      const orig = bisher.find((d) => idVon(d) === bewId);
+      if (!orig || !istObjekt(orig.daten) || orig.daten.art !== 'retoure_auszahlung') throw new Error('Bewegung der Retoure fehlt');
+      if (!bisher.some((d) => d.daten && d.daten.storno_von === bewId)) {
+        const nr = naechsteNr(bisher);
+        if (nr > BEWEGUNGEN_MAX_JE_TAG) return { antwort: fehlerAntwort(422, 'BEWEGUNGEN_MAX', cors, { max: BEWEGUNGEN_MAX_JE_TAG }) };
+        stornoBewId = `${kasseId}_${tag}_${String(nr).padStart(3, '0')}`;
+        writes.push(schreibe.anlegen(P.bewegung(uid, stornoBewId), {
+          kasse_id: kasseId, geschaeftstag: tag, art: 'storno', betrag_cent: orig.daten.betrag_cent, text: `Storno: ${orig.daten.text || ''}`.slice(0, 200), beleg_id: retoureId, eigenbeleg_pfad: null,
+          privatvorgang_id: null, gegenkasse_id: null, storno_von: bewId, storno_art: 'retoure_auszahlung', storno_grund: grund, kontoauszug_abgleich: null,
+          kassennummer: nummer, erfasst_am: ts, anfrage_id: body.anfrage_id, aufbewahrung_bis: aufbewahrungBis(tag),
+        }));
+      }
+    }
+    const rs = { kassennummer: nummer, anfrage_id: body.anfrage_id, bewegung_id: stornoBewId, am: ts };
+    writes.push(schreibe.aendern(P.beleg(uid, retoureId), {
+      storniert: true, storniert_am: ts, storno_grund: grund, retoure_storno: rs, ...(gesperrt.length ? { nach_festschreibung: { perioden: gesperrt, erkannt_am: zeit } } : {}),
+    }, ['storniert', 'storniert_am', 'storno_grund', 'retoure_storno', ...(gesperrt.length ? ['nach_festschreibung'] : [])], { updateTime: rDok.updateTime }));
+    const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{
+      aktion: 'kassentag_retoure_storno', ziel: `dokumente/${retoureId}`, vorher: { storniert: false }, nachher: { storniert: true, kassennummer: nummer, bewegung_id: stornoBewId },
+      details: { kasse_id: kasseId, kassentag_id: tagId, beleg_id: retoureId, verkaufstag: rd.retoure.verkaufstag ?? null, bewegung_id: stornoBewId, nach_festschreibung: gesperrt.length > 0 },
+    }], zeit);
+    writes.push(...audit.writes);
+    return {
+      writes,
+      erfolg: async () => {
+        if (gesperrt.length) await festPruefungMarkieren({ uid, token: await c.deps.adminToken(), fetchFn: c.deps.fetchFn, perioden: gesperrt, zeit });
+        return antwort({ ok: true, retoure_beleg_id: retoureId, storno_kassennummer: nummer, bewegung_id: stornoBewId, ...nachFestschreibungAntwort({ nach_festschreibung: gesperrt }) }, 200, cors);
       },
     };
   });
@@ -1140,6 +1409,8 @@ async function bewegungStornieren(c) {
       if (gegenDok && istObjekt(gegenDok.daten) && gegenDok.daten.aktiv === false) return { antwort: fehlerAntwort(422, 'KASSE_INAKTIV', cors, { feld: 'gegenkasse_id' }) };
     }
     if (orig.art === 'storno') return { antwort: fehlerAntwort(409, 'STORNO_VON_STORNO', cors) };
+    // R1.5: die Barauszahlung einer Retoure gehört zum Korrekturbeleg; storniert wird beides zusammen über /kassentag retoure_stornieren (nie nur die Bewegung)
+    if (orig.art === 'retoure_auszahlung') return { antwort: fehlerAntwort(409, 'RETOURE_BEWEGUNG', cors, { bewegung_id: origId, retoure_beleg_id: orig.beleg_id ?? null }) };
     if (bisher.some((d) => d.daten.storno_von === origId)) return { antwort: fehlerAntwort(409, 'BEWEGUNG_STORNIERT', cors, { bewegung_id: origId }) };
     const sperre = await offenerTag(c, kasseDok, docs.get(P.kassentag(uid, tagId)), tag, tagId);
     if (sperre) return sperre;

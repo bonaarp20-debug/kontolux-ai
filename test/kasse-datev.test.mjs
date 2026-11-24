@@ -990,3 +990,59 @@ test('G2-Fix H-1: 403 auf kassen bleibt 503, sobald Kassenbuch-Daten da sind (Ta
   fs.setze(P('privatvorgaenge/p1'), { art: 'entnahme', datum: '2026-11-03', betrag: 5, storniert: false }); // kein Kassenbezug mehr
   assert.equal((await exportiere(fs)).status, 503);
 });
+
+// ── R1.5 Retoure auf Vortag (Baukonzept 08 2.13): Erlösminderung je Satz am Retourentag gegen Kasse (bar) bzw. Geldtransit (Karte), Belegfeld 1 = Kassennummer ─────
+const MIT_RETOURE = { kern_max: 'an', features: { steuerprofil: 'an', kasse: 'an', kasse_retoure: 'an' } };
+const retoure = (id, tag, verkaufstag, zeilen) => ({ aktion: 'retoure', kasse_id: id, geschaeftstag: tag, verkaufstag, zeilen, korrektur_grund: 'rueckabwicklung' });
+
+test('R1.5 Retoure Regel: 19 % bar 119,00 Kasse Haben an 8400, 7 % Karte 10,70 Geldtransit Haben an 8300, Belegdatum Retourentag, Belegfeld 1 Kassennummer, Textmarke [Rückgabe] (O14 N3); Summe je Konto = Verkauf minus Retoure', async () => {
+  for (const [skr, kasse, transit, e19, e7] of [['SKR03', '1000', '1360', '8400', '8300'], ['SKR04', '1600', '1460', '4400', '4300']]) {
+    const w = await welt({ skr });
+    w.fs.setze('config/features', MIT_RETOURE);
+    ok200(await w.tag(abschluss(w.id, '2026-11-02')));
+    const r = ok200(await w.tag(retoure(w.id, '2026-11-03', '2026-11-02', [{ steuerfall: 'A_INLAND_19', bar_cent: 11900, unbar_cent: 0 }, { steuerfall: 'A_INLAND_7', bar_cent: 0, unbar_cent: 1070 }])));
+    const x = await w.exp();
+    assert.equal(x.status, 200, x.text);
+    assert.deepEqual(kurz(x.zeilen, r.kassennummer), [['119,00', 'H', kasse, e19, '', '0311', 'K-THK-2026-0002'], ['10,70', 'H', transit, e7, '', '0311', 'K-THK-2026-0002']], skr);
+    assert.ok(x.zeilen.filter((z) => ohne(z[10]) === r.kassennummer).every((z) => /Rückgabe/.test(z[13]) && /\[Rückgabe\]/.test(z[13]) && !/\[Storno\]/.test(z[13])));
+    const s = nachKonto(x.zeilen);
+    assert.equal(s[kasse], 50000 + 10700 - 11900, `${skr} Kasse`);
+    assert.equal(s[transit], 30000 - 1070, `${skr} Geldtransit`);
+    assert.equal(s[e19], 0 - (80000 - 11900)); assert.equal(s[e7], 0 - (10700 - 1070));
+    assert.doesNotMatch(x.warnung, /retoure|K-THK-2026-0002/);
+  }
+});
+
+test('R1.5 Retoure Kleinunternehmer: eine Zeile auf 8192 (SKR04 4184) ohne Schlüssel; stornierte Retoure: Gegenbuchung am selben Tag mit der Storno-Kassennummer, Summe 0', async () => {
+  const w = await welt({ profil: KU });
+  w.fs.setze('config/features', MIT_RETOURE);
+  ok200(await w.tag(abschluss(w.id, '2026-11-02', { umsaetze: [{ steuerfall: 'A_KU', bar_cent: 50000, unbar_cent: 0 }], gezaehlt_cent: 60000 })));
+  const r = ok200(await w.tag(retoure(w.id, '2026-11-03', '2026-11-02', [{ steuerfall: 'A_KU', bar_cent: 2000, unbar_cent: 1000 }])));
+  let x = await w.exp();
+  assert.deepEqual(kurz(x.zeilen, r.kassennummer), [['20,00', 'H', '1000', '8192', '', '0311', r.kassennummer], ['10,00', 'H', '1360', '8192', '', '0311', r.kassennummer]]);
+  const s = ok200(await w.tag({ aktion: 'retoure_stornieren', kasse_id: w.id, retoure_beleg_id: r.retoure_beleg_id, grund: 'falsch erfasst' }));
+  x = await w.exp();
+  assert.equal(kurz(x.zeilen, r.kassennummer).length, 2, 'die Retoure bleibt im Stapel');
+  assert.deepEqual(kurz(x.zeilen, s.storno_kassennummer), [['20,00', 'S', '1000', '8192', '', '0311', s.storno_kassennummer], ['10,00', 'S', '1360', '8192', '', '0311', s.storno_kassennummer]]);
+  const sum = nachKonto(x.zeilen.filter((z) => [r.kassennummer, s.storno_kassennummer].includes(ohne(z[10]))));
+  for (const [konto, c] of Object.entries(sum)) assert.equal(c, 0, konto);
+});
+
+test('R1.5 kasseBelegPlan (rein): Retoure mit Satz je Kanal aus dem Feld retoure; Summen, die nicht passen, bleiben mit Grund aus dem Stapel (nie raten)', () => {
+  const st = { beleg_art: 'korrektur', steuerfall: 'A_INLAND_19', wirkdatum: '2026-11-03', rueckzahlung: { datum: '2026-11-03', betrag_cent: 12970 },
+    positionen: [{ netto_cent: -10000, ust_cent: -1900, satz_bp: 1900 }, { netto_cent: -1000, ust_cent: -70, satz_bp: 700 }], summe: { netto_cent: -11000, ust_cent: -1970, brutto_cent: -12970 } };
+  const d = { quelle: 'kasse', kassentag_id: 'kabcdefgh_2026-11-03', kassennummer: 'K-THK-2026-0002', betrag: 129.7, steuer: st,
+    retoure: { zeilen: [{ steuerfall: 'A_INLAND_19', satz_bp: 1900, bar_cent: 11900, unbar_cent: 0 }, { steuerfall: 'A_INLAND_7', satz_bp: 700, bar_cent: 0, unbar_cent: 1070 }] } };
+  const p = kasseBelegPlan(d);
+  assert.deepEqual([p.art, p.korrektur, p.datum, p.kassennummer, p.storno], ['retoure', true, '2026-11-03', 'K-THK-2026-0002', null]);
+  assert.deepEqual(p.kanaele, [{ kanal: 'bar', gruppen: [{ satz: '19', brutto_cent: 11900 }] }, { kanal: 'karte', gruppen: [{ satz: '7', brutto_cent: 1070 }] }]);
+  assert.equal(kasseBelegPlan({ ...d, retoure: null }).grund, 'retoure_fehlt');
+  assert.equal(kasseBelegPlan({ ...d, retoure: { zeilen: [{ ...d.retoure.zeilen[0], bar_cent: 11800 }, d.retoure.zeilen[1]] } }).grund, 'retoure_zeilen');
+  assert.equal(kasseBelegPlan({ ...d, steuer: { ...st, rueckzahlung: { datum: '2026-11-04', betrag_cent: 12970 } } }).grund, 'rueckzahlung_fehlt');
+  assert.equal(kasseBelegPlan({ ...d, betrag: 129.6 }).grund, 'betrag_abweichend');
+  assert.equal(kasseBelegPlan({ ...d, storniert: true }).grund, 'storno_kassennummer_fehlt');
+  assert.deepEqual(kasseBelegPlan({ ...d, storniert: true, retoure_storno: { kassennummer: 'K-THK-2026-0003' } }).storno, { kassennummer: 'K-THK-2026-0003', datum: '2026-11-03' });
+  // O15 N-3: Pfand wird im Buchungstext „Pfandrückgabe“ genannt
+  assert.equal(p.art_detail, 'retoure');
+  assert.equal(kasseBelegPlan({ ...d, retoure: { ...d.retoure, art: 'pfand' } }).art_detail, 'pfand');
+});

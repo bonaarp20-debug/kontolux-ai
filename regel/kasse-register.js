@@ -13,7 +13,7 @@ import { antwort, fehlerAntwort, istObjekt, istDatum, nurSchluessel, listeAlle }
 import { schreibe, zeitstempel } from './firestore.js';
 import { auditKette, kopfPfad } from './audit.js';
 import { KASSE_ID_MUSTER, BETRIEBSSTAETTE_ID_MUSTER, MELDEWEGE, K3_DATUM_MIN, aufbewahrungBis } from './kasse-form.js';
-import { P, zeigerAus, zeigerPasst, bewegungenImBereich, ohneStornoPaare, KasseLesefehler, betriebsstaetteIdAus, meldungIdAus } from './kasse-daten.js';
+import { P, zeigerAus, zeigerPasst, bewegungenImBereich, ohneStornoPaare, KasseLesefehler, betriebsstaetteIdAus, meldungIdAus, retourenTageImBereich } from './kasse-daten.js';
 
 const SCHLUESSEL_BASIS = ['userId', 'token', 'anfrage_id', 'aktion'];
 const idVon = (d) => String(d.pfad).split('/').pop();
@@ -511,6 +511,11 @@ export async function ausserBetrieb(c, h) {
           const tage = [...new Set(offen.map((d) => d.daten.geschaeftstag))].sort().slice(0, 31);
           return { antwort: fehlerAntwort(409, 'OFFENE_BEWEGUNGEN_VORTAG', cors, { tage, ...(tage.some((t) => t > am) ? { grund: 'nach_ausser_betrieb' } : {}) }) };
         }
+        // O14 M4 (R1.5): ebenso eine nicht stornierte Retoure an einem offenen Tag (auch reine Kartenretoure ohne Bewegung)
+        const rt = await retourenTageImBereich(fs, uid, id, von, heute);
+        const rtTage = rt.tage.filter((d) => !rt.randTag || d < rt.randTag);
+        if (rtTage.length) return { antwort: fehlerAntwort(409, 'OFFENE_BEWEGUNGEN_VORTAG', cors, { tage: rtTage.slice(0, 31), grund: rtTage.some((t) => t > am) ? 'nach_ausser_betrieb' : 'retoure' }) };
+        if (rt.unvollstaendig) return { antwort: fehlerAntwort(422, 'BEWEGUNGEN_ZU_VIELE', cors, { bis_tag: rt.randTag, grund: 'retoure' }) };
       }
       // Regel 2: kein Restbestand (gezählter Endbestand des letzten Abschlusses, ohne Abschluss der Anfangsbestand)
       const bestand = zeiger ? zeiger.gezaehlt_cent : k.anfangsbestand_cent;

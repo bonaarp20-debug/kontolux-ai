@@ -2266,9 +2266,61 @@ function kassenStornoWirkungen(s, profil, ctx, opt, out, orig) {
   }
 }
 
+// R1.5 (Baukonzept 08 2.13, Retoure auf Vortag): enger Kleinunternehmer-Zweig für eine Retoure auf einen Kassen-Tagesabschluss mit A_KU. Ohne ihn schlösse
+// korrekturWirkungen jede A_KU-Korrektur aus (HN_NOCH_NICHT_UNTERSTUETZT). Der Kleinunternehmer hat keine Umsatzsteuer berechnet (§ 19 Abs. 1 UStG), es gibt also
+// nichts nach § 17 UStG zu berichtigen. Die Rückzahlung ist eine Betriebsausgabe im Jahr der Rückzahlung (§ 11 Abs. 2 EStG; Ausweis Kz 183 wie R-ZP-25 aller
+// Rückzahlungen im Kern, sb-antworten.md SB-8: Zeitpunkt A, Ausweis C, Gewinn gleich) und mindert den Gesamtumsatz nach § 19 Abs. 2 UStG (vereinnahmte Entgelte)
+// im Jahr der Rückzahlung, aber nur bei einem Verkauf im selben Kalenderjahr (O14 M1, sonst Hinweis HN_KU_RETOURE_VORJAHR; Vermerk ku_umsatz_minderung, Status
+// information, auswertung.js umsatzPosten). Greift nur, wenn ALLES zutrifft: beleg_art 'korrektur',
+// Grund rueckabwicklung oder preisnachlass, Ausgang, Steuerfall A_KU, Bezug korrigiert_beleg_id mit Präfix 'kasse_' auf ein gefundenes Original (gleiche ID)
+// mit Belegart tagesabschluss und A_KU, eigene ID eine Retouren-ID des Workers (kasse_<Kasse>_<Tag>_r<NNN>), Positionen ohne Steuer und nie positiv, Summe < 0, Rückzahlung am Wirkdatum in Höhe der Summe. Jede andere
+// A_KU-Korrektur bleibt unverändert ausgeschlossen (Rückfall test-steuerkern-r15.mjs).
+const KASSEN_RETOURE_GRUENDE_K = Object.freeze(['rueckabwicklung', 'preisnachlass']);
+const KASSEN_RETOURE_ID = /^kasse_k[a-z0-9]{8}_\d{4}-\d{2}-\d{2}_r\d{3}$/; // Retouren-ID (kassenRetoureBelegId); IDs mit Präfix kasse_ vergibt nur der Worker (Rules, hyg N1)
+function kuKassenRetoureOriginal(s, opt, beleg) {
+  if (!istObjekt(beleg) || typeof beleg.id !== 'string' || !KASSEN_RETOURE_ID.test(beleg.id)) return null;
+  if (s.steuerfall !== 'A_KU' || s.beleg_art !== 'korrektur' || s.richtung !== 'ausgang' || !KASSEN_RETOURE_GRUENDE_K.includes(s.korrektur_grund) || !istObjekt(s.bezug)) return null;
+  const id = s.bezug.korrigiert_beleg_id;
+  if (typeof id !== 'string' || id.slice(0, KASSEN_BELEG_PRAEFIX.length) !== KASSEN_BELEG_PRAEFIX || (typeof s.bezug.storniert_beleg_id === 'string' && s.bezug.storniert_beleg_id !== '')) return null;
+  const orig = opt.korrekturOriginal instanceof Map && opt.korrekturOriginal.has(beleg)
+    ? opt.korrekturOriginal.get(beleg)
+    : (istObjekt(opt.originale) && typeof opt.originale.get === 'function' ? opt.originale.get(id) : null);
+  if (!istObjekt(orig) || orig.id !== id || !istObjekt(orig.steuer)) return null;
+  const os = orig.steuer;
+  return os.beleg_art === 'tagesabschluss' && os.steuerfall === 'A_KU' && os.richtung === 'ausgang' ? orig : null;
+}
+function kuKassenRetoureWirkungen(s, profil, ctx, out, orig) {
+  const rz = rueckzahlungVon(s);
+  const pos = Array.isArray(s.positionen) ? s.positionen : [];
+  let brutto = 0;
+  let form = pos.length > 0;
+  for (const p of pos) {
+    if (!istObjekt(p) || !istCent(p.netto_cent) || !istCent(p.ust_cent) || p.ust_cent !== 0 || p.netto_cent > 0) { form = false; break; }
+    brutto += 0 - p.netto_cent;
+  }
+  if (!form || brutto <= 0 || !rz || rz.datum !== s.wirkdatum || rz.betrag_cent !== brutto) {
+    // Form passt nicht (z. B. Rückzahlung an einem anderen Tag oder in anderer Höhe): ausgeschlossen wie jede andere A_KU-Korrektur, nie still halb gerechnet
+    ctx.beleg_status = 'ausgeschlossen';
+    if (!ctx.hinweise.includes('HN_NOCH_NICHT_UNTERSTUETZT')) ctx.hinweise.push('HN_NOCH_NICHT_UNTERSTUETZT');
+    out.push(mk(ctx, { welt: 'ust', periode: istDatum(s.wirkdatum) ? ustPeriode(profil, s.wirkdatum, ctx.hinweise) : null, datum_wirk: istDatum(s.wirkdatum) ? s.wirkdatum : null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-KOR-01', hinweis_detail: 'kassen_retoure_ku_ungueltig' }));
+    return;
+  }
+  const jahr = String(jahrVon(rz.datum));
+  out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: rz.datum, kz: 183, netto_cent: brutto, betrag_cent: brutto, rolle: 'ausgabe', spalte: 'ausgabe', regel_id: 'R-ZP-25', hinweise: ['HN_EUER_RUECKZAHLUNG_K20'] }));
+  // O14 M1 (vorsichtig bis zur Antwort des Steuerberaters): den Gesamtumsatz § 19 Abs. 2 mindert nur eine Retoure auf einen Verkauf DESSELBEN Kalenderjahres.
+  // Ob die Rückgewähr eines Vorjahresentgelts den Gesamtumsatz des laufenden Jahres mindert, ist nicht belegt (UStAE 19.2 Abs. 1: vereinnahmte Entgelte „für“
+  // Umsätze; 19.7 Abs. 3 S. 2 schließt nur eine Rückwirkung aus). Ohne Minderung bleibt die laufende Summe höher, die Grenze greift höchstens früher, nie später.
+  const tagOrig = istObjekt(orig) && istObjekt(orig.steuer) && istObjekt(orig.steuer.leistung) && istDatum(orig.steuer.leistung.bis) ? orig.steuer.leistung.bis : null;
+  if (tagOrig !== null && jahrVon(tagOrig) === jahrVon(rz.datum)) {
+    out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: rz.datum, kz: null, netto_cent: 0 - brutto, betrag_cent: 0 - brutto, rolle: 'ku_umsatz_minderung', status: 'information', regel_id: 'R-KU-02' }));
+  } else if (!ctx.hinweise.includes('HN_KU_RETOURE_VORJAHR')) ctx.hinweise.push('HN_KU_RETOURE_VORJAHR');
+}
+
 function korrekturWirkungen(s, profil, ctx, opt, out, beleg) {
   const kassenOrig = kassenStornoOriginal(s, opt, beleg);
   if (kassenOrig) { kassenStornoWirkungen(s, profil, ctx, opt, out, kassenOrig); return; }
+  const kuRetoureOrig = kuKassenRetoureOriginal(s, opt, beleg);
+  if (kuRetoureOrig) { kuKassenRetoureWirkungen(s, profil, ctx, out, kuRetoureOrig); return; }
   if (s.korrektur_grund === 'tippfehler_berichtigung') { ctx.hinweise.push('HN_BERICHTIGUNG_OHNE_UST_WIRKUNG'); return; }
   if (s.steuerfall !== 'A_INLAND_19' && s.steuerfall !== 'A_INLAND_7' && s.steuerfall !== 'A_INLAND_0_PV' && s.steuerfall !== 'E_INLAND_VORSTEUER') {
     ctx.beleg_status = 'ausgeschlossen';
@@ -2298,7 +2350,10 @@ function korrekturWirkungen(s, profil, ctx, opt, out, beleg) {
   const origPer = istObjekt(opt.originalPerioden) && typeof opt.originalPerioden.get === 'function' ? opt.originalPerioden.get(origId) : null;
   // Warnung bei Storno und Rückabwicklung; Preisnachlass, Skonto und Bonus sind gewöhnliche Minderungen (T-S2-012)
   const stornoGrund = s.korrektur_grund === 'rueckabwicklung' || s.korrektur_grund === 'leistung_nicht_erbracht' || s.beleg_art === 'storno';
-  const warneAbgeschlossen = (per) => { if (stornoGrund && origPer && origPer < per && periodenArt(origPer) === periodenArt(per) && !ctx.hinweise.includes('W_STORNO_ABGESCHLOSSENER_ZEITRAUM')) ctx.hinweise.push('W_STORNO_ABGESCHLOSSENER_ZEITRAUM'); };
+  // O14 N5: eine Kassen-Retoure (Retouren-ID des Workers) bekommt statt der Storno-Warnung einen ruhigen Hinweis (Rückgabe, nicht Storno einer Rechnung)
+  const istRetoure = istObjekt(beleg) && typeof beleg.id === 'string' && KASSEN_RETOURE_ID.test(beleg.id);
+  const hinweisAbgeschlossen = istRetoure ? 'HN_RETOURE_FRUEHERER_ZEITRAUM' : 'W_STORNO_ABGESCHLOSSENER_ZEITRAUM';
+  const warneAbgeschlossen = (per) => { if (stornoGrund && origPer && origPer < per && periodenArt(origPer) === periodenArt(per) && !ctx.hinweise.includes(hinweisAbgeschlossen)) ctx.hinweise.push(hinweisAbgeschlossen); };
   // Unbezahlter Teil: Wirkdatum, in voller Höhe (Soll). Bei Ist wurde nichts vereinnahmt (keine Wirkung). Vor der Leistung (TR-orakel-002) hat
   // alleWirkungen den Betrag schon vom Leistungsposten des Originals abgezogen.
   const verrechnet = opt.vorLeistungKorrekturen instanceof Set && opt.vorLeistungKorrekturen.has(beleg);
