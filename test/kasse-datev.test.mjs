@@ -995,7 +995,7 @@ test('G2-Fix H-1: 403 auf kassen bleibt 503, sobald Kassenbuch-Daten da sind (Ta
 const MIT_RETOURE = { kern_max: 'an', features: { steuerprofil: 'an', kasse: 'an', kasse_retoure: 'an' } };
 const retoure = (id, tag, verkaufstag, zeilen) => ({ aktion: 'retoure', kasse_id: id, geschaeftstag: tag, verkaufstag, zeilen, korrektur_grund: 'rueckabwicklung' });
 
-test('R1.5 Retoure Regel: 19 % bar 119,00 Kasse Haben an 8400, 7 % Karte 10,70 Geldtransit Haben an 8300, Belegdatum Retourentag, Belegfeld 1 Kassennummer, Textmarke [Storno]; Summe je Konto = Verkauf minus Retoure', async () => {
+test('R1.5 Retoure Regel: 19 % bar 119,00 Kasse Haben an 8400, 7 % Karte 10,70 Geldtransit Haben an 8300, Belegdatum Retourentag, Belegfeld 1 Kassennummer, Textmarke [Rückgabe] (O14 N3); Summe je Konto = Verkauf minus Retoure', async () => {
   for (const [skr, kasse, transit, e19, e7] of [['SKR03', '1000', '1360', '8400', '8300'], ['SKR04', '1600', '1460', '4400', '4300']]) {
     const w = await welt({ skr });
     w.fs.setze('config/features', MIT_RETOURE);
@@ -1004,7 +1004,7 @@ test('R1.5 Retoure Regel: 19 % bar 119,00 Kasse Haben an 8400, 7 % Karte 10,70 G
     const x = await w.exp();
     assert.equal(x.status, 200, x.text);
     assert.deepEqual(kurz(x.zeilen, r.kassennummer), [['119,00', 'H', kasse, e19, '', '0311', 'K-THK-2026-0002'], ['10,70', 'H', transit, e7, '', '0311', 'K-THK-2026-0002']], skr);
-    assert.ok(x.zeilen.filter((z) => ohne(z[10]) === r.kassennummer).every((z) => /Rückgabe/.test(z[13]) && /\[Storno\]/.test(z[13])));
+    assert.ok(x.zeilen.filter((z) => ohne(z[10]) === r.kassennummer).every((z) => /Rückgabe/.test(z[13]) && /\[Rückgabe\]/.test(z[13]) && !/\[Storno\]/.test(z[13])));
     const s = nachKonto(x.zeilen);
     assert.equal(s[kasse], 50000 + 10700 - 11900, `${skr} Kasse`);
     assert.equal(s[transit], 30000 - 1070, `${skr} Geldtransit`);

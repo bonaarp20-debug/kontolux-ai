@@ -2361,10 +2361,10 @@ test('hyg N4: die Zahl der Firestore-Anfragen eines Abschlusses hängt nicht von
     assert.equal(r.status, 200, JSON.stringify(r.json));
     return u.fs.log.anfragen - vor;
   };
-  // eine Lücke kostet genau eine Abfrage (O6 H1: Bewegungen in der Lücke), unabhängig von ihrer Länge
+  // eine Lücke kostet genau zwei Abfragen (O6 H1: Bewegungen in der Lücke; O14 M4: Retouren in der Lücke), unabhängig von ihrer Länge
   const kurz = await zaehle(1);
   assert.equal(await zaehle(300), kurz);
-  assert.equal(await zaehle(0), kurz - 1);
+  assert.equal(await zaehle(0), kurz - 2);
   assert.ok(kurz <= 20, `Anfragen ${kurz}`);
 });
 
@@ -3277,11 +3277,76 @@ test('R1.5 Form: Positivliste (fremder Schlüssel, Zeile mit fremdem Schlüssel)
     assert.equal(F.pruefeRetoure(x, { heute: HEUTE }).fehler.feld, feld, JSON.stringify(x));
   }
   assert.deepEqual(F.pruefeRetoure({ ...b, zeilen: [Z7(5), Z19(100)] }, { heute: HEUTE }).wert.zeilen.map((z) => z.steuerfall), ['A_INLAND_19', 'A_INLAND_7'], 'Reihenfolge der Sätze');
-  assert.deepEqual([...F.RETOURE_SCHLUESSEL], ['userId', 'token', 'anfrage_id', 'aktion', 'kasse_id', 'geschaeftstag', 'verkaufstag', 'zeilen', 'korrektur_grund', 'notiz']);
+  assert.deepEqual([...F.RETOURE_SCHLUESSEL], ['userId', 'token', 'anfrage_id', 'aktion', 'kasse_id', 'geschaeftstag', 'verkaufstag', 'zeilen', 'korrektur_grund', 'notiz', 'art']);
+  assert.equal(F.pruefeRetoure({ ...b, art: 'leergut' }, { heute: HEUTE }).fehler.feld, 'art');
+  assert.equal(F.pruefeRetoure(b, { heute: HEUTE }).wert.art, 'retoure');
   assert.deepEqual([...F.RETOURE_STORNO_SCHLUESSEL], ['userId', 'token', 'anfrage_id', 'aktion', 'kasse_id', 'retoure_beleg_id', 'grund']);
   assert.equal(F.pruefeRetoureStorno({ aktion: 'retoure_stornieren', kasse_id: 'kabcdefgh', retoure_beleg_id: 'kasse_kandere00_2026-11-03_r001', grund: 'falsch gewählt' }).fehler.feld, 'retoure_beleg_id');
   assert.equal(F.pruefeRetoureStorno({ aktion: 'retoure_stornieren', kasse_id: 'kabcdefgh', retoure_beleg_id: 'kasse_kabcdefgh_2026-11-03_r001', grund: 'kurz' }).fehler.feld, 'grund');
   assert.deepEqual(F.pruefeRetoureStorno({ aktion: 'retoure_stornieren', kasse_id: 'kabcdefgh', retoure_beleg_id: 'kasse_kabcdefgh_2026-11-03_r001', grund: ' falsch gewählt ' }).wert, { kasse_id: 'kabcdefgh', retoure_beleg_id: 'kasse_kabcdefgh_2026-11-03_r001', geschaeftstag: '2026-11-03', grund: 'falsch gewählt' });
   assert.ok(AUDIT_AKTIONEN.includes('kassentag_retoure') && AUDIT_AKTIONEN.includes('kassentag_retoure_storno'));
   assert.equal(K.BEWEGUNG_VORZEICHEN.retoure_auszahlung, -1);
+});
+
+// ---------------------------------------------------------------------------------------------
+// O14-Fix (Gegenlesung zu R1.5): M1 KU-Summe, M4 Kartenretoure und Ruhetag/Lücke/Außerbetriebnahme, Pfand ohne Verkaufstag, N7 Lücken
+// ---------------------------------------------------------------------------------------------
+test('O14 M4: reine Kartenretoure (ohne Bewegung): ihr Tag wird kein Ruhetag (409 RUHETAG_MIT_BEWEGUNG, grund retoure) und bleibt vor einem späteren Abschluss nicht offen (409 OFFENE_BEWEGUNGEN_VORTAG, grund retoure); nach dem Storno der Retoure geht beides', async () => {
+  const { u, id } = await mitVerkauf();
+  const r = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(0, 5000)]));
+  assert.equal(r.status, 200); assert.equal(r.json.bewegung_id, null);
+  const rt = await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-03' });
+  assert.equal(rt.status, 409); assert.equal(rt.json.fehler[0].code, 'RUHETAG_MIT_BEWEGUNG'); assert.equal(rt.json.grund, 'retoure'); assert.equal(rt.json.geschaeftstag, '2026-11-03');
+  const rts = await u.tagRufe({ aktion: 'ruhetage', kasse_id: id, tage: ['2026-11-03', '2026-11-04'] });
+  assert.equal(rts.status, 409);
+  const sp = await u.tagRufe(ohneUmsatz(id, '2026-11-04', { gezaehlt_cent: 70700 }));
+  assert.equal(sp.status, 409); assert.equal(sp.json.fehler[0].code, 'OFFENE_BEWEGUNGEN_VORTAG'); assert.deepEqual(sp.json.tage, ['2026-11-03']); assert.equal(sp.json.grund, 'retoure');
+  const ab = await u.kasse({ aktion: 'ausser_betrieb', kasse_id: id, ausser_betrieb_am: '2026-11-04', ausser_betrieb_grund: 'defekt', geraet_endgueltig: true });
+  assert.equal(ab.status, 409); assert.equal(ab.json.fehler[0].code, 'OFFENE_BEWEGUNGEN_VORTAG');
+  // Ausweg ohne Sackgasse: Storno der Retoure am (noch offenen) Tag, danach Ruhetag bzw. Abschluss des Folgetags
+  assert.equal((await u.tagRufe({ aktion: 'retoure_stornieren', kasse_id: id, retoure_beleg_id: r.json.retoure_beleg_id, grund: 'doch kein Umtausch' })).status, 200);
+  assert.equal((await u.tagRufe({ aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-03' })).status, 200);
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-04', { gezaehlt_cent: 70700 }))).status, 200);
+});
+
+test('O14 M4: Retoure am Retourentag und Abschluss genau dieses Tages bleiben möglich; eine Retoure an einem abgeschlossenen Verkaufstag stört dessen Nachbarn nicht', async () => {
+  const { u, id } = await mitVerkauf();
+  assert.equal((await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(0, 5000)]))).status, 200);
+  const a = await u.tagRufe(ohneUmsatz(id, '2026-11-03', { gezaehlt_cent: 70700 }));
+  assert.equal(a.status, 200, JSON.stringify(a.json));
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2026-11-05', { gezaehlt_cent: 70700 }))).status, 200, 'Lücke 04.11. ohne Retoure');
+});
+
+test('O14 M1: Kleinunternehmer, Retoure im Januar auf einen Dezember-Verkauf mindert die Summe des neuen Jahres nicht (KU_GRENZE_AM_TAG greift bei 100.000,01 EUR)', async () => {
+  const u = umgebung({ config: AN_R, profil: KU, heute: '2027-01-10' });
+  const id = await u.legeKasseAn({ anfangsbestand_am: '2026-12-01' });
+  const ku = (tag, bar, gez) => abschluss(id, tag, { umsaetze: [{ steuerfall: 'A_KU', bar_cent: bar, unbar_cent: 0 }], gezaehlt_cent: gez });
+  assert.equal((await u.tagRufe(ku('2026-12-30', 5000000, 5010000))).status, 200);
+  const r = await u.tagRufe(retoureBody(id, '2027-01-02', '2026-12-30', [{ steuerfall: 'A_KU', bar_cent: 3000000, unbar_cent: 0 }]));
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal((await u.tagRufe(ohneUmsatz(id, '2027-01-02', { gezaehlt_cent: 2010000 }))).status, 200);
+  const t3 = await u.tagRufe(ku('2027-01-03', 10000001, 12010001));
+  assert.equal(t3.status, 409, JSON.stringify(t3.json)); assert.equal(t3.json.fehler[0].code, 'KU_GRENZE_AM_TAG');
+  assert.equal(t3.json.fehler[0].summe_cent, 10000001, 'Vorjahresretoure nicht abgezogen');
+});
+
+test('O14 Pfand ohne Verkaufstag (art pfand): gleicher Weg wie die Retoure, Beleg „Pfandrückgabe“, Bewegung mit Pfand-Text, art im Beleg; art unbekannt 400', async () => {
+  const { u, id } = await mitVerkauf();
+  const r = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(238)], { art: 'pfand' }));
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  const d = u.fs.lies(P(`dokumente/${r.json.retoure_beleg_id}`));
+  assert.equal(d.retoure.art, 'pfand'); assert.match(d.name, /^Pfandrückgabe Theke 03\.11\.2026/);
+  assert.deepEqual(d.steuer.positionen.map((p) => [p.bez, p.netto_cent, p.ust_cent]), [['Pfandrückgabe 19 %', -200, -38]]);
+  assert.match(u.fs.lies(P(`kassenbewegungen/${r.json.bewegung_id}`)).text, /^Pfandrückgabe/);
+  const x = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(100)], { art: 'leergut' }));
+  assert.equal(x.status, 400); assert.equal(x.json.feld, 'art');
+});
+
+test('O14 N7: retoure_stornieren mit Retouren-ID einer anderen Kasse 400 FORMAT, mit fremder Kasse 404', async () => {
+  const { u, id } = await mitVerkauf();
+  const r = await u.tagRufe(retoureBody(id, '2026-11-03', '2026-11-02', [Z19(500)]));
+  const fremd = await u.tagRufe({ aktion: 'retoure_stornieren', kasse_id: 'kzzzzzzzz', retoure_beleg_id: r.json.retoure_beleg_id, grund: 'andere Kasse' });
+  assert.equal(fremd.status, 400); assert.equal(fremd.json.feld, 'retoure_beleg_id');
+  const unbek = await u.tagRufe({ aktion: 'retoure_stornieren', kasse_id: 'kzzzzzzzz', retoure_beleg_id: 'kasse_kzzzzzzzz_2026-11-03_r001', grund: 'andere Kasse' });
+  assert.equal(unbek.status, 404);
 });

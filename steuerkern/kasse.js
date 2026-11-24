@@ -586,6 +586,10 @@ export function kassenStornoEingabe(originalSteuer, optionen) {
 // ---------------------------------------------------------------------------------------------
 export const KASSEN_RETOURE_GRUENDE = Object.freeze(['rueckabwicklung', 'preisnachlass']); // aus KORREKTUR_GRUENDE: Rückgabe bzw. nachträglicher Rabatt
 export const KASSEN_RETOURE_NR_MAX = 999;
+// O14 (Pfand ohne Verkaufstag, 12-steuer-vertiefung Kurzfassung Nr. 4, UStAE 10.1 Abs. 8 S. 3-4): ausgezahltes Pfand mindert das Entgelt unabhängig vom Umfang der
+// Vollgutlieferungen des Zeitraums; der Bezug auf einen früheren Tag mit Umsatz zum selben Satz ist nur der technische Anker. Gleicher Weg wie die Retoure, art 'pfand'.
+export const KASSEN_RETOURE_ARTEN = Object.freeze(['retoure', 'pfand']);
+const PFAND_BEZ = Object.freeze({ A_INLAND_19: 'Pfandrückgabe 19 %', A_INLAND_7: 'Pfandrückgabe 7 %', A_INLAND_0_PV: 'Pfandrückgabe 0 % (§ 12 Abs. 3 UStG)', A_KU: 'Pfandrückgabe (Kleinunternehmer, § 19 UStG)' });
 const SATZ_ZU_STEUERFALL = Object.freeze({ [String(SATZ_REGEL_BP)]: 'A_INLAND_19', [String(SATZ_ERMAESSIGT_BP)]: 'A_INLAND_7', [String(SATZ_NULL_BP)]: 'A_INLAND_0_PV' });
 const RUECKGABE_BEZ = Object.freeze({ A_INLAND_19: 'Rückgabe 19 %', A_INLAND_7: 'Rückgabe 7 %', A_INLAND_0_PV: 'Rückgabe 0 % (§ 12 Abs. 3 UStG)', A_KU: 'Rückgabe (Kleinunternehmer, § 19 UStG)' });
 
@@ -656,6 +660,8 @@ export function kassenRetoureEingabe(originalSteuer, optionen) {
   if (!istDatum(o.verkaufstag) || !istDatum(o.retourentag)) throw new TypeError('verkaufstag und retourentag (JJJJ-MM-TT) nötig');
   if (o.verkaufstag >= o.retourentag) throw new RangeError('RETOURE_CHRONOLOGIE: Verkaufstag muss vor dem Retourentag liegen');
   if (!KASSEN_RETOURE_GRUENDE.includes(o.korrektur_grund)) throw new TypeError(`korrektur_grund: ${KASSEN_RETOURE_GRUENDE.join(' oder ')}`);
+  const art = o.art === undefined || o.art === null ? 'retoure' : o.art;
+  if (!KASSEN_RETOURE_ARTEN.includes(art)) throw new TypeError(`art: ${KASSEN_RETOURE_ARTEN.join(' oder ')}`);
   const rest = kassenRetoureRest(os, o.fruehere);
   const tagOrig = istObjekt(os.leistung) && istDatum(os.leistung.bis) ? os.leistung.bis : null;
   if (tagOrig !== o.verkaufstag) throw new TypeError('originalSteuer: Leistungstag ist nicht der Verkaufstag');
@@ -685,7 +691,7 @@ export function kassenRetoureEingabe(originalSteuer, optionen) {
     // Rundung gegen Original und frühere Retouren: Steuer höchstens der Steuer-Rest, Netto höchstens der Netto-Rest (b - ust <= rest_netto). Schließt die Zeile
     // den Satz ab (b = Rest), ist das Intervall ein Punkt: genau der Rest.
     const ust = Math.min(Math.max(roh, b - r.rest_netto_cent), r.rest_ust_cent);
-    positionen.push({ bez: RUECKGABE_BEZ[sf], netto_cent: 0 - (b - ust), satz_bp: satzR, ust_cent: 0 - ust });
+    positionen.push({ bez: (art === 'pfand' ? PFAND_BEZ : RUECKGABE_BEZ)[sf], netto_cent: 0 - (b - ust), satz_bp: satzR, ust_cent: 0 - ust });
     summe += b;
   }
   let netto = 0;

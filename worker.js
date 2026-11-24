@@ -5267,7 +5267,7 @@ async function handleDatevExport(body, env, cors = {}) {
     // Buchungszeilen je Satz-Gruppe (Mischsatz und Rückzahlung). gruppen: [{ satz: '19'|'7'|'keine', brutto_cent }], korrektur: Gegenbuchung (Richtung umgekehrt,
     // Textmarke [Storno]), ku: Kleinunternehmer (Konto ohne Steuer, kein Schlüssel). Bewirtung (70 %): je Gruppe 70/30 (abziehbar / nicht abziehbar) mit dem Schlüssel
     // des Satzes der Gruppe, Rundung wie im Einzelpfad.
-    const bucheGruppen = ({ gruppen, korrektur, ku, istEinnahme, kategorie, importKonto, belegDatum, belegfeld1, textBasis, diverseAdressnummer, buchungskonto = bankkonto, markeZusatz = '' }) => {
+    const bucheGruppen = ({ gruppen, korrektur, ku, istEinnahme, kategorie, importKonto, belegDatum, belegfeld1, textBasis, diverseAdressnummer, buchungskonto = bankkonto, markeZusatz = '', korrekturMarke = ' [Storno]' }) => {
       const skrK = skr === 'SKR04' ? 'SKR04' : 'SKR03';
       const bewirtungKonten = DATEV_BEWIRTUNG_KONTEN[skrK];
       for (const g of gruppen) {
@@ -5286,7 +5286,7 @@ async function handleDatevExport(body, env, cors = {}) {
         }
         const ohneSchl = ku || (alleErloeskonten.has(String(konto)) && !istEinnahme);
         const satzBu = ku ? '' : buSchluesselExport(ohneSchl ? 'keine' : g.satz, false, istEinnahme, konto, skr);
-        const marke = ` ${g.satz === 'keine' ? '0' : g.satz} %${markeZusatz}${korrektur ? ' [Storno]' : ''}${hinweis}`;
+        const marke = ` ${g.satz === 'keine' ? '0' : g.satz} %${markeZusatz}${korrektur ? korrekturMarke : ''}${hinweis}`;
         const sh = istEinnahme === !korrektur ? 'S' : 'H';
         const zeile = (betragCent, kontoZeile, zusatz) => buchungen.push({ betrag: betragCent / 100, sollHaben: sh, konto: buchungskonto, gegenkonto: kontoZeile, bu: satzBu, belegDatum, belegfeld1, belegfeld2: '', buchungstext: buchungstextBasisKurz(textBasis, marke + zusatz), diverseAdressnummer });
         // F1: auch ein importiertes Bewirtungskonto (4650/6640) wird 70/30 gebucht (der Kern rechnet für "Bewirtung (70%)" immer 70/30, der Import fasst das Paar zu einem Beleg zusammen)
@@ -5464,7 +5464,8 @@ async function handleDatevExport(body, env, cors = {}) {
           const kanalKonto = k.kanal === 'karte' ? geldtransitkonto : k.kanal === 'gutschein' ? KASSE_MEHRZWECK_KONTO[skrK0] : kasseKto;
           bucheGruppen({
             gruppen: gruppenKasse, korrektur: plan.korrektur, ku: plan.ku, istEinnahme: plan.einnahme, kategorie: plan.kategorie, belegDatum: datumKasse, belegfeld1: plan.kassennummer,
-            textBasis: `${textKasse} ${absenderKasse}`.trim(), diverseAdressnummer: '', buchungskonto: kanalKonto, markeZusatz: k.kanal === 'karte' ? ' Karte' : k.kanal === 'gutschein' ? ' Gutschein-Einlösung' : ''
+            textBasis: `${textKasse} ${absenderKasse}`.trim(), diverseAdressnummer: '', buchungskonto: kanalKonto, markeZusatz: k.kanal === 'karte' ? ' Karte' : k.kanal === 'gutschein' ? ' Gutschein-Einlösung' : '',
+            ...(plan.art === 'retoure' ? { korrekturMarke: ' [Rückgabe]' } : {}) // O14 N3: Rückgabe ist kein Erfassungsstorno
           });
         }
         // R1.5: stornierte Retoure: die Retoure bleibt im Stapel, die Gegenbuchung (Richtung des Verkaufs) folgt am selben Tag mit der Kassennummer des Stornos

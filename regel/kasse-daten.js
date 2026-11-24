@@ -204,6 +204,24 @@ export async function bewegungenImBereich(fs, uid, kasseId, vonTag, bisTag) {
   return liste;
 }
 
+// O14 M4 (R1.5): Tage mit einer nicht stornierten Retoure auf Vortag (dokumente kasse_<kasseId>_<Tag>_r<NNN>) im Bereich. Eine reine Kartenretoure hat keine
+// Bewegung; ohne diese Abfrage könnte ihr Tag Ruhetag werden oder vor einem späteren Abschluss offen bleiben (und ihr Storno liefe in eine Sackgasse).
+// Der ID-Bereich enthält auch die übrigen Kassenbelege der Tage (Tagesabschluss, Stornos); gefiltert wird auf die Retouren-ID. Höchstens 300 Dokumente;
+// darüber unvollstaendig (der Aufrufer antwortet wie bei Bewegungen 422 BEWEGUNGEN_ZU_VIELE, nie eine geratene Entwarnung).
+const RETOURE_ID = /^kasse_k[a-z0-9]{8}_(\d{4}-\d{2}-\d{2})_r\d{3}$/;
+export async function retourenTageImBereich(fs, uid, kasseId, vonTag, bisTag) {
+  const r = await fs.runQuery(`users/${uid}`, idBereich(uid, 'dokumente', `kasse_${kasseId}_${vonTag}_`, `kasse_${kasseId}_${bisTag}_~`, { limit: BEREICH_MAX + 1 }));
+  const tage = new Set();
+  for (const d of r.slice(0, BEREICH_MAX)) {
+    const m = RETOURE_ID.exec(idVon(d));
+    const x = d.daten;
+    if (!m || !x || typeof x !== 'object' || x.quelle !== 'kasse' || x.storniert === true || x.deleted === true) continue;
+    tage.add(m[1]);
+  }
+  const randTag = r.length > BEREICH_MAX ? (RETOURE_ID.exec(idVon(r[BEREICH_MAX - 1])) || /_(\d{4}-\d{2}-\d{2})_/.exec(idVon(r[BEREICH_MAX - 1])) || [])[1] || null : null;
+  return { tage: [...tage].sort(), unvollstaendig: r.length > BEREICH_MAX, randTag };
+}
+
 // B-M1 (o-p1c-gegenlesung): Ein Bewegungs-Storno liegt immer am Tag des Originals; Original und Storno (storno_von) heben sich auf. Für die Frage
 // „hat dieser Tag Bewegungen?“ (Lücke vor einem Abschluss, O6 H1; Ruhetag) zählen solche Paare nicht, sonst erzwänge eine falsch datierte und stornierte Bewegung
 // einen Schein-Abschluss für einen geschlossenen Tag. Ein Storno ohne sein Original in der Liste zählt weiter (fail-closed). Der Soll-Bestand rechnet beide (Summe 0).

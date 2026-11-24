@@ -11,6 +11,9 @@
 // Gleichzeitige Änderungen: updateTime-Vorbedingungen auf Tagesplatz, Zähler, Kasse (Stammdaten und Zeiger) und Audit-Kopf (serialisiert alle Kassen-Commits eines Kontos); bei Konflikt höchstens 3 Wiederholungen
 // (die ganze Prüfung läuft neu), danach 409 KONFLIKT. Unteranfragen: höchstens etwa 14 je Aufruf (REGEL_UNTERANFRAGEN_MAX = 35; O12: dazu die Liste der
 // Monatsabschlüsse des Altpfads bei Belegwirkung, zwei kleine Abfragen beim Kassenart-Wechsel über die Meldepflicht-Grenze, zwei Duplikat-Abfragen bei der Ausgabe).
+// O14 N1 (R1.5): retoure braucht je Versuch etwa 10 Unteranfragen (Tagesplätze, Retouren des Tages, Zeiger, Original, Retouren des Originals, Bewegungen,
+// Festschreibungen, Monatsabschlüsse, commit); nach mehreren Konflikten am Audit-Kopf kann das Budget vor der dritten Wiederholung enden: dann 503 statt 409
+// KONFLIKT (fail-closed, nichts geschrieben, die App wiederholt). Abschluss, Ruhetage und Außerbetriebnahme lesen seit O14 M4 eine Abfrage mehr (Retouren im Bereich).
 import * as Steuerkern from '../steuerkern/index.js';
 import {
   antwort, fehlerAntwort, featureAusAntwort, grundpruefung, istObjekt, CONFIG_PFAD, configBereinigen, featureAktiv, agbFassungenLaden, agbFassungVergleich,
@@ -27,7 +30,7 @@ import {
   ohneSystemDaten, ereignis, ereignisSetzen, anschaffungsEreignis, K3_LEER, dateiImSpeicher,
 } from './kasse-register.js';
 import {
-  P, kasseIdAus, kassennummer, idBereich, zeigerAus, zeigerPasst, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern, ohneStornoPaare, KasseLesefehler,
+  P, kasseIdAus, kassennummer, idBereich, zeigerAus, zeigerPasst, letzterTagMit, bewegungenDesTages, bewegungenImBereich, bewegungFuerKern, ohneStornoPaare, KasseLesefehler, retourenTageImBereich,
   STAMM_FELDER, STAMMDATEN_VERLAUF_MAX, stammVerlaufAus, stammAm, stammVerlaufMit, stammVerlaufStart, stammVerlaufVerdichten,
 } from './kasse-daten.js';
 
@@ -493,15 +496,8 @@ async function kuSummeVorTag(c, tag, kernOptionen) {
     if (gelesen.size < n) throw new KasseLesefehler('KU_SUMME_UNVOLLSTAENDIG', 'KU-Summe: weniger Belege gelesen als gezählt');
   }
   const r = [...gelesen.values()];
-  // R1.5: eine Retoure (Korrekturbeleg der Kasse) mindert den Gesamtumsatz nur mit ihrem Original (Kern-Zweig für Kleinunternehmer). Liegt der Verkaufstag vor dem
-  // 01.01. des Jahres, fehlt das Original in der Abfrage oben: einmal nachlesen (höchstens 100; fehlt es trotzdem, bleibt die Summe höher, nie zu niedrig).
-  const ids = new Set(r.map((d) => idVon(d)));
-  const fehlend = [...new Set(r.map((d) => (istObjekt(d.daten) && d.daten.quelle === 'kasse' && istObjekt(d.daten.steuer) && d.daten.steuer.beleg_art === 'korrektur' && istObjekt(d.daten.steuer.bezug) ? d.daten.steuer.bezug.korrigiert_beleg_id : null))
-    .filter((x) => typeof x === 'string' && x.startsWith(Steuerkern.KASSEN_BELEG_PRAEFIX) && !ids.has(x)))].slice(0, 100);
-  if (fehlend.length) {
-    const m = await fs.batchGet(fehlend.map((x) => P.beleg(uid, x)));
-    for (const x of fehlend) { const d = m.get(P.beleg(uid, x)); if (d && istObjekt(d.daten)) r.push({ pfad: P.beleg(uid, x), daten: d.daten }); }
-  }
+  // R1.5 / O14 M1: eine Retoure mindert die Summe nur, wenn ihr Verkaufstag im selben Jahr liegt (Kern kuKassenRetoureWirkungen); das Original liegt dann im
+  // Zeitraum dieser Abfrage. Retouren auf Vorjahresverkäufe mindern bis zur Antwort des Steuerberaters nicht (kein Nachlesen des Vorjahres-Originals).
   const belege = Steuerkern.belegeFuerKern(r.map((d) => ({ ...d.daten, id: idVon(d) })), profil, kernOptionen).belege;
   const wirkungen = Steuerkern.alleWirkungen(belege, profil, kernOptionen).filter((x) => !(typeof x.datum_wirk === 'string' && x.datum_wirk >= tag));
   const g = Steuerkern.grenzenFuerJahr(wirkungen, profil, jahr, null, {});
@@ -644,6 +640,11 @@ async function abschliessen(c) {
       const offen = ohneStornoPaare(gelesen).filter((d) => !randTag || d.daten.geschaeftstag < randTag);
       if (!offen.length && gelesen.unvollstaendig) return { antwort: fehlerAntwort(422, 'BEWEGUNGEN_ZU_VIELE', cors, { bis_tag: gelesen[gelesen.length - 1].daten.geschaeftstag }) };
       if (offen.length) return { antwort: fehlerAntwort(409, 'OFFENE_BEWEGUNGEN_VORTAG', cors, { tage: [...new Set(offen.map((d) => d.daten.geschaeftstag))].sort().slice(0, 31) }) };
+      // O14 M4 (R1.5): eine nicht stornierte Retoure (auch reine Kartenretoure ohne Bewegung) an einem offenen Tag davor: erst diesen Tag abschließen
+      const rt = await retourenTageImBereich(fs, uid, kasseId, lueckeVon, lueckeBis);
+      const rtTage = rt.tage.filter((d) => !rt.randTag || d < rt.randTag);
+      if (rtTage.length) return { antwort: fehlerAntwort(409, 'OFFENE_BEWEGUNGEN_VORTAG', cors, { tage: rtTage.slice(0, 31), grund: 'retoure' }) };
+      if (rt.unvollstaendig) return { antwort: fehlerAntwort(422, 'BEWEGUNGEN_ZU_VIELE', cors, { bis_tag: rt.randTag, grund: 'retoure' }) };
     }
     const anfangsbestand = letzter ? letzter.daten.gezaehlt_cent : kasse.anfangsbestand_cent;
     if (!Number.isSafeInteger(anfangsbestand) || anfangsbestand < 0) throw new Error('Anfangsbestand unlesbar');
@@ -803,6 +804,11 @@ async function ruhetage(c, aktion) {
     if (mit) return { antwort: fehlerAntwort(409, 'RUHETAG_MIT_BEWEGUNG', cors, { geschaeftstag: mit.daten.geschaeftstag }) };
     // B-N1: mehr als 300 Bewegungen im Bereich und das Gelesene entscheidet nicht: 422 (weniger Tage auf einmal bestätigen), nie 500 und nie ein ungeprüfter Ruhetag
     if (bew.unvollstaendig) return { antwort: fehlerAntwort(422, 'BEWEGUNGEN_ZU_VIELE', cors, { bis_tag: bew[bew.length - 1].daten.geschaeftstag }) };
+    // O14 M4 (R1.5): ein Tag mit einer nicht stornierten Retoure (auch reine Kartenretoure ohne Bewegung) ist kein Ruhetag
+    const rt = await retourenTageImBereich(fs, uid, kasseId, tage[0], tage[tage.length - 1]);
+    const rtTag = rt.tage.find((d) => tage.includes(d) && (!rt.randTag || d < rt.randTag));
+    if (rtTag) return { antwort: fehlerAntwort(409, 'RUHETAG_MIT_BEWEGUNG', cors, { geschaeftstag: rtTag, grund: 'retoure' }) };
+    if (rt.unvollstaendig) return { antwort: fehlerAntwort(422, 'BEWEGUNGEN_ZU_VIELE', cors, { bis_tag: rt.randTag, grund: 'retoure' }) };
     const ts = zeitstempel(zeit);
     const writes = tage.map((t, i) => schreibe.anlegen(P.kassentag(uid, ids[i]), {
       kasse_id: kasseId, geschaeftstag: t, status: 'ruhetag', fassung_aktiv: null, fassungen_kurz: [], anfangsbestand_cent: null, soll_endbestand_cent: null, gezaehlt_cent: null,
@@ -1065,8 +1071,10 @@ async function retoure(c) {
     const origDok = await fs.get(P.beleg(uid, origId));
     if (!origDok || !istObjekt(origDok.daten) || !istEchterKassenbeleg(origDok.daten) || !istObjekt(origDok.daten.steuer) || origDok.daten.steuer.beleg_art !== 'tagesabschluss') throw new Error('Umsatzbeleg des Verkaufstags fehlt');
     const origSteuer = origDok.daten.steuer;
-    // Steuerstatus: der Steuerfall folgt dem Original. Regelbesteuerter Verkauf, Kleinunternehmer am Retourentag: § 17-Berichtigung ohne Voranmeldung rechnet Kontolux
-    // nicht (Sonderfall, vorsichtig ablehnen; Weg B des Hilfetexts bleibt). Kleinunternehmer-Verkauf, regelbesteuert am Retourentag: geht (keine USt, Kz 183).
+    // Steuerstatus: der Steuerfall folgt dem Original. Regelbesteuerter Verkauf, Kleinunternehmer am Retourentag: die Steuer ist nach § 17 Abs. 1 S. 1, Abs. 2 UStG
+    // zu berichtigen (UStAE 19.7 Abs. 8, docs/quellen/ustae-stand-2026-10-19-19-1-bis-19-7.md Z. 261-265); das rechnet Kontolux noch nicht (wie und wo die
+    // Berichtigung als Kleinunternehmer erklärt wird, ist offen): vorsichtig ablehnen (422), der Text nennt die fehlende Minderung. Kleinunternehmer-Verkauf,
+    // regelbesteuert am Retourentag: geht (keine USt, UStAE 19.7 Abs. 3, Kz 183).
     const statusTag = Steuerkern.statusAm(profil, tag).status;
     if (statusTag === 'unbekannt') return { antwort: fehlerAntwort(403, 'PROFIL_FEHLT', cors) };
     if (origSteuer.steuerfall !== 'A_KU' && statusTag === 'ku') return { antwort: fehlerAntwort(422, 'RETOURE_STATUS_GEWECHSELT', cors, { feld: 'verkaufstag' }) };
@@ -1102,7 +1110,7 @@ async function retoure(c) {
     const nummer = kassennummer(kasse.kuerzel, jahr, nummerNeu);
     let steuer;
     try {
-      steuer = Steuerkern.kassenRetoureEingabe(origSteuer, { original_id: origId, verkaufstag: w.verkaufstag, retourentag: tag, zeilen: w.zeilen, korrektur_grund: w.korrektur_grund, notiz: w.notiz, fruehere, erfasst_am: heute, kern_version: Steuerkern.KERN_VERSION });
+      steuer = Steuerkern.kassenRetoureEingabe(origSteuer, { original_id: origId, verkaufstag: w.verkaufstag, retourentag: tag, zeilen: w.zeilen, korrektur_grund: w.korrektur_grund, notiz: w.notiz, art: w.art, fruehere, erfasst_am: heute, kern_version: Steuerkern.KERN_VERSION });
     } catch (e) {
       const m = String(e && e.message ? e.message : e);
       if (m.startsWith('RETOURE_UEBER_VERKAUF')) return { antwort: fehlerAntwort(422, 'RETOURE_UEBER_VERKAUF', cors, { steuerfall: m.split(': ')[1] || null, rest: restAntwort(rest) }) };
@@ -1124,9 +1132,9 @@ async function retoure(c) {
     const ts = zeitstempel(zeit);
     const zeilenDok = w.zeilen.map((z) => ({ steuerfall: z.steuerfall, satz_bp: rest.zeilen.find((x) => x.steuerfall === z.steuerfall).satz_bp, bar_cent: z.bar_cent, unbar_cent: z.unbar_cent }));
     const dok = {
-      ...dokumentAus(kandidat, { zeit, kasse, kasseId, tagId, n: null, nummer, anhaenge: null, tag, einnahme: false, name: `Rückgabe ${kassennamen(kasse)} ${datumDe(tag)} (Verkauf vom ${datumDe(w.verkaufstag)})` }),
+      ...dokumentAus(kandidat, { zeit, kasse, kasseId, tagId, n: null, nummer, anhaenge: null, tag, einnahme: false, name: `${w.art === 'pfand' ? 'Pfandrückgabe' : 'Rückgabe'} ${kassennamen(kasse)} ${datumDe(tag)} (${w.art === 'pfand' ? 'Bezug' : 'Verkauf'} vom ${datumDe(w.verkaufstag)})` }),
       // Felder außerhalb des Drift-Hashes: Verkaufstag und Aufteilung bar/Karte je Satz (DATEV, Kassenbuch, Rest), Bewegung, Anfrage (Wiederholung)
-      retoure: { verkaufstag: w.verkaufstag, verkauf_kassentag_id: vTagId, verkauf_fassung: vTag.fassung_aktiv, verkauf_beleg_id: origId, zeilen: zeilenDok, bar_cent: bar, unbar_cent: unbar, bewegung_id: bewegungId, anfrage_id: body.anfrage_id },
+      retoure: { art: w.art, verkaufstag: w.verkaufstag, verkauf_kassentag_id: vTagId, verkauf_fassung: vTag.fassung_aktiv, verkauf_beleg_id: origId, zeilen: zeilenDok, bar_cent: bar, unbar_cent: unbar, bewegung_id: bewegungId, anfrage_id: body.anfrage_id },
       ...nachFest,
     };
     const writes = [
@@ -1136,7 +1144,7 @@ async function retoure(c) {
     let bewegung = null;
     if (bewegungId) {
       bewegung = {
-        kasse_id: kasseId, geschaeftstag: tag, art: 'retoure_auszahlung', betrag_cent: bar, text: `Rückgabe aus Verkauf vom ${datumDe(w.verkaufstag)}`, beleg_id: retoureId, eigenbeleg_pfad: null,
+        kasse_id: kasseId, geschaeftstag: tag, art: 'retoure_auszahlung', betrag_cent: bar, text: w.art === 'pfand' ? `Pfandrückgabe (Bezug ${datumDe(w.verkaufstag)})` : `Rückgabe aus Verkauf vom ${datumDe(w.verkaufstag)}`, beleg_id: retoureId, eigenbeleg_pfad: null,
         privatvorgang_id: null, gegenkasse_id: null, storno_von: null, storno_art: null, storno_grund: null, kontoauszug_abgleich: null,
         kassennummer: nummer, erfasst_am: ts, anfrage_id: body.anfrage_id, aufbewahrung_bis: aufbewahrungBis(tag),
       };
@@ -1144,7 +1152,7 @@ async function retoure(c) {
     }
     const audit = await auditKette(uid, docs.get(kopfPfad(uid)), [{
       aktion: 'kassentag_retoure', ziel: `dokumente/${retoureId}`, vorher: null, nachher: { beleg_id: retoureId, bewegung_id: bewegungId, verkaufstag: w.verkaufstag, kassennummer: nummer },
-      details: { kasse_id: kasseId, kassentag_id: tagId, verkaufstag: w.verkaufstag, verkauf_beleg_id: origId, beleg_id: retoureId, bewegung_id: bewegungId, saetze: w.zeilen.map((z) => z.steuerfall), grund: w.korrektur_grund, nach_festschreibung: gesperrt.length > 0 },
+      details: { kasse_id: kasseId, kassentag_id: tagId, verkaufstag: w.verkaufstag, verkauf_beleg_id: origId, beleg_id: retoureId, bewegung_id: bewegungId, saetze: w.zeilen.map((z) => z.steuerfall), grund: w.korrektur_grund, art: w.art, nach_festschreibung: gesperrt.length > 0 },
     }], zeit);
     writes.push(...audit.writes);
     // Rest nach dieser Retoure (für die Antwort, gleiche Kern-Rechnung)

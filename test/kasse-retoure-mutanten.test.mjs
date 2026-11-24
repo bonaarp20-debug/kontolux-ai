@@ -47,7 +47,7 @@ async function szenario({ regelKasse, AGB }) {
   assert.equal((await tag('2026-11-02', [{ steuerfall: 'A_INLAND_19', bar_cent: 50000, unbar_cent: 0 }], 60000)).status, 200);
   const r = await ruf('/kassentag', { aktion: 'retoure', kasse_id: id, geschaeftstag: '2026-11-03', verkaufstag: '2026-11-02', zeilen: [{ steuerfall: 'A_INLAND_19', bar_cent: 11900, unbar_cent: 0 }], korrektur_grund: 'rueckabwicklung' });
   assert.equal(r.status, 200, JSON.stringify(r.json));
-  assert.ok(fs.lies(P(`kassenbewegungen/${r.json.bewegung_id}`)), 'Bewegung retoure_auszahlung geschrieben');
+  // O14 N6: keine Existenzprüfung der Bewegung, der Mutant muss an der fachlichen Folge (Differenz im Soll-Bestand) scheitern
   const a = await tag('2026-11-03', [], 48100);
   assert.equal(a.status, 200, JSON.stringify(a.json));
   assert.equal(a.json.differenz_cent, 0, 'Soll-Bestand des Retourentags ohne Differenz');
@@ -56,7 +56,30 @@ async function szenario({ regelKasse, AGB }) {
 test('KR05 Gegenprobe: unveränderte Kopie besteht das Szenario', async () => {
   await szenario(await kopie(null));
 });
-test('Mutant KR05 (Bewegung retoure_auszahlung fehlt) macht das Szenario rot', async () => {
+test('Mutant KR05 (Bewegung retoure_auszahlung fehlt) macht das Szenario rot (Soll-Differenz)', async () => {
   const m = await kopie([KR05_ANKER, '/* KR05 */']);
-  await assert.rejects(() => szenario(m));
+  await assert.rejects(() => szenario(m), /DIFFERENZ_OHNE_GRUND|ohne Differenz/);
+});
+
+// O14 M4: Mutant KR07 (Retouren fehlen in der Ruhetag-Prüfung). Szenario: reine Kartenretoure am 03.11., danach Ruhetag 03.11. muss 409 geben.
+export const KR07_ANKER = "if (rtTag) return { antwort: fehlerAntwort(409, 'RUHETAG_MIT_BEWEGUNG', cors, { geschaeftstag: rtTag, grund: 'retoure' }) };";
+async function szenarioRuhetag({ regelKasse, AGB }) {
+  const fs = fakeFirestore();
+  fs.setze('config/features', { kern_max: 'an', features: { steuerprofil: 'an', kasse: 'an', kasse_retoure: 'an' } });
+  fs.setze(P('steuerprofil/aktuell'), REGEL);
+  fs.setze(P('agb_zustimmung/z1'), { version: AGB });
+  let n = 0; let heute = '2026-11-01'; let t = 0;
+  const deps = { fetchFn: fs.fetchFn, adminToken: async () => 't', heute: () => heute, jetzt: () => new Date(Date.parse(`${heute}T09:00:00Z`) + (t++) * 1000).toISOString(), storageUrlOk: () => true, storageVorhanden: async () => true };
+  const ruf = async (pfad, body) => { heute = body.geschaeftstag || '2026-11-05'; const r = await regelKasse(pfad, { userId: UID, token: 'tok', anfrage_id: `mu7-${String(++n).padStart(8, '0')}`, ...body }, {}, {}, deps); return { status: r.status, json: await r.json() }; };
+  const k = await ruf('/kasse', { aktion: 'anlegen', bezeichnung: 'Theke', kuerzel: 'THK', art: 'registrierkasse', grundaufzeichnung: 'tse_kasse', datenquelle: 'manuell', anfangsbestand_cent: 10000, anfangsbestand_am: '2026-11-01', anfangsbestand_herkunft: 'bank' });
+  const id = k.json.kasse_id;
+  assert.equal((await ruf('/kassentag', { aktion: 'abschliessen', kasse_id: id, geschaeftstag: '2026-11-02', z_nummern: ['Z-1'], umsaetze: [{ steuerfall: 'A_INLAND_19', bar_cent: 50000, unbar_cent: 0 }], gezaehlt_cent: 60000, bestand_gezaehlt_bestaetigt: true, grundaufzeichnung_bestaetigt: true })).status, 200);
+  assert.equal((await ruf('/kassentag', { aktion: 'retoure', kasse_id: id, geschaeftstag: '2026-11-03', verkaufstag: '2026-11-02', zeilen: [{ steuerfall: 'A_INLAND_19', bar_cent: 0, unbar_cent: 5000 }], korrektur_grund: 'rueckabwicklung' })).status, 200);
+  const r = await ruf('/kassentag', { aktion: 'ruhetag', kasse_id: id, geschaeftstag: '2026-11-03' });
+  assert.equal(r.status, 409, 'Tag mit Kartenretoure ist kein Ruhetag');
+}
+test('KR07 Gegenprobe: unveränderte Kopie besteht das Ruhetag-Szenario', async () => { await szenarioRuhetag(await kopie(null)); });
+test('Mutant KR07 (Retouren fehlen in der Ruhetag-Prüfung) macht das Szenario rot', async () => {
+  const m = await kopie([KR07_ANKER, '/* KR07 */']);
+  await assert.rejects(() => szenarioRuhetag(m), /kein Ruhetag/);
 });

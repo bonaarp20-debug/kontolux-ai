@@ -2288,7 +2288,7 @@ function kuKassenRetoureOriginal(s, opt, beleg) {
   const os = orig.steuer;
   return os.beleg_art === 'tagesabschluss' && os.steuerfall === 'A_KU' && os.richtung === 'ausgang' ? orig : null;
 }
-function kuKassenRetoureWirkungen(s, profil, ctx, out) {
+function kuKassenRetoureWirkungen(s, profil, ctx, out, orig) {
   const rz = rueckzahlungVon(s);
   const pos = Array.isArray(s.positionen) ? s.positionen : [];
   let brutto = 0;
@@ -2306,13 +2306,20 @@ function kuKassenRetoureWirkungen(s, profil, ctx, out) {
   }
   const jahr = String(jahrVon(rz.datum));
   out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: rz.datum, kz: 183, netto_cent: brutto, betrag_cent: brutto, rolle: 'ausgabe', spalte: 'ausgabe', regel_id: 'R-ZP-25', hinweise: ['HN_EUER_RUECKZAHLUNG_K20'] }));
-  out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: rz.datum, kz: null, netto_cent: 0 - brutto, betrag_cent: 0 - brutto, rolle: 'ku_umsatz_minderung', status: 'information', regel_id: 'R-KU-02' }));
+  // O14 M1 (vorsichtig bis zur Antwort des Steuerberaters): den Gesamtumsatz § 19 Abs. 2 mindert nur eine Retoure auf einen Verkauf DESSELBEN Kalenderjahres.
+  // Ob die Rückgewähr eines Vorjahresentgelts den Gesamtumsatz des laufenden Jahres mindert, ist nicht belegt (UStAE 19.3 Abs. 1: vereinnahmte Entgelte „für“
+  // Umsätze; 19.7 Abs. 3 S. 2 schließt nur eine Rückwirkung aus). Ohne Minderung bleibt die laufende Summe höher, die Grenze greift höchstens früher, nie später.
+  const tagOrig = istObjekt(orig) && istObjekt(orig.steuer) && istObjekt(orig.steuer.leistung) && istDatum(orig.steuer.leistung.bis) ? orig.steuer.leistung.bis : null;
+  if (tagOrig !== null && jahrVon(tagOrig) === jahrVon(rz.datum)) {
+    out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: rz.datum, kz: null, netto_cent: 0 - brutto, betrag_cent: 0 - brutto, rolle: 'ku_umsatz_minderung', status: 'information', regel_id: 'R-KU-02' }));
+  } else if (!ctx.hinweise.includes('HN_KU_RETOURE_VORJAHR')) ctx.hinweise.push('HN_KU_RETOURE_VORJAHR');
 }
 
 function korrekturWirkungen(s, profil, ctx, opt, out, beleg) {
   const kassenOrig = kassenStornoOriginal(s, opt, beleg);
   if (kassenOrig) { kassenStornoWirkungen(s, profil, ctx, opt, out, kassenOrig); return; }
-  if (kuKassenRetoureOriginal(s, opt, beleg)) { kuKassenRetoureWirkungen(s, profil, ctx, out); return; }
+  const kuRetoureOrig = kuKassenRetoureOriginal(s, opt, beleg);
+  if (kuRetoureOrig) { kuKassenRetoureWirkungen(s, profil, ctx, out, kuRetoureOrig); return; }
   if (s.korrektur_grund === 'tippfehler_berichtigung') { ctx.hinweise.push('HN_BERICHTIGUNG_OHNE_UST_WIRKUNG'); return; }
   if (s.steuerfall !== 'A_INLAND_19' && s.steuerfall !== 'A_INLAND_7' && s.steuerfall !== 'A_INLAND_0_PV' && s.steuerfall !== 'E_INLAND_VORSTEUER') {
     ctx.beleg_status = 'ausgeschlossen';
@@ -2342,7 +2349,10 @@ function korrekturWirkungen(s, profil, ctx, opt, out, beleg) {
   const origPer = istObjekt(opt.originalPerioden) && typeof opt.originalPerioden.get === 'function' ? opt.originalPerioden.get(origId) : null;
   // Warnung bei Storno und Rückabwicklung; Preisnachlass, Skonto und Bonus sind gewöhnliche Minderungen (T-S2-012)
   const stornoGrund = s.korrektur_grund === 'rueckabwicklung' || s.korrektur_grund === 'leistung_nicht_erbracht' || s.beleg_art === 'storno';
-  const warneAbgeschlossen = (per) => { if (stornoGrund && origPer && origPer < per && periodenArt(origPer) === periodenArt(per) && !ctx.hinweise.includes('W_STORNO_ABGESCHLOSSENER_ZEITRAUM')) ctx.hinweise.push('W_STORNO_ABGESCHLOSSENER_ZEITRAUM'); };
+  // O14 N5: eine Kassen-Retoure (Retouren-ID des Workers) bekommt statt der Storno-Warnung einen ruhigen Hinweis (Rückgabe, nicht Storno einer Rechnung)
+  const istRetoure = istObjekt(beleg) && typeof beleg.id === 'string' && KASSEN_RETOURE_ID.test(beleg.id);
+  const hinweisAbgeschlossen = istRetoure ? 'HN_RETOURE_FRUEHERER_ZEITRAUM' : 'W_STORNO_ABGESCHLOSSENER_ZEITRAUM';
+  const warneAbgeschlossen = (per) => { if (stornoGrund && origPer && origPer < per && periodenArt(origPer) === periodenArt(per) && !ctx.hinweise.includes(hinweisAbgeschlossen)) ctx.hinweise.push(hinweisAbgeschlossen); };
   // Unbezahlter Teil: Wirkdatum, in voller Höhe (Soll). Bei Ist wurde nichts vereinnahmt (keine Wirkung). Vor der Leistung (TR-orakel-002) hat
   // alleWirkungen den Betrag schon vom Leistungsposten des Originals abgezogen.
   const verrechnet = opt.vorLeistungKorrekturen instanceof Set && opt.vorLeistungKorrekturen.has(beleg);

@@ -246,7 +246,8 @@ export function pruefeStorno(body, { heute }) {
 // Feature: retoure nur mit kasse UND kasse_retoure (fehlend = aus); retoure_stornieren nur mit kasse (Ausweg auch bei ausgeschaltetem kasse_retoure).
 // ---------------------------------------------------------------------------------------------
 export const FEATURE_RETOURE = FEATURE_KASSE_RETOURE;
-export const RETOURE_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'geschaeftstag', 'verkaufstag', 'zeilen', 'korrektur_grund', 'notiz']);
+// art (O14, Pfand ohne Verkaufstag): 'retoure' (Standard) oder 'pfand' (Pfandauszahlung, Anker = früherer Tag mit Umsatz zum Satz, UStAE 10.1 Abs. 8)
+export const RETOURE_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'geschaeftstag', 'verkaufstag', 'zeilen', 'korrektur_grund', 'notiz', 'art']);
 export const RETOURE_ZEILE_SCHLUESSEL = Object.freeze(['steuerfall', 'bar_cent', 'unbar_cent']);
 export const RETOURE_STORNO_SCHLUESSEL = Object.freeze([...SCHLUESSEL_BASIS, 'kasse_id', 'retoure_beleg_id', 'grund']);
 export const RETOURE_BELEG_ID_MUSTER = /^kasse_(k[a-z0-9]{8})_(\d{4}-\d{2}-\d{2})_r(\d{3})$/;
@@ -272,6 +273,8 @@ export function pruefeRetoure(body, { heute }) {
     zeilen.push({ steuerfall: z.steuerfall, bar_cent: bar, unbar_cent: unbar });
   }
   if (!Steuerkern.KASSEN_RETOURE_GRUENDE.includes(body.korrektur_grund)) return fehl('korrektur_grund');
+  const art = body.art === undefined || body.art === null ? 'retoure' : body.art;
+  if (!Steuerkern.KASSEN_RETOURE_ARTEN.includes(art)) return fehl('art');
   let notiz = null;
   if (body.notiz !== undefined && body.notiz !== null) {
     if (typeof body.notiz !== 'string' || body.notiz.length > 300) return fehl('notiz');
@@ -279,7 +282,7 @@ export function pruefeRetoure(body, { heute }) {
   }
   // Reihenfolge wie KASSE_STEUERFAELLE (Kern), damit Beleg, Bewegung und Antwort stabil sind
   zeilen.sort((a, b) => Steuerkern.KASSE_STEUERFAELLE.indexOf(a.steuerfall) - Steuerkern.KASSE_STEUERFAELLE.indexOf(b.steuerfall));
-  return ok({ kasse_id: body.kasse_id, geschaeftstag: body.geschaeftstag, verkaufstag: body.verkaufstag, zeilen, korrektur_grund: body.korrektur_grund, notiz });
+  return ok({ kasse_id: body.kasse_id, geschaeftstag: body.geschaeftstag, verkaufstag: body.verkaufstag, zeilen, korrektur_grund: body.korrektur_grund, notiz, art });
 }
 export function pruefeRetoureStorno(body) {
   if (!istObjekt(body) || !nurSchluessel(body, RETOURE_STORNO_SCHLUESSEL)) return fehl(istObjekt(body) ? Object.keys(body).find((x) => !RETOURE_STORNO_SCHLUESSEL.includes(x)) || 'body' : 'body');
