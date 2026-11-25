@@ -30,7 +30,7 @@ import { PDFArray, PDFDict, PDFName, PDFNumber, PDFRawStream } from 'pdf-lib';
 import { ladePdfBegrenzt, stromLaengeBegrenzt, PDF_STROM_MAX, PDF_ENTPACKT_MAX, PDF_XREF_EINTRAEGE_MAX } from './pdf-sicher.js';
 import * as Steuerkern from '../steuerkern/index.js';
 import {
-  antwort, fehlerAntwort, featureAusAntwort, grundpruefung, istObjekt, istDatum, nurSchluessel, CONFIG_PFAD, configBereinigen, featureAktiv,
+  antwort, fehlerAntwort, featureAusAntwort, grundpruefung, istObjekt, istDatum, nurSchluessel, CONFIG_PFAD, configBereinigen, configFuerKonto, featureAktiv,
   jetztIso, schichtFuer, regelFehler, agbZustimmungAb, codesBereinigen,
 } from './gemeinsam.js';
 import { schreibe, vorbedingungAus } from './firestore.js';
@@ -785,7 +785,7 @@ export async function regelKasseZbonLesen(body, env, cors = {}, deps = {}) {
   try {
     fs = await schichtFuer(deps);
     // 3. Schalter kasse UND kasse_ki (fehlend = aus)
-    const config = configBereinigen((await fs.get(CONFIG_PFAD))?.daten);
+    const config = configFuerKonto(configBereinigen((await fs.get(CONFIG_PFAD))?.daten), uid); // W3 Fix 3: optionale Kontenliste je Kassen-Funktion
     if (!featureAktiv(config, 'kasse') || !featureAktiv(config, 'kasse_ki')) return featureAusAntwort(cors);
     // 4. Steuerprofil bestätigt. O12a N7: dieselbe Prüfung wie /kasse* (profilBereit: status_verlauf vorhanden und bestaetigt_am oder bestaetigt true)
     const profilDok = await fs.get(`users/${uid}/steuerprofil/aktuell`);
