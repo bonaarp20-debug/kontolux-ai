@@ -323,3 +323,17 @@ test('datevSatzJeQuelle und datevBelegIdZuNr: letzter Satz nach Datum, gleiche N
   const e = [doc('a', { rechnungsnr: S('R1'), typ: S('rechnung_eingehend') }), doc('b', { rechnungsnummer: S('R1'), typ: S('rechnung_ausgehend') }), doc('c', { rechnungsnr: S('R1'), typ: S('storno') })];
   assert.equal(datevBelegIdZuNr(e, fv).get('R1'), 'b');
 });
+
+// ── Bekannte Eigenheit behoben: Warnungen bei "Keine buchbaren Belege" (404) ─────────────────────
+test('404 ohne buchbare Zeile nennt die Gründe aus der Warnung (Einnahme ohne Steuersatz bleibt draußen), in beiden Modi gleich', async () => {
+  const fs = fakeFirestore();
+  fs.setze(`users/${UID}/steuerprofil/aktuell`, REGEL);
+  fs.setze(`users/${UID}/profil/settings`, { datev_skr: 'SKR03', datev_bankkonto: '1200', datev_berater_nr: '1001', datev_mandanten_nr: '1', kleinunternehmer: 'Nein' });
+  fs.setze(`users/${UID}/dokumente/e1`, alt('E-OHNE', 'rechnung_ausgehend', 119, undefined, undefined));
+  const voll = await ruf(worker, fs, 'voll', 2026);
+  const zeitraum = await ruf(worker, fs, 'zeitraum', 2026);
+  assert.equal(voll.status, 404);
+  assert.match(JSON.parse(voll.text).details, /1 Einnahme\(n\) ohne Steuersatz wurden NICHT exportiert/);
+  assert.match(JSON.parse(voll.text).details, /keine als bezahlt markierten Belege/);
+  assert.equal(zeitraum.text, voll.text);
+});

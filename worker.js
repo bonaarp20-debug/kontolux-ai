@@ -6101,7 +6101,7 @@ async function handleDatevExport(body, env, cors = {}) {
     if (buchungen.length === 0) {
       return new Response(JSON.stringify({
         error: 'Keine buchbaren Belege gefunden',
-        details: `Für ${jahr} wurden keine als bezahlt markierten Belege mit Betrag gefunden.${skippedUnpaid ? ` (${skippedUnpaid} unbezahlte Belege wurden übersprungen.)` : ''}${kasseOffen.length ? ` Aus dem Kassenbuch konnten ${kasseOffen.length} Beleg(e) nicht gebucht werden (Grund in Klammern): ${nummern(kasseOffen)}.` : ''}`
+        details: `Für ${jahr} wurden keine als bezahlt markierten Belege mit Betrag gefunden.${skippedUnpaid ? ` (${skippedUnpaid} unbezahlte Belege wurden übersprungen.)` : ''}${kasseOffen.length ? ` Aus dem Kassenbuch konnten ${kasseOffen.length} Beleg(e) nicht gebucht werden (Grund in Klammern): ${nummern(kasseOffen)}.` : ''}${datevWarning ? ` Hinweise: ${datevWarning.length > 1500 ? datevWarning.slice(0, 1500) + ' …' : datevWarning}` : ''}` // W3 DATEV: die Warnungen (zum Beispiel Einnahmen ohne Steuersatz) erschienen bei 404 nirgends
       }), {
         status: 404,
         headers: { ...cors, 'Content-Type': 'application/json' }
