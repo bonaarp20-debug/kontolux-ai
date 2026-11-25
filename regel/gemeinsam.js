@@ -152,7 +152,31 @@ export function configBereinigen(roh) {
       if (FEATURE_NAME_MUSTER.test(k)) features[k] = v === 'an' ? 'an' : 'aus';
     }
   }
-  return { kern_max, features };
+  const konten = kontenBereinigen(roh.features_konten);
+  return konten ? { kern_max, features, features_konten: konten } : { kern_max, features };
+}
+
+// W3 Fix 3 (Gate-Zeit des Kassenbuchs): optionale Kontenliste je Kassen-Funktion, config/features.features_konten { kasse: [uid, ...] }. Steht für eine Funktion
+// ein Eintrag da, gilt sie (bei globalem 'an') NUR für diese Konten (configFuerKonto); alle anderen sehen sie als 'aus'. Die Liste schaltet nie etwas ein, sie wirkt
+// zusätzlich zu 'an' und zur AGB-Bindung. Fail-closed: nicht lesbare Form = Liste leer = niemand (nicht-Objekt: alle drei Kassen-Funktionen mit leerer Liste);
+// Namen außerhalb von FEATURES_KASSE und Einträge, die keine UID sind, zählen nicht. Gleiche Regeln in der App (regel/loader.js normiereKonfig, Paritätstest).
+export const KONTEN_MAX = 50;
+function kontenBereinigen(roh) {
+  if (roh === undefined) return null;
+  const o = {};
+  for (const name of FEATURES_KASSE) {
+    const liste = istObjekt(roh) ? roh[name] : [];
+    if (istObjekt(roh) && liste === undefined) continue;
+    o[name] = Array.isArray(liste) ? liste.filter((u) => typeof u === 'string' && UID_MUSTER.test(u)).slice(0, KONTEN_MAX) : [];
+  }
+  return Object.keys(o).length ? o : null;
+}
+// Die Konfiguration, wie sie für dieses Konto gilt: Funktionen mit Kontenliste, auf der die UID fehlt, stehen auf 'aus'. Ohne Liste unverändert (dasselbe Objekt).
+export function configFuerKonto(config, uid) {
+  if (!config || !config.features_konten) return config;
+  const features = { ...config.features };
+  for (const [name, liste] of Object.entries(config.features_konten)) if (!liste.includes(uid)) features[name] = 'aus';
+  return { ...config, features };
 }
 
 // Ist eine Funktion serverseitig freigeschaltet? config null = nicht lesbar oder nicht vorhanden.

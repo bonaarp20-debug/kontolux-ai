@@ -3,8 +3,9 @@
 // mindestens 5 Zeichen, Eintrag ins Admin-Protokoll. Das Dokument lesen alle angemeldeten Konten (Firestore-Regeln), darum steht darin weder
 // eine E-Mail-Adresse noch der Grund (beides nur im Admin-Protokoll).
 //   { lesen: true }                                                    -> aktueller Stand
-//   { kern_max?: 'aus'|'schatten'|'an', features?: { name: 'aus'|'an'|null }, grund }   null entfernt einen Eintrag
-import { antwort, istObjekt, CONFIG_PFAD, configBereinigen, KERN_MAX_WERTE, FEATURE_WERTE, FEATURE_NAME_MUSTER, FEATURES_MAX, jetztIso, schichtFuer, regelFehler } from './gemeinsam.js';
+//   { kern_max?: 'aus'|'schatten'|'an', features?: { name: 'aus'|'an'|null }, features_konten?: { kasse|kasse_ki|kasse_retoure: [uid, ...]|null }, grund }   null entfernt einen Eintrag
+//   features_konten (W3 Fix 3): schränkt eine Kassen-Funktion auf die genannten Konten ein (gemeinsam.js configFuerKonto); [] = niemand; null hebt die Einschränkung auf
+import { antwort, istObjekt, CONFIG_PFAD, configBereinigen, KERN_MAX_WERTE, FEATURE_WERTE, FEATURE_NAME_MUSTER, FEATURES_MAX, FEATURES_KASSE, KONTEN_MAX, UID_MUSTER, jetztIso, schichtFuer, regelFehler } from './gemeinsam.js';
 import { schreibe, vorbedingungAus } from './firestore.js';
 import { kernModusCacheLeeren } from './kern-modus.js';
 
@@ -23,7 +24,7 @@ export async function regelAdminFeatures(request, authHeader, env, cors = {}, de
     if (body.lesen === true) return antwort({ ok: true, vorhanden: !!altDok, config: alt, roh_version: altDok?.daten?.version ?? null }, 200, cors);
 
     if (!(typeof body.grund === 'string' && body.grund.trim().length >= 5 && body.grund.length <= 500)) return antwort({ ok: false, fehler: [{ code: 'GRUND_ZU_KURZ' }] }, 400, cors);
-    if (Object.keys(body).some((k) => !['kern_max', 'features', 'grund'].includes(k))) return antwort({ ok: false, fehler: [{ code: 'FELD_NICHT_ERLAUBT' }] }, 400, cors);
+    if (Object.keys(body).some((k) => !['kern_max', 'features', 'features_konten', 'grund'].includes(k))) return antwort({ ok: false, fehler: [{ code: 'FELD_NICHT_ERLAUBT' }] }, 400, cors);
     if (body.kern_max !== undefined && !KERN_MAX_WERTE.includes(body.kern_max)) return antwort({ ok: false, fehler: [{ code: 'KERN_MAX_UNGUELTIG' }] }, 400, cors);
     if (body.features !== undefined && !istObjekt(body.features)) return antwort({ ok: false, fehler: [{ code: 'FEATURES_UNGUELTIG' }] }, 400, cors);
     const basis = alt || { kern_max: CONFIG_START.kern_max, features: { ...CONFIG_START.features } };
@@ -32,10 +33,19 @@ export async function regelAdminFeatures(request, authHeader, env, cors = {}, de
       if (!FEATURE_NAME_MUSTER.test(k) || !(v === null || FEATURE_WERTE.includes(v))) return antwort({ ok: false, fehler: [{ code: 'FEATURE_UNGUELTIG', name: String(k).slice(0, 40) }] }, 400, cors);
       if (v === null) delete features[k]; else features[k] = v;
     }
+    // W3 Fix 3: Kontenliste je Kassen-Funktion; bleibt bei jedem Schreiben erhalten (sonst verlöre eine Änderung von features sie still)
+    if (body.features_konten !== undefined && !istObjekt(body.features_konten)) return antwort({ ok: false, fehler: [{ code: 'FEATURES_KONTEN_UNGUELTIG' }] }, 400, cors);
+    const konten = { ...(basis.features_konten || {}) };
+    for (const [k, v] of Object.entries(body.features_konten || {})) {
+      const ok = v === null || (Array.isArray(v) && v.length <= KONTEN_MAX && v.every((u) => typeof u === 'string' && UID_MUSTER.test(u)));
+      if (!FEATURES_KASSE.includes(k) || !ok) return antwort({ ok: false, fehler: [{ code: 'FEATURES_KONTEN_UNGUELTIG', name: String(k).slice(0, 40) }] }, 400, cors);
+      if (v === null) delete konten[k]; else konten[k] = [...new Set(v)];
+    }
+    const kontenTeil = Object.keys(konten).length ? { features_konten: konten } : {};
     if (Object.keys(features).length > FEATURES_MAX) return antwort({ ok: false, fehler: [{ code: 'ZU_VIELE_FEATURES' }] }, 400, cors);
     const zeit = jetztIso(deps);
     const neu = {
-      kern_max: body.kern_max ?? basis.kern_max, features, geaendert_am: zeit,
+      kern_max: body.kern_max ?? basis.kern_max, features, ...kontenTeil, geaendert_am: zeit,
       version: (Number.isSafeInteger(altDok?.daten?.version) ? altDok.daten.version : 0) + 1, schema: 1,
     };
     await fs.commit([schreibe.setzen(CONFIG_PFAD, neu, vorbedingungAus(altDok))]);
@@ -43,10 +53,10 @@ export async function regelAdminFeatures(request, authHeader, env, cors = {}, de
     // Protokoll nach dem Schreiben; ein Protokollfehler macht die bereits gespeicherte Änderung nicht rückgängig, wird aber gemeldet
     let protokoll = true;
     try {
-      if (deps.adminLog) await deps.adminLog(verified.email, 'features_geaendert', { grund: body.grund.trim(), vorher: alt, nachher: { kern_max: neu.kern_max, features }, version: neu.version });
+      if (deps.adminLog) await deps.adminLog(verified.email, 'features_geaendert', { grund: body.grund.trim(), vorher: alt, nachher: { kern_max: neu.kern_max, features, ...kontenTeil }, version: neu.version });
     } catch { protokoll = false; console.warn('regel_admin_features_protokoll_fehler'); }
-    if (!protokoll) return antwort({ ok: true, config: { kern_max: neu.kern_max, features }, version: neu.version, protokoll: false }, 200, cors);
-    return antwort({ ok: true, config: { kern_max: neu.kern_max, features }, version: neu.version }, 200, cors);
+    if (!protokoll) return antwort({ ok: true, config: { kern_max: neu.kern_max, features, ...kontenTeil }, version: neu.version, protokoll: false }, 200, cors);
+    return antwort({ ok: true, config: { kern_max: neu.kern_max, features, ...kontenTeil }, version: neu.version }, 200, cors);
   } catch (e) {
     return regelFehler(e, 'admin_features', cors);
   }

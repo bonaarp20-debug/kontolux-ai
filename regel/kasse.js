@@ -17,7 +17,7 @@
 import * as Steuerkern from '../steuerkern/index.js';
 import {
   antwort, fehlerAntwort, featureAusAntwort, grundpruefung, istObjekt, CONFIG_PFAD, configBereinigen, featureAktiv, agbFassungenLaden, agbFassungVergleich,
-  AGB_MINDESTFASSUNG_KASSE, kernOptionenFuerKontoLaden, jetztIso, schichtFuer, regelFehler, listeAlle,
+  AGB_MINDESTFASSUNG_KASSE, configFuerKonto, kernOptionenFuerKontoLaden, jetztIso, schichtFuer, regelFehler, listeAlle,
 } from './gemeinsam.js';
 import { schreibe, zeitstempel, FirestoreFehler, vollerName } from './firestore.js';
 import { auditKette, kopfPfad, eintragPfad } from './audit.js';
@@ -147,7 +147,7 @@ export async function regelKasse(pfad, body, env, cors = {}, deps = {}) {
   const heute = typeof deps.heute === 'function' ? deps.heute() : heuteBerlin(new Date(zeit));
   try {
     const fs = await schichtFuer(deps);
-    const config = configBereinigen((await fs.get(CONFIG_PFAD))?.daten);
+    const config = configFuerKonto(configBereinigen((await fs.get(CONFIG_PFAD))?.daten), uid); // W3 Fix 3: optionale Kontenliste je Kassen-Funktion
     if (!featureAktiv(config, FEATURE)) return featureAusAntwort(cors);
     const profilDok = await fs.get(P.profil(uid));
     const profil = istObjekt(profilDok?.daten) ? profilDok.daten : null;

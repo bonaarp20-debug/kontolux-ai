@@ -31,8 +31,10 @@ export function kiFeatureStand(config) {
   const c = configBereinigen(config);
   if (!c) return KI_FEATURES_AUS;
   const kasse = featureAktiv(c, 'kasse') === true;
-  if (c.kern_max !== 'an') return kasse ? Object.freeze({ ...KI_FEATURES_AUS, kasse: true }) : KI_FEATURES_AUS;
-  return Object.freeze(Object.fromEntries(KI_STAND_NAMEN.map((n) => [n, n === 'kasse' ? kasse : c.features[n] === 'an'])));
+  // W3 Fix 3: Kontenliste des Kassenbuchs (config/features.features_konten.kasse) reicht der Stand an kiFeatureStandKonto weiter; ohne Liste kein weiterer Schlüssel
+  const konten = kasse && c.features_konten && c.features_konten.kasse ? { kasse_konten: c.features_konten.kasse } : {};
+  if (c.kern_max !== 'an') return kasse ? Object.freeze({ ...KI_FEATURES_AUS, kasse: true, ...konten }) : KI_FEATURES_AUS;
+  return Object.freeze({ ...Object.fromEntries(KI_STAND_NAMEN.map((n) => [n, n === 'kasse' ? kasse : c.features[n] === 'an'])), ...konten });
 }
 
 // Texte je Feature: modul = Prompt-Modul, an = Abschnitt bei an, aus = kurzer Satz bei aus (oder null, wenn der Grundtext den Altpfad schon beschreibt).
@@ -184,7 +186,7 @@ export async function kiFeatureStandKonto({ uid, stand, tokenFn, fetchFn, jetzt 
       if (zustimmungCache.size >= ZUSTIMMUNG_CACHE_MAX) zustimmungCache.clear();
       zustimmungCache.set(uid, { ok, okC, okK, bis });
     }
-    const kasse = stand.kasse === true && okK === true;
+    const kasse = stand.kasse === true && okK === true && (!Array.isArray(stand.kasse_konten) || stand.kasse_konten.includes(uid)); // W3 Fix 3: Kontenliste
     if (ok !== true) return kasse ? Object.freeze({ ...KI_FEATURES_AUS, kasse: true }) : KI_FEATURES_AUS;
     const ohneOss = okC === true || stand.oss !== true;
     if (ohneOss && kasse === (stand.kasse === true)) return stand;
