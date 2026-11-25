@@ -17,6 +17,7 @@
 import * as Steuerkern from '../steuerkern/index.js';
 import { CONFIG_PFAD, configBereinigen, featureAktiv, agbFassungenLaden, agbFassungVergleich, AGB_FASSUNG_RELEASE_B, AGB_FASSUNG_RELEASE_C, AGB_MINDESTFASSUNG_KASSE, UID_MUSTER } from './gemeinsam.js';
 import { erzeugeSchicht } from './firestore.js';
+import { kontoAufListe } from './konten-hash.js'; // O18a N10
 
 export const KI_FEATURES = Object.freeze(['ausland', 'zahlung', 'korrektur', 'anlagegut', 'rechnung', 'erechnung', 'plattform', 'oss']);
 // W2-W3: 'kasse' ist ein Prompt-Feature ohne Abschnitt in KI_FEATURE_TEXTE (es ersetzt nur den Text KASSEN-TAGESBERICHT, kiKasseText) und hängt an der
@@ -186,7 +187,7 @@ export async function kiFeatureStandKonto({ uid, stand, tokenFn, fetchFn, jetzt 
       if (zustimmungCache.size >= ZUSTIMMUNG_CACHE_MAX) zustimmungCache.clear();
       zustimmungCache.set(uid, { ok, okC, okK, bis });
     }
-    const kasse = stand.kasse === true && okK === true && (!Array.isArray(stand.kasse_konten) || stand.kasse_konten.includes(uid)); // W3 Fix 3: Kontenliste
+    const kasse = stand.kasse === true && okK === true && (!Array.isArray(stand.kasse_konten) || kontoAufListe(stand.kasse_konten, uid)); // W3 Fix 3: Kontenliste
     if (ok !== true) return kasse ? Object.freeze({ ...KI_FEATURES_AUS, kasse: true }) : KI_FEATURES_AUS;
     const ohneOss = okC === true || stand.oss !== true;
     if (ohneOss && kasse === (stand.kasse === true)) return stand;

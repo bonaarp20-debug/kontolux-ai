@@ -2,6 +2,7 @@
 // (config/features), Festschreibungsstand, kanonisches JSON und Hash. Rein bis auf crypto.subtle (sha256).
 import * as Steuerkern from '../steuerkern/index.js';
 import { erzeugeSchicht, FirestoreFehler, BudgetFehler } from './firestore.js';
+import { KONTEN_HASH_MUSTER, kontoAufListe } from './konten-hash.js'; // O18a N10: Kontenliste mit gehashten Konto-IDs
 
 export const UID_MUSTER = /^[A-Za-z0-9]{6,128}$/;
 export const ANFRAGE_ID_MUSTER = /^[A-Za-z0-9_-]{8,64}$/;
@@ -161,13 +162,15 @@ export function configBereinigen(roh) {
 // zusätzlich zu 'an' und zur AGB-Bindung. Fail-closed: nicht lesbare Form = Liste leer = niemand (nicht-Objekt: alle drei Kassen-Funktionen mit leerer Liste);
 // Namen außerhalb von FEATURES_KASSE und Einträge, die keine UID sind, zählen nicht. Gleiche Regeln in der App (regel/loader.js normiereKonfig, Paritätstest).
 export const KONTEN_MAX = 50;
+// O18a N10: ein Eintrag ist ein Hash 'h1:…' (Standard, so speichert /admin/features) oder, aus altem Bestand, eine Klar-UID (gilt weiter, wird beim nächsten Schreiben zum Hash)
+export const kontoEintragOk = (u) => typeof u === 'string' && (UID_MUSTER.test(u) || KONTEN_HASH_MUSTER.test(u));
 function kontenBereinigen(roh) {
   if (roh === undefined) return null;
   const o = {};
   for (const name of FEATURES_KASSE) {
     const liste = istObjekt(roh) ? roh[name] : [];
     if (istObjekt(roh) && liste === undefined) continue;
-    o[name] = Array.isArray(liste) ? liste.filter((u) => typeof u === 'string' && UID_MUSTER.test(u)).slice(0, KONTEN_MAX) : [];
+    o[name] = Array.isArray(liste) ? liste.filter(kontoEintragOk).slice(0, KONTEN_MAX) : [];
   }
   return Object.keys(o).length ? o : null;
 }
@@ -175,7 +178,7 @@ function kontenBereinigen(roh) {
 export function configFuerKonto(config, uid) {
   if (!config || !config.features_konten) return config;
   const features = { ...config.features };
-  for (const [name, liste] of Object.entries(config.features_konten)) if (!liste.includes(uid)) features[name] = 'aus';
+  for (const [name, liste] of Object.entries(config.features_konten)) if (!kontoAufListe(liste, uid)) features[name] = 'aus';
   return { ...config, features };
 }
 

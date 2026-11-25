@@ -9,7 +9,10 @@ import { regelKasseZbonLesen } from '../regel/kasse-zbon-ki.js';
 import { regelAdminFeatures } from '../regel/admin-features.js';
 import { AGB_MINDESTFASSUNG_KASSE, FEATURES_KASSE, configBereinigen, configFuerKonto, featureAktiv, KONTEN_MAX } from '../regel/gemeinsam.js';
 import { kiFeatureStand, kiFeatureStandKonto, kiZustimmungCacheLeeren } from '../regel/prompts.js';
+import { kontoHash } from '../regel/konten-hash.js';
 import { fakeFirestore } from './regel-fake-firestore.mjs';
+
+const H = kontoHash; // O18a N10: die Liste speichert Hashes
 
 const TEST = 'testKonto0000000000000001';
 const FREMD = 'fremdKonto000000000000001';
@@ -171,17 +174,75 @@ test('/admin/features: features_konten setzen, bleibt bei späteren Änderungen 
   assert.equal(fs.lies('config/features').version, 4, 'nichts geschrieben');
   const ok = await rufe({ features: { kasse: 'an' }, features_konten: { kasse: [TEST, TEST] }, grund: 'Gate-Zeit Kassenbuch' });
   assert.equal(ok.status, 200, JSON.stringify(ok.json));
-  assert.deepEqual(fs.lies('config/features').features_konten, { kasse: [TEST] }, 'doppelte UID nur einmal');
-  assert.deepEqual(ok.json.config.features_konten, { kasse: [TEST] });
+  assert.deepEqual(fs.lies('config/features').features_konten, { kasse: [H(TEST)] }, 'doppelte UID nur einmal, gespeichert als Hash (O18a N10)');
+  assert.ok(!JSON.stringify(fs.lies('config/features')).includes(TEST), 'keine Klar-UID im Dokument');
+  assert.deepEqual(ok.json.config.features_konten, { kasse: [H(TEST)] });
   // eine spätere Änderung ohne features_konten erhält die Liste
   await rufe({ features: { kasse_ki: 'an' }, grund: 'weitere Funktion' });
-  assert.deepEqual(fs.lies('config/features').features_konten, { kasse: [TEST] });
+  assert.deepEqual(fs.lies('config/features').features_konten, { kasse: [H(TEST)] });
   assert.equal(fs.lies('config/features').features.kasse_ki, 'an');
   // Lesen zeigt die Liste
-  assert.deepEqual((await rufe({ lesen: true })).json.config.features_konten, { kasse: [TEST] });
+  assert.deepEqual((await rufe({ lesen: true })).json.config.features_konten, { kasse: [H(TEST)] });
   // Aufheben
   const weg = await rufe({ features_konten: { kasse: null }, grund: 'Liste aufheben' });
   assert.equal(weg.status, 200);
   assert.equal('features_konten' in fs.lies('config/features'), false);
   assert.ok(protokoll.length >= 3, 'Admin-Protokoll geschrieben');
+});
+
+// ── O18a N10: Kontenliste mit gehashten Konto-IDs ──────────────────────────────────────────────────────────────
+test('N10 Konfiguration: Hash-Einträge gelten (configFuerKonto, Chat-Stand), Klar-UIDs aus altem Bestand auch; Formfehler fail-closed', async () => {
+  const roh = (liste) => AN({ features_konten: { kasse: liste } });
+  for (const liste of [[H(TEST)], [TEST], [H(FREMD), TEST]]) {
+    const c = configBereinigen(roh(liste));
+    assert.deepEqual(c.features_konten.kasse, liste, 'Einträge bleiben, wie sie stehen');
+    assert.equal(featureAktiv(configFuerKonto(c, TEST), 'kasse'), true, JSON.stringify(liste));
+    assert.equal(featureAktiv(configFuerKonto(c, FREMD), 'kasse'), liste.includes(H(FREMD)), JSON.stringify(liste));
+  }
+  // kaputte Hashes zählen nicht (Länge, Großbuchstaben, falsches Präfix), ebenso der Hash eines anderen Präfixes
+  const kaputt = [`h1:${'a'.repeat(63)}`, `h1:${'A'.repeat(64)}`, `h2:${'a'.repeat(64)}`, `H1:${'a'.repeat(64)}`, `h1:${'a'.repeat(64)}x`];
+  assert.deepEqual(configBereinigen(roh(kaputt)).features_konten.kasse, []);
+  assert.notEqual(H(TEST), H(FREMD));
+  assert.match(H(TEST), /^h1:[0-9a-f]{64}$/);
+  // Chat-Stand
+  kiZustimmungCacheLeeren();
+  const fs = fakeFirestore();
+  for (const uid of [TEST, FREMD]) fs.setze(`users/${uid}/agb_zustimmung/z1`, { version: AGB_MINDESTFASSUNG_KASSE });
+  const stand = kiFeatureStand(roh([H(TEST)]));
+  assert.deepEqual(stand.kasse_konten, [H(TEST)]);
+  assert.equal((await kiFeatureStandKonto({ uid: TEST, stand, tokenFn: async () => 't', fetchFn: fs.fetchFn })).kasse, true);
+  assert.equal((await kiFeatureStandKonto({ uid: FREMD, stand, tokenFn: async () => 't', fetchFn: fs.fetchFn })).kasse, false);
+});
+
+test('N10 Router: ein Konto auf der Hash-Liste hat kasse, ein anderes nicht; Klar-UID-Liste (alter Bestand) wirkt weiter', async () => {
+  for (const liste of [[H(TEST)], [TEST]]) {
+    const u = umgebung(AN({ features_konten: { kasse: liste } }));
+    assert.equal((await u.kasse(FREMD)).status, 503, JSON.stringify(liste));
+    assert.equal((await u.kasse(TEST)).status, 200, JSON.stringify(liste));
+  }
+});
+
+test('N10 /admin/features: nimmt Klar-UIDs oder Hashes, speichert nur Hashes, ersetzt Klar-UIDs aus altem Bestand, lehnt Kaputtes ab; Protokoll ohne Klar-UID', async () => {
+  const fs = fakeFirestore();
+  const protokoll = [];
+  const deps = { fetchFn: fs.fetchFn, adminToken: async () => 't', jetzt: () => `${HEUTE}T09:00:00.000Z`, verifiziere: async () => ({ email: 'chef@beispiel.de' }), istAdmin: () => true, adminLog: async (...a) => { protokoll.push(a); } };
+  const rufe = async (body) => { const r = await regelAdminFeatures({ json: async () => body }, 'Bearer x', {}, {}, deps); return { status: r.status, json: await r.json() }; };
+  // alter Bestand mit Klar-UIDs in zwei Funktionen
+  fs.setze('config/features', { kern_max: 'an', features: { kasse: 'an' }, features_konten: { kasse: [TEST], kasse_ki: [FREMD] }, version: 2, schema: 1 });
+  const r = await rufe({ features_konten: { kasse: [FREMD, H(TEST)] }, grund: 'Hash-Umstellung' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  const gespeichert = fs.lies('config/features');
+  assert.deepEqual(gespeichert.features_konten, { kasse: [H(FREMD), H(TEST)], kasse_ki: [H(FREMD)] }, 'Eingabe als UID und als Hash, alter Bestand der anderen Funktion ebenfalls umgestellt');
+  const roh = JSON.stringify(gespeichert) + JSON.stringify(protokoll) + JSON.stringify(r.json);
+  assert.ok(!roh.includes(TEST) && !roh.includes(FREMD), 'nirgends eine Klar-UID (Dokument, Protokoll, Antwort)');
+  // kaputte Einträge
+  for (const kaputt of [[`h1:${'a'.repeat(63)}`], [`h1:${'G'.repeat(64)}`], ['zu kurz'], [H(TEST), 'x/y']]) {
+    const k = await rufe({ features_konten: { kasse: kaputt }, grund: 'Kaputte Eingabe' });
+    assert.equal(k.status, 400, JSON.stringify(kaputt));
+  }
+  assert.equal(fs.lies('config/features').version, 3, 'nur die gültige Änderung geschrieben');
+  // Ende zu Ende: die so gespeicherte Liste gilt im Router
+  const u = umgebung(fs.lies('config/features'));
+  assert.equal((await u.kasse(TEST)).status, 200);
+  assert.equal((await u.kasse(FREMD)).status, 200, 'FREMD steht auf der Hash-Liste von kasse');
 });
