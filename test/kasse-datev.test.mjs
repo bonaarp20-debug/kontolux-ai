@@ -441,6 +441,21 @@ test('A-H2: SumUp-Barzahlung einer Kasse mit sumup_integration bucht gegen das K
   assert.deepEqual(kurz((await w2.exp()).zeilen, 'TCBAR1').map((x) => x.slice(0, 4)), [['119,00', 'S', '1010', '8400']]);
 });
 
+// O18a N1: Warnung zum ungültigen DATEV-Konto einer Kasse nur für Belege des Exportjahres (volle und Zeitraum-Modus gleich; der Zeitraum-Modus lädt Belege anderer Jahre nicht).
+test('N1: ein SumUp-Barbeleg aus einem anderen Jahr löst die Warnung „DATEV-Konto der Kasse ungültig“ nicht aus; im Jahr des Belegs schon', async () => {
+  const w = await welt({ kasseExtra: { datenquelle: 'sumup_integration' } });
+  w.fs.setze(P(`kassen/${w.id}`), { ...w.fs.lies(P(`kassen/${w.id}`)), datev_konto: '1000123' });
+  w.fs.setze(P('dokumente/s1'), sumupBeleg('TCBAR1', 'Barzahlung', 119)); // 03.11.2026
+  // Kassenzeile im Exportjahr 2027 über eine andere (unbekannte) Kasse, damit die Kassenwarnungen überhaupt ausgegeben werden
+  w.fs.setze(P('privatvorgaenge/pvk'), { art: 'entnahme', datum: '2027-01-05', betrag: 10, notiz: 'k', zahlweg: 'kasse', kasse_id: 'andereKasse' });
+  const r27 = await w.exp(2027);
+  assert.equal(r27.status, 200, r27.text);
+  assert.doesNotMatch(r27.warnung, /DATEV-Konto der Kasse/);
+  const r26 = await w.exp(2026);
+  assert.equal(r26.status, 200, r26.text);
+  assert.match(r26.warnung, /DATEV-Konto der Kasse „Theke“ ist keine vierstellige Kontonummer/);
+});
+
 test('A-H2: ohne SumUp-Kasse (manuelle Kasse oder kein Kassenbuch) bleibt die SumUp-Barzahlung auf der Bank; bei mehr als einer SumUp-Kasse bleibt sie auf der Bank mit Warnung', async () => {
   const w = await welt();
   w.fs.setze(P('dokumente/s1'), sumupBeleg('TCBAR1', 'Barzahlung', 119));

@@ -5053,7 +5053,8 @@ async function datevDokumenteZaehlen(userBasis, authHeader, bis) {
   } catch (e) { console.warn('DATEV-Export Belegzahl:', e?.message); return null; }
 }
 // Dokumente (dokumente oder kunden) einzeln per batchGet nach ID (100 je Anfrage). Nur IDs, die als Dokument-ID möglich sind (ein Pfadteil); fehlende Dokumente fehlen auch hier.
-const datevIdMoeglich = (id) => typeof id === 'string' && id.length > 0 && id.length <= 1500 && !id.includes('/') && id !== '.' && id !== '..' && !/^__.*__$/.test(id);
+// O18a N3: Firestore begrenzt die Dokument-ID auf 1500 BYTES (UTF-8), nicht auf Zeichen; eine längere ID bräche den ganzen batchGet (400) und damit den Export
+const datevIdMoeglich = (id) => typeof id === 'string' && id.length > 0 && id.length <= 1500 && new TextEncoder().encode(id).length <= 1500 && !id.includes('/') && id !== '.' && id !== '..' && !/^__.*__$/.test(id);
 async function datevNachladen(userId, sammlung, ids, authHeader) {
   const wurzel = 'projects/kontolux-ai/databases/(default)/documents';
   const liste = [...new Set(ids.filter(datevIdMoeglich))];
@@ -5155,6 +5156,8 @@ async function handleDatevExport(body, env, cors = {}) {
     const modusWunsch = String(env?.DATEV_LESEMODUS || '').toLowerCase();
     if (/^\d{4}$/.test(String(jahr)) && modusWunsch !== 'voll') {
       let viele = modusWunsch === 'zeitraum';
+      // O18a N7 (bewusst belassen): die Zählabfrage kostet jedem Export eine von 50 Unteranfragen. Sparen ließe sich das nur, indem man die erste Listenseite vorab liest und bei kleinen Konten weiterverwendet;
+      // bei Konten über 300 Belegen (genau die am Free-Plan-Rand) kostete das aber eine Unteranfrage MEHR. Der Gewinn für kleine Konten ist ohne Bedeutung, daher unverändert.
       if (!viele) { const n = await datevDokumenteZaehlen(base, authHeader, DOK_VOLL_MAX + 1); viele = n !== null && n > DOK_VOLL_MAX; }
       if (viele) {
         try { ossVorbereitet = await datevOssVorbereiten(userId, ossDeps); } catch (e) { console.error('DATEV-Export OSS:', e?.message); return ossLesefehler(); }
@@ -5361,7 +5364,8 @@ async function handleDatevExport(body, env, cors = {}) {
       if (fehlend.length) dokDocs = datevNachName([...dokDocs, ...await datevNachladen(userId, 'dokumente', fehlend, authHeader)]);
       // Kunden: nur die, auf die ein geladener Beleg zeigt (die Nummer steht nur in "Diverse Adressnummer" bei Einnahmen, die Menge der Verweise ist ein Obermaß)
       const kundenIds = new Set();
-      for (const d of dokDocs) { const k = firestoreValue((d.fields || {}).kunde_id); if (typeof k === 'string' && k) kundenIds.add(k); }
+      // O18a N2: auch eine nicht-Text-kunde_id (Zahl) zählt: der volle Modus findet den Kunden über die Textumwandlung des Schlüssels (kundenNummerById[k]), also hier ebenso
+      for (const d of dokDocs) { const k = firestoreValue((d.fields || {}).kunde_id); if (k !== null && k !== undefined && k !== '') kundenIds.add(String(k)); }
       for (const kDoc of await datevNachladen(userId, 'kunden', [...kundenIds], authHeader)) kundeEintragen(kDoc);
     }
     const dokById = new Map(dokDocs.map((d) => [String(d.name || '').split('/').pop(), d]));
@@ -5436,12 +5440,14 @@ async function handleDatevExport(body, env, cors = {}) {
       if (kassenVerweigert && !ohneKassenbuch) throw new DatevLesefehler('Die Kassen des Kassenbuchs konnten nicht gelesen werden.');
       return kassenDocs;
     };
-    const kassenKonto = async (kasseId) => {
+    // O18a N1: zaehlt = false: der Beleg liegt außerhalb des Exportjahres und trägt nicht zur Warnung „Konto der Kasse ungültig“ bei (der Zeitraum-Modus lädt solche Belege gar nicht,
+    // beide Modi nennen die Warnung so nur noch für Belege des Jahres)
+    const kassenKonto = async (kasseId, zaehlt = true) => {
       await kassenLaden();
       const k = kassenDocs.get(String(kasseId || ''));
       if (k && k.datev_konto) {
         const w = kassenKontoWahl(k.datev_konto, kasseWahl.konto);
-        if (w.ungueltig) kasseKontoUngueltig.add(String(k.bezeichnung || kasseId));
+        if (w.ungueltig && zaehlt) kasseKontoUngueltig.add(String(k.bezeichnung || kasseId));
         return w.konto;
       }
       return kasseWahl.konto;
@@ -5594,7 +5600,7 @@ async function handleDatevExport(body, env, cors = {}) {
         sumupKasse = sumupKasseWahl(await kassenLaden({ ohneKassenbuch: !hatKasseDok }), String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || ''));
         if (sumupKasse && firestoreValue(fields.bezahlt) === true && String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || '').slice(0, 4) === String(jahr)) { if (sumupKasse.mehrere) kasseSumupMehrere++; else if (sumupKasse.unbekannt) kasseSumupUnbekannt++; else kasseSumupBar++; }
       }
-      const kasseKonto = istKasseAusgabe ? await kassenKonto(firestoreValue(fields.kasse_id)) : (sumupKasse && sumupKasse.id ? await kassenKonto(sumupKasse.id) : bankkonto);
+      const kasseKonto = istKasseAusgabe ? await kassenKonto(firestoreValue(fields.kasse_id)) : (sumupKasse && sumupKasse.id ? await kassenKonto(sumupKasse.id, String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || '').slice(0, 4) === String(jahr)) : bankkonto);
       if (istKasseAusgabe && String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || '').slice(0, 4) === String(jahr)) kasseAusgabeJahr++;
       if (istKasseAusgabe && firestoreValue(fields.storniert) === true && firestoreValue(fields.bewegung_id)) {
         const bewAlle = await kassenBewegungen();
@@ -5975,6 +5981,10 @@ async function handleDatevExport(body, env, cors = {}) {
       datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${ossOffen.length} Verkauf/Verkäufe an Privatkunden im Ausland wurden NICHT exportiert (Steuerfall offen): ${ossOffen.slice(0, 10).join(', ')}${ossOffen.length > 10 ? ', …' : ''}. Bitte in der App klären und erneut exportieren.`;
     }
 
+    // O18a N4: ein Privatvorgang gehört zum Jahr nur mit einem Datum als TEXT, dessen erste vier Zeichen das Jahr sind. Ein Datum als Zeitstempel (schreibt kein Schreiber) gilt in beiden
+    // Lesemodi als nicht im Jahr: der Zeitraum-Modus fragt per Textbereich, und gebucht würde ein solches Datum ohnehin nie (privatvorgangBuchung verlangt JJJJ-MM-TT als Text).
+    // N5: bei Jahr 9999 wäre die obere Grenze "10000" kleiner als jeder Text "9999-…"; die Abfrage bliebe leer. Ohne Bedeutung (es gibt keine Belege in diesem Jahr), daher keine Sonderbehandlung.
+    const privatImJahr = (f) => !!f.datum && f.datum.stringValue !== undefined && String(f.datum.stringValue).slice(0, 4) === String(jahr);
     // Privatentnahmen/-einlagen des Jahres (Storno-Vorgänge bleiben draußen)
     // F2-Fix B-M1: kein stilles Verschlucken (vorher .catch(() => [])): ein Lesefehler bricht den Export ab, sonst fehlten Entnahmen und Einlagen ohne Hinweis
     let privatDocs;
@@ -5982,7 +5992,7 @@ async function handleDatevExport(body, env, cors = {}) {
     try { privatDocs = lesenZeitraum ? datevNachName(await firestoreAbfrageAlle(userBasis, 'privatvorgaenge', [firestoreFeldFilter('datum', 'GREATER_THAN_OR_EQUAL', String(jahr)), firestoreFeldFilter('datum', 'LESS_THAN', String(Number(jahr) + 1))], 'datum', authHeader)) : await firestoreListAll(`${base}/privatvorgaenge`, authHeader); } catch (e) { console.error('DATEV-Export Privatvorgänge:', e?.message); throw new DatevLesefehler('Die Privatentnahmen und -einlagen konnten nicht gelesen werden.'); }
     // Bewegungen, auf die Privatvorgänge des Jahres aus der Kasse zeigen (Belegfeld 1), aber nicht im Jahres-Bestand stehen: einzeln per batchGet nachladen
     {
-      const fehlende = [...new Set(privatDocs.filter((d) => firestoreValue((d.fields || {}).zahlweg) === 'kasse' && String(firestoreValue((d.fields || {}).datum) || '').slice(0, 4) === String(jahr)).map((d) => firestoreValue((d.fields || {}).kassenbewegung_id)).filter(Boolean))];
+      const fehlende = [...new Set(privatDocs.filter((d) => firestoreValue((d.fields || {}).zahlweg) === 'kasse' && privatImJahr(d.fields || {})).map((d) => firestoreValue((d.fields || {}).kassenbewegung_id)).filter(Boolean))];
       if (fehlende.length) {
         const bewMap = await kassenBewegungen();
         const nachladen = fehlende.filter((id) => !bewMap.has(String(id)) && /^[A-Za-z0-9_-]{1,200}$/.test(String(id)));
@@ -5999,7 +6009,7 @@ async function handleDatevExport(body, env, cors = {}) {
     for (const pDoc of privatDocs) {
       const f = pDoc.fields || {};
       const v = { art: firestoreValue(f.art), datum: firestoreValue(f.datum), betrag: firestoreValue(f.betrag), notiz: firestoreValue(f.notiz), storniert: firestoreValue(f.storniert) === true };
-      if (String(v.datum || '').slice(0, 4) !== String(jahr)) continue;
+      if (!privatImJahr(f)) continue;
       // Kassenbuch P1b-5: Privatvorgang aus der Kasse (zahlweg 'kasse') läuft gegen das Kassenkonto statt gegen die Bank
       const ausKasse = firestoreValue(f.zahlweg) === 'kasse';
       const b = privatvorgangBuchung(v, skr, ausKasse ? await kassenKonto(firestoreValue(f.kasse_id)) : bankkonto);

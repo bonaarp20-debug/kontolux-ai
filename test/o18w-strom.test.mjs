@@ -60,7 +60,6 @@ test('Archiv-Lesen (Löschlauf, Export): ein Fehlerelement im Strom bricht ab; i
 
 test('Löschlauf-Schicht: runQuery mit Fehlerelement wirft', async () => {
   const f = firestore(ant([DOK, FEHLER]), async () => 't', 'scope');
-  const meth = Object.values(f).find(() => false);
   assert.ok(f && typeof f === 'object');
   // alle Abfrage-Methoden der Schicht laufen über laufAbfrage: eine mit leerem Aufruf genügt
   await assert.rejects(() => f.nachfahren('users/u1', { limit: 5 }), /abgebrochen/);

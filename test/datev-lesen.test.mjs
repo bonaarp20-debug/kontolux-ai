@@ -336,6 +336,42 @@ test('M1: ein batchGet-Element ohne found und missing bricht das Nachladen ab', 
   assert.ok(r.status >= 500, String(r.status));
 });
 
+// O18a N2, N3, N4: Randfälle, in denen der Zeitraum-Modus vom vollen Modus abweichen konnte (beide Modi byte-gleich)
+test('N2: eine kunde_id als Zahl findet den Kunden im Zeitraum-Modus wie im vollen Modus (Diverse Adressnummer)', async () => {
+  const fs = fakeFirestore(); bestand(fs);
+  fs.setze(`users/${UID}/kunden/7`, { name: 'Kunde Sieben', kundennummer: '10007' });
+  fs.setze(`users/${UID}/dokumente/n2`, alt('N2-1', 'rechnung_ausgehend', 119, '19', 'Einnahmen 19%', { datum: '2026-09-09', bezahlt_am: '2026-09-09', kunde_id: 7 }));
+  const r = await beide(fs, 2026, 'N2');
+  assert.equal(r.status, 200, r.text.slice(0, 200));
+  assert.deepEqual(zeilenVon(r, 'N2-1').map((x) => x[15]), ['10007'], 'Adressnummer des Kunden mit Zahl-ID');
+});
+test('N3: eine kunde_id mit vielen Mehrbyte-Zeichen (unter 1500 Zeichen, über 1500 Bytes) wird nicht nachgeladen und bricht den Export nicht ab', async () => {
+  const lang = 'ä'.repeat(800); // 800 Zeichen, 1600 Bytes
+  const fs = fakeFirestore(); bestand(fs);
+  fs.setze(`users/${UID}/dokumente/n3`, alt('N3-1', 'rechnung_ausgehend', 119, '19', 'Einnahmen 19%', { datum: '2026-09-09', bezahlt_am: '2026-09-09', kunde_id: lang }));
+  const bodies = [];
+  const orig = fs.fetchFn;
+  fs.fetchFn = async (input, init = {}) => { if (init.body && /:batchGet$/.test(typeof input === 'string' ? input : input.url)) bodies.push(String(init.body)); return orig(input, init); };
+  const r = await beide(fs, 2026, 'N3');
+  assert.equal(r.status, 200, r.text.slice(0, 200));
+  assert.ok(bodies.length > 0 && !bodies.some((b) => b.includes(lang)), 'die zu lange ID steht in keiner batchGet-Anfrage');
+});
+test('N4: ein Privatvorgang mit Datum als Zeitstempel gilt in beiden Modi als nicht im Jahr (nichts gebucht, gleicher Stapel)', async () => {
+  const fs = fakeFirestore(); bestand(fs);
+  fs.setze(`users/${UID}/privatvorgaenge/pvts`, { art: 'entnahme', datum: 'x', betrag: 777, notiz: 'ts' });
+  fs.docs.get(`users/${UID}/privatvorgaenge/pvts`).fields.datum = { timestampValue: '2026-03-03T00:00:00Z' };
+  // aus der Kasse mit ungültigem DATEV-Konto: im vollen Modus löste schon das Nachschlagen des Kontos die Warnung aus, im Zeitraum-Modus nicht (der Vorgang wird dort nicht gelesen)
+  fs.setze(`users/${UID}/privatvorgaenge/pvts`, { art: 'entnahme', datum: 'x', betrag: 777, notiz: 'ts', zahlweg: 'kasse', kasse_id: 'kxUngueltig' });
+  fs.docs.get(`users/${UID}/privatvorgaenge/pvts`).fields.datum = { timestampValue: '2026-03-03T00:00:00Z' };
+  fs.setze(`users/${UID}/kassen/kxUngueltig`, { bezeichnung: 'KxU', datev_konto: 'abc' });
+  fs.setze(`users/${UID}/privatvorgaenge/pvk2`, { art: 'entnahme', datum: '2026-03-04', betrag: 5, notiz: 'k2', zahlweg: 'kasse', kasse_id: 'andereKasse' }); // damit die Kassenwarnungen erscheinen
+  const r = await beide(fs, 2026, 'N4');
+  assert.equal(r.status, 200);
+  assert.doesNotMatch(r.warnung, /KxU/);
+  assert.equal(r.zeilen.filter((x) => /^"?PRIV-/.test(x[10])).length, 3, 'pv1, pv2 und pvk2; der Zeitstempel-Vorgang fehlt');
+  assert.ok(!r.zeilen.some((x) => x[0] === '777,00'));
+});
+
 // ── Reine Hilfen ─────────────────────────────────────────────────────────────────────────────────
 const S = (v) => ({ stringValue: v });
 const fv = (f) => (f && f.stringValue !== undefined ? f.stringValue : f && f.booleanValue !== undefined ? f.booleanValue : f && f.timestampValue !== undefined ? f.timestampValue : null);
