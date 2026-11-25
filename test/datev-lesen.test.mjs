@@ -328,6 +328,61 @@ for (const modus of ['voll', 'zeitraum']) {
     });
   }
 }
+// O19-3: ein vorübergehendes UNAVAILABLE im Strom wird im Export genau einmal wiederholt; zwei Fehler in Folge bleiben fail-closed
+function stromNurErste(fs, art, maxN, fehlerElement) {
+  const orig = fs.fetchFn;
+  const zaehler = { n: 0, treffer: 0 };
+  fs.fetchFn = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input.url;
+    const r = await orig(input, init);
+    if (r.status !== 200 || !url.endsWith(`:${art}`)) return r;
+    zaehler.treffer++;
+    if (zaehler.n >= maxN) return r;
+    zaehler.n++;
+    const l = await r.json();
+    return json(200, [...(Array.isArray(l) ? l.slice(0, Math.max(0, l.length - 1)) : []), fehlerElement]);
+  };
+  return zaehler;
+}
+for (const modus of ['voll', 'zeitraum']) {
+  for (const art of ['runQuery', 'batchGet']) {
+    test(`O19-3 (${modus}): ${art} mit einmaligem UNAVAILABLE im Strom wird wiederholt (gleicher Stapel); zweimal oder anderer Fehlercode brechen ab`, async () => {
+      const fs0 = fakeFirestore(); strombestand(fs0);
+      const gut = await ruf(worker, fs0, modus, 2026);
+      assert.equal(gut.status, 200, gut.text.slice(0, 200));
+      const fs1 = fakeFirestore(); strombestand(fs1);
+      const z1 = stromNurErste(fs1, art, 1, STROM_FEHLER);
+      const r1 = await ruf(worker, fs1, modus, 2026);
+      assert.equal(z1.n, 1, 'der Fehler wurde genau einmal eingespielt');
+      assert.ok(z1.treffer >= 2, 'es gab eine Wiederholung');
+      assert.equal(r1.status, 200, r1.text.slice(0, 200));
+      assert.equal(r1.ohneZeit, gut.ohneZeit, 'Stapel wie ohne Fehler');
+      const fs2 = fakeFirestore(); strombestand(fs2);
+      const z2 = stromNurErste(fs2, art, 2, STROM_FEHLER);
+      const r2 = await ruf(worker, fs2, modus, 2026);
+      assert.equal(z2.n, 2);
+      assert.ok(r2.status >= 500 && r2.zeilen.length === 0, `zweimal UNAVAILABLE: Abbruch (Status ${r2.status})`);
+      const fs3 = fakeFirestore(); strombestand(fs3);
+      const z3 = stromNurErste(fs3, art, 1, { error: { code: 4, status: 'DEADLINE_EXCEEDED' } });
+      const r3 = await ruf(worker, fs3, modus, 2026);
+      assert.equal(z3.n, 1);
+      assert.ok(r3.status >= 500 && r3.zeilen.length === 0, 'anderer Code: keine Wiederholung, Abbruch');
+    });
+  }
+}
+// O19-7: firestoreListAll nennt im Fehler nur den Statuscode, nie den Firestore-Fehlertext (der Export loggt die Meldung)
+test('O19-7: Lesefehler einer Liste (GET) trägt in der Meldung keinen Firestore-Text', async () => {
+  const fs = fakeFirestore(); bestand(fs);
+  fs.haken.fehler = (url, init) => (/privatvorgaenge/.test(url) && !/:runQuery|:batchGet/.test(url) && (init.method || 'GET') === 'GET' ? json(500, { error: { status: 'INTERNAL', message: 'GEHEIMER-FIRESTORE-TEXT' } }) : null);
+  const logs = [];
+  const orig = console.error;
+  console.error = (...a) => { logs.push(a.map(String).join(' ')); };
+  let r;
+  try { r = await ruf(worker, fs, 'voll', 2026); } finally { console.error = orig; }
+  assert.ok(r.status >= 500, String(r.status));
+  assert.ok(logs.some((l) => /Firestore read failed \(500\)/.test(l)), 'Statuscode steht im Log: ' + logs.join(' | ').slice(0, 300));
+  assert.ok(!logs.some((l) => /GEHEIMER-FIRESTORE-TEXT/.test(l)) && !r.text.includes('GEHEIMER'), 'kein Firestore-Text in Log oder Antwort');
+});
 test('M1: ein batchGet-Element ohne found und missing bricht das Nachladen ab', async () => {
   const fs = fakeFirestore(); strombestand(fs);
   const z = stromUmbauen(fs, 'batchGet', (l) => [...l, { readTime: '2026-01-01T00:00:00Z' }]);

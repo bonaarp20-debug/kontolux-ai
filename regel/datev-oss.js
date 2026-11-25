@@ -26,6 +26,7 @@ import * as Steuerkern from '../steuerkern/index.js';
 import { istObjekt, CONFIG_PFAD, configBereinigen, kernOptionenFuer, kernOptionenFuerKontoLaden, schichtFuer, UID_MUSTER } from './gemeinsam.js';
 import { dekodiereFelder } from './firestore.js';
 import { datevKuKonto } from './datev-export-regeln.js';
+import { lesenMitEinerWiederholung } from './firestore-strom.js'; // O19-3
 
 export const DATEV_OSS_KONTEN = Object.freeze({
   SKR03: Object.freeze({ ware: '8320', ware_korrektur: '8727', tbe: '8331', drittland: '8338', inland: Object.freeze({ 1900: '8400', 700: '8300' }), kleinunternehmer: '8192' }),
@@ -132,7 +133,8 @@ export function datevOssBuchungen(eintrag, ctx) {
 export async function datevOssVorbereiten(uid, deps = {}) {
   if (!UID_MUSTER.test(String(uid || ''))) return null;
   const fs = await schichtFuer({ budget: 4, ...deps });
-  const docs = await fs.batchGet([CONFIG_PFAD, steuerprofilPfad(uid)]);
+  // O19-3: Lesepfad (Export): ein einziger Wiederholungsversuch bei vorübergehendem UNAVAILABLE im Strom, danach wie bisher fail-closed (503)
+  const docs = await lesenMitEinerWiederholung(() => fs.batchGet([CONFIG_PFAD, steuerprofilPfad(uid)]));
   const config = configBereinigen(docs.get(CONFIG_PFAD)?.daten);
   if (kernOptionenFuer(config).regeln.oss !== true) return null;
   const optionen = await kernOptionenFuerKontoLaden(uid, config, { fs, streng: true });

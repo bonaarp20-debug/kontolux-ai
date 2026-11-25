@@ -118,3 +118,31 @@ test('KASSE-P1a: Kassenbuch im Archiv-Register; Export und Löschlauf erfassen F
   assert.ok(fs.lies(`users/${FREMD}/kassentage/k1_2026-11-20/fassungen/1`), 'fremdes Konto bleibt');
   assert.ok(fs.lies(`users/${UID}/kassen/k1`), 'Elterndokumente bleiben (löscht erst archivDatenLoeschen)');
 });
+
+// O19-2: markerBehalten stellt die Markierung konto_archiv auch dann wieder her, wenn der Lauf nach dem Löschen des Profil-Bereichs wirft
+// (hier: Strom der Feedback-Abfrage bricht ab). Der ursprüngliche Fehler bleibt der geworfene. O19-1: dabei wird kein Feedback gelöscht (fail-closed).
+test('archivDatenLoeschen mit markerBehalten: Wurf nach dem Löschen stellt konto_archiv wieder her; Feedback bleibt unangetastet', async () => {
+  const fs = fakeFirestore();
+  befuelle(fs, UID);
+  fs.setze(`users/${UID}/profil/konto_archiv`, { aufbewahrung_bis: { stringValue: '2030-01-01' }, grund: 'test' });
+  fs.setze('feedback/f1', { userId: UID, gut: 'x' });
+  fs.setze('feedback/f2', { userId: UID, gut: 'y' });
+  const patches = [];
+  const env = await erzeugeTestEnv();
+  const original = globalThis.fetch;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.startsWith('https://oauth2.googleapis.com/token')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }), { status: 200 });
+    if (url.startsWith('https://storage.googleapis.com/')) return new Response(JSON.stringify({ items: [] }), { status: 200 });
+    if (init.method === 'PATCH' && /profil\/konto_archiv\?/.test(url)) { patches.push(JSON.parse(init.body).fields); return new Response('{}', { status: 200 }); } // die Nachbildung kennt dieses PATCH mit Maske nicht
+    if (url.endsWith(':runQuery') && /"feedback"/.test(String(init.body || ''))) return new Response(JSON.stringify([{ document: { name: 'projects/kontolux-ai/databases/(default)/documents/feedback/f1', fields: {} } }, { error: { code: 14, status: 'UNAVAILABLE' } }]), { status: 200 });
+    return fs.fetchFn(input, init);
+  };
+  try {
+    await assert.rejects(() => archivDatenLoeschen(UID, env, 't', { markerBehalten: true }), /Strom abgebrochen \(UNAVAILABLE\)/);
+  } finally { globalThis.fetch = original; }
+  assert.equal(patches.length, 1, 'Markierung genau einmal wiederhergestellt');
+  assert.ok(patches[0].aufbewahrung_bis, 'mit den gelesenen Feldern');
+  assert.ok(fs.lies('feedback/f1') && fs.lies('feedback/f2'), 'kein Feedback gelöscht');
+  assert.equal(fs.pfade(`users/${UID}/`).length, 0, 'der Bereich ist geleert (die Markierung kam über das PATCH zurück)');
+});

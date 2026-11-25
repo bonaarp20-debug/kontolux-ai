@@ -2,7 +2,7 @@
 // Reine Tests der Prüfung und der Stellen in der Regel-Schicht (regel/firestore.js, regel/archiv.js, regel/loeschlaeufe.js). Der Export steht in datev-lesen.test.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { abfrageStrom, batchGetStrom } from '../regel/firestore-strom.js';
+import { abfrageStrom, batchGetStrom, lesenMitEinerWiederholung, StromAbbruch, stromWiederholbar } from '../regel/firestore-strom.js';
 import { erzeugeSchicht } from '../regel/firestore.js';
 import { untersammlungLesen } from '../regel/archiv.js';
 import { firestore } from '../regel/loeschlaeufe.js';
@@ -63,4 +63,30 @@ test('Löschlauf-Schicht: runQuery mit Fehlerelement wirft', async () => {
   assert.ok(f && typeof f === 'object');
   // alle Abfrage-Methoden der Schicht laufen über laufAbfrage: eine mit leerem Aufruf genügt
   await assert.rejects(() => f.nachfahren('users/u1', { limit: 5 }), /abgebrochen/);
+});
+
+// O19-3: genau ein Wiederholungsversuch bei vorübergehendem UNAVAILABLE (nur Lesepfade rufen lesenMitEinerWiederholung)
+test('lesenMitEinerWiederholung: Fehler einmal, dann gültig gilt; zweimal bricht ab; andere Fehler werden nicht wiederholt', async () => {
+  let n = 0;
+  const einmal = async () => { n++; return abfrageStrom(n === 1 ? [DOK, FEHLER] : [DOK], 'x'); };
+  assert.deepEqual(await lesenMitEinerWiederholung(einmal, 1), [DOK]);
+  assert.equal(n, 2);
+  n = 0;
+  const immer = async () => { n++; return abfrageStrom([DOK, FEHLER], 'x'); };
+  await assert.rejects(() => lesenMitEinerWiederholung(immer, 1), /Strom abgebrochen \(UNAVAILABLE\)/);
+  assert.equal(n, 2, 'nie mehr als ein Wiederholungsversuch');
+  for (const fremd of [{ error: { code: 4, status: 'DEADLINE_EXCEEDED' } }, { error: { code: 13, status: 'INTERNAL' } }, { error: { message: 'x' } }]) {
+    n = 0;
+    await assert.rejects(() => lesenMitEinerWiederholung(async () => { n++; return abfrageStrom([fremd], 'x'); }, 1), /abgebrochen/);
+    assert.equal(n, 1, JSON.stringify(fremd));
+  }
+  n = 0;
+  await assert.rejects(() => lesenMitEinerWiederholung(async () => { n++; throw new Error('HTTP 500'); }, 1), /HTTP 500/);
+  assert.equal(n, 1, 'HTTP-Fehler und andere Fehler werden nicht wiederholt');
+  n = 0;
+  await assert.rejects(() => lesenMitEinerWiederholung(async () => { n++; return abfrageStrom({}, 'x'); }, 1), /keine Liste/);
+  assert.equal(n, 1);
+  assert.ok(stromWiederholbar(new StromAbbruch('x', 'UNAVAILABLE')) && stromWiederholbar(new StromAbbruch('x', '14')));
+  assert.ok(!stromWiederholbar(new Error('UNAVAILABLE')) && !stromWiederholbar(new StromAbbruch('x', 'INTERNAL')));
+  assert.ok(!/geheimer Text/.test((await lesenMitEinerWiederholung(async () => abfrageStrom([DOK], 'x'), 1)).length ? '' : 'x'));
 });

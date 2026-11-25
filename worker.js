@@ -26,7 +26,7 @@ import { datevOssPlanLaden, datevOssVorbereiten, datevOssBuchungen } from './reg
 import { rechnungsnrDuplikat, rechnungsnrAbfragen, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c); O11 N2 Varianten; O12a N1 gemeinsame Abfragen
 import { datevMischsatzGruppen, datevKorrekturGruppen, KORREKTUR_BELEG_ARTEN } from './regel/datev-mischsatz.js'; // Branch datev-mischsatz: Belege mit mehreren Steuersätzen je Satz buchen
 import { dekodiereFelder as datevDekodiereFelder } from './regel/firestore.js';
-import { abfrageStrom, batchGetStrom } from './regel/firestore-strom.js'; // O18a M1: Fehlerelemente im Antwortstrom von runQuery/batchGet brechen ab (fail-closed)
+import { abfrageStrom, batchGetStrom, lesenMitEinerWiederholung } from './regel/firestore-strom.js'; // O18a M1: Fehlerelemente im Antwortstrom von runQuery/batchGet brechen ab (fail-closed)
 import { DOK_VOLL_MAX, DOK_VORAB_SEITE, DOK_VORAB_FELDER, datevNachName, datevDokId, datevBelegDatum, datevJahrNamen, datevSatzJeQuelle, datevBelegIdZuNr } from './regel/datev-lesen.js'; // W3 DATEV: Belege nur für das Exportjahr lesen
 import { DATEV_KASSE_KONTEN, KASSE_UMSATZ_STEUERFAELLE, KASSE_DURCHLAUF_KONTO, KASSE_ERLOES_0_KONTO, KASSE_MEHRZWECK_KONTO, kassenKontoWahl, istKasseTagesbeleg, kasseBelegPlan, kasseBewegungBuchung, kasseBewegungOhneBuchung, kasseGeldtransitGegenbein, kasseTagesPosten, istSumupBarbeleg, sumupKasseWahl } from './regel/datev-kasse.js'; // Kassenbuch P1b-5: DATEV-Kassenzweig
 import { datevBelegfeldBereinigen, datevFeldGequotet, datevNummerPruefen, datevKontoVierstellig, datevGeldkontoImBereich, datevKuKonto, RC_EINGANG_KONTEN, RC_AUSGANG_KONTEN, datevRcLage, datevUstId, GWG_KONTEN, AFA_KATEGORIE, GWG_KATEGORIE, FA_EST_ART, UST_KATEGORIEN, datevWarnHeader } from './regel/datev-export-regeln.js'; // DATEV-Gesamtcheck 21.11.2026: Belegfeld 1, § 13b, GWG, Konten
@@ -4105,6 +4105,8 @@ async function handleDeleteAccountData(body, env, cors = {}) {
       })
     });
     if (queryRes.ok) {
+      // O19-1: Bricht der Strom ab, wird KEIN Feedback-Dokument gelöscht (auch keines der schon gelieferten): fail-closed und gewollt. Der Fehler wird nur geloggt;
+      // den Rest räumt der spätere Archiv-/Sperrlauf ab, der handleDeleteAccountData erneut aufruft.
       const rowsRoh = abfrageStrom(await queryRes.json().catch(() => null), 'Feedback suchen'); // O18a M1: abgebrochener Strom -> Fehler (unten geloggt), nicht "nichts mehr da"
       for (const row of rowsRoh) {
         if (!row.document?.name) continue;
@@ -4321,22 +4323,25 @@ async function sha256Hex(text) {
 }
 
 async function prueferZugangSuchen(adminToken, feld, wert) {
-  const res = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      structuredQuery: {
-        from: [{ collectionId: 'profil', allDescendants: true }],
-        where: { fieldFilter: { field: { fieldPath: feld }, op: 'EQUAL', value: { stringValue: wert } } },
-        limit: 1
-      }
-    })
+  // O19-3: reiner Lesepfad; ein einziger Wiederholungsversuch bei vorübergehendem UNAVAILABLE im Strom, danach fail-closed wie bisher
+  const rows = await lesenMitEinerWiederholung(async () => {
+    const res = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        structuredQuery: {
+          from: [{ collectionId: 'profil', allDescendants: true }],
+          where: { fieldFilter: { field: { fieldPath: feld }, op: 'EQUAL', value: { stringValue: wert } } },
+          limit: 1
+        }
+      })
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Query fehlgeschlagen: ${res.status} ${apiFehlerKlasse(errText)}`);
+    }
+    return abfrageStrom(await res.json(), 'Prüferzugang suchen');
   });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`Query fehlgeschlagen: ${res.status} ${apiFehlerKlasse(errText)}`);
-  }
-  const rows = abfrageStrom(await res.json(), 'Prüferzugang suchen');
   return rows.find(r => r.document?.name) || null;
 }
 
@@ -4984,8 +4989,8 @@ async function firestoreListAll(baseUrl, authHeader) {
     const url = `${baseUrl}?pageSize=300${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
     const res = await fetch(url, { headers: { 'Authorization': `Bearer ${authHeader}` } });
     if (!res.ok) {
-      const errorText = await res.text();
-      throw new Error(`Firestore read failed (${res.status}): ${errorText}`);
+      // O19-7: nur der Statuscode in der Meldung, nie der Firestore-Fehlertext (wie firestore-strom.js); das Präfix "Firestore read failed (403)" wertet der DATEV-Export aus
+      throw new Error(`Firestore read failed (${res.status})`);
     }
     const data = await res.json();
     if (Array.isArray(data.documents)) allDocs.push(...data.documents);
@@ -5005,6 +5010,8 @@ async function firestoreAbfrageAlle(userBasis, sammlung, filters, sortFeld, auth
   let cursor = null;
   const reihenfolge = [...(sortFeld ? [{ field: { fieldPath: sortFeld }, direction: 'ASCENDING' }] : []), { field: { fieldPath: '__name__' }, direction: 'ASCENDING' }];
   for (let seite = 0; seite < 200; seite++) {
+    // O19-3: Lesepfad (nur Export); ein einziger Wiederholungsversuch je Seite bei vorübergehendem UNAVAILABLE im Strom
+    const zeilen = await lesenMitEinerWiederholung(async () => {
     const res = await fetch(`${userBasis}:runQuery`, {
       method: 'POST', headers: { 'Authorization': `Bearer ${authHeader}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ structuredQuery: {
@@ -5019,7 +5026,8 @@ async function firestoreAbfrageAlle(userBasis, sammlung, filters, sortFeld, auth
     });
     if (!res.ok) throw new Error(`Abfrage ${sammlung} fehlgeschlagen (${res.status})`);
     // O18a M1: ein Fehlerelement im Strom (Status bleibt 200) oder eine Antwort ohne Liste bricht ab; sonst gälte eine abgeschnittene Seite als letzte Seite
-    const zeilen = abfrageStrom(await res.json(), `Abfrage ${sammlung}`);
+    return abfrageStrom(await res.json(), `Abfrage ${sammlung}`);
+    });
     const docs = zeilen.filter((z) => z.document).map((z) => z.document);
     alle.push(...docs);
     if (docs.length < seitenGroesse) return alle;
@@ -5060,12 +5068,16 @@ async function datevNachladen(userId, sammlung, ids, authHeader) {
   const liste = [...new Set(ids.filter(datevIdMoeglich))];
   const aus = [];
   for (let i = 0; i < liste.length; i += 100) {
-    const res = await fetch(`https://firestore.googleapis.com/v1/${wurzel}:batchGet`, {
-      method: 'POST', headers: { 'Authorization': `Bearer ${authHeader}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ documents: liste.slice(i, i + 100).map((id) => `${wurzel}/users/${userId}/${sammlung}/${id}`) })
+    // O19-3: Lesepfad (nur Export); ein einziger Wiederholungsversuch bei vorübergehendem UNAVAILABLE im Strom
+    const zeilen = await lesenMitEinerWiederholung(async () => {
+      const res = await fetch(`https://firestore.googleapis.com/v1/${wurzel}:batchGet`, {
+        method: 'POST', headers: { 'Authorization': `Bearer ${authHeader}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ documents: liste.slice(i, i + 100).map((id) => `${wurzel}/users/${userId}/${sammlung}/${id}`) })
+      });
+      if (!res.ok) throw new Error(`Nachladen ${sammlung} fehlgeschlagen (${res.status})`);
+      return batchGetStrom(await res.json(), `Nachladen ${sammlung}`);
     });
-    if (!res.ok) throw new Error(`Nachladen ${sammlung} fehlgeschlagen (${res.status})`);
-    for (const z of batchGetStrom(await res.json(), `Nachladen ${sammlung}`)) if (z.found) aus.push(z.found);
+    for (const z of zeilen) if (z.found) aus.push(z.found);
   }
   return aus;
 }
@@ -5442,6 +5454,8 @@ async function handleDatevExport(body, env, cors = {}) {
     };
     // O18a N1: zaehlt = false: der Beleg liegt außerhalb des Exportjahres und trägt nicht zur Warnung „Konto der Kasse ungültig“ bei (der Zeitraum-Modus lädt solche Belege gar nicht,
     // beide Modi nennen die Warnung so nur noch für Belege des Jahres)
+    // O19-4 (nur Doku, bewusst so): Nur der SumUp-Zweig übergibt zaehlt (Jahr aus bezahlt_am || datum). Kassenausgaben anderer Jahre zählen weiter zur Warnung; das gilt in
+    // beiden Lesemodi gleich (der Zeitraum-Modus lädt alle Kassenbelege) und betrifft nur den Warntext, nie Konto oder Stapel. Eine Angleichung wäre eine Textänderung ohne Buchungswirkung.
     const kassenKonto = async (kasseId, zaehlt = true) => {
       await kassenLaden();
       const k = kassenDocs.get(String(kasseId || ''));
@@ -5495,12 +5509,16 @@ async function handleDatevExport(body, env, cors = {}) {
           const wurzel = 'projects/kontolux-ai/databases/(default)/documents';
           const liste = [...gesucht.values()];
           for (let i = 0; i < liste.length; i += 100) {
-            const res = await fetch(`https://firestore.googleapis.com/v1/${wurzel}:batchGet`, {
-              method: 'POST', headers: { 'Authorization': `Bearer ${authHeader}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ documents: liste.slice(i, i + 100).map((x) => `${wurzel}/users/${userId}/kassentage/${x.tagId}/fassungen/${x.n}`) })
+            // O19-3: Lesepfad (Export); ein einziger Wiederholungsversuch bei vorübergehendem UNAVAILABLE im Strom
+            const fassZeilen = await lesenMitEinerWiederholung(async () => {
+              const res = await fetch(`https://firestore.googleapis.com/v1/${wurzel}:batchGet`, {
+                method: 'POST', headers: { 'Authorization': `Bearer ${authHeader}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ documents: liste.slice(i, i + 100).map((x) => `${wurzel}/users/${userId}/kassentage/${x.tagId}/fassungen/${x.n}`) })
+              });
+              if (!res.ok) throw new Error(`Fassungen lesen fehlgeschlagen (${res.status})`);
+              return batchGetStrom(await res.json(), 'Fassungen lesen');
             });
-            if (!res.ok) throw new Error(`Fassungen lesen fehlgeschlagen (${res.status})`);
-            for (const z of batchGetStrom(await res.json(), 'Fassungen lesen')) {
+            for (const z of fassZeilen) {
               if (!z.found) continue;
               const seg = String(z.found.name || '').split('/documents/').pop().split('/');
               if (seg[2] === 'kassentage' && seg[4] === 'fassungen') daten.fassungen.set(`${seg[3]}|${Number(seg[5])}`, datevDekodiereFelder(z.found.fields || {}));
@@ -5999,9 +6017,13 @@ async function handleDatevExport(body, env, cors = {}) {
         const wurzel = 'projects/kontolux-ai/databases/(default)/documents';
         try {
           for (let i = 0; i < nachladen.length; i += 100) {
-            const res = await fetch(`https://firestore.googleapis.com/v1/${wurzel}:batchGet`, { method: 'POST', headers: { 'Authorization': `Bearer ${authHeader}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ documents: nachladen.slice(i, i + 100).map((id) => `${wurzel}/users/${userId}/kassenbewegungen/${id}`) }) });
-            if (!res.ok) throw new Error(`Bewegungen lesen fehlgeschlagen (${res.status})`);
-            for (const z of batchGetStrom(await res.json(), 'Bewegungen lesen')) if (z.found) bewMap.set(String(z.found.name).split('/').pop(), datevDekodiereFelder(z.found.fields || {}));
+            // O19-3: Lesepfad (Export); ein einziger Wiederholungsversuch bei vorübergehendem UNAVAILABLE im Strom
+            const bewZeilen = await lesenMitEinerWiederholung(async () => {
+              const res = await fetch(`https://firestore.googleapis.com/v1/${wurzel}:batchGet`, { method: 'POST', headers: { 'Authorization': `Bearer ${authHeader}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ documents: nachladen.slice(i, i + 100).map((id) => `${wurzel}/users/${userId}/kassenbewegungen/${id}`) }) });
+              if (!res.ok) throw new Error(`Bewegungen lesen fehlgeschlagen (${res.status})`);
+              return batchGetStrom(await res.json(), 'Bewegungen lesen');
+            });
+            for (const z of bewZeilen) if (z.found) bewMap.set(String(z.found.name).split('/').pop(), datevDekodiereFelder(z.found.fields || {}));
           }
         } catch (e) { console.error('DATEV-Export Kassenbewegungen:', e?.message); throw new DatevLesefehler('Die Kassenbewegungen des Kassenbuchs konnten nicht gelesen werden.'); }
       }
@@ -6297,15 +6319,19 @@ export async function fristErinnerungenSenden(env, optionen = {}) {
   const abfragen = async (mitDatum) => fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(fristAbfrage(heute, mitDatum)) });
   // Datum in der Abfrage eingrenzen (nur Fristen der nächsten 8 Tage). Braucht den zusammengesetzten Index (firestore.indexes.json, erinnerung_mail + datum, Sammlungsgruppe);
   // ist er noch nicht angelegt, antwortet Firestore mit FAILED_PRECONDITION und der Lauf liest wie bisher alle Fristen mit eingeschalteter Erinnerung.
-  let res = await abfragen(true);
-  if (!res.ok) res = await abfragen(false);
-  if (!res.ok) throw new Error(`Fristen-Abfrage fehlgeschlagen (${res.status})`);
+  // O19-3: reiner Lesepfad; ein einziger Wiederholungsversuch bei vorübergehendem UNAVAILABLE im Strom (die Abfrage läuft dann komplett neu), danach wie bisher abbrechen
+  const fristZeilen = await lesenMitEinerWiederholung(async () => {
+    let res = await abfragen(true);
+    if (!res.ok) res = await abfragen(false);
+    if (!res.ok) throw new Error(`Fristen-Abfrage fehlgeschlagen (${res.status})`);
+    return abfrageStrom(await res.json(), 'Fristen-Abfrage');
+  });
 
   let gesendet = 0;
   const jeKonto = new Map();
   const fehlerJeKonto = new Map();
   const mailCache = new Map();
-  const zeilen = abfrageStrom(await res.json(), 'Fristen-Abfrage').filter((z) => z.document);
+  const zeilen = fristZeilen.filter((z) => z.document);
   zeilen.sort((a, b) => String(a.document.fields?.datum?.stringValue || '').localeCompare(String(b.document.fields?.datum?.stringValue || ''))); // früheste Frist zuerst
   for (const zeile of zeilen) {
     if (gesendet >= FRIST_MAILS_JE_LAUF) break;
@@ -6490,34 +6516,42 @@ async function archivKontoLoeschen(uid, env, adminToken) {
 }
 
 // Löscht alle Firestore-Sammlungen, Feedback, Dateien und KV-Spuren eines Kontos (ohne das Login selbst).
+// O19-2: Ein Wurf nach dem Löschen des Profil-Bereichs (Sammlungen, Feedback-Abfrage, Storage) ließ die Markierung früher verloren gehen. Mit markerBehalten wird sie
+// jetzt auch im Fehlerfall wiederhergestellt (finally); der ursprüngliche Fehler bleibt der geworfene. (Weg ist derzeit tot: archivLoeschlauf hat loeschenAktiv = false.)
 export async function archivDatenLoeschen(uid, env, adminToken, { markerBehalten = false } = {}) {
   let marker = null;
   if (markerBehalten) marker = await firestoreGetDoc(`users/${uid}/profil/konto_archiv`, adminToken);
-  // BP-13: zuerst die Unterkollektionen (steuerprofil/*/verlauf, dokumente/*/versionen): Firestore löscht sie nicht mit dem Elterndokument
-  await untersammlungenLoeschen(uid, adminToken);
-  for (const coll of ARCHIV_SAMMLUNGEN) {
-    await loescheAlleUnterPfad(`users/${uid}/${coll}`, adminToken, coll === 'chats' ? 'messages' : null);
-  }
-  // Feedback liegt top-level und ist über das Feld userId zugeordnet (siehe handleDeleteAccountData)
-  const fbRes = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'feedback' }], where: { fieldFilter: { field: { fieldPath: 'userId' }, op: 'EQUAL', value: { stringValue: uid } } } } })
-  });
-  if (fbRes.ok) {
-    const fbZeilen = abfrageStrom(await fbRes.json().catch(() => null), 'Feedback suchen'); // O18a M1: unvollständiger Strom bricht ab, der Lauf wiederholt
-    for (const zeile of fbZeilen) {
-      if (!zeile.document?.name) continue;
-      await fetch(`https://firestore.googleapis.com/v1/${zeile.document.name}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${adminToken}` } });
+  let wurf = null;
+  try {
+    // BP-13: zuerst die Unterkollektionen (steuerprofil/*/verlauf, dokumente/*/versionen): Firestore löscht sie nicht mit dem Elterndokument
+    await untersammlungenLoeschen(uid, adminToken);
+    for (const coll of ARCHIV_SAMMLUNGEN) {
+      await loescheAlleUnterPfad(`users/${uid}/${coll}`, adminToken, coll === 'chats' ? 'messages' : null);
+    }
+    // Feedback liegt top-level und ist über das Feld userId zugeordnet (siehe handleDeleteAccountData).
+    // O19-1: Bricht der Strom der Feedback-Abfrage ab, löscht der Lauf KEIN Feedback-Dokument (auch keines der schon gelieferten): fail-closed und gewollt, der Lauf wird wiederholt.
+    const fbRes = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'feedback' }], where: { fieldFilter: { field: { fieldPath: 'userId' }, op: 'EQUAL', value: { stringValue: uid } } } } })
+    });
+    if (fbRes.ok) {
+      const fbZeilen = abfrageStrom(await fbRes.json().catch(() => null), 'Feedback suchen'); // O18a M1: unvollständiger Strom bricht ab, der Lauf wiederholt
+      for (const zeile of fbZeilen) {
+        if (!zeile.document?.name) continue;
+        await fetch(`https://firestore.googleapis.com/v1/${zeile.document.name}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${adminToken}` } });
+      }
+    }
+    await archivStorage(uid, env, true);
+  } catch (e) { wurf = e; throw e; } finally {
+    if (markerBehalten && marker?.fields) {
+      // Markierung wiederherstellen (sie lag im gelöschten Profil-Bereich); der Aufrufer entfernt sie nach dem Löschen des Logins.
+      // Scheitert die Wiederherstellung ohne vorherigen Fehler, wirft sie wie bisher; nach einem Fehler wird sie nur geloggt, der erste Fehler bleibt der geworfene.
+      try { await firestorePatchFields(`users/${uid}/profil/konto_archiv`, marker.fields, adminToken); }
+      catch (e2) { if (!wurf) throw e2; console.error('Archiv-Markierung wiederherstellen:', e2?.message); }
     }
   }
-  await archivStorage(uid, env, true);
-  if (markerBehalten) {
-    // Markierung wiederherstellen (sie lag im gelöschten Profil-Bereich); der Aufrufer entfernt sie nach dem Löschen des Logins
-    if (marker?.fields) await firestorePatchFields(`users/${uid}/profil/konto_archiv`, marker.fields, adminToken);
-  } else {
-    await loescheKvSpuren(uid, env, { archivMarkerAuch: true });
-  }
+  if (!markerBehalten) await loescheKvSpuren(uid, env, { archivMarkerAuch: true });
 }
 
 async function archivLoeschlauf(env) {
