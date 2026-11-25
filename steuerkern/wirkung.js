@@ -393,8 +393,18 @@ function istTeilleistung(s) {
   return Array.isArray(s.positionen) && s.positionen.some((p) => istObjekt(p) && istObjekt(p.leistung) && istDatum(p.leistung.bis) && p.leistung.bis !== bis);
 }
 
+// O20k M1: Eingangsbeleg (kein Korrekturbeleg) mit ausgeschlossenem Vorsteuerabzug (ausschluss.vorsteuer 'nein': kein_vorsteuerabzug, Kleinbetrag über 250 EUR,
+// Bewirtung ohne Nachweis, Geschenk über 50 EUR, E_INLAND_OHNE_VORSTEUER). Der Beleg selbst bucht nie Vorsteuer (mitVorsteuer in eingangWirkungen); abziehbar ist 0.
+function ohneVorsteuerAbzug(s) {
+  return istObjekt(s) && s.richtung === 'eingang' && !KORREKTUR_ARTEN.includes(s.beleg_art) && istObjekt(s.ausschluss) && s.ausschluss.vorsteuer === 'nein';
+}
+
 function gruppiere(s, mitBis) {
   const map = new Map();
+  // O20k M1: Ausschluss am Original -> abziehbar 0 je Gruppe. Wirkt nur dort, wo die abziehbare Steuer des Originals ohne Vorsteuer-Wächter gelesen wird
+  // (Korrektur-Zerlegung Fall A, Rundungsabgleich korrekturPlan); der eigene Weg des Belegs liest sie nur mit mitVorsteuer/mitVst (dort false): byte-gleich.
+  // Korrekturbelege bleiben unverändert (ihre abziehbare Steuer setzt korrekturPlanRoh aus dem Original).
+  const keinAbzug = ohneVorsteuerAbzug(s);
   for (const p of s.positionen) {
     const bis = mitBis ? positionBis(s, p) : null;
     const k = (p.satz_bp === null || p.satz_bp === undefined ? 'null' : String(p.satz_bp)) + (mitBis ? `|${bis}` : '');
@@ -404,7 +414,7 @@ function gruppiere(s, mitBis) {
     g.ust_cent += p.ust_cent;
     // KERN-25: Versicherungsposition mit Umsatzsteuerbetrag: je Position keine abziehbare Vorsteuer (gemischter Beleg: die übrigen Positionen behalten ihre Vorsteuer)
     const vp = versicherungPosition(s, p);
-    g.abziehbar_cent += vp ? 0 : (istCent(p.vorsteuer_abziehbar_cent) ? p.vorsteuer_abziehbar_cent : p.ust_cent);
+    g.abziehbar_cent += vp || keinAbzug ? 0 : (istCent(p.vorsteuer_abziehbar_cent) ? p.vorsteuer_abziehbar_cent : p.ust_cent);
     if (vp) g.vers_n = (g.vers_n || 0) + 1;
     else if (!(istCent(p.ust_cent) && p.ust_cent === 0)) g.vers_fremd = true;
   }
@@ -2072,7 +2082,7 @@ function vorLeistungKorrektur(os, wirk, eingang, istOrig) {
 
 // Zerlegung einer Korrektur: je Gruppe des Korrekturbelegs { unbezahlt: {netto, ust}, bezahlt: {netto, ust} } (vorzeichenbehaftet wie der Beleg:
 // Minderung negativ; ust bei Eingang die abziehbare Vorsteuer), dazu Summen in Brutto. vorher = Brutto der früheren Korrekturen zum selben Original.
-function korrekturPlanRoh(s, orig, vorherInfo) {
+function korrekturPlanRoh(s, orig, vorherInfo, ohneVersAnteil) {
   const vorher = vorherInfo.brutto;
   const tol = vorherInfo.anzahl; // Rundung: jede frühere Korrektur weist ihre eigene gerundete Steuer aus (höchstens 1 ct Abweichung)
   const gk = gruppiere(s);
@@ -2083,7 +2093,11 @@ function korrekturPlanRoh(s, orig, vorherInfo) {
   const st = origStand(orig);
   // KERN-26: Korrektur auf einen Eingangsbeleg mit Versicherungsposition (Umsatzsteuerbetrag ohne abziehbare Vorsteuer, KERN-24/-25): die Vorsteuer-Minderung
   // der Korrektur nur im abziehbaren Anteil des Originals (abziehbar/ust je Satzgruppe, soweit die Lücke aus Versicherungspositionen stammt)
-  if (eingang && st) versAnteilKorrektur(gk, st.o);
+  // O20k N1: ohneVersAnteil (nur für den Hinweiswert „Korrektur nur für die Positionen mit Vorsteuer“) rechnet ohne diese Skalierung.
+  if (eingang && st && !ohneVersAnteil) versAnteilKorrektur(gk, st.o);
+  // O20k M1 (§ 17 Abs. 1 S. 2 UStG: berichtigt wird der in Anspruch genommene Vorsteuerabzug): Hat das Original keinen Vorsteuerabzug (ausschluss.vorsteuer
+  // 'nein'), mindert die Korrektur Kz 66 nicht. Abziehbar 0 in jeder Gruppe, auch wenn die Korrektur eine eigene Aufteilung trägt (der Abzug war 0).
+  if (eingang && st && ohneVorsteuerAbzug(st.o)) for (const g of gk) g.abziehbar_cent = 0;
   const gew = gk.map((g) => Math.abs(g.netto_cent + g.ust_cent));
   let bk = 0;
   for (const x of gew) bk += x;
@@ -2186,8 +2200,8 @@ function korrekturPlanRoh(s, orig, vorherInfo) {
 
 // Rundung (TR-korrektur-003): Schließt die Korrektur das Netto einer Gruppe des Originals ab, darf die Steuer aller Korrekturen zusammen die Steuer des Originals
 // nicht übersteigen; die abschließende Korrektur nimmt nur den Rest der Steuer (ein Cent Rundungsunterschied je Teilgutschrift).
-function korrekturPlan(s, orig, vorherInfo) {
-  const plan = korrekturPlanRoh(s, orig, vorherInfo);
+function korrekturPlan(s, orig, vorherInfo, ohneVersAnteil) {
+  const plan = korrekturPlanRoh(s, orig, vorherInfo, ohneVersAnteil);
   const st = origStand(orig);
   if (!st || !vorherInfo.gruppen || vorherInfo.anzahl === 0) return plan;
   const eingang = s.richtung === 'eingang';
@@ -2397,7 +2411,41 @@ function korrekturWirkungen(s, profil, ctx, opt, out, beleg) {
     out.push(mk(ctx, { welt: 'euer', periode: String(jahrVon(rz.datum)), datum_wirk: rz.datum, kz: null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-25', hinweis_detail: 'gutschrift_erhalten_rueckzahlung' }));
   }
   if (eingang) anlagegutKorrekturEuer(s, profil, ctx, opt, out, orig, rz);
-  if (versAnteilHinweis && out.length && !ctx.hinweise.includes('HN_KORREKTUR_VERSICHERUNG_ANTEILIG')) ctx.hinweise.push('HN_KORREKTUR_VERSICHERUNG_ANTEILIG'); // O2-Fix K-N1, F4 hängt ihn an alle Wirkungen
+  // O20k M1: Original ohne Vorsteuerabzug: Hinweis, warum die Korrektur Kz 66 nicht mindert (nur wenn die Korrektur eine Wirkung hat)
+  if (eingang && orig && ohneVorsteuerAbzug(orig.steuer) && out.length && !ctx.hinweise.includes('HN_KORREKTUR_OHNE_VORSTEUERABZUG')) ctx.hinweise.push('HN_KORREKTUR_OHNE_VORSTEUERABZUG');
+  if (versAnteilHinweis && out.length && !ctx.hinweise.includes('HN_KORREKTUR_VERSICHERUNG_ANTEILIG')) {
+    ctx.hinweise.push('HN_KORREKTUR_VERSICHERUNG_ANTEILIG'); // O2-Fix K-N1, F4 hängt ihn an alle Wirkungen
+    // O20k N1: konkrete Zahlen für den Hinweis (Platzhalter in hinweise.js, hinweisFuer(code, w.hinweis_werte)). Die Zahlen der Voranmeldung bleiben anteilig.
+    // minderung_cent: was Kontolux mindert (Kz 66, Beträge positiv); minderung_nur_vorsteuer_cent: dieselbe Korrektur ohne Versicherungsanteil (gilt sie nur für
+    // die Positionen mit Vorsteuer), je Satzgruppe höchstens die abgezogene Vorsteuer des Originals abzüglich der Minderung früherer Korrekturen (vorher.gruppen,
+    // aus deren Plan); differenz: um so viel ist Kz 66 dann zu hoch. Eine reine Versicherungsgruppe (Abzug 0) bekommt so nie einen höheren Wert.
+    const jeGruppe = (p) => {
+      const m = new Map();
+      p.gruppen.forEach((g, gi) => {
+        let u = 0;
+        if (unbezahltBuchen && p.unbezahlt_brutto > 0) u += p.je[gi].unbezahlt.ust;
+        if (rz && p.gebucht_bezahlt_brutto > 0) u += p.je[gi].bezahlt.ust;
+        m.set(satzKey(g), (m.get(satzKey(g)) || 0) - u);
+      });
+      return m;
+    };
+    const gb = jeGruppe(plan);
+    const roh = jeGruppe(korrekturPlan(s, orig, vorher, true));
+    const st = origStand(orig);
+    let gebucht = 0;
+    let nurVst = 0;
+    for (const [k, u] of gb) {
+      const o = st ? st.gruppen.find((x) => satzKey(x) === k) : null;
+      const frueher = vorher.gruppen instanceof Map && vorher.gruppen.has(k) ? vorher.gruppen.get(k).ust : 0;
+      const rest = o ? Math.max(0, o.abziehbar_cent - frueher) : 0;
+      gebucht += u;
+      nurVst += Math.max(u, Math.min(roh.get(k) || 0, rest));
+    }
+    if (nurVst > gebucht) {
+      const werte = { minderung_cent: gebucht, minderung_nur_vorsteuer_cent: nurVst, minderung_differenz_cent: nurVst - gebucht };
+      for (const w of out) if (w.beleg_id === ctx.id) w.hinweis_werte = { ...werte };
+    }
+  }
 }
 
 // KERN-E (G-KD-6): Korrektur (Storno, Gutschrift, Preisnachlass) auf ein Original, dessen Anschaffungskosten der Anlagegut-Weg als GWG (Kz 132) oder
@@ -2471,6 +2519,7 @@ function uneinbringlichkeitsWirkung(s, profil, ctx, opt, out, beleg) {
   if (plan.bezahlt_brutto > 0) ctx.hinweise.push('W_UNEINBRINGLICH_TEIL_BEZAHLT');
   if (plan.unbezahlt_brutto <= 0) return;
   const per = ustPeriode(profil, wirk, hinw);
+  if (eingang && orig && ohneVorsteuerAbzug(orig.steuer) && !ctx.hinweise.includes('HN_KORREKTUR_OHNE_VORSTEUERABZUG')) ctx.hinweise.push('HN_KORREKTUR_OHNE_VORSTEUERABZUG'); // O20k M1
   plan.gruppen.forEach((g, gi) => {
     const w = plan.je[gi].unbezahlt;
     if (w.netto === 0 && w.ust === 0) return;
