@@ -399,6 +399,17 @@ function ohneVorsteuerAbzug(s) {
   return istObjekt(s) && s.richtung === 'eingang' && !KORREKTUR_ARTEN.includes(s.beleg_art) && istObjekt(s.ausschluss) && s.ausschluss.vorsteuer === 'nein';
 }
 
+// O21 N1: Geschenk, dessen Vorsteuer schon zurückgenommen ist (geschenk.ruecknahme_datum, R-VS-02: Freigrenze 50 EUR je Empfänger und Jahr später
+// überschritten), und zwar spätestens am frühesten Buchungstag der Korrektur (Wirkdatum, ggf. früheres Rückzahlungsdatum). Dann steht am Tag der Korrektur
+// kein Vorsteuerabzug mehr, die Korrektur mindert Kz 66 nicht noch einmal. Liegt die Rücknahme später, bleibt die Korrektur unverändert (Minderung im
+// Zeitraum der Korrektur; die spätere Rücknahme nimmt dann zu viel zurück: Zahllast höchstens zu hoch, nie zu niedrig; Grenze in ABWEICHUNGEN 5.42).
+function geschenkVorsteuerZurueck(os, s) {
+  if (!istObjekt(os) || !istObjekt(s) || os.richtung !== 'eingang' || !istObjekt(os.geschenk) || !istDatum(os.geschenk.ruecknahme_datum) || !istDatum(s.wirkdatum)) return false;
+  const rz = rueckzahlungVon(s);
+  const frueh = rz && rz.datum < s.wirkdatum ? rz.datum : s.wirkdatum;
+  return os.geschenk.ruecknahme_datum <= frueh;
+}
+
 function gruppiere(s, mitBis) {
   const map = new Map();
   // O20k M1: Ausschluss am Original -> abziehbar 0 je Gruppe. Wirkt nur dort, wo die abziehbare Steuer des Originals ohne Vorsteuer-Wächter gelesen wird
@@ -2098,6 +2109,8 @@ function korrekturPlanRoh(s, orig, vorherInfo, ohneVersAnteil) {
   // O20k M1 (§ 17 Abs. 1 S. 2 UStG: berichtigt wird der in Anspruch genommene Vorsteuerabzug): Hat das Original keinen Vorsteuerabzug (ausschluss.vorsteuer
   // 'nein'), mindert die Korrektur Kz 66 nicht. Abziehbar 0 in jeder Gruppe, auch wenn die Korrektur eine eigene Aufteilung trägt (der Abzug war 0).
   if (eingang && st && ohneVorsteuerAbzug(st.o)) for (const g of gk) g.abziehbar_cent = 0;
+  // O21 N1: Geschenk mit schon zurückgenommener Vorsteuer: Korrektur und Zerlegung über die Zahlungen des Originals (Fall A) ohne abziehbare Steuer
+  if (eingang && st && geschenkVorsteuerZurueck(st.o, s)) { for (const g of gk) g.abziehbar_cent = 0; st.gruppen = st.gruppen.map((g) => ({ ...g, abziehbar_cent: 0 })); }
   const gew = gk.map((g) => Math.abs(g.netto_cent + g.ust_cent));
   let bk = 0;
   for (const x of gew) bk += x;
@@ -2413,6 +2426,8 @@ function korrekturWirkungen(s, profil, ctx, opt, out, beleg) {
   if (eingang) anlagegutKorrekturEuer(s, profil, ctx, opt, out, orig, rz);
   // O20k M1: Original ohne Vorsteuerabzug: Hinweis, warum die Korrektur Kz 66 nicht mindert (nur wenn die Korrektur eine Wirkung hat)
   if (eingang && orig && ohneVorsteuerAbzug(orig.steuer) && out.length && !ctx.hinweise.includes('HN_KORREKTUR_OHNE_VORSTEUERABZUG')) ctx.hinweise.push('HN_KORREKTUR_OHNE_VORSTEUERABZUG');
+  // O21 N1: Geschenk mit schon zurückgenommener Vorsteuer (nicht doppelt mindern)
+  if (eingang && orig && !ohneVorsteuerAbzug(orig.steuer) && geschenkVorsteuerZurueck(orig.steuer, s) && out.length && !ctx.hinweise.includes('HN_KORREKTUR_GESCHENK_ZURUECKGENOMMEN')) ctx.hinweise.push('HN_KORREKTUR_GESCHENK_ZURUECKGENOMMEN');
   if (versAnteilHinweis && out.length && !ctx.hinweise.includes('HN_KORREKTUR_VERSICHERUNG_ANTEILIG')) {
     ctx.hinweise.push('HN_KORREKTUR_VERSICHERUNG_ANTEILIG'); // O2-Fix K-N1, F4 hängt ihn an alle Wirkungen
     // O20k N1: konkrete Zahlen für den Hinweis (Platzhalter in hinweise.js, hinweisFuer(code, w.hinweis_werte)). Die Zahlen der Voranmeldung bleiben anteilig.
@@ -2520,6 +2535,7 @@ function uneinbringlichkeitsWirkung(s, profil, ctx, opt, out, beleg) {
   if (plan.unbezahlt_brutto <= 0) return;
   const per = ustPeriode(profil, wirk, hinw);
   if (eingang && orig && ohneVorsteuerAbzug(orig.steuer) && !ctx.hinweise.includes('HN_KORREKTUR_OHNE_VORSTEUERABZUG')) ctx.hinweise.push('HN_KORREKTUR_OHNE_VORSTEUERABZUG'); // O20k M1
+  if (eingang && orig && !ohneVorsteuerAbzug(orig.steuer) && geschenkVorsteuerZurueck(orig.steuer, { ...s, rueckzahlung: null }) && !ctx.hinweise.includes('HN_KORREKTUR_GESCHENK_ZURUECKGENOMMEN')) ctx.hinweise.push('HN_KORREKTUR_GESCHENK_ZURUECKGENOMMEN'); // O21 N1
   plan.gruppen.forEach((g, gi) => {
     const w = plan.je[gi].unbezahlt;
     if (w.netto === 0 && w.ust === 0) return;
