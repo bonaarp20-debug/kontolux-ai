@@ -71,12 +71,12 @@ test('Zustimmung je Konto: kasse nur mit der Fassung des Kassenbuchs, unabhängi
     return kiFeatureStandKonto({ uid: 'nutzerKassePrompt00000001', stand, tokenFn: async () => 't', fetchFn: async () => new Response(JSON.stringify(liste(v)), { status }), jetzt: 1 });
   };
   const nurKasse = Object.freeze({ ...KI_FEATURES_AUS, kasse: true });
-  assert.deepEqual(await lauf(nurKasse, ['2026-12-14-1']), nurKasse, 'nur Kassen-Fassung: kasse an');
+  assert.deepEqual(await lauf(nurKasse, ['2026-11-25-1']), nurKasse, 'nur Kassen-Fassung: kasse an');
   assert.deepEqual(await lauf(nurKasse, ['2026-11-15-1', '2026-11-15-2']), KI_FEATURES_AUS, 'ohne Kassen-Fassung: aus');
   assert.deepEqual(await lauf(nurKasse, []), KI_FEATURES_AUS);
-  assert.deepEqual(await lauf(nurKasse, ['2026-12-14-1'], 500), KI_FEATURES_AUS, 'Lesefehler: aus');
-  assert.deepEqual(await lauf(KI_FEATURES_AN, ['2026-11-15-1', '2026-11-15-2', '2026-12-14-1']), KI_FEATURES_AN);
-  assert.deepEqual(await lauf(KI_FEATURES_AN, ['2026-12-14-1']), KI_FEATURES_AN, 'die spätere Fassung schließt die früheren ein');
+  assert.deepEqual(await lauf(nurKasse, ['2026-11-25-1'], 500), KI_FEATURES_AUS, 'Lesefehler: aus');
+  assert.deepEqual(await lauf(KI_FEATURES_AN, ['2026-11-15-1', '2026-11-15-2', '2026-11-25-1']), KI_FEATURES_AN);
+  assert.deepEqual(await lauf(KI_FEATURES_AN, ['2026-11-25-1']), KI_FEATURES_AN, 'die spätere Fassung schließt die früheren ein');
   assert.deepEqual(await lauf({ ...KI_FEATURES_AUS, kasse: true, ausland: true }, ['2026-11-15-1']), { ...KI_FEATURES_AUS, ausland: true }, 'Release B ohne Kassen-Fassung: kasse aus, ausland an');
   assert.deepEqual(await lauf(KI_FEATURES_AN, ['2026-11-15-1', '2026-11-15-2']), { ...KI_FEATURES_AN, kasse: false });
   kiZustimmungCacheLeeren();

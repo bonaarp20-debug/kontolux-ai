@@ -200,10 +200,10 @@ export const FEATURE_KASSE_RETOURE = 'kasse_retoure';
 // 'kasse' hängt am Kern (KERN_ABHAENGIG: kern_max 'aus' schaltet das Kassenbuch mit ab). Die Liste schaltet nichts; sie dient Drehbuch und Paritätstest.
 export const FEATURES_KASSE = Object.freeze(['kasse', 'kasse_ki', FEATURE_KASSE_RETOURE]);
 // KASSE-P1b (M15): Mindestfassung der Nutzungsbedingungen für das Kassenbuch (Zustimmungsnachweis users/{uid}/agb_zustimmung, wie OSS). P6-Fassungs-Commit
-// (23.11.2026): echte Fassung mit den Kassenbuch-Texten (Nutzungsbedingungen 2b/2c, Stand 14. Dezember 2026), gleich App AGB_VERSION und Lader
+// (23.11.2026): echte Fassung mit den Kassenbuch-Texten (Nutzungsbedingungen 2b/2c, Stand 25. November 2026), gleich App AGB_VERSION und Lader
 // AGB_MINDESTFASSUNG_KASSE (scripts/rollout-vorpruefung.mjs). Das Datum darf nicht nach dem Deploy-Tag liegen (agbZustimmungPruefen in worker.js lehnt
 // eine Fassung mit Datum nach heute ab); bei abweichendem Deploy-Tag in App, Worker und Landing vorher gemeinsam umdatieren (deploy-reihenfolge.md).
-export const AGB_MINDESTFASSUNG_KASSE = '2026-12-14-1';
+export const AGB_MINDESTFASSUNG_KASSE = '2026-11-25-1';
 
 // E-B (Auflage A1 G-KERN-B, KERN-B2): Kern-Optionen (optionen.regeln) aus config/features, dieselbe Abbildung wie die App (Kern-Index
 // optionenAusFeatures, Lader regel/loader.js kernOptionen). Eingabe: das bereinigte Dokument (configBereinigen) oder null; fehlend, 'aus',
