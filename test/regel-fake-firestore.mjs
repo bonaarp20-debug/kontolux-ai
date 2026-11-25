@@ -164,7 +164,14 @@ export function fakeFirestore() {
       const treffer = abfrage(rest.slice(1, q), body.structuredQuery);
       const t = zeit();
       if (!treffer.length) return json([{ readTime: t }]);
-      return json(treffer.map((p) => ({ document: roh(p, docs.get(p)), readTime: t })));
+      // W3 DATEV: select (Projektion auf Felder der obersten Ebene), wie REST StructuredQuery.select; verschachtelte Pfade kennt die Nachbildung nicht
+      const sel = body.structuredQuery.select && Array.isArray(body.structuredQuery.select.fields) ? body.structuredQuery.select.fields.map((x) => x.fieldPath) : null;
+      if (sel && sel.some((fp) => fp.includes('.'))) return fehler(400, 'FAKE_SELECT_NUR_OBERSTE_EBENE');
+      return json(treffer.map((p) => {
+        const r = roh(p, docs.get(p));
+        if (sel) r.fields = Object.fromEntries(Object.entries(r.fields).filter(([k]) => sel.includes(k)));
+        return { document: r, readTime: t };
+      }));
     }
     if (methode === 'GET') {
       const [pfadTeil, query] = rest.slice(1).split('?');

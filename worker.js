@@ -22,10 +22,11 @@ import { regelKasseZbonLesen, KASSE_ZBON_PFAD } from './regel/kasse-zbon-ki.js';
 import { kassenPrueferDaten, kassenPrueferFortsetzung } from './regel/kasse-daten.js'; // KASSE-P1b: Prüfer-Daten Kassenbuch
 import { kassenAusgabeBeleg } from './regel/kasse-ausgabe.js'; // KASSE-P1b-4: Ausgabe aus der Kasse über den Beleg-Schreibweg v2
 import { regelEzbKurs } from './regel/ezb-kurs.js'; // WORKER-C (Release C, BP-29)
-import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // KX-WC2 (Release C, BP-30 DATEV-Teil)
+import { datevOssPlanLaden, datevOssVorbereiten, datevOssBuchungen } from './regel/datev-oss.js'; // KX-WC2 (Release C, BP-30 DATEV-Teil)
 import { rechnungsnrDuplikat, rechnungsnrAbfragen, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c); O11 N2 Varianten; O12a N1 gemeinsame Abfragen
 import { datevMischsatzGruppen, datevKorrekturGruppen, KORREKTUR_BELEG_ARTEN } from './regel/datev-mischsatz.js'; // Branch datev-mischsatz: Belege mit mehreren Steuersätzen je Satz buchen
 import { dekodiereFelder as datevDekodiereFelder } from './regel/firestore.js';
+import { DOK_VOLL_MAX, DOK_VORAB_SEITE, DOK_VORAB_FELDER, datevNachName, datevDokId, datevBelegDatum, datevJahrNamen, datevSatzJeQuelle, datevBelegIdZuNr } from './regel/datev-lesen.js'; // W3 DATEV: Belege nur für das Exportjahr lesen
 import { DATEV_KASSE_KONTEN, KASSE_UMSATZ_STEUERFAELLE, KASSE_DURCHLAUF_KONTO, KASSE_ERLOES_0_KONTO, KASSE_MEHRZWECK_KONTO, kassenKontoWahl, istKasseTagesbeleg, kasseBelegPlan, kasseBewegungBuchung, kasseBewegungOhneBuchung, kasseGeldtransitGegenbein, kasseTagesPosten, istSumupBarbeleg, sumupKasseWahl } from './regel/datev-kasse.js'; // Kassenbuch P1b-5: DATEV-Kassenzweig
 import { datevBelegfeldBereinigen, datevFeldGequotet, datevNummerPruefen, datevKontoVierstellig, datevGeldkontoImBereich, datevKuKonto, RC_EINGANG_KONTEN, RC_AUSGANG_KONTEN, datevRcLage, datevUstId, GWG_KONTEN, AFA_KATEGORIE, GWG_KATEGORIE, FA_EST_ART, UST_KATEGORIEN, datevWarnHeader } from './regel/datev-export-regeln.js'; // DATEV-Gesamtcheck 21.11.2026: Belegfeld 1, § 13b, GWG, Konten
 import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen, kiKassenberichtText, kiKasseText } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4); Kassen-P0: kiKassenberichtText
@@ -4995,7 +4996,7 @@ const ISTKASSEOBJ = (x) => x !== null && typeof x === 'object' && !Array.isArray
 
 // F2-Fix B-M1: Dokumente einer Sammlung per Abfrage auf ein Feld (kein zusammengesetzter Index nötig), je 500 pro Anfrage mit Cursor, sortiert nach sortFeld (oder nur __name__).
 // Eine Anfrage je 500 Dokumente statt einer Liste über alle Jahre (Free-Plan: 50 Unteranfragen je Aufruf). Jeder Fehler wird geworfen.
-async function firestoreAbfrageAlle(userBasis, sammlung, filters, sortFeld, authHeader) {
+async function firestoreAbfrageAlle(userBasis, sammlung, filters, sortFeld, authHeader, { select = null, seite: seitenGroesse = 500 } = {}) {
   const alle = [];
   let cursor = null;
   const reihenfolge = [...(sortFeld ? [{ field: { fieldPath: sortFeld }, direction: 'ASCENDING' }] : []), { field: { fieldPath: '__name__' }, direction: 'ASCENDING' }];
@@ -5004,9 +5005,11 @@ async function firestoreAbfrageAlle(userBasis, sammlung, filters, sortFeld, auth
       method: 'POST', headers: { 'Authorization': `Bearer ${authHeader}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ structuredQuery: {
         from: [{ collectionId: sammlung }],
-        where: filters.length === 1 ? filters[0] : { compositeFilter: { op: 'AND', filters } },
+        // W3 DATEV: ohne Filter (Vorab-Lesen mit Projektion) steht kein where in der Abfrage; select: nur diese Felder (oberste Ebene) zurückgeben
+        ...(filters.length ? { where: filters.length === 1 ? filters[0] : { compositeFilter: { op: 'AND', filters } } } : {}),
+        ...(select ? { select: { fields: select.map((fieldPath) => ({ fieldPath })) } } : {}),
         orderBy: reihenfolge,
-        limit: 500,
+        limit: seitenGroesse,
         ...(cursor ? { startAt: { values: cursor, before: false } } : {})
       } })
     });
@@ -5014,7 +5017,7 @@ async function firestoreAbfrageAlle(userBasis, sammlung, filters, sortFeld, auth
     const zeilen = await res.json();
     const docs = Array.isArray(zeilen) ? zeilen.filter((z) => z && z.document).map((z) => z.document) : [];
     alle.push(...docs);
-    if (docs.length < 500) return alle;
+    if (docs.length < seitenGroesse) return alle;
     const letzte = docs[docs.length - 1];
     const wert = sortFeld ? datevDekodiereFelder(letzte.fields || {})[sortFeld] : null;
     if (sortFeld && typeof wert !== 'string') throw new Error(`Abfrage ${sammlung}: Cursor nicht möglich`);
@@ -5027,6 +5030,61 @@ const firestoreFeldFilter = (feld, op, wert) => ({ fieldFilter: { field: { field
 async function firestoreJahresListe(userBasis, sammlung, jahr, authHeader) {
   if (!/^\d{4}$/.test(String(jahr))) return [];
   return firestoreAbfrageAlle(userBasis, sammlung, [firestoreFeldFilter('geschaeftstag', 'GREATER_THAN_OR_EQUAL', `${jahr}-01-01`), firestoreFeldFilter('geschaeftstag', 'LESS_THAN', `${Number(jahr) + 1}-01-01`)], 'geschaeftstag', authHeader);
+}
+
+// ── W3 DATEV: Belege nur für das Exportjahr lesen (regel/datev-lesen.js) ─────────────────────────
+// Anzahl der Belege, höchstens bis (Zählabfrage, eine Unteranfrage); null bei jedem Fehler (der Export liest dann wie bisher alles).
+async function datevDokumenteZaehlen(userBasis, authHeader, bis) {
+  try {
+    const res = await fetch(`${userBasis}:runAggregationQuery`, {
+      method: 'POST', headers: { 'Authorization': `Bearer ${authHeader}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ structuredAggregationQuery: { structuredQuery: { from: [{ collectionId: 'dokumente' }] }, aggregations: [{ alias: 'n', count: { upTo: String(bis) } }] } })
+    });
+    if (!res.ok) return null;
+    const zeilen = await res.json();
+    const f = (Array.isArray(zeilen) ? zeilen : []).map((z) => z && z.result && z.result.aggregateFields).find(Boolean);
+    const n = f && f.n && f.n.integerValue !== undefined ? Number(f.n.integerValue) : NaN;
+    return Number.isSafeInteger(n) && n >= 0 ? n : null;
+  } catch (e) { console.warn('DATEV-Export Belegzahl:', e?.message); return null; }
+}
+// Dokumente (dokumente oder kunden) einzeln per batchGet nach ID (100 je Anfrage). Nur IDs, die als Dokument-ID möglich sind (ein Pfadteil); fehlende Dokumente fehlen auch hier.
+const datevIdMoeglich = (id) => typeof id === 'string' && id.length > 0 && id.length <= 1500 && !id.includes('/') && id !== '.' && id !== '..' && !/^__.*__$/.test(id);
+async function datevNachladen(userId, sammlung, ids, authHeader) {
+  const wurzel = 'projects/kontolux-ai/databases/(default)/documents';
+  const liste = [...new Set(ids.filter(datevIdMoeglich))];
+  const aus = [];
+  for (let i = 0; i < liste.length; i += 100) {
+    const res = await fetch(`https://firestore.googleapis.com/v1/${wurzel}:batchGet`, {
+      method: 'POST', headers: { 'Authorization': `Bearer ${authHeader}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ documents: liste.slice(i, i + 100).map((id) => `${wurzel}/users/${userId}/${sammlung}/${id}`) })
+    });
+    if (!res.ok) throw new Error(`Nachladen ${sammlung} fehlgeschlagen (${res.status})`);
+    for (const z of await res.json()) if (z && z.found) aus.push(z.found);
+  }
+  return aus;
+}
+// Zeitraum-Modus, Schritt 1: Vorab-Lesen aller Belege (wenige Felder) und volle Dokumente für alles, was der Stapel dieses Jahres anfassen kann
+// (Begründung und Beweis: regel/datev-lesen.js, docs/kassenbuch/w3-datev-bericht.md). Ergebnis: { vorab, dokDocs } mit dokDocs nach Name sortiert.
+// Die Originale, auf die Korrekturbelege zeigen, lädt der Aufrufer nach (datevNachladen), sobald er die Korrekturbelege ausgewertet hat.
+async function datevDokumenteZeitraum(userBasis, userId, jahr, authHeader) {
+  const vorab = await firestoreAbfrageAlle(userBasis, 'dokumente', [], null, authHeader, { select: DOK_VORAB_FELDER, seite: DOK_VORAB_SEITE });
+  const jahrNamen = datevJahrNamen(vorab, jahr, firestoreValue);
+  const geladen = new Map();
+  const merke = (docs) => { for (const d of docs) geladen.set(d.name, d); };
+  const bereich = (feld) => [firestoreFeldFilter(feld, 'GREATER_THAN_OR_EQUAL', String(jahr)), firestoreFeldFilter(feld, 'LESS_THAN', String(Number(jahr) + 1))];
+  // Kassenbelege aller Jahre, Korrekturbelege (Storno, Gutschrift) und Stornos alter Form aller Jahre, Zahlungen im Jahr
+  const abfragen = [
+    firestoreAbfrageAlle(userBasis, 'dokumente', bereich('bezahlt_am'), 'bezahlt_am', authHeader),
+    firestoreAbfrageAlle(userBasis, 'dokumente', [firestoreFeldFilter('quelle', 'EQUAL', 'kasse')], null, authHeader),
+    firestoreAbfrageAlle(userBasis, 'dokumente', [firestoreFeldFilter('typ', 'EQUAL', 'storno')], null, authHeader),
+    ...KORREKTUR_BELEG_ARTEN.map((art) => firestoreAbfrageAlle(userBasis, 'dokumente', [firestoreFeldFilter('steuer.beleg_art', 'EQUAL', art)], null, authHeader))
+  ];
+  for (const docs of await Promise.all(abfragen)) merke(docs);
+  // Belege des Jahres ohne Zahlungsdatum (offene Rechnungen mit Belegdatum im Jahr): viele per Bereichsabfrage auf datum, wenige einzeln
+  let fehlt = [...jahrNamen].filter((n) => !geladen.has(n));
+  if (fehlt.length > 300) { merke(await firestoreAbfrageAlle(userBasis, 'dokumente', bereich('datum'), 'datum', authHeader)); fehlt = fehlt.filter((n) => !geladen.has(n)); }
+  if (fehlt.length) merke(await datevNachladen(userId, 'dokumente', fehlt.map((n) => datevDokId({ name: n })), authHeader));
+  return { vorab, dokDocs: datevNachName([...geladen.values()]) };
 }
 
 // ── /datev-export Handler ─────────────────────────────────────────
@@ -5082,23 +5140,53 @@ async function handleDatevExport(body, env, cors = {}) {
   try {
     const base = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}`;
 
+    // W3 DATEV: Lesemodus. 'voll' (bisher): Belegarchiv und Kundenstamm vollständig lesen. 'zeitraum': nur die Belege, die der Stapel dieses Jahres anfassen kann, und
+    // nur die Kunden, auf die sie zeigen (regel/datev-lesen.js). Automatisch ab DOK_VOLL_MAX Belegen und ohne aktive Kern-Option oss (der Kern rechnet die
+    // OSS-Zuordnung über alle Jahre), sonst voll. env.DATEV_LESEMODUS = 'voll' erzwingt den bisherigen Weg (Notschalter), 'zeitraum' den neuen (Tests).
+    const ossDeps = { adminToken: () => getGoogleAccessToken(env, FIRESTORE_SCOPE), fetchFn: (...a) => fetch(...a) };
+    const ossLesefehler = () => new Response(JSON.stringify({ error: 'Export vorübergehend nicht möglich', details: 'Die Angaben zu Verkäufen ins Ausland konnten nicht gelesen werden. Bitte den Export gleich noch einmal starten.' }), { status: 503, headers: { ...cors, 'Content-Type': 'application/json' } });
+    let lesemodus = 'voll';
+    let ossVorbereitet; // undefined = Option noch nicht geprüft
+    const modusWunsch = String(env?.DATEV_LESEMODUS || '').toLowerCase();
+    if (/^\d{4}$/.test(String(jahr)) && modusWunsch !== 'voll') {
+      let viele = modusWunsch === 'zeitraum';
+      if (!viele) { const n = await datevDokumenteZaehlen(base, authHeader, DOK_VOLL_MAX + 1); viele = n !== null && n > DOK_VOLL_MAX; }
+      if (viele) {
+        try { ossVorbereitet = await datevOssVorbereiten(userId, ossDeps); } catch (e) { console.error('DATEV-Export OSS:', e?.message); return ossLesefehler(); }
+        if (!ossVorbereitet) lesemodus = 'zeitraum';
+      }
+    }
+
     // Profil (DATEV-Einstellungen + Kleinunternehmer-Status) + Belegarchiv + Kundenstamm
     // (für die Debitorennummer im Feld "Diverse Adressnummer") parallel laden.
-    const [profilRes, dokDocs, kundenDocs] = await Promise.all([
-      fetch(`${base}/profil/settings`, { headers: { 'Authorization': `Bearer ${authHeader}` } }),
-      firestoreListAll(`${base}/dokumente`, authHeader),
-      firestoreListAll(`${base}/kunden`, authHeader)
-    ]);
+    let dokDocs; let vorabDocs = null; let kundenDocs = null;
+    const lesenZeitraum = lesemodus === 'zeitraum';
+    let profilRes;
+    if (lesemodus === 'zeitraum') {
+      let zeitraum;
+      [profilRes, zeitraum] = await Promise.all([
+        fetch(`${base}/profil/settings`, { headers: { 'Authorization': `Bearer ${authHeader}` } }),
+        datevDokumenteZeitraum(base, userId, jahr, authHeader)
+      ]);
+      dokDocs = zeitraum.dokDocs; vorabDocs = zeitraum.vorab;
+    } else {
+      [profilRes, dokDocs, kundenDocs] = await Promise.all([
+        fetch(`${base}/profil/settings`, { headers: { 'Authorization': `Bearer ${authHeader}` } }),
+        firestoreListAll(`${base}/dokumente`, authHeader),
+        firestoreListAll(`${base}/kunden`, authHeader)
+      ]);
+    }
 
     // kunde_id (Beleg) -> Kundennummer (Kundenstamm), nur wenn eine Kundennummer gepflegt ist —
     // DATEV erwartet in "Diverse Adressnummer" eine reine Zahl, daher wie beim Bankkonto robust
     // die erste Zahl aus dem Feld extrahieren statt den Rohwert zu übernehmen.
     const kundenNummerById = {};
-    for (const kDoc of kundenDocs) {
+    const kundeEintragen = (kDoc) => {
       const kId = kDoc.name?.split('/').pop();
       const kNummer = extractKontoNummer(firestoreValue((kDoc.fields || {}).kundennummer));
       if (kId && kNummer) kundenNummerById[kId] = kNummer;
-    }
+    };
+    for (const kDoc of kundenDocs || []) kundeEintragen(kDoc); // Zeitraum-Modus: nur die referenzierten Kunden, nach dem Nachladen der Originale (unten)
 
     const profilFields = profilRes.ok ? ((await profilRes.json()).fields || {}) : {};
     const kleinunternehmer = isKleinunternehmer(profilFields);
@@ -5182,21 +5270,18 @@ async function handleDatevExport(body, env, cors = {}) {
 
     // Steuersatz je Integration aus deren Einnahmen (zuletzt verwendeter Satz, wie
     // berechneUstSchaetzwert in index.html) — für Erstattungen, die ohne Satz gespeichert werden.
-    const satzJeQuelle = {};
-    dokDocs
-      .map(d => d.fields || {})
-      .filter(f => firestoreValue(f.typ) === 'rechnung_ausgehend' && firestoreValue(f.deleted) !== true
-        && DATEV_WEBHOOK_QUELLEN.includes(firestoreValue(f.quelle)))
-      .sort((a, b) => String(firestoreValue(a.bezahlt_am) || firestoreValue(a.datum) || '').localeCompare(String(firestoreValue(b.bezahlt_am) || firestoreValue(b.datum) || '')))
-      .forEach(f => { satzJeQuelle[firestoreValue(f.quelle)] = String(firestoreValue(f.mwst_satz) ?? ''); });
+    // W3 DATEV: im Zeitraum-Modus aus dem Vorab-Lesen aller Belege (alle Jahre, gleiche Funktion wie im vollen Modus).
+    const satzJeQuelle = datevSatzJeQuelle(vorabDocs || dokDocs, firestoreValue, DATEV_WEBHOOK_QUELLEN);
 
     // KX-WC2 (BP-30): OSS-Umsätze nach dem Fall des Kerns (regel/datev-oss.js). null = Kern-Option oss aus, dann bleibt der Export wie vorher.
     let ossPlan = null;
-    try {
-      ossPlan = await datevOssPlanLaden(userId, dokDocs, { adminToken: () => getGoogleAccessToken(env, FIRESTORE_SCOPE), fetchFn: (...a) => fetch(...a) });
-    } catch (e) {
-      console.error('DATEV-Export OSS:', e?.message);
-      return new Response(JSON.stringify({ error: 'Export vorübergehend nicht möglich', details: 'Die Angaben zu Verkäufen ins Ausland konnten nicht gelesen werden. Bitte den Export gleich noch einmal starten.' }), { status: 503, headers: { ...cors, 'Content-Type': 'application/json' } });
+    if (lesemodus !== 'zeitraum') { // Zeitraum-Modus nur bei ausgeschalteter Option (ossVorbereitet null): kein Plan
+      try {
+        ossPlan = await datevOssPlanLaden(userId, dokDocs, { ...ossDeps, ...(ossVorbereitet !== undefined ? { vorbereitet: ossVorbereitet } : {}) });
+      } catch (e) {
+        console.error('DATEV-Export OSS:', e?.message);
+        return ossLesefehler();
+      }
     }
     const ossOffen = [];
 
@@ -5224,7 +5309,6 @@ async function handleDatevExport(body, env, cors = {}) {
     const ossStorniert = [];
     const korrekturOffen = [];
     const korrekturOhneRueckzahlung = [];
-    const dokById = new Map(dokDocs.map((d) => [String(d.name || '').split('/').pop(), d]));
     // Vorlauf über die Korrekturbelege (A-H1, A-N2): stornoWirksam = Originale, auf die ein nicht gelöschter v2-Storno zeigt (der Korrektur-Dialog löscht das
     // Original weich und markiert es storniert; der Kern lässt es wirksam, bis zurückgezahlt ist, der Export hält es genauso im Stapel).
     // rzTraeger = Originale, zu denen mindestens ein Korrekturbeleg eine Rückzahlung trägt (dann kein Hinweis „ohne Rückzahlung“ bei einem anderen).
@@ -5247,12 +5331,7 @@ async function handleDatevExport(body, env, cors = {}) {
     }
     // G3-N3: Storno nach voller Gutschrift (Rest 0) bekommt keinen Steuerteil (Altform: typ storno + storniert_rechnungsnr), das Original muss trotzdem wirksam
     // bleiben, wenn zu ihm schon ein v2-Korrekturbeleg (die Gutschrift) existiert.
-    const belegIdZuNr = new Map();
-    for (const d of dokDocs) {
-      const f = d.fields || {};
-      const nr0 = firestoreValue(f.rechnungsnr) || firestoreValue(f.rechnungsnummer);
-      if (nr0 && (firestoreValue(f.typ) === 'rechnung_ausgehend' || firestoreValue(f.typ) === 'rechnung_eingehend')) belegIdZuNr.set(String(nr0), String(d.name || '').split('/').pop());
-    }
+    const belegIdZuNr = datevBelegIdZuNr(vorabDocs || dokDocs, firestoreValue); // W3 DATEV: Zeitraum-Modus aus dem Vorab-Lesen aller Belege
     const hatV2Korrektur = new Set([...korrekturSteuer.values()].map((st) => String(st.bezug.storniert_beleg_id || st.bezug.korrigiert_beleg_id)));
     for (const d of dokDocs) {
       const f = d.fields || {};
@@ -5261,6 +5340,26 @@ async function handleDatevExport(body, env, cors = {}) {
       const origId = belegIdZuNr.get(String(firestoreValue(f.storniert_rechnungsnr) || ''));
       if (origId && hatV2Korrektur.has(origId)) stornoWirksam.add(origId);
     }
+    // W3 DATEV, Zeitraum-Modus: die Originale, auf die Korrekturbelege (auch Kassen-Stornos) zeigen, und die aufgelösten Originale alter Stornos liegen oft in einem
+    // anderen Jahr und fehlen noch: gezielt nachladen (batchGet), dann wieder nach Name ordnen (Reihenfolge wie die Liste des vollen Modus).
+    if (lesenZeitraum) {
+      const vorhanden = new Set(dokDocs.map(datevDokId));
+      const noetig = new Set(stornoWirksam);
+      for (const st of korrekturSteuer.values()) noetig.add(String(st.bezug.storniert_beleg_id || st.bezug.korrigiert_beleg_id));
+      for (const d of dokDocs) {
+        const f = d.fields || {};
+        if (firestoreValue(f.quelle) !== 'kasse' || !firestoreValue(f.kassentag_id)) continue;
+        const kd = datevDekodiereFelder(f);
+        if (kd.steuer && kd.steuer.bezug && kd.steuer.bezug.storniert_beleg_id) noetig.add(String(kd.steuer.bezug.storniert_beleg_id));
+      }
+      const fehlend = [...noetig].filter((id) => !vorhanden.has(id));
+      if (fehlend.length) dokDocs = datevNachName([...dokDocs, ...await datevNachladen(userId, 'dokumente', fehlend, authHeader)]);
+      // Kunden: nur die, auf die ein geladener Beleg zeigt (die Nummer steht nur in "Diverse Adressnummer" bei Einnahmen, die Menge der Verweise ist ein Obermaß)
+      const kundenIds = new Set();
+      for (const d of dokDocs) { const k = firestoreValue((d.fields || {}).kunde_id); if (typeof k === 'string' && k) kundenIds.add(k); }
+      for (const kDoc of await datevNachladen(userId, 'kunden', [...kundenIds], authHeader)) kundeEintragen(kDoc);
+    }
+    const dokById = new Map(dokDocs.map((d) => [String(d.name || '').split('/').pop(), d]));
     const nrBelegt = new Map(); // A-N3: Belegfeld 1 der Gegenbuchungen ohne Belegnummer eindeutig machen
     const ossOriginal = (id, of) => !!(ossPlan && ossPlan.get(String(id))) || !!(of && of.steuer && of.steuer.mapValue && of.steuer.mapValue.fields && of.steuer.mapValue.fields.oss);
 
@@ -5576,16 +5675,7 @@ async function handleDatevExport(body, env, cors = {}) {
       // Belegdatum und Exportjahr nach Zahlungsdatum (Konzept 7.2, Spalte 10 'Belegdatum': Zahlungsdatum, EÜR-/Bank-Sicht, § 11 EStG),
       // bei Soll- wie bei Istversteuerung. Das Rechnungsdatum (datum) dient nur als Rückfall, dann createdAt (TR-euer-006).
       // Leistungsdatum und Steuerperiode für die Soll-USt kommen in die Spalten 115/116 (Phase 5, noch nicht gebaut).
-      const datumStr = firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum);
-      let belegDatum;
-      if (datumStr && /^\d{4}-\d{2}-\d{2}/.test(datumStr)) {
-        belegDatum = new Date(datumStr + 'T00:00:00');
-      } else if (firestoreValue(fields.createdAt)) {
-        belegDatum = new Date(firestoreValue(fields.createdAt));
-      } else {
-        belegDatum = new Date();
-      }
-      if (isNaN(belegDatum.getTime())) belegDatum = new Date();
+      const belegDatum = datevBelegDatum(fields, firestoreValue); // W3 DATEV: dieselbe Regel nutzt das Vorab-Lesen (regel/datev-lesen.js)
 
       if (String(belegDatum.getFullYear()) !== String(jahr) && !(kasseMarke && kasseMarke.stornoImJahr)) continue; // stornierte Kassenausgabe aus dem Vorjahr: Gegenbuchung dieses Jahres
 
@@ -5883,7 +5973,8 @@ async function handleDatevExport(body, env, cors = {}) {
     // Privatentnahmen/-einlagen des Jahres (Storno-Vorgänge bleiben draußen)
     // F2-Fix B-M1: kein stilles Verschlucken (vorher .catch(() => [])): ein Lesefehler bricht den Export ab, sonst fehlten Entnahmen und Einlagen ohne Hinweis
     let privatDocs;
-    try { privatDocs = await firestoreListAll(`${base}/privatvorgaenge`, authHeader); } catch (e) { console.error('DATEV-Export Privatvorgänge:', e?.message); throw new DatevLesefehler('Die Privatentnahmen und -einlagen konnten nicht gelesen werden.'); }
+    // W3 DATEV, Zeitraum-Modus: nur Vorgänge mit Datum im Jahr (Textbereich auf datum; die Schleife unten prüft ohnehin die ersten vier Zeichen), wieder nach Name geordnet
+    try { privatDocs = lesenZeitraum ? datevNachName(await firestoreAbfrageAlle(userBasis, 'privatvorgaenge', [firestoreFeldFilter('datum', 'GREATER_THAN_OR_EQUAL', String(jahr)), firestoreFeldFilter('datum', 'LESS_THAN', String(Number(jahr) + 1))], 'datum', authHeader)) : await firestoreListAll(`${base}/privatvorgaenge`, authHeader); } catch (e) { console.error('DATEV-Export Privatvorgänge:', e?.message); throw new DatevLesefehler('Die Privatentnahmen und -einlagen konnten nicht gelesen werden.'); }
     // Bewegungen, auf die Privatvorgänge des Jahres aus der Kasse zeigen (Belegfeld 1), aber nicht im Jahres-Bestand stehen: einzeln per batchGet nachladen
     {
       const fehlende = [...new Set(privatDocs.filter((d) => firestoreValue((d.fields || {}).zahlweg) === 'kasse' && String(firestoreValue((d.fields || {}).datum) || '').slice(0, 4) === String(jahr)).map((d) => firestoreValue((d.fields || {}).kassenbewegung_id)).filter(Boolean))];

@@ -29,7 +29,7 @@ const P = (p) => `users/${UID}/${p}`;
 // ── Worker-Umgebung für /datev-export ────────────────────────────────────────────────────────────
 const { privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
 const kvStub = { get: async () => null, put: async () => {}, delete: async () => {} };
-const env = { FIREBASE_ADMIN_CLIENT_EMAIL: 'x@example.iam.gserviceaccount.com', FIREBASE_ADMIN_PRIVATE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }), PROFIL_KV: kvStub, ABO_KV: kvStub, PDF_RESULTS: kvStub };
+const env = { ...(process.env.DATEV_LESEMODUS ? { DATEV_LESEMODUS: process.env.DATEV_LESEMODUS } : {}), FIREBASE_ADMIN_CLIENT_EMAIL: 'x@example.iam.gserviceaccount.com', FIREBASE_ADMIN_PRIVATE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }), PROFIL_KV: kvStub, ABO_KV: kvStub, PDF_RESULTS: kvStub };
 const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 let aktuellesFs = null;
 globalThis.fetch = async (input, init = {}) => {
@@ -933,7 +933,7 @@ test('B-M1: Lesefehler bei Kassendaten brechen den Export ab (503, klare Meldung
   const faelle = [
     ['Kassentage', (u) => u.endsWith('/documents/users/' + UID + ':runQuery') ? 'kassentage' : null],
     ['Fassungen', (u, init) => (u.endsWith(':batchGet') && /fassungen/.test(String(init.body || '')) ? 'batch' : null)],
-    ['Privatvorgänge', (u) => (/\/privatvorgaenge\?/.test(u) ? 'privat' : null)],
+    ['Privatvorgänge', (u, init) => (/\/privatvorgaenge\?/.test(u) || (/:runQuery$/.test(u) && /privatvorgaenge/.test(String((init && init.body) || ''))) ? 'privat' : null)], // W3 DATEV: im Zeitraum-Modus eine Abfrage statt der Liste
     ['Kassen', (u) => (/\/kassen\?/.test(u) ? 'kassen' : null)],
   ];
   for (const [name, erkenne] of faelle) {

@@ -10,7 +10,7 @@ import { datevBelegfeldBereinigen, datevNummerPruefen, datevKontoVierstellig, da
 const UID = 'nutzerGesamtcheck000001';
 const { privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
 const kvStub = { get: async () => null, put: async () => {}, delete: async () => {} };
-const env = { FIREBASE_ADMIN_CLIENT_EMAIL: 'x@example.iam.gserviceaccount.com', FIREBASE_ADMIN_PRIVATE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }), PROFIL_KV: kvStub, ABO_KV: kvStub, PDF_RESULTS: kvStub };
+const env = { ...(process.env.DATEV_LESEMODUS ? { DATEV_LESEMODUS: process.env.DATEV_LESEMODUS } : {}), FIREBASE_ADMIN_CLIENT_EMAIL: 'x@example.iam.gserviceaccount.com', FIREBASE_ADMIN_PRIVATE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }), PROFIL_KV: kvStub, ABO_KV: kvStub, PDF_RESULTS: kvStub };
 const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 let aktuellesFs = null;
 globalThis.fetch = async (input, init = {}) => {

@@ -7,7 +7,7 @@
     "predeploy": "npm run deploy:check",
     "deploy:check": "node scripts/deploy-check.mjs",
     "dev": "wrangler dev",
-    "test": "node --test test/*.test.mjs && node scripts/test-skripte.mjs"
+    "test": "node --test test/*.test.mjs && DATEV_LESEMODUS=zeitraum node --test test/datev-gesamtcheck-fixes.test.mjs test/datev-mischsatz.test.mjs test/kasse-datev.test.mjs test/worker-c2-datev-oss.test.mjs && node scripts/test-skripte.mjs"
   },
   "dependencies": {
     "fast-xml-parser": "^5.11.0",
