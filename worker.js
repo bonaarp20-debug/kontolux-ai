@@ -4789,7 +4789,9 @@ async function handleStripeGebuehren(body, env, cors, uid) {
 function datevText(val, maxLen) {
   let s = String(val ?? '').replace(/[\r\n]+/g, ' ');
   if (/^[=+\-@\t]/.test(s)) s = `'${s}`;
-  if (maxLen) s = s.slice(0, maxLen);
+  // E-F1: Längengrenze nach Zeichen (Codepunkten), nicht nach UTF-16-Einheiten: ein Emoji an der Grenze wird sonst zerschnitten (U+FFFD).
+  // Für Texte ohne Zeichen außerhalb der Grundebene (BMP) ist das Ergebnis byte-gleich zu slice.
+  if (maxLen) s = Array.from(s).slice(0, maxLen).join('');
   return `"${s.replace(/"/g, '""')}"`;
 }
 
@@ -4906,7 +4908,8 @@ function datevBelegNr(fields, id, fallbackDatum) {
 
 // Buchungstext einer Mischsatz-Zeile: Satzmarke am Ende, der Beleg-Text wird gekürzt statt die Marke abzuschneiden (DATEV: 60 Zeichen).
 function buchungstextBasisKurz(text, marke) {
-  return String(text).slice(0, Math.max(0, 60 - marke.length)) + marke;
+  // E-F1: nach Zeichen (Codepunkten) kürzen, damit ein Emoji an der Grenze nicht zerschnitten wird (BMP-Texte: byte-gleich)
+  return Array.from(String(text)).slice(0, Math.max(0, 60 - Array.from(marke).length)).join('') + marke;
 }
 
 // Gegenkonto aus der Kategorie nur dann übernehmen, wenn sie zur Buchungsrichtung passt.
@@ -6139,8 +6142,12 @@ async function handleDatevExport(body, env, cors = {}) {
       belegfeldWerte.get(bf.wert).add(String(b.belegfeld1 ?? ''));
       if (bf.geaendert) { belegfeldGeaendert++; if (!belegfeldBeispiel) belegfeldBeispiel = `„${Array.from(String(b.belegfeld1 ?? '')).slice(0, 40).join('')}“ wurde zu „${bf.wert}“`; }
       const zeile = [
+      // E-F3: Beträge entstehen als Cent-Ganzzahl / 100 (alle Sonderpfade) oder als gespeicherter Beleg-Betrag mit höchstens zwei Stellen;
+      // toFixed(2) rundet Fließkommarauschen (0,1 + 0,2) sauber auf zwei Stellen. Mehr echte Nachkommastellen sind kein Betriebsfall (kein Cent-Bruchteil in Belegen);
+      // die übrigen Pfade runden mit Math.round(betrag * 100), also gleich (1,005 wird dort wie hier 1,00).
       b.betrag.toFixed(2).replace('.', ','),
-      b.sollHaben,
+      // E-F2: Soll/Haben-Kennzeichen ist im DATEV-Format ein Textfeld ("S"/"H", so schreibt DATEV selbst)
+      datevText(b.sollHaben),
       '', '', '', '',
       b.konto,
       b.gegenkonto,

@@ -43,7 +43,7 @@ async function ruf(w, fs, modus, jahr) {
   const roh = r.status === 200 ? text.replace(/^﻿/, '').split('\r\n').filter(Boolean) : [];
   const ohneZeit = roh.length ? [roh[0].split(';').map((x, i) => (i === 5 ? '' : x)).join(';'), ...roh.slice(1)].join('\r\n') : text;
   return {
-    status: r.status, zeilen: roh.slice(2).map((x) => x.split(';')), warnung: decodeURIComponent(r.headers.get('X-Datev-Warning') || ''), ohneZeit, text,
+    status: r.status, zeilen: roh.slice(2).map((x) => x.split(';').map((f, i) => (i === 1 ? f.replace(/^"|"$/g, '') : f))), warnung: decodeURIComponent(r.headers.get('X-Datev-Warning') || ''), ohneZeit, text,
     zaehler: { exportiert: r.headers.get('X-Datev-Exported-Count'), unbezahlt: r.headers.get('X-Datev-Skipped-Unpaid-Count') }, anfragen: fs.log.anfragen - vor,
   };
 }

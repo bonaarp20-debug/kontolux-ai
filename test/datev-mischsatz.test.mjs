@@ -45,7 +45,7 @@ async function exportiere(belege, { skr = 'SKR03', ku = false, profil = REGEL, j
   }), env, { waitUntil() {} });
   const text = new TextDecoder('utf-8').decode(new Uint8Array(await r.arrayBuffer()));
   const roh = r.status === 200 ? text.replace(/^﻿/, '').split('\r\n').filter(Boolean) : [];
-  const zeilen = roh.slice(2).map((x) => x.split(';'));
+  const zeilen = roh.slice(2).map((x) => x.split(';').map((f, i) => (i === 1 ? f.replace(/^"|"$/g, '') : f)));
   const ohneZeit = roh.length ? [roh[0].split(';').map((x, i) => (i === 5 ? '' : x)).join(';'), ...roh.slice(1)].join('\r\n') : text;
   return { status: r.status, zeilen, warnung: decodeURIComponent(r.headers.get('X-Datev-Warning') || ''), ohneZeit };
 }

@@ -48,7 +48,7 @@ async function exportiere(fs, jahr = 2026) {
   }), env, { waitUntil() {} });
   const text = new TextDecoder('utf-8').decode(new Uint8Array(await r.arrayBuffer()));
   const roh = r.status === 200 ? text.replace(/^﻿/, '').split('\r\n').filter(Boolean) : [];
-  const zeilen = roh.slice(2).map((x) => x.split(';'));
+  const zeilen = roh.slice(2).map((x) => x.split(';').map((f, i) => (i === 1 ? f.replace(/^"|"$/g, '') : f)));
   return { status: r.status, text, zeilen, warnung: decodeURIComponent(r.headers.get('X-Datev-Warning') || '') };
 }
 const ohne = (s) => String(s).replace(/"/g, '');
