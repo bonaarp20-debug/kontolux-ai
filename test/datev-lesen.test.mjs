@@ -62,8 +62,10 @@ async function beide(fs, jahr, name = '') {
   if (workerAlt) {
     const alt = await ruf(workerAlt, fs, undefined, jahr);
     assert.equal(alt.status, voll.status, `${name} ${jahr}: Status alter Worker`);
-    assert.equal(alt.ohneZeit, voll.ohneZeit, `${name} ${jahr}: Stapel alter Worker`);
-    assert.equal(alt.warnung, voll.warnung, `${name} ${jahr}: Warnung alter Worker`);
+    if (voll.status === 200) { // 404: der Text nennt jetzt die Warnungen (bewusste Änderung, eigener Test unten)
+      assert.equal(alt.ohneZeit, voll.ohneZeit, `${name} ${jahr}: Stapel alter Worker`);
+      assert.equal(alt.warnung, voll.warnung, `${name} ${jahr}: Warnung alter Worker`);
+    }
   }
   return voll;
 }
