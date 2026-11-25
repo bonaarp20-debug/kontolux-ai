@@ -466,24 +466,26 @@ async function sumupLesen(c, tag) {
   return { aktuell, barCent };
 }
 
-// Gesamtumsatz nach § 19 Abs. 2 UStG des Jahres bis einschließlich Vortag (Näherung aus den Belegen mit Belegdatum im Jahr vor dem Tag; Kern grenzenFuerJahr)
+// Gesamtumsatz nach § 19 Abs. 2 UStG des Jahres bis einschließlich Vortag (Näherung aus den Belegen im Jahr vor dem Tag; Kern grenzenFuerJahr)
 // hyg M5: Die Summe rechnet der Kern aus den Belegen (Wirkungen, Stornos, Steuerfälle); eine Firestore-Summe über ein Feld (runAggregationQuery sum) gäbe diese
 // Bedeutung nicht wieder, ein mitgeführter Jahreszähler ginge nicht, weil der Client dokumente direkt schreibt. Darum: alle Belege des Zeitraums vollständig lesen,
-// seitenweise mit Cursor (datum, Dokumentname), ohne Abschneiden. Erst wenn die erste Seite voll ist, zählt runAggregationQuery (count) die Treffer: über
+// seitenweise mit Cursor (Feld, Dokumentname), ohne Abschneiden. Erst wenn die erste Seite voll ist, zählt runAggregationQuery (count) die Treffer: über
 // KU_BELEGE_MAX 503 KU_SUMME_ZU_GROSS (Budget), weniger gelesen als gezählt 503 KU_SUMME_UNVOLLSTAENDIG. Nie eine geschätzte oder abgeschnittene (zu kleine) Summe.
 // Doppelt gelesene Dokumente (Datum zwischen zwei Seiten geändert) zählen einmal.
+// O20a M1: Der Kern zählt den Umsatz am Zahlungstag (EÜR-Wirkung, datum_wirk), nicht am Belegdatum. Eine Rechnung vom Dezember des Vorjahres, im Januar bezahlt,
+// gehört in den Umsatz des Jahres, liegt aber nicht im Belegdatum-Bereich. Darum zwei Bereiche: Belegdatum im Jahr UND bezahlt_am im Jahr (jeweils vor dem Tag),
+// vereinigt nach Pfad. Der Kern filtert danach selbst auf die Wirkung im Jahr und vor dem Tag, ein zusätzlich gelesener Beleg kann also nichts zu viel zählen.
+// Unteranfragen höchstens 2 x (1 + 1 Zählung + 4 weitere Seiten) = 12 (vorher 6); mit den übrigen Lesevorgängen des Abschlusses (etwa 14) unter 35.
 export const KU_SEITE = 2000;
-export const KU_BELEGE_MAX = 10000; // 5 Seiten plus eine Zählung; reicht für jede Kleinunternehmerin (Umsatzgrenze), schont das Budget (REGEL_UNTERANFRAGEN_MAX 35)
-async function kuSummeVorTag(c, tag, kernOptionen) {
-  const { fs, uid, profil } = c;
-  const jahr = Number(tag.slice(0, 4));
+export const KU_BELEGE_MAX = 10000; // je Bereich 5 Seiten plus eine Zählung, auch für die Vereinigung; reicht für jede Kleinunternehmerin (Umsatzgrenze), schont das Budget (REGEL_UNTERANFRAGEN_MAX 35)
+async function kuBereichLesen(fs, uid, feld, jahr, tag) {
   const basis = { from: [{ collectionId: 'dokumente' }], where: { compositeFilter: { op: 'AND', filters: [
-    { fieldFilter: { field: { fieldPath: 'datum' }, op: 'GREATER_THAN_OR_EQUAL', value: { stringValue: `${jahr}-01-01` } } },
-    { fieldFilter: { field: { fieldPath: 'datum' }, op: 'LESS_THAN', value: { stringValue: tag } } },
+    { fieldFilter: { field: { fieldPath: feld }, op: 'GREATER_THAN_OR_EQUAL', value: { stringValue: `${jahr}-01-01` } } },
+    { fieldFilter: { field: { fieldPath: feld }, op: 'LESS_THAN', value: { stringValue: tag } } },
   ] } } };
   const seite = (nach) => fs.runQuery(`users/${uid}`, {
-    ...basis, orderBy: [{ field: { fieldPath: 'datum' }, direction: 'ASCENDING' }, { field: { fieldPath: '__name__' }, direction: 'ASCENDING' }],
-    ...(nach ? { startAt: { values: [{ stringValue: nach.daten.datum }, { referenceValue: vollerName(nach.pfad) }], before: false } } : {}),
+    ...basis, orderBy: [{ field: { fieldPath: feld }, direction: 'ASCENDING' }, { field: { fieldPath: '__name__' }, direction: 'ASCENDING' }],
+    ...(nach ? { startAt: { values: [{ stringValue: nach.daten[feld] }, { referenceValue: vollerName(nach.pfad) }], before: false } } : {}),
     limit: KU_SEITE,
   });
   let x = await seite(null);
@@ -498,6 +500,15 @@ async function kuSummeVorTag(c, tag, kernOptionen) {
     }
     if (gelesen.size < n) throw new KasseLesefehler('KU_SUMME_UNVOLLSTAENDIG', 'KU-Summe: weniger Belege gelesen als gezählt');
   }
+  return gelesen;
+}
+async function kuSummeVorTag(c, tag, kernOptionen) {
+  const { fs, uid, profil } = c;
+  const jahr = Number(tag.slice(0, 4));
+  const nachDatum = await kuBereichLesen(fs, uid, 'datum', jahr, tag);
+  const nachZahlung = await kuBereichLesen(fs, uid, 'bezahlt_am', jahr, tag);
+  const gelesen = new Map([...nachDatum, ...nachZahlung]);
+  if (gelesen.size > KU_BELEGE_MAX) throw new KasseLesefehler('KU_SUMME_ZU_GROSS', 'KU-Summe: mehr Belege als lesbar');
   const r = [...gelesen.values()];
   // R1.5 / O14 M1: eine Retoure mindert die Summe nur, wenn ihr Verkaufstag im selben Jahr liegt (Kern kuKassenRetoureWirkungen); das Original liegt dann im
   // Zeitraum dieser Abfrage. Retouren auf Vorjahresverkäufe mindern bis zur Antwort des Steuerberaters nicht (kein Nachlesen des Vorjahres-Originals).

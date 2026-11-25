@@ -140,7 +140,9 @@ test('Steuerprofil nicht bestätigt oder fehlend: 403 PROFIL_FEHLT; AGB-Mindestf
     assert.equal(r.json.fehler[0].code, 'PROFIL_FEHLT');
     assert.equal(u.fs.log.commits, 0);
   }
-  for (const agb of [false, '2026-12-13-9', '2026-01-01-1']) {
+  // O20d M1: „ein Tag vor der Mindestfassung“ wird aus AGB_MINDESTFASSUNG_KASSE abgeleitet (die Fassung wird beim Deploy umdatiert), nicht fest eingetragen
+  const tagVorFassung = new Date(Date.parse(`${AGB_MINDESTFASSUNG_KASSE.slice(0, 10)}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+  for (const agb of [false, `${tagVorFassung}-9`, '2026-01-01-1']) {
     const u = umgebung({ agb });
     const r = await u.kasse({ ...KASSE_ANLEGEN });
     assert.equal(r.status, 403, String(agb));
@@ -148,7 +150,8 @@ test('Steuerprofil nicht bestätigt oder fehlend: 403 PROFIL_FEHLT; AGB-Mindestf
     assert.equal(u.fs.log.commits, 0);
   }
   // Fassung gleich oder neuer ist genug
-  assert.equal((await umgebung({ agb: '2027-01-01-1' }).kasse({ ...KASSE_ANLEGEN })).status, 200);
+  const tagNachFassung = new Date(Date.parse(`${AGB_MINDESTFASSUNG_KASSE.slice(0, 10)}T00:00:00Z`) + 86400000).toISOString().slice(0, 10);
+  for (const agb of [AGB_MINDESTFASSUNG_KASSE, `${tagNachFassung}-1`]) assert.equal((await umgebung({ agb }).kasse({ ...KASSE_ANLEGEN })).status, 200, agb);
   // Prüfreihenfolge: Profil vor AGB (beides fehlt: PROFIL_FEHLT), Feature vor Profil (503)
   assert.equal((await umgebung({ profil: null, agb: false }).kasse({ ...KASSE_ANLEGEN })).json.fehler[0].code, 'PROFIL_FEHLT');
 });
@@ -2602,6 +2605,56 @@ test('hyg M5: KU-Summe ohne Abschneiden: alle Belege seitenweise (Cursor datum/N
     if (code) assert.equal(y.json.fehler[0].code, code);
     assert.deepEqual(z.fs.pfade(P('kassentage/')), []);
   }
+});
+
+test('O20a M1: KU-Summe zählt Umsatz am Zahlungstag: eine Rechnung vom Vorjahr, im laufenden Jahr bezahlt, schlägt die 100.000-Euro-Grenze an; Vorjahr bezahlt oder unbezahlt zählt nicht; Seiten und Unteranfragen im Rahmen', async () => {
+  const ku = (id, cent) => ({ ...abschluss(id, '2026-11-02'), umsaetze: [{ steuerfall: 'A_KU', bar_cent: cent, unbar_cent: 0 }], gezaehlt_cent: 10000 + cent });
+  const rechnung = (u, name, extra) => u.fs.setze(P(`dokumente/${name}`), { typ: 'rechnung_ausgehend', betrag: 99950, betrag_netto: 99950, mwst_satz: 'keine', absender: 'K', rechnungsnr: name, ...extra });
+  // Rechnung 20.12.2025, bezahlt 10.01.2026: 99.950 im Jahr 2026, plus 100,00 am Tag = 100.050 > 100.000
+  const a = umgebung({ profil: KU });
+  const aid = await a.legeKasseAn();
+  rechnung(a, 'vorjahr', { datum: '2025-12-20', bezahlt: true, bezahlt_am: '2026-01-10' });
+  const r = await a.tagRufe(ku(aid, 10000));
+  assert.equal(r.status, 409, JSON.stringify(r.json));
+  assert.equal(r.json.fehler[0].code, 'KU_GRENZE_AM_TAG');
+  assert.equal(r.json.fehler[0].summe_cent, 9995000 + 10000);
+  assert.deepEqual(a.fs.pfade(P('kassentage/')), []);
+  // Gegenproben: im Vorjahr bezahlt, unbezahlt, oder nach dem Tag bezahlt: zählt nicht zum Umsatz 2026 bis zum Tag
+  for (const extra of [{ datum: '2025-12-20', bezahlt: true, bezahlt_am: '2025-12-28' }, { datum: '2025-12-20', bezahlt: false }, { datum: '2025-12-20', bezahlt: true, bezahlt_am: '2026-11-05' }]) {
+    const b = umgebung({ profil: KU });
+    const bid = await b.legeKasseAn();
+    rechnung(b, 'vorjahr', extra);
+    const rb = await b.tagRufe(ku(bid, 10000));
+    assert.equal(rb.status, 200, JSON.stringify(extra) + JSON.stringify(rb.json));
+  }
+  // Rechnung im Jahr datiert UND im Jahr bezahlt (liegt in beiden Bereichen): zählt einmal
+  const d = umgebung({ profil: KU });
+  const did = await d.legeKasseAn();
+  rechnung(d, 'doppelt', { betrag: 89950, betrag_netto: 89950, datum: '2026-03-01', bezahlt: true, bezahlt_am: '2026-03-05' });
+  assert.equal((await d.tagRufe(ku(did, 10000))).status, 200); // 89.950 + 100 = 90.050 (doppelt gezählt: 180.000)
+  // Seiten im Zahlungs-Bereich (2.100 Vorjahresrechnungen, im Jahr bezahlt) und gleichzeitig im Datums-Bereich (2.100): beide mit Zählung, Unteranfragen unter dem Budget
+  const w = umgebung({ profil: KU });
+  const wid = await w.legeKasseAn();
+  for (let i = 0; i < 2100; i += 1) {
+    const z = String(i).padStart(5, '0');
+    w.fs.setze(P(`dokumente/vj${z}`), { typ: 'rechnung_ausgehend', betrag: 10, betrag_netto: 10, mwst_satz: 'keine', datum: '2025-12-15', bezahlt: true, bezahlt_am: `2026-${String(1 + (i % 10)).padStart(2, '0')}-15`, absender: 'K', rechnungsnr: `V${i}` });
+    w.fs.setze(P(`dokumente/jj${z}`), { typ: 'rechnung_ausgehend', betrag: 39, betrag_netto: 39, mwst_satz: 'keine', datum: `2026-${String(1 + (i % 10)).padStart(2, '0')}-15`, bezahlt: false, absender: 'K', rechnungsnr: `J${i}` });
+  }
+  w.fs.setze(P('dokumente/vjplus'), { typ: 'rechnung_ausgehend', betrag: 0, betrag_netto: 0, mwst_satz: 'keine', datum: '2025-12-15', bezahlt: false, absender: 'K', rechnungsnr: 'VP' });
+  const vor = w.fs.log.anfragen;
+  const rw = await w.tagRufe(ku(wid, 100));
+  // Vorjahr bezahlt: 2.100 mal 10,00 = 21.000; Jahr unbezahlt zählt nicht: keine Grenze, Abschluss geht durch
+  assert.equal(rw.status, 200, JSON.stringify(rw.json));
+  assert.ok(w.fs.log.anfragen - vor <= 30, `Anfragen ${w.fs.log.anfragen - vor}`);
+  assert.equal(w.fs.log.methoden.filter((x) => x === 'runAggregationQuery').length, 2);
+  // gleiche Menge, aber 2.100 mal 49,00 bezahlt im Jahr (Vorjahresrechnungen): 102.900 > Grenze, volle Summe über beide Seiten
+  const v = umgebung({ profil: KU });
+  const vid = await v.legeKasseAn();
+  for (let i = 0; i < 2100; i += 1) v.fs.setze(P(`dokumente/vj${String(i).padStart(5, '0')}`), { typ: 'rechnung_ausgehend', betrag: 49, betrag_netto: 49, mwst_satz: 'keine', datum: '2025-12-15', bezahlt: true, bezahlt_am: `2026-${String(1 + (i % 10)).padStart(2, '0')}-15`, absender: 'K', rechnungsnr: `V${i}` });
+  const rv = await v.tagRufe(ku(vid, 10000));
+  assert.equal(rv.status, 409, JSON.stringify(rv.json));
+  assert.equal(rv.json.fehler[0].code, 'KU_GRENZE_AM_TAG');
+  assert.equal(rv.json.fehler[0].summe_cent, 10290000 + 10000);
 });
 
 test('O6 N1: ein vom Client gefälschtes Dokument mit quelle kasse (ohne gesperrt) umgeht die Ähnlichkeitsprüfung nicht; echte Kassenbelege (gesperrt, gesperrt_durch kasse) zählen weiter nicht', async () => {

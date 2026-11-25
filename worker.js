@@ -26,7 +26,7 @@ import { datevOssPlanLaden, datevOssVorbereiten, datevOssBuchungen } from './reg
 import { rechnungsnrDuplikat, rechnungsnrAbfragen, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c); O11 N2 Varianten; O12a N1 gemeinsame Abfragen
 import { datevMischsatzGruppen, datevKorrekturGruppen, KORREKTUR_BELEG_ARTEN } from './regel/datev-mischsatz.js'; // Branch datev-mischsatz: Belege mit mehreren Steuersätzen je Satz buchen
 import { dekodiereFelder as datevDekodiereFelder } from './regel/firestore.js';
-import { abfrageStrom, batchGetStrom, lesenMitEinerWiederholung } from './regel/firestore-strom.js'; // O18a M1: Fehlerelemente im Antwortstrom von runQuery/batchGet brechen ab (fail-closed)
+import { abfrageStrom, batchGetStrom, lesenMitEinerWiederholung, StromAbbruch } from './regel/firestore-strom.js'; // O18a M1: Fehlerelemente im Antwortstrom von runQuery/batchGet brechen ab (fail-closed)
 import { DOK_VOLL_MAX, DOK_VORAB_SEITE, DOK_VORAB_FELDER, datevNachName, datevDokId, datevBelegDatum, datevJahrNamen, datevSatzJeQuelle, datevBelegIdZuNr } from './regel/datev-lesen.js'; // W3 DATEV: Belege nur für das Exportjahr lesen
 import { DATEV_KASSE_KONTEN, KASSE_UMSATZ_STEUERFAELLE, KASSE_DURCHLAUF_KONTO, KASSE_ERLOES_0_KONTO, KASSE_MEHRZWECK_KONTO, kassenKontoWahl, istKasseTagesbeleg, kasseBelegPlan, kasseBewegungBuchung, kasseBewegungOhneBuchung, kasseGeldtransitGegenbein, kasseTagesPosten, istSumupBarbeleg, sumupKasseWahl } from './regel/datev-kasse.js'; // Kassenbuch P1b-5: DATEV-Kassenzweig
 import { datevBelegfeldBereinigen, datevFeldGequotet, datevNummerPruefen, datevKontoVierstellig, datevGeldkontoImBereich, datevKuKonto, RC_EINGANG_KONTEN, RC_AUSGANG_KONTEN, datevRcLage, datevUstId, GWG_KONTEN, AFA_KATEGORIE, GWG_KATEGORIE, FA_EST_ART, UST_KATEGORIEN, datevWarnHeader } from './regel/datev-export-regeln.js'; // DATEV-Gesamtcheck 21.11.2026: Belegfeld 1, § 13b, GWG, Konten
@@ -4353,6 +4353,10 @@ async function prueferZugangSuchen(adminToken, feld, wert) {
 // Token (neuer token_hash), der alte findet keinen Zugang mehr.
 // Nur Ordner, deren Dateien in den Prüfer-Daten vorkommen; alles andere (logo, chats …) bleibt gesperrt.
 // uploads: Chat-Uploads (index.html: users/{uid}/uploads/…); E-Rechnungen aus dem Chat tragen sie als storage_url, Chat-Belege als url (F2-Fix A-H1).
+// O20w N3 (bewusst so gelassen): Der Abruf prüft nur Konto und Ordner, nicht, ob der Pfad in der Prüfer-Ausgabe steht. Eine Mitgliedschaftsprüfung hieße, bei jedem Klick die
+// Belege des Kontos zu durchsuchen (storage_url/url/anhaenge[].pfad in drei Adressformen und mehreren Buckets, bei Tausenden Belegen mehr als das Budget von 50 Unteranfragen)
+// und träfe bei einem verpassten Fall einen echten Prüfer (kein Dateizugriff mehr). Der Gewinn ist gering: Zugang hat nur, wem das Konto den Zugang erteilt hat (eigener
+// Steuerberater, Prüfer), der Zugang ist befristet und widerrufbar, die Pfade sind nicht erratbar (Zeitstempel plus Dateiname) und es gibt kein Verzeichnis zum Auflisten.
 // angebote bleibt draußen: Angebote liegen in der Sammlung angebote, nicht in den Prüfer-Daten; es gibt dort nichts zu verlinken.
 // Die Liste begrenzt den Abruf per Pfad (POST /pruefer-datei) auf diese Ordner des eigenen Kontos.
 const PRUEFER_DATEI_ORDNER = ['kasse', 'belege', 'rechnungen', 'mahnungen', 'sammelbelege', 'uploads'];
@@ -5443,7 +5447,15 @@ async function handleDatevExport(body, env, cors = {}) {
     const kassenLaden = async ({ ohneKassenbuch = false } = {}) => {
       if (kassenDocs === null) {
         const m = new Map();
-        try { for (const k of await firestoreListAll(`${base}/kassen`, authHeader)) m.set(String(k.name || '').split('/').pop(), datevDekodiereFelder(k.fields || {})); } catch (e) {
+        // O20a N6: Lesepfad; ein vorübergehender Fehler (429/500/502/503/504, Netzfehler) wird genau einmal wiederholt (wie die übrigen Export-Lesepfade, lesenMitEinerWiederholung).
+        // 403 wird nie wiederholt (Regeln, siehe oben). Die Meldung bleibt unverändert, sodass die 403-Prüfung unten und der 503 des Exports gleich bleiben.
+        const kassenListe = () => lesenMitEinerWiederholung(async () => {
+          try { return await firestoreListAll(`${base}/kassen`, authHeader); } catch (e) {
+            if (e instanceof TypeError || /^Firestore read failed \((429|500|502|503|504)\)/.test(String(e?.message || ''))) throw new StromAbbruch(String(e?.message || 'Netzfehler').slice(0, 80), 'UNAVAILABLE');
+            throw e;
+          }
+        });
+        try { for (const k of await kassenListe()) m.set(String(k.name || '').split('/').pop(), datevDekodiereFelder(k.fields || {})); } catch (e) {
           if (ohneKassenbuch && /^Firestore read failed \(403\)/.test(String(e?.message || ''))) { console.warn('DATEV-Export Kassen: 403 ohne Kassenbelege, als keine Kassen gewertet'); kassenVerweigert = true; kassenDocs = m; return kassenDocs; }
           console.error('DATEV-Export Kassen:', e?.message); throw new DatevLesefehler('Die Kassen des Kassenbuchs konnten nicht gelesen werden.');
         }
