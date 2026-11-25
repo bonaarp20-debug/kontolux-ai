@@ -12,6 +12,8 @@
 //   await fs.commit(writes)                               -> { updateTimes: [...], commitTime }   (atomar, höchstens 500 Schreibvorgänge)
 //   schreibe.setzen / schreibe.aendern / schreibe.anlegen erzeugen die Schreibvorgänge.
 
+import { abfrageStrom, batchGetStrom } from './firestore-strom.js'; // O18a M1
+
 export const FIRESTORE_BASIS = 'https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents';
 const NAME_PRAEFIX = 'projects/kontolux-ai/databases/(default)/documents/';
 
@@ -190,10 +192,10 @@ export function erzeugeSchicht({ token, fetchFn, basis = FIRESTORE_BASIS, budget
       if (!pfade.length) return ergebnis;
       const res = await rufe(`${wurzel}:batchGet`, { method: 'POST', headers: kopf(), body: JSON.stringify({ documents: pfade.map(vollerName) }) });
       if (!res.ok) throw await fehlerAus(res, false);
-      const zeilen = await res.json();
+      const zeilen = batchGetStrom(await res.json(), 'batchGet'); // O18a M1: Fehlerelement im Strom oder Antwort ohne Liste bricht ab
       for (const p of pfade) ergebnis.set(p, null);
-      for (const z of Array.isArray(zeilen) ? zeilen : []) {
-        if (z && z.found) { const d = dokAusRoh(z.found); if (d) ergebnis.set(d.pfad, d); }
+      for (const z of zeilen) {
+        if (z.found) { const d = dokAusRoh(z.found); if (d) ergebnis.set(d.pfad, d); }
       }
       return ergebnis;
     },
@@ -209,8 +211,8 @@ export function erzeugeSchicht({ token, fetchFn, basis = FIRESTORE_BASIS, budget
       const url = elternPfad ? `${wurzel}/${elternPfad}:runQuery` : `${wurzel}:runQuery`;
       const res = await rufe(url, { method: 'POST', headers: kopf(), body: JSON.stringify({ structuredQuery }) });
       if (!res.ok) throw await fehlerAus(res, false);
-      const zeilen = await res.json();
-      return (Array.isArray(zeilen) ? zeilen : []).filter((z) => z && z.document).map((z) => dokAusRoh(z.document));
+      const zeilen = abfrageStrom(await res.json(), 'runQuery'); // O18a M1
+      return zeilen.filter((z) => z.document).map((z) => dokAusRoh(z.document));
     },
     // hyg M5: Aggregation (count/sum/avg) über eine Abfrage, EINE Unteranfrage. aggregationen: [{ alias, count: { upTo } } | { alias, sum: { field } } ...].
     // Ergebnis: { alias: Zahl }. Fehlt ein Alias in der Antwort oder ist der Wert keine Zahl: Fehler (der Aufrufer bleibt fail-closed).

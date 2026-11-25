@@ -5,6 +5,8 @@
 // steuerprofil/aktuell/verlauf/* und dokumente/*/versionen/* nach dem Löschlauf (Ablauf der Aufbewahrungsfrist) als Datenrest zurück.
 // Darum werden sie über eine Abfrage über alle Nachfahren (allDescendants) unter users/{uid} gefunden: eine Unteranfrage je 300 Dokumente,
 // unabhängig von der Zahl der Elterndokumente (Free-Plan: 50 Unteranfragen; eine Liste je Beleg wäre bei 5.000 Belegen nicht machbar).
+import { abfrageStrom } from './firestore-strom.js'; // O18a M1
+
 export const FIRESTORE_WURZEL = 'https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents';
 // FIX-RB N6 (G-RB): zaehler (benannte Zähler, regel/zaehler.js) gehört mit in Archiv, Löschlauf, Speicher-Umzug und Export
 // WORKER-C (Release C, Q-5): oss_meldung (Abgabe-Schnappschüsse der OSS-Quartale, regel/oss-meldung.js), Aufbewahrung zehn Jahre ab Ende des
@@ -66,8 +68,8 @@ export async function untersammlungLesen(uid, name, token, fetchFn = globalThis.
         method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(abfrage(name, nurName, cursor)),
       });
       if (!res.ok) throw new Error(`Abfrage ${name} fehlgeschlagen (${res.status})`);
-      const zeilen = await res.json();
-      const docs = (Array.isArray(zeilen) ? zeilen : []).map((z) => z && z.document).filter((d) => d && d.name);
+      const zeilen = abfrageStrom(await res.json(), `Abfrage ${name}`); // O18a M1: abgebrochener Strom (Fehlerelement bei Status 200) gälte sonst als letzte Seite
+      const docs = zeilen.map((z) => z.document).filter((d) => d && d.name);
       for (const d of docs) if (gehoertZu(uid, name, d.name)) alle.push(d);
       if (docs.length < SEITE) return teil ? { dokumente: alle, vollstaendig: true } : alle;
       cursor = docs[docs.length - 1].name;

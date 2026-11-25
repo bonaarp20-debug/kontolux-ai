@@ -26,6 +26,7 @@ import { datevOssPlanLaden, datevOssVorbereiten, datevOssBuchungen } from './reg
 import { rechnungsnrDuplikat, rechnungsnrAbfragen, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c); O11 N2 Varianten; O12a N1 gemeinsame Abfragen
 import { datevMischsatzGruppen, datevKorrekturGruppen, KORREKTUR_BELEG_ARTEN } from './regel/datev-mischsatz.js'; // Branch datev-mischsatz: Belege mit mehreren Steuersätzen je Satz buchen
 import { dekodiereFelder as datevDekodiereFelder } from './regel/firestore.js';
+import { abfrageStrom, batchGetStrom } from './regel/firestore-strom.js'; // O18a M1: Fehlerelemente im Antwortstrom von runQuery/batchGet brechen ab (fail-closed)
 import { DOK_VOLL_MAX, DOK_VORAB_SEITE, DOK_VORAB_FELDER, datevNachName, datevDokId, datevBelegDatum, datevJahrNamen, datevSatzJeQuelle, datevBelegIdZuNr } from './regel/datev-lesen.js'; // W3 DATEV: Belege nur für das Exportjahr lesen
 import { DATEV_KASSE_KONTEN, KASSE_UMSATZ_STEUERFAELLE, KASSE_DURCHLAUF_KONTO, KASSE_ERLOES_0_KONTO, KASSE_MEHRZWECK_KONTO, kassenKontoWahl, istKasseTagesbeleg, kasseBelegPlan, kasseBewegungBuchung, kasseBewegungOhneBuchung, kasseGeldtransitGegenbein, kasseTagesPosten, istSumupBarbeleg, sumupKasseWahl } from './regel/datev-kasse.js'; // Kassenbuch P1b-5: DATEV-Kassenzweig
 import { datevBelegfeldBereinigen, datevFeldGequotet, datevNummerPruefen, datevKontoVierstellig, datevGeldkontoImBereich, datevKuKonto, RC_EINGANG_KONTEN, RC_AUSGANG_KONTEN, datevRcLage, datevUstId, GWG_KONTEN, AFA_KATEGORIE, GWG_KATEGORIE, FA_EST_ART, UST_KATEGORIEN, datevWarnHeader } from './regel/datev-export-regeln.js'; // DATEV-Gesamtcheck 21.11.2026: Belegfeld 1, § 13b, GWG, Konten
@@ -4104,8 +4105,8 @@ async function handleDeleteAccountData(body, env, cors = {}) {
       })
     });
     if (queryRes.ok) {
-      const rowsRoh = await queryRes.json().catch(() => []);
-      for (const row of Array.isArray(rowsRoh) ? rowsRoh : []) {
+      const rowsRoh = abfrageStrom(await queryRes.json().catch(() => null), 'Feedback suchen'); // O18a M1: abgebrochener Strom -> Fehler (unten geloggt), nicht "nichts mehr da"
+      for (const row of rowsRoh) {
         if (!row.document?.name) continue;
         await fetch(`https://firestore.googleapis.com/v1/${row.document.name}`, {
           method: 'DELETE',
@@ -4335,8 +4336,8 @@ async function prueferZugangSuchen(adminToken, feld, wert) {
     const errText = await res.text().catch(() => '');
     throw new Error(`Query fehlgeschlagen: ${res.status} ${apiFehlerKlasse(errText)}`);
   }
-  const rows = await res.json();
-  return Array.isArray(rows) ? rows.find(r => r.document?.name) || null : null;
+  const rows = abfrageStrom(await res.json(), 'Prüferzugang suchen');
+  return rows.find(r => r.document?.name) || null;
 }
 
 // ── Dateien im Prüferzugang (H1-Fix, ersetzt die signierten Kurzlinks aus N5) ────────────────────────────────────────────────────
@@ -4944,8 +4945,8 @@ async function belegeSeit(userId, token, seitMs) {
     } })
   });
   if (!res.ok) throw new Error(`Firestore-Abfrage fehlgeschlagen (${res.status})`);
-  const rows = await res.json();
-  return Array.isArray(rows) ? rows.filter(r => r.document).map(r => r.document) : [];
+  const rows = abfrageStrom(await res.json(), 'Belege seit');
+  return rows.filter(r => r.document).map(r => r.document);
 }
 
 // Kassen-P0 0.5(c): Belege mit derselben Rechnungsnummer (nur Gleichheits-/IN-Filter, kein zusammengesetzter Index nötig).
@@ -4959,8 +4960,8 @@ async function belegeMitRechnungsnr(userId, token, rechnungsnr, absender) {
       body: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'dokumente' }], where, limit } })
     });
     if (!res.ok) throw new Error(`Firestore-Abfrage fehlgeschlagen (${res.status})`);
-    const rows = await res.json();
-    return Array.isArray(rows) ? rows.filter(r => r.document).map(r => r.document) : [];
+    const rows = abfrageStrom(await res.json(), 'Belege je Rechnungsnummer');
+    return rows.filter(r => r.document).map(r => r.document);
   };
   // O12a N1: die Abfragen stehen in regel/duplikat.js (rechnungsnrAbfragen), dieselben nutzt die Ausgabe aus der Kasse
   const ergebnisse = await Promise.all(rechnungsnrAbfragen(rechnungsnr, absender).map((q) => lauf(q.where, q.limit)));
@@ -5017,8 +5018,9 @@ async function firestoreAbfrageAlle(userBasis, sammlung, filters, sortFeld, auth
       } })
     });
     if (!res.ok) throw new Error(`Abfrage ${sammlung} fehlgeschlagen (${res.status})`);
-    const zeilen = await res.json();
-    const docs = Array.isArray(zeilen) ? zeilen.filter((z) => z && z.document).map((z) => z.document) : [];
+    // O18a M1: ein Fehlerelement im Strom (Status bleibt 200) oder eine Antwort ohne Liste bricht ab; sonst gälte eine abgeschnittene Seite als letzte Seite
+    const zeilen = abfrageStrom(await res.json(), `Abfrage ${sammlung}`);
+    const docs = zeilen.filter((z) => z.document).map((z) => z.document);
     alle.push(...docs);
     if (docs.length < seitenGroesse) return alle;
     const letzte = docs[docs.length - 1];
@@ -5062,7 +5064,7 @@ async function datevNachladen(userId, sammlung, ids, authHeader) {
       body: JSON.stringify({ documents: liste.slice(i, i + 100).map((id) => `${wurzel}/users/${userId}/${sammlung}/${id}`) })
     });
     if (!res.ok) throw new Error(`Nachladen ${sammlung} fehlgeschlagen (${res.status})`);
-    for (const z of await res.json()) if (z && z.found) aus.push(z.found);
+    for (const z of batchGetStrom(await res.json(), `Nachladen ${sammlung}`)) if (z.found) aus.push(z.found);
   }
   return aus;
 }
@@ -5492,8 +5494,8 @@ async function handleDatevExport(body, env, cors = {}) {
               body: JSON.stringify({ documents: liste.slice(i, i + 100).map((x) => `${wurzel}/users/${userId}/kassentage/${x.tagId}/fassungen/${x.n}`) })
             });
             if (!res.ok) throw new Error(`Fassungen lesen fehlgeschlagen (${res.status})`);
-            for (const z of await res.json()) {
-              if (!z || !z.found) continue;
+            for (const z of batchGetStrom(await res.json(), 'Fassungen lesen')) {
+              if (!z.found) continue;
               const seg = String(z.found.name || '').split('/documents/').pop().split('/');
               if (seg[2] === 'kassentage' && seg[4] === 'fassungen') daten.fassungen.set(`${seg[3]}|${Number(seg[5])}`, datevDekodiereFelder(z.found.fields || {}));
             }
@@ -5989,7 +5991,7 @@ async function handleDatevExport(body, env, cors = {}) {
           for (let i = 0; i < nachladen.length; i += 100) {
             const res = await fetch(`https://firestore.googleapis.com/v1/${wurzel}:batchGet`, { method: 'POST', headers: { 'Authorization': `Bearer ${authHeader}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ documents: nachladen.slice(i, i + 100).map((id) => `${wurzel}/users/${userId}/kassenbewegungen/${id}`) }) });
             if (!res.ok) throw new Error(`Bewegungen lesen fehlgeschlagen (${res.status})`);
-            for (const z of await res.json()) if (z && z.found) bewMap.set(String(z.found.name).split('/').pop(), datevDekodiereFelder(z.found.fields || {}));
+            for (const z of batchGetStrom(await res.json(), 'Bewegungen lesen')) if (z.found) bewMap.set(String(z.found.name).split('/').pop(), datevDekodiereFelder(z.found.fields || {}));
           }
         } catch (e) { console.error('DATEV-Export Kassenbewegungen:', e?.message); throw new DatevLesefehler('Die Kassenbewegungen des Kassenbuchs konnten nicht gelesen werden.'); }
       }
@@ -6293,7 +6295,7 @@ export async function fristErinnerungenSenden(env, optionen = {}) {
   const jeKonto = new Map();
   const fehlerJeKonto = new Map();
   const mailCache = new Map();
-  const zeilen = ((await res.json()) || []).filter((z) => z && z.document);
+  const zeilen = abfrageStrom(await res.json(), 'Fristen-Abfrage').filter((z) => z.document);
   zeilen.sort((a, b) => String(a.document.fields?.datum?.stringValue || '').localeCompare(String(b.document.fields?.datum?.stringValue || ''))); // früheste Frist zuerst
   for (const zeile of zeilen) {
     if (gesendet >= FRIST_MAILS_JE_LAUF) break;
@@ -6493,8 +6495,8 @@ export async function archivDatenLoeschen(uid, env, adminToken, { markerBehalten
     body: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'feedback' }], where: { fieldFilter: { field: { fieldPath: 'userId' }, op: 'EQUAL', value: { stringValue: uid } } } } })
   });
   if (fbRes.ok) {
-    const fbZeilen = await fbRes.json().catch(() => []);
-    for (const zeile of Array.isArray(fbZeilen) ? fbZeilen : []) {
+    const fbZeilen = abfrageStrom(await fbRes.json().catch(() => null), 'Feedback suchen'); // O18a M1: unvollständiger Strom bricht ab, der Lauf wiederholt
+    for (const zeile of fbZeilen) {
       if (!zeile.document?.name) continue;
       await fetch(`https://firestore.googleapis.com/v1/${zeile.document.name}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${adminToken}` } });
     }
@@ -6662,8 +6664,8 @@ async function handleAdminSpeicherUmzug(request, authHeader, env, cors = {}) {
         body: JSON.stringify({ structuredQuery: { from: [{ collectionId: coll, allDescendants: true }], limit: 20000 } })
       });
       if (!res.ok) throw new Error(`Abfrage ${coll} fehlgeschlagen (${res.status})`);
-      const zeilen = await res.json();
-      for (const z of Array.isArray(zeilen) ? zeilen : []) {
+      const zeilen = abfrageStrom(await res.json(), `Abfrage ${coll}`);
+      for (const z of zeilen) {
         const d = z.document;
         if (!d?.name || !d.fields) continue;
         bericht.dokumente_geprueft++;
@@ -6890,7 +6892,7 @@ async function handleAdminProtokoll(request, authHeader, env, cors = {}) {
       body: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'admin_protokoll' }], orderBy: [{ field: { fieldPath: 'zeit' }, direction: 'DESCENDING' }], limit: 300 } })
     });
     if (!res.ok) throw new Error(`Protokoll lesen fehlgeschlagen (${res.status})`);
-    const eintraege = (await res.json()).filter(z => z.document).map(z => {
+    const eintraege = abfrageStrom(await res.json(), 'Protokoll lesen').filter(z => z.document).map(z => {
       const f = z.document.fields || {};
       const feld = (k) => f[k]?.stringValue || '';
       return { zeit: feld('zeit') || f.zeit?.timestampValue || '', admin: feld('admin'), aktion: feld('aktion'), uid: feld('uid'), grund: feld('grund'), details: feld('details') };

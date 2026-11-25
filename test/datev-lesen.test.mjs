@@ -286,6 +286,56 @@ test('Lesefehler im Zeitraum-Modus: Vorab-Lesen, Belegabfrage und Nachladen brec
   assert.notEqual((await ruf(worker, fs, 'zeitraum', 2026)).status, 200);
 });
 
+// O18a M1: runQuery und batchGet sind Strom-Methoden. Bricht der Strom ab, steht ein { error } IN der Liste bei Status 200. Der Export darf dann keinen unvollständigen
+// Stapel liefern, in beiden Lesemodi. Der Umbau greift auf die echte Antwort des Fakes (abgeschnitten + Fehlerelement) und zählt, wie oft er zugeschlagen hat.
+function stromUmbauen(fs, art, umbau) {
+  const orig = fs.fetchFn;
+  const zaehler = { n: 0 };
+  fs.fetchFn = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input.url;
+    const r = await orig(input, init);
+    if (r.status !== 200 || !url.endsWith(`:${art}`)) return r;
+    zaehler.n++;
+    return json(200, umbau(await r.json()));
+  };
+  return zaehler;
+}
+const STROM_FEHLER = { error: { code: 14, message: 'unavailable', status: 'UNAVAILABLE' } };
+const UMBAUTEN = {
+  'Fehlerelement am Ende (abgeschnitten)': (l) => [...(Array.isArray(l) ? l.slice(0, Math.max(0, l.length - 1)) : []), STROM_FEHLER],
+  'nur ein Fehlerelement': () => [STROM_FEHLER],
+  'Antwort ohne Liste (200 mit Objekt)': () => ({}),
+};
+function strombestand(fs) {
+  bestand(fs);
+  // Privatvorgang aus der Kasse mit Bewegung, die nicht im Jahresbestand steht: der volle Modus liest dann Bewegungen (runQuery) und lädt die fehlende per batchGet nach
+  fs.setze(`users/${UID}/privatvorgaenge/pvk`, { art: 'entnahme', datum: '2026-03-04', betrag: 10, notiz: 'k', zahlweg: 'kasse', kasse_id: 'kx', kassenbewegung_id: 'bewfehlt' });
+}
+for (const modus of ['voll', 'zeitraum']) {
+  for (const art of ['runQuery', 'batchGet']) {
+    test(`M1 (${modus}): ein abgebrochener Strom von ${art} bricht den Export ab statt einen unvollständigen Stapel zu liefern`, async () => {
+      const fs0 = fakeFirestore(); strombestand(fs0);
+      const gut = await ruf(worker, fs0, modus, 2026);
+      assert.equal(gut.status, 200, gut.text.slice(0, 200));
+      for (const [name, umbau] of Object.entries(UMBAUTEN)) {
+        const fs = fakeFirestore(); strombestand(fs);
+        const z = stromUmbauen(fs, art, umbau);
+        const r = await ruf(worker, fs, modus, 2026);
+        assert.ok(z.n > 0, `${name}: der Umbau hat nie gegriffen (${modus}, ${art})`);
+        assert.ok(r.status >= 500, `${name} (${modus}, ${art}): Status ${r.status} statt Abbruch`);
+        assert.equal(r.zeilen.length, 0, `${name}: kein Stapel`);
+      }
+    });
+  }
+}
+test('M1: ein batchGet-Element ohne found und missing bricht das Nachladen ab', async () => {
+  const fs = fakeFirestore(); strombestand(fs);
+  const z = stromUmbauen(fs, 'batchGet', (l) => [...l, { readTime: '2026-01-01T00:00:00Z' }]);
+  const r = await ruf(worker, fs, 'zeitraum', 2026);
+  assert.ok(z.n > 0);
+  assert.ok(r.status >= 500, String(r.status));
+});
+
 // ── Reine Hilfen ─────────────────────────────────────────────────────────────────────────────────
 const S = (v) => ({ stringValue: v });
 const fv = (f) => (f && f.stringValue !== undefined ? f.stringValue : f && f.booleanValue !== undefined ? f.booleanValue : f && f.timestampValue !== undefined ? f.timestampValue : null);
