@@ -1006,6 +1006,47 @@ test('G2-Fix H-1: 403 auf kassen bleibt 503, sobald Kassenbuch-Daten da sind (Ta
   assert.equal((await exportiere(fs)).status, 503);
 });
 
+// O20a N6: ein vorübergehender Lesefehler auf kassen (Konto mit SumUp-Barbeleg ohne Kassenbuch) wird einmal wiederholt: Export 200 statt 503; dauerhaft bleibt 503 (kein Raten);
+// 403 wird nicht wiederholt (eine Anfrage); jede Seite der Kassenliste zählt für sich (Fehler auf der zweiten Anfrage genauso)
+test('O20a N6: kassen scheitert einmal vorübergehend (503, 500, Netzfehler): zweiter Versuch gelingt, Export 200; dauerhaft 503; 403 ohne Wiederholung', async () => {
+  const bau = () => {
+    const fs = fakeFirestore();
+    fs.setze('config/features', AN);
+    fs.setze(P('steuerprofil/aktuell'), REGEL);
+    fs.setze(P('profil/settings'), { datev_skr: 'SKR03', datev_bankkonto: '1200', datev_berater_nr: '1001', datev_mandanten_nr: '1', kleinunternehmer: 'Nein' });
+    fs.setze(P('dokumente/s1'), sumupBeleg('TCBAR1', 'Barzahlung', 119));
+    return fs;
+  };
+  const kassenAnfragen = (fs, antworten) => {
+    let n = 0;
+    fs.haken.fehler = (url) => {
+      if (!/\/users\/[^/]+\/kassen\?/.test(url)) return null;
+      const a = antworten[Math.min(n, antworten.length - 1)]; n += 1;
+      if (a === 'netz') throw new TypeError('fetch failed');
+      return a;
+    };
+    return () => n;
+  };
+  for (const erster of [json(503, { error: { status: 'UNAVAILABLE' } }), json(500, { error: { status: 'INTERNAL' } }), 'netz']) {
+    const fs = bau();
+    const n = kassenAnfragen(fs, [erster, null]);
+    const r = await exportiere(fs);
+    assert.equal(r.status, 200, r.text.slice(0, 300));
+    assert.equal(n(), 2, 'genau ein Wiederholungsversuch');
+    assert.deepEqual(kurz(r.zeilen, 'TCBAR1').map((x) => x.slice(0, 4)), [['119,00', 'S', '1200', '8400']]);
+  }
+  // dauerhaft: zwei Versuche, dann 503
+  const d = bau();
+  const nd = kassenAnfragen(d, [json(503, { error: { status: 'UNAVAILABLE' } })]);
+  assert.equal((await exportiere(d)).status, 503);
+  assert.equal(nd(), 2);
+  // 403: nie wiederholt (wie bisher, Export 200 ohne Kassenbuch)
+  const f = bau();
+  const nf = kassenAnfragen(f, [json(403, { error: { code: 403, status: 'PERMISSION_DENIED' } })]);
+  assert.equal((await exportiere(f)).status, 200);
+  assert.equal(nf(), 1);
+});
+
 // ── R1.5 Retoure auf Vortag (Baukonzept 08 2.13): Erlösminderung je Satz am Retourentag gegen Kasse (bar) bzw. Geldtransit (Karte), Belegfeld 1 = Kassennummer ─────
 const MIT_RETOURE = { kern_max: 'an', features: { steuerprofil: 'an', kasse: 'an', kasse_retoure: 'an' } };
 const retoure = (id, tag, verkaufstag, zeilen) => ({ aktion: 'retoure', kasse_id: id, geschaeftstag: tag, verkaufstag, zeilen, korrektur_grund: 'rueckabwicklung' });

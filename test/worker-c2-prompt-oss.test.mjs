@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { kiPromptTeile, detectRequiredModules, erkennungsText } from '../worker.js';
 import { KI_FEATURES, KI_FEATURES_AN, KI_FEATURES_AUS, KI_FEATURE_TEXTE, kiFeatureStand, kiFeatureAbschnitt, kiLandAbgleichen, KI_RC_LAND_BEFEHL_AKTIV, KI_RC_LAND_TEXT, kiFeatureStandKonto, kiZustimmungCacheLeeren } from '../regel/prompts.js';
+import { AGB_MINDESTFASSUNG_KASSE } from '../regel/gemeinsam.js'; // O20d M1: Fassung des Kassenbuchs nicht fest eintragen (wird beim Deploy umdatiert)
 import { VERBOTEN, ohneVerbotsAnweisungen, uebermittlungOhneVerneinung } from './prompt-wortliste.mjs';
 import { ZUSAMMENSTELLUNGEN, BUDGET_FAKTOR, tokenSchaetzung, messen } from './prompt-messung.mjs';
 
@@ -63,9 +64,9 @@ test('Zustimmung je Konto (E1: Fassung C = 2026-11-15-2): -1 = Release B an, oss
   kiZustimmungCacheLeeren();
   assert.deepEqual(await kiFeatureStandKonto({ uid: 'nutzerWC2prompt000000001', stand: KI_FEATURES_AN, tokenFn: async () => 't', fetchFn: r(['2026-11-15-1', '2026-11-15-2']), jetzt: 1 }), { ...KI_FEATURES_AN, kasse: false });
   kiZustimmungCacheLeeren();
-  assert.deepEqual(await kiFeatureStandKonto({ uid: 'nutzerWC2prompt000000001', stand: KI_FEATURES_AN, tokenFn: async () => 't', fetchFn: r(['2026-11-15-1', '2026-11-15-2', '2026-12-14-1']), jetzt: 1 }), KI_FEATURES_AN);
+  assert.deepEqual(await kiFeatureStandKonto({ uid: 'nutzerWC2prompt000000001', stand: KI_FEATURES_AN, tokenFn: async () => 't', fetchFn: r(['2026-11-15-1', '2026-11-15-2', AGB_MINDESTFASSUNG_KASSE]), jetzt: 1 }), KI_FEATURES_AN);
   kiZustimmungCacheLeeren();
-  assert.deepEqual(await kiFeatureStandKonto({ uid: 'nutzerWC2prompt000000001', stand: KI_FEATURES_AN, tokenFn: async () => 't', fetchFn: r(['2026-12-14-1']), jetzt: 1 }), KI_FEATURES_AN, 'Fassung 2 und das Kassenbuch schließen Fassung 1 ein');
+  assert.deepEqual(await kiFeatureStandKonto({ uid: 'nutzerWC2prompt000000001', stand: KI_FEATURES_AN, tokenFn: async () => 't', fetchFn: r([AGB_MINDESTFASSUNG_KASSE]), jetzt: 1 }), KI_FEATURES_AN, 'Fassung 2 und das Kassenbuch schließen Fassung 1 ein');
   kiZustimmungCacheLeeren();
   assert.deepEqual(await kiFeatureStandKonto({ uid: 'nutzerWC2prompt000000001', stand: KI_FEATURES_AN, tokenFn: async () => 't', fetchFn: async () => new Response('{}', { status: 500 }), jetzt: 1 }), KI_FEATURES_AUS, 'Lesefehler');
   kiZustimmungCacheLeeren();
