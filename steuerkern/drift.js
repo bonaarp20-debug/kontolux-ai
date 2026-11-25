@@ -186,9 +186,22 @@ export function nurStatusGeaendert(dok) {
   return false;
 }
 
+// R1.5: Retouren-ID des Workers (steuerkern/kasse.js kassenRetoureBelegId); IDs mit Präfix kasse_ vergibt nur der Worker (Rules, hyg N1)
+const KASSEN_RETOURE_DOK_ID = /^kasse_k[a-z0-9]{8}_\d{4}-\d{2}-\d{2}_r\d{3}$/;
 // Gespeicherter Steuerteil mit Zahlungen und Storno aus den Legacy-Feldern. null, wenn der Fall nicht passt (dann Neubildung wie bisher).
 function statusUebernehmen(dok) {
   const s = dok.steuer;
+  // R1.5 (Baukonzept 08 2.13): Storno einer Retoure auf Vortag. Der Worker setzt am Korrekturbeleg nur storniert: true (dazu Felder außerhalb des Hashes), wie beim
+  // Storno einer Kassenausgabe; einen Gegenbeleg gibt es nicht (ein Storno-Beleg auf eine Korrektur wäre korrektur_auf_korrektur und würde nicht gerechnet).
+  // Die Retoure wird damit wirkungslos: alle ihre Wirkungen lagen am Retourentag, der Storno nimmt sie dort genau zurück. Nur für Kassenbelege (alle drei Merkmale
+  // von istKassenbeleg, die Regeln lassen den Client storniert an gesperrten Belegen nicht setzen) mit Retouren-ID, Belegart korrektur und Bezug auf einen Kassenbeleg;
+  // alle anderen Korrekturen bleiben bei der Neubildung aus den Altfeldern (unverändert).
+  if (s.beleg_art === 'korrektur' && dok.storniert === true && typeof dok.id === 'string' && KASSEN_RETOURE_DOK_ID.test(dok.id)
+    && dok.quelle === 'kasse' && dok.gesperrt === true && Array.isArray(dok.gesperrt_durch) && dok.gesperrt_durch.includes('kasse')
+    && istObjekt(s.bezug) && typeof s.bezug.korrigiert_beleg_id === 'string' && s.bezug.korrigiert_beleg_id.slice(0, 6) === 'kasse_') {
+    const m0 = istObjekt(s.migration) ? s.migration : {};
+    return { schema_version: 2, id: dok.id, steuer: { ...s, wirkungslos: true, migration: { ...m0, hinweise: [...(Array.isArray(m0.hinweise) ? m0.hinweise : []), 'ZAHLUNG_AUS_ALTFELDERN', 'ORIGINAL_STORNIERT'] } } };
+  }
   const sum = istObjekt(s.summe) ? s.summe : null;
   const brutto = sum && istCent(sum.brutto_cent) ? sum.brutto_cent : null;
   if (brutto === null || brutto <= 0) return null;

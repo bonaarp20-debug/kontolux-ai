@@ -2,7 +2,7 @@
 // Nur Warnung in der Antwort, nie Ablehnung. Reine Funktion und echter Router gegen einen Firestore-Mock.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rechnungsnrDuplikat, RECHNUNGSNR_DUPLIKAT_WARNUNG } from '../regel/duplikat.js';
+import { rechnungsnrDuplikat, rechnungsnrVarianten, RECHNUNGSNR_DUPLIKAT_WARNUNG } from '../regel/duplikat.js';
 import { erzeugeTestEnv, mockExterneDienste, anfrage } from './harness.mjs';
 
 const s = (v) => ({ stringValue: v });
@@ -18,6 +18,16 @@ test('rechnungsnrDuplikat: gleiche Nummer, Absender und Typ trifft, jedes andere
   assert.equal(rechnungsnrDuplikat([basis], { ...frage, typ: 'rechnung_eingehend' }), null);
   assert.equal(rechnungsnrDuplikat([basis], { ...frage, rechnungsnr: '' }), null, 'ohne Nummer nie ein Treffer');
   assert.equal(rechnungsnrDuplikat([basis], { ...frage, absender: '' }), null, 'ohne Absender nie ein Treffer');
+});
+
+test('O11 N2 rechnungsnrDuplikat: Leerzeichen und Groß-/Kleinschreibung bei Nummer und Absender egal; Varianten für die Abfrage', () => {
+  const basis = dok({ rechnungsnr: s('RE-17 '), absender: s('Telekom '), typ: s('rechnung_eingehend') });
+  assert.ok(rechnungsnrDuplikat([basis], { rechnungsnr: 're-17', absender: 'TELEKOM', typ: 'rechnung_eingehend' }));
+  assert.ok(rechnungsnrDuplikat([basis], { rechnungsnr: 'RE-17', absender: 'Telekom', typ: 'rechnung_eingehend' }));
+  assert.equal(rechnungsnrDuplikat([basis], { rechnungsnr: 'RE-17', absender: 'Telekom AG', typ: 'rechnung_eingehend' }), null);
+  assert.deepEqual(rechnungsnrVarianten(' Re-1 '), ['Re-1', ' Re-1 ', 'Re-1 ', ' Re-1', 'RE-1', 're-1']);
+  assert.deepEqual(rechnungsnrVarianten(''), []);
+  assert.ok(rechnungsnrVarianten('x'.repeat(5)).length <= 10);
 });
 
 test('rechnungsnrDuplikat: gelöschte und stornierte Belege zählen nicht, Typ fehlt = Eingang', () => {
@@ -48,18 +58,20 @@ async function lauf(body, vorhandene) {
   const dienste = mockExterneDienste({ users });
   const basis = globalThis.fetch;
   const runQuerys = [];
+  const schreib = [];
   globalThis.fetch = async (input, init = {}) => {
     const url = typeof input === 'string' ? input : input.url;
     if (url.endsWith(':runQuery') && init.body && String(init.body).includes('"rechnungsnr"')) {
       runQuerys.push(JSON.parse(init.body));
       return new Response(JSON.stringify(vorhandene === 'fehler' ? { error: 'x' } : vorhandene.map((f) => ({ document: dok(f) }))), { status: vorhandene === 'fehler' ? 503 : 200 });
     }
+    if (!url.endsWith(':runQuery') && init.body && String(init.body).includes('"rechnungsnr"')) schreib.push(String(init.body));
     return basis(input, init);
   };
   try {
     const env = await erzeugeTestEnv();
     const r = await anfrage(env, { path: '/document', headers: { Authorization: `Bearer ${TOK}` }, ip: `198.51.100.${(ip++ % 200) + 20}`, body });
-    return { status: r.status, json: await r.json(), runQuerys };
+    return { status: r.status, json: await r.json(), runQuerys, schreib };
   } finally { globalThis.fetch = basis; dienste.restore(); }
 }
 
@@ -74,8 +86,24 @@ for (const [name, bau] of [['BELEG_SPEICHERN', speichernBody], ['BELEG_MANUELL',
     assert.equal(r.json.success, true);
     assert.equal(r.json.duplikat_warnung, true);
     assert.ok(r.json.warning.includes(RECHNUNGSNR_DUPLIKAT_WARNUNG));
-    assert.equal(r.runQuerys.length, 1);
-    assert.equal(r.runQuerys[0].structuredQuery.where.fieldFilter.value.stringValue, 'Z-0042');
+    // O11 N2: gezielt Nummer + Absender und breit über die Schreibweisen der Nummer
+    assert.equal(r.runQuerys.length, 2);
+    const ziel = r.runQuerys.find((q) => q.structuredQuery.where.compositeFilter);
+    assert.deepEqual(ziel.structuredQuery.where.compositeFilter.filters.map((f) => [f.fieldFilter.field.fieldPath, f.fieldFilter.op, f.fieldFilter.value.stringValue]), [['rechnungsnr', 'EQUAL', 'Z-0042'], ['absender', 'EQUAL', 'Bäckerei Muster']]);
+    assert.equal(ziel.structuredQuery.limit, 20);
+    const breit = r.runQuerys.find((q) => q.structuredQuery.where.fieldFilter);
+    assert.equal(breit.structuredQuery.where.fieldFilter.op, 'IN');
+    assert.ok(breit.structuredQuery.where.fieldFilter.value.arrayValue.values.some((v) => v.stringValue === 'Z-0042 '));
+    assert.equal(breit.structuredQuery.limit, 100);
+  });
+
+  test(`${name}: O11 N2: Nummer mit Leerzeichen am Rand wird getrimmt gespeichert; Altbeleg mit Leerzeichen und anderer Groß-/Kleinschreibung: Warnung`, async () => {
+    const r = await lauf(bau({ rechnungsnr: '  Z-0042 ' }), [{ ...gleicher, rechnungsnr: s('z-0042 '), absender: s(' bäckerei muster') }]);
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.equal(r.json.duplikat_warnung, true);
+    assert.ok(r.schreib.length >= 1, 'Beleg geschrieben');
+    assert.ok(r.schreib.every((b) => !b.includes('"  Z-0042 "') && !b.includes('"Z-0042 "')), 'ungetrimmte Nummer nicht gespeichert');
+    assert.ok(r.schreib.some((b) => b.includes('"Z-0042"')), 'getrimmte Nummer gespeichert');
   });
 
   test(`${name}: andere Nummer, anderer Absender oder anderer Typ: keine Warnung`, async () => {

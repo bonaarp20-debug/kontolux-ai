@@ -21,7 +21,7 @@ const REGEL = {
 
 const { privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
 const kvStub = { get: async () => null, put: async () => {}, delete: async () => {} };
-const env = { FIREBASE_ADMIN_CLIENT_EMAIL: 'x@example.iam.gserviceaccount.com', FIREBASE_ADMIN_PRIVATE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }), PROFIL_KV: kvStub, ABO_KV: kvStub, PDF_RESULTS: kvStub };
+const env = { ...(process.env.DATEV_LESEMODUS ? { DATEV_LESEMODUS: process.env.DATEV_LESEMODUS } : {}), FIREBASE_ADMIN_CLIENT_EMAIL: 'x@example.iam.gserviceaccount.com', FIREBASE_ADMIN_PRIVATE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }), PROFIL_KV: kvStub, ABO_KV: kvStub, PDF_RESULTS: kvStub };
 const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 let aktuellesFs = null;
 globalThis.fetch = async (input, init = {}) => {
@@ -45,7 +45,7 @@ async function exportiere(belege, { skr = 'SKR03', ku = false, profil = REGEL, j
   }), env, { waitUntil() {} });
   const text = new TextDecoder('utf-8').decode(new Uint8Array(await r.arrayBuffer()));
   const roh = r.status === 200 ? text.replace(/^﻿/, '').split('\r\n').filter(Boolean) : [];
-  const zeilen = roh.slice(2).map((x) => x.split(';'));
+  const zeilen = roh.slice(2).map((x) => x.split(';').map((f, i) => (i === 1 ? f.replace(/^"|"$/g, '') : f)));
   const ohneZeit = roh.length ? [roh[0].split(';').map((x, i) => (i === 5 ? '' : x)).join(';'), ...roh.slice(1)].join('\r\n') : text;
   return { status: r.status, zeilen, warnung: decodeURIComponent(r.headers.get('X-Datev-Warning') || ''), ohneZeit };
 }

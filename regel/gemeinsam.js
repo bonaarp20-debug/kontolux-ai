@@ -2,6 +2,7 @@
 // (config/features), Festschreibungsstand, kanonisches JSON und Hash. Rein bis auf crypto.subtle (sha256).
 import * as Steuerkern from '../steuerkern/index.js';
 import { erzeugeSchicht, FirestoreFehler, BudgetFehler } from './firestore.js';
+import { KONTEN_HASH_MUSTER, kontoAufListe } from './konten-hash.js'; // O18a N10: Kontenliste mit gehashten Konto-IDs
 
 export const UID_MUSTER = /^[A-Za-z0-9]{6,128}$/;
 export const ANFRAGE_ID_MUSTER = /^[A-Za-z0-9_-]{8,64}$/;
@@ -54,7 +55,8 @@ export const FEATURE_WERTE = ['aus', 'an'];
 export const FEATURE_NAME_MUSTER = /^[a-z][a-z0-9_]{0,39}$/;
 export const FEATURES_MAX = 40;
 // Diese Funktionen hängen am Kern und gehen bei kern_max 'aus' mit aus
-const KERN_ABHAENGIG = ['migration', 'festschreibung'];
+// KASSE-P1b: auch das Kassenbuch (Tagesabschluss-Belege sind reine Kern-Belege v2, ohne Kern gäbe es keine Wirkung)
+const KERN_ABHAENGIG = ['migration', 'festschreibung', 'kasse'];
 // Standard ohne lesbare Konfiguration: Schreibwege auf Belege und Perioden bleiben aus (tot geschaltet bis zur Freigabe,
 // migration-rollout.md 6.1 Schritt 3). Das Steuerprofil ist eine Nutzerangabe ohne Belegwirkung und bleibt an.
 const FEATURE_STANDARD = { steuerprofil: true, migration: false, festschreibung: false };
@@ -151,7 +153,33 @@ export function configBereinigen(roh) {
       if (FEATURE_NAME_MUSTER.test(k)) features[k] = v === 'an' ? 'an' : 'aus';
     }
   }
-  return { kern_max, features };
+  const konten = kontenBereinigen(roh.features_konten);
+  return konten ? { kern_max, features, features_konten: konten } : { kern_max, features };
+}
+
+// W3 Fix 3 (Gate-Zeit des Kassenbuchs): optionale Kontenliste je Kassen-Funktion, config/features.features_konten { kasse: [uid, ...] }. Steht für eine Funktion
+// ein Eintrag da, gilt sie (bei globalem 'an') NUR für diese Konten (configFuerKonto); alle anderen sehen sie als 'aus'. Die Liste schaltet nie etwas ein, sie wirkt
+// zusätzlich zu 'an' und zur AGB-Bindung. Fail-closed: nicht lesbare Form = Liste leer = niemand (nicht-Objekt: alle drei Kassen-Funktionen mit leerer Liste);
+// Namen außerhalb von FEATURES_KASSE und Einträge, die keine UID sind, zählen nicht. Gleiche Regeln in der App (regel/loader.js normiereKonfig, Paritätstest).
+export const KONTEN_MAX = 50;
+// O18a N10: ein Eintrag ist ein Hash 'h1:…' (Standard, so speichert /admin/features) oder, aus altem Bestand, eine Klar-UID (gilt weiter, wird beim nächsten Schreiben zum Hash)
+export const kontoEintragOk = (u) => typeof u === 'string' && (UID_MUSTER.test(u) || KONTEN_HASH_MUSTER.test(u));
+function kontenBereinigen(roh) {
+  if (roh === undefined) return null;
+  const o = {};
+  for (const name of FEATURES_KASSE) {
+    const liste = istObjekt(roh) ? roh[name] : [];
+    if (istObjekt(roh) && liste === undefined) continue;
+    o[name] = Array.isArray(liste) ? liste.filter(kontoEintragOk).slice(0, KONTEN_MAX) : [];
+  }
+  return Object.keys(o).length ? o : null;
+}
+// Die Konfiguration, wie sie für dieses Konto gilt: Funktionen mit Kontenliste, auf der die UID fehlt, stehen auf 'aus'. Ohne Liste unverändert (dasselbe Objekt).
+export function configFuerKonto(config, uid) {
+  if (!config || !config.features_konten) return config;
+  const features = { ...config.features };
+  for (const [name, liste] of Object.entries(config.features_konten)) if (!kontoAufListe(liste, uid)) features[name] = 'aus';
+  return { ...config, features };
 }
 
 // Ist eine Funktion serverseitig freigeschaltet? config null = nicht lesbar oder nicht vorhanden.
@@ -162,6 +190,20 @@ export function featureAktiv(config, name) {
   if (!(name in config.features)) return standard;
   return config.features[name] === 'an';
 }
+
+export const FEATURE_KASSE_RETOURE = 'kasse_retoure';
+// R1.5 (Welle 3, Baukonzept 08 2.13, Jona: Variante B mit Release 1): Schalter „Rückgabe aus früherem Tag“ (POST /kassentag retoure). Fehlend = aus (featureAktiv,
+// nicht in FEATURE_STANDARD), wirkt nur zusammen mit kasse (der Kassen-Router prüft kasse zuerst) und nur mit Zustimmung ab AGB_MINDESTFASSUNG_KASSE (dieselbe
+// Prüfung wie kasse). Seit Phase 2 (UI) in FEATURES_KASSE und gleichzeitig im Lader der App (FEATURES, STANDARD_AUS, FEATURES_AGB_KASSE; Paritätstest scripts/test-eb-loader.mjs).
+// KASSE-P1b (Baukonzept 08 2.12 M25, 2.10 Schritt 3): Feature-Namen des Kassenbuchs. Im Worker gilt jeder fehlende Name als aus (featureAktiv, nicht in
+// FEATURE_STANDARD); in der App (Lader) gilt ein fehlender Name als an: das Drehbuch setzt beide Namen vor dem App-Deploy ausdrücklich auf 'aus'.
+// 'kasse' hängt am Kern (KERN_ABHAENGIG: kern_max 'aus' schaltet das Kassenbuch mit ab). Die Liste schaltet nichts; sie dient Drehbuch und Paritätstest.
+export const FEATURES_KASSE = Object.freeze(['kasse', 'kasse_ki', FEATURE_KASSE_RETOURE]);
+// KASSE-P1b (M15): Mindestfassung der Nutzungsbedingungen für das Kassenbuch (Zustimmungsnachweis users/{uid}/agb_zustimmung, wie OSS). P6-Fassungs-Commit
+// (23.11.2026): echte Fassung mit den Kassenbuch-Texten (Nutzungsbedingungen 2b/2c, Stand 25. November 2026), gleich App AGB_VERSION und Lader
+// AGB_MINDESTFASSUNG_KASSE (scripts/rollout-vorpruefung.mjs). Das Datum darf nicht nach dem Deploy-Tag liegen (agbZustimmungPruefen in worker.js lehnt
+// eine Fassung mit Datum nach heute ab); bei abweichendem Deploy-Tag in App, Worker und Landing vorher gemeinsam umdatieren (deploy-reihenfolge.md).
+export const AGB_MINDESTFASSUNG_KASSE = '2026-11-25-1';
 
 // E-B (Auflage A1 G-KERN-B, KERN-B2): Kern-Optionen (optionen.regeln) aus config/features, dieselbe Abbildung wie die App (Kern-Index
 // optionenAusFeatures, Lader regel/loader.js kernOptionen). Eingabe: das bereinigte Dokument (configBereinigen) oder null; fehlend, 'aus',

@@ -31,7 +31,12 @@ export const KLEINBETRAG_GRENZE_CENT = GRENZEN.KLEINBETRAG.wert_cent; // § 33 U
 export const BELEG_BETRAG_MAX_CENT = 1000000000; // 10 Mio EUR je Beleg (Konzept E1); die Firestore-Regeln lassen das Doppelte zu (Gegenprüfung M3, M6)
 
 // Kategorien, bei denen ein Altbeleg mit mwst_satz 'keine' im Regelstatus eindeutig ohne Vorsteuer ist (3.8.2).
-const KATEGORIEN_OHNE_VORSTEUER = Object.freeze(['Bankgebühren', 'Versicherungen', 'Versicherung', 'Kfz-Steuern/Versicherung', 'Reisekosten', 'Verpflegungsmehraufwand', 'Fahrtkosten (Kilometerpauschale)']);
+const KATEGORIEN_OHNE_VORSTEUER = Object.freeze(['Bankgebühren', 'Versicherungen', 'Versicherung', 'Kfz-Steuern/Versicherung', 'Reisekosten', 'Verpflegungsmehraufwand', 'Fahrtkosten (Kilometerpauschale)', 'Kassendifferenz (Fehlbetrag)']);
+// KERN-26 (Kassenbuch, Baukonzept 08 2.4 Nr. 2): geprüfte Liste der Zahlungskanäle. 'auszug' (Zahlung aus dem Kontoauszug, regel/dialoge-zahlung-logik.js)
+// steht im Bestand und bleibt erlaubt (Abweichung vom Baukonzept, das ihn nicht nannte). Ein unbekannter Kanal wird nie abgelehnt (kein Altbeleg wird rot),
+// sondern auf 'manuell' abgebildet, mit der Unsicherheit KANAL_UNBEKANNT. Der Kanal hat keine Steuerwirkung (nur DATEV-Gegenkonto, Kassenbuch).
+// 'gutschein_mehrzweck': Einlösung eines Mehrzweck-Gutscheins im Tagesabschluss (Umsatzsteuer wie eine Zahlung, aber kein Zufluss in der EÜR, wirkung.js).
+export const KANAELE = Object.freeze(['manuell', 'import', 'plattform', 'auszug', 'bar', 'karte', 'gutschein_mehrzweck']);
 const PLATTFORM_QUELLEN = ['webhook', 'stripe', 'copecart', 'digistore', 'shopify', 'paypal', 'plattform'];
 
 // ---------------------------------------------------------------------------------------------
@@ -173,11 +178,14 @@ function summiere(positionen) {
   return { netto_cent: netto, ust_cent: ust, brutto_cent: netto + ust };
 }
 
-function baueZahlungen(e, belegId, leistungBis, richtung, vorschlaege) {
+function baueZahlungen(e, belegId, leistungBis, richtung, vorschlaege, unsicherheiten, belegArt) {
   const roh = Array.isArray(e.zahlungen) ? e.zahlungen : (istObjekt(e.zahlung) ? [e.zahlung] : []);
   const out = [];
   roh.forEach((z, i) => {
     if (!istObjekt(z)) return;
+    // O2 N2: 'gutschein_mehrzweck' gilt nur am Tagesabschluss (sonst verlöre eine Rechnung still ihre EÜR-Einnahme)
+    const kanalBekannt = z.kanal === undefined || z.kanal === null || z.kanal === '' || (KANAELE.includes(z.kanal) && (z.kanal !== 'gutschein_mehrzweck' || belegArt === 'tagesabschluss'));
+    if (!kanalBekannt && Array.isArray(unsicherheiten)) unsicherheiten.push(hin('KANAL_UNBEKANNT', `zahlungen[${i}].kanal`, String(z.kanal).slice(0, 40)));
     const art = z.art || (istDatum(z.datum) && leistungBis && z.datum < leistungBis && richtung === 'ausgang' ? 'anzahlung' : 'zahlung');
     if (!z.art && art === 'anzahlung') vorschlaege.push({ feld: `zahlungen[${i}].art`, wert: 'anzahlung', grund: 'Zahlung vor Ende der Leistung (R-ZP-04)' });
     out.push({
@@ -187,10 +195,12 @@ function baueZahlungen(e, belegId, leistungBis, richtung, vorschlaege) {
       art,
       skonto_cent: istCent(z.skonto_cent) ? z.skonto_cent : 0,
       rabatt_cent: istCent(z.rabatt_cent) ? z.rabatt_cent : 0,
-      kanal: z.kanal || 'manuell',
+      kanal: kanalBekannt ? (z.kanal || 'manuell') : 'manuell',
       status: z.status === 'rueckgaengig' ? 'rueckgaengig' : 'aktiv',
       // KERN-B2 F-2: Anzahlung in fremder Währung (§ 16 Abs. 6 S. 1 UStG), nur wenn fremdVorbereiten sie gesetzt hat
       ...(istCent(z.rc_basis_cent) ? { rc_basis_cent: z.rc_basis_cent, fremd_betrag_cent: z.fremd_betrag_cent } : {}),
+      // K3-Fix (K-N3): Satz der Mehrzweck-Einlösung (kasse.js kassentagZuBelegEingabe), nur an der Gutschein-Zahlung eines Tagesabschlusses
+      ...(kanalBekannt && z.kanal === 'gutschein_mehrzweck' && SAETZE_ZULAESSIG.includes(z.mehrzweck_satz_bp) ? { mehrzweck_satz_bp: z.mehrzweck_satz_bp } : {}),
     });
   });
   return out;
@@ -536,6 +546,11 @@ export function normalisiereEingabe(eingabe, kontext) {
     if (oe.hinweis) unsicherheiten.push(hin(oe.hinweis, 'gegenpartei.land', 'Land des Kunden fehlt'));
     satzBp = null;
     herkunft = herkunft === 'nutzer' ? 'beleg' : herkunft;
+  } else if (wahl === 'gutschein_mehrzweck' && richtung === 'ausgang' && belegArt === 'tagesabschluss') {
+    // KERN-26 (Kassenbuch, SB-3): Verkauf eines Mehrzweck-Gutscheins, nicht steuerbar (§ 3 Abs. 15 UStG), unabhängig vom Status; nur am Kassenbeleg
+    // (O2 N2: an einer gewöhnlichen Rechnung bleibt die Wahl unbekannt, Steuerfall UNBEKANNT)
+    steuerfall = 'A_GUTSCHEIN_MEHRZWECK';
+    satzBp = null;
   } else if (!istKorrektur && status === 'unbekannt') {
     steuerfall = 'UNBEKANNT';
     unbekanntGrund = 'steuerfall_nicht_gewaehlt';
@@ -708,7 +723,7 @@ export function normalisiereEingabe(eingabe, kontext) {
   let positionen = [];
   const vorz = istKorrektur ? -1 : 1;
   const keinSatz = steuerfall === 'UNBEKANNT' || steuerfall === 'SPERRE_STUFE4' || steuerfall === 'E_INLAND_OHNE_VORSTEUER'
-    || steuerfall === 'A_KU' || steuerfall === 'FA_ZAHLUNG' || steuerfall === 'PRIVAT'
+    || steuerfall === 'A_KU' || steuerfall === 'A_GUTSCHEIN_MEHRZWECK' || steuerfall === 'FA_ZAHLUNG' || steuerfall === 'PRIVAT'
     || steuerfall === 'E_13B_EU_DL' || steuerfall === 'E_13B_DRITTLAND_DL' || steuerfall === 'A_NICHT_STEUERBAR_EU_B2B_DL' || steuerfall === 'A_NICHT_STEUERBAR_DRITTLAND_B2B_DL';
   // Gegenprüfung M3: Beträge werden immer positiv eingegeben (Korrekturen und Stornos tragen das Vorzeichen erst im Beleg, vorz).
   // Ein negativer Betrag ist ein Pflichtfeldfehler und wird im Entwurf als 0 geführt: sonst würde eine "Rechnung" mit negativem Betrag
@@ -807,7 +822,7 @@ export function normalisiereEingabe(eingabe, kontext) {
 
   // --- Zahlungen (Schritt 7) ---
   const belegId = id || 'beleg';
-  const zahlungen = baueZahlungen(e, belegId, leistung ? leistung.bis : null, richtung, vorschlaege);
+  const zahlungen = baueZahlungen(e, belegId, leistung ? leistung.bis : null, richtung, vorschlaege, unsicherheiten, belegArt);
 
   // --- Beleg bauen ---
   const steuer = {
@@ -942,7 +957,7 @@ export function validiereBeleg(beleg, optionen) {
   if (s.richtung === 'ausgang' && !kor && !nurSumme) {
     if (!istDatum(s.rechnungsdatum)) b('PF_RECHNUNGSDATUM', 'steuer.rechnungsdatum', 'Rechnungsdatum fehlt');
     if (!istObjekt(s.leistung)) b('PF_LEISTUNG', 'steuer.leistung', 'Leistungszeitpunkt fehlt');
-    if (s.steuerfall !== 'UNBEKANNT' && s.steuerfall !== 'SPERRE_STUFE4' && s.steuerfall !== 'A_KU' && s.steuerfall !== 'A_NICHT_STEUERBAR_EU_B2B_DL' && s.steuerfall !== 'A_NICHT_STEUERBAR_DRITTLAND_B2B_DL' && pos.some((p) => istObjekt(p) && (p.satz_bp === null || p.satz_bp === undefined))) b('PF_SATZ', 'steuer.positionen', 'mindestens eine Position ohne Satz');
+    if (s.steuerfall !== 'UNBEKANNT' && s.steuerfall !== 'SPERRE_STUFE4' && s.steuerfall !== 'A_KU' && s.steuerfall !== 'A_GUTSCHEIN_MEHRZWECK' && s.steuerfall !== 'A_NICHT_STEUERBAR_EU_B2B_DL' && s.steuerfall !== 'A_NICHT_STEUERBAR_DRITTLAND_B2B_DL' && pos.some((p) => istObjekt(p) && (p.satz_bp === null || p.satz_bp === undefined))) b('PF_SATZ', 'steuer.positionen', 'mindestens eine Position ohne Satz');
   }
   if (s.richtung === 'eingang' && !kor && !nurSumme) {
     if (!istDatum(s.rechnungsdatum)) w('W_RECHNUNGSDATUM_FEHLT', 'steuer.rechnungsdatum', 'Rechnungsdatum fehlt');

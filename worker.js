@@ -17,18 +17,25 @@ import { regelKlaerungBeleg } from './regel/klaerung-beleg.js'; // KX-VD
 import { regelZaehler, ZAEHLER_PFADE } from './regel/zaehler.js'; // KX-RB (BP-19)
 import { regelAdminFeatures } from './regel/admin-features.js';
 import { regelOssMeldung } from './regel/oss-meldung.js'; // WORKER-C (Release C, BP-29)
+import { regelKasse, KASSE_PFADE } from './regel/kasse.js'; // KASSE-P1b: Kassenbuch (Feature kasse, Standard aus)
+import { regelKasseZbonLesen, KASSE_ZBON_PFAD } from './regel/kasse-zbon-ki.js'; // KASSE-P5-KI: Z-Bon lesen (Features kasse und kasse_ki, Standard aus)
+import { kassenPrueferDaten, kassenPrueferFortsetzung } from './regel/kasse-daten.js'; // KASSE-P1b: Prüfer-Daten Kassenbuch
+import { kassenAusgabeBeleg } from './regel/kasse-ausgabe.js'; // KASSE-P1b-4: Ausgabe aus der Kasse über den Beleg-Schreibweg v2
 import { regelEzbKurs } from './regel/ezb-kurs.js'; // WORKER-C (Release C, BP-29)
-import { datevOssPlanLaden, datevOssBuchungen } from './regel/datev-oss.js'; // KX-WC2 (Release C, BP-30 DATEV-Teil)
-import { rechnungsnrDuplikat, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c)
+import { datevOssPlanLaden, datevOssVorbereiten, datevOssBuchungen } from './regel/datev-oss.js'; // KX-WC2 (Release C, BP-30 DATEV-Teil)
+import { rechnungsnrDuplikat, rechnungsnrAbfragen, RECHNUNGSNR_DUPLIKAT_WARNUNG } from './regel/duplikat.js'; // Kassen-P0 0.5(c); O11 N2 Varianten; O12a N1 gemeinsame Abfragen
 import { datevMischsatzGruppen, datevKorrekturGruppen, KORREKTUR_BELEG_ARTEN } from './regel/datev-mischsatz.js'; // Branch datev-mischsatz: Belege mit mehreren Steuersätzen je Satz buchen
 import { dekodiereFelder as datevDekodiereFelder } from './regel/firestore.js';
-import { datevBelegfeldBereinigen, datevFeldGequotet, datevNummerPruefen, datevKontoVierstellig, datevGeldkontoImBereich, datevKuKonto, RC_EINGANG_KONTEN, RC_AUSGANG_KONTEN, datevRcLage, datevUstId, GWG_KONTEN, AFA_KATEGORIE, GWG_KATEGORIE, FA_EST_ART, UST_KATEGORIEN } from './regel/datev-export-regeln.js'; // DATEV-Gesamtcheck 21.11.2026: Belegfeld 1, § 13b, GWG, Konten
-import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen, kiKassenberichtText } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4); Kassen-P0: kiKassenberichtText
+import { abfrageStrom, batchGetStrom, lesenMitEinerWiederholung, StromAbbruch } from './regel/firestore-strom.js'; // O18a M1: Fehlerelemente im Antwortstrom von runQuery/batchGet brechen ab (fail-closed)
+import { DOK_VOLL_MAX, DOK_VORAB_SEITE, DOK_VORAB_FELDER, datevNachName, datevDokId, datevBelegDatum, datevJahrNamen, datevSatzJeQuelle, datevBelegIdZuNr } from './regel/datev-lesen.js'; // W3 DATEV: Belege nur für das Exportjahr lesen
+import { DATEV_KASSE_KONTEN, KASSE_UMSATZ_STEUERFAELLE, KASSE_DURCHLAUF_KONTO, KASSE_ERLOES_0_KONTO, KASSE_MEHRZWECK_KONTO, kassenKontoWahl, istKasseTagesbeleg, kasseBelegPlan, kasseBewegungBuchung, kasseBewegungOhneBuchung, kasseGeldtransitGegenbein, kasseTagesPosten, istSumupBarbeleg, sumupKasseWahl } from './regel/datev-kasse.js'; // Kassenbuch P1b-5: DATEV-Kassenzweig
+import { datevBelegfeldBereinigen, datevFeldGequotet, datevNummerPruefen, datevKontoVierstellig, datevGeldkontoImBereich, datevKuKonto, RC_EINGANG_KONTEN, RC_AUSGANG_KONTEN, datevRcLage, datevUstId, GWG_KONTEN, AFA_KATEGORIE, GWG_KATEGORIE, FA_EST_ART, UST_KATEGORIEN, datevWarnHeader } from './regel/datev-export-regeln.js'; // DATEV-Gesamtcheck 21.11.2026: Belegfeld 1, § 13b, GWG, Konten
+import { KI_FEATURES_AUS, KI_FEATURES_AN, kiFeatureAbschnitt, kiFeatureStandLesen, kiFeatureStandKonto, kiLandAbgleichen, kiKassenberichtText, kiKasseText } from './regel/prompts.js'; // BP-22B; KX-EC: kiLandAbgleichen (P4); Kassen-P0: kiKassenberichtText
 // BP-13: Sammlungen der Regelbesteuerung im Löschlauf/Archiv/Export samt Unterkollektionen (verlauf, versionen)
 // NP-05/BP-13: Schreibweg v2 im Kern-Modus 'an' (steuer im selben PATCH wie die Legacy-Felder)
 import { v2Vorbereiten, clientSteuerVorbereiten, v2RestFelder, nachFestschreibungAntwort, festPruefungMarkieren } from './regel/schreibweg-v2.js';
 // BP-21a-W (Phase 3): Steuerdaten je Plattformbeleg, OSS-Datenbasis, hinter Feature 'plattform'
-import { agbZustimmungAb, AGB_FASSUNG_RELEASE_B } from './regel/gemeinsam.js'; // KX-EB A6
+import { agbZustimmungAb, AGB_FASSUNG_RELEASE_B, AGB_MINDESTFASSUNG_KASSE } from './regel/gemeinsam.js'; // KX-EB A6
 import { plattformAuswerten, plattformFeatureAn, plattformEingabe, plattformSteuerKennzeichnen, plattformDatenFeld, originalZurErstattung, stripeChargeLaden, paypalOrderLaden, refBereinigen, waehrungCode, hinweisAusland, HINWEIS_LAND_FEHLT } from './regel/plattform.js';
 import { plattformDatenSigFeld, plattformDatenPruefen, SIG_FELD as PLATTFORM_SIG_FELD } from './regel/plattform-signatur.js'; // POLITUR-B
 import { kodiereWert as kodiereFirestoreWert } from './regel/firestore.js';
@@ -348,6 +355,34 @@ function kurz(id) {
   return s.length > 6 ? s.slice(0, 6) + '…' : s;
 }
 
+// L1-Fix F-1: Schlüssel für Limits je IP. IPv6 zählt je /64-Netz (ein Anschluss hat das ganze Netz und könnte sonst je Anfrage die Adresse wechseln),
+// IPv4 und IPv4-mapped IPv6 (::ffff:a.b.c.d) je Adresse. Normiert (Kleinschreibung, ::-Auflösung, Zone-ID weg); Fehlendes/Ungültiges bleibt unverändert.
+export function ipLimitSchluessel(ip) {
+  const roh = String(ip == null ? '' : ip).trim();
+  if (!roh.includes(':')) return roh;
+  let a = roh.toLowerCase().replace(/^\[|\]$/g, '').split('%')[0];
+  // IPv4-Ende in zwei Hex-Gruppen umrechnen
+  const v4 = a.match(/^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const o = v4.slice(2).map(Number);
+    if (o.some((n) => n > 255)) return roh;
+    a = v4[1] + ((o[0] << 8) | o[1]).toString(16) + ':' + ((o[2] << 8) | o[3]).toString(16);
+  }
+  if (!/^[0-9a-f:]+$/.test(a) || (a.match(/::/g) || []).length > 1) return roh;
+  let teile;
+  if (a.includes('::')) {
+    const [l, r] = a.split('::');
+    const links = l ? l.split(':') : [], rechts = r ? r.split(':') : [];
+    const fehlt = 8 - links.length - rechts.length;
+    if (fehlt < 1) return roh;
+    teile = [...links, ...Array(fehlt).fill('0'), ...rechts];
+  } else teile = a.split(':');
+  if (teile.length !== 8 || teile.some((t) => !/^[0-9a-f]{1,4}$/.test(t))) return roh;
+  const g = teile.map((t) => parseInt(t, 16));
+  if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) return `${g[6] >> 8}.${g[6] & 255}.${g[7] >> 8}.${g[7] & 255}`;
+  return g.slice(0, 4).map((x) => x.toString(16)).join(':') + '::/64';
+}
+
 // ── In-Memory Rate Limiting ──────────────────
 const rateLimitMap = new Map();
 
@@ -374,6 +409,9 @@ const ROUTEN_LIMITS = {
   '/kontakt':               { limit: 5,  windowMs: 10 * 60 * 1000 },
   '/send-password-reset':   { limit: 5,  windowMs: 10 * 60 * 1000 },
   '/pruefer-daten':         { limit: 10, windowMs: 10 * 60 * 1000 },
+  '/pruefer-datei':         { limit: 120, windowMs: 10 * 60 * 1000 },
+  // O9a M4: Etappen der Kassendaten (die Prüfer-Seite lädt ältere Jahre in Etappen nach; je Etappe ein eigenes Unteranfragen-Budget)
+  '/pruefer-kasse':         { limit: 60, windowMs: 10 * 60 * 1000 },
   '/konto-archivieren':     { limit: 3,  windowMs: 60 * 60 * 1000 },
   '/konto-art':              { limit: 10, windowMs: 10 * 60 * 1000 },
   '/anfrage':               { limit: 5,  windowMs: 60 * 60 * 1000 },
@@ -420,6 +458,14 @@ const UID_LIMITS = {
   // WORKER-C (Release C): OSS-Abgabe je Quartal selten; Kursvorschlag je Währung und Quartal (Cache im KV)
   '/oss-meldung':                    { limit: 20, windowMs: 10 * 60 * 1000 },
   '/ezb-kurs':                       { limit: 30, windowMs: 10 * 60 * 1000 },
+  // KASSE-P1b (Baukonzept 2.3): Tagesabschluss je Kasse und Tag, Stammdaten selten
+  '/kassentag':                      { limit: 60, windowMs: 10 * 60 * 1000 },
+  '/kasse':                          { limit: 30, windowMs: 10 * 60 * 1000 },
+  '/kassenbewegung':                 { limit: 120, windowMs: 10 * 60 * 1000 },
+  // W2-W2: „Ich habe gemeldet“ (Kassenmeldung) selten
+  '/kassenmeldung':                  { limit: 10, windowMs: 10 * 60 * 1000 },
+  // KASSE-P5-KI (2.14): „Z-Bon lesen“ kostet je Aufruf einen Haiku-Aufruf: 10 je 10 Minuten, dazu das Tageslimit 5 im Modul (atomar, fail-closed)
+  [KASSE_ZBON_PFAD]:                 { limit: 10, windowMs: 10 * 60 * 1000 },
   // G6-M5: kostenpflichtige Datei-Aufrufe je Nutzer (zusätzlich zum atomaren Monatskontingent)
   '/image':                          { limit: 30, windowMs: 10 * 60 * 1000 },
   '/document':                       { limit: 300, windowMs: 10 * 60 * 1000 },
@@ -458,6 +504,8 @@ export default {
     // Format wird zwar sofort lokal abgelehnt, aber auch das ist ohne Limit ein
     // günstiger Vektor, um den Worker mit Requests zu fluten.
     const clientIP = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || 'unknown';
+    // L1-Fix F-1: Limits je IP zählen IPv6 je /64 (clientIP bleibt die volle Adresse für Konten-Zähler und VPN-Prüfung, Webhooks bleiben je Adresse)
+    const limitIP = ipLimitSchluessel(clientIP);
     // Webhooks (Integrations-Audit 2026-09-26): Stripe, PayPal, Shopify & Co. schicken die
     // Zustellungen ALLER Kontolux-Nutzer von denselben wenigen Server-IPs — ein gemeinsames
     // 20er-Limit pro IP hätte bei mehreren Kunden oder einem Verkaufs-Peak echte Zahlungen mit 429
@@ -467,7 +515,7 @@ export default {
     const webhookPlattform = url.pathname.split('/')[2] || '';
     // Plus Nutzer-ID (nur wenn sie wie eine echte aussieht): Stripe, PayPal & Co. senden die Zustellungen aller Kunden von denselben IPs, ein Verkaufspeak eines Kunden darf andere nicht drosseln. Die LRU-Begrenzung hält den Speicher klein.
     const webhookNutzer = url.pathname.split('/')[3] || '';
-    const limitSchluessel = istWebhook ? `${clientIP}|webhook|${/^[a-z0-9]{2,20}$/.test(webhookPlattform) ? webhookPlattform : 'x'}|${/^[A-Za-z0-9]{20,40}$/.test(webhookNutzer) ? webhookNutzer : 'x'}` : clientIP;
+    const limitSchluessel = istWebhook ? `${clientIP}|webhook|${/^[a-z0-9]{2,20}$/.test(webhookPlattform) ? webhookPlattform : 'x'}|${/^[A-Za-z0-9]{20,40}$/.test(webhookNutzer) ? webhookNutzer : 'x'}` : limitIP;
     if (!checkRateLimit(limitSchluessel, istWebhook ? 60 : 20)) {
       return new Response('Too Many Requests', { status: 429, headers: cors });
     }
@@ -478,7 +526,7 @@ export default {
     // Strengere Limits für Routen, die Mails versenden, Firestore-Daten ausliefern oder
     // öffentlich erreichbar sind (Security-Audit 2026-10-16). Pro IP und Route.
     const routenLimit = ROUTEN_LIMITS[url.pathname];
-    if (request.method === 'POST' && routenLimit && !checkRateLimit(`${url.pathname}|${clientIP}`, routenLimit.limit, routenLimit.windowMs)) {
+    if (request.method === 'POST' && routenLimit && !checkRateLimit(`${url.pathname}|${limitIP}`, routenLimit.limit, routenLimit.windowMs)) {
       return new Response('Too Many Requests', { status: 429, headers: cors });
     }
 
@@ -507,8 +555,8 @@ export default {
           headers: { ...cors, 'Content-Type': 'application/json' }
         });
       }
-      const limitResult = await peekUploadLimit(limitVerified.uid, env);
-      return new Response(JSON.stringify(limitResult), {
+      // Kein Upload-Kontingent mehr (Kap. 6 Nr. 28): immer erlaubt. Der Weg bleibt für ältere App-Stände, die vor dem Hochladen fragen.
+      return new Response(JSON.stringify({ erlaubt: true }), {
         status: 200,
         headers: { ...cors, 'Content-Type': 'application/json' }
       });
@@ -619,6 +667,8 @@ export default {
       const protectedPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/stripe-gebuehren', '/usage', '/abo', '/konto-archivieren', '/send-verification-email', '/send-email-change-verification', '/webhook-settings', '/feedback', '/auszug-rueckmeldung', '/pruefer-zugang', '/freigabe-status', '/steuerprofil', '/festschreibung', '/entsperren', '/migration', '/agb-zustimmung'];
       protectedPaths.push(...ZAEHLER_PFADE); // KX-RB
       protectedPaths.push('/oss-meldung', '/ezb-kurs'); // WORKER-C
+      protectedPaths.push(...KASSE_PFADE); // KASSE-P1b
+      protectedPaths.push(KASSE_ZBON_PFAD); // KASSE-P5-KI
 
       if (protectedPaths.includes(url.pathname)) {
         try {
@@ -657,6 +707,8 @@ export default {
           const emailVerifiedRequiredPaths = ['/chat', '/image', '/document', '/frist', '/datev-export', '/steuerprofil', '/festschreibung', '/entsperren', '/migration', '/agb-zustimmung'];
           emailVerifiedRequiredPaths.push(...ZAEHLER_PFADE); // KX-RB
           emailVerifiedRequiredPaths.push('/oss-meldung', '/ezb-kurs'); // WORKER-C
+          emailVerifiedRequiredPaths.push(...KASSE_PFADE); // KASSE-P1b
+          emailVerifiedRequiredPaths.push(KASSE_ZBON_PFAD); // KASSE-P5-KI
           if (emailVerifiedRequiredPaths.includes(url.pathname) && !verified.emailVerified) {
             const errorCors = getCORS(origin);
             return new Response(JSON.stringify({ error: 'E-Mail nicht verifiziert', code: 'email-not-verified' }), {
@@ -675,7 +727,7 @@ export default {
       }
 
       // Verifizierte UID überschreibt client-seitige userId — auch wenn der Client sie weglässt
-      // (Prüfung 2026-09-28): sonst fiel checkNachrichtenLimit/peekUploadLimit auf den frei
+      // (Prüfung 2026-09-28): sonst fiel checkNachrichtenLimit auf den frei
       // wählbaren Nutzernamen zurück, und mit wechselnden Namen ließ sich das Tageslimit umgehen.
       if (verifiedUid) body.userId = verifiedUid;
       // Security-Audit 2026-10-16: Firestore-Zugriffe in Handlern nutzen den Token aus dem
@@ -762,10 +814,19 @@ export default {
       // WORKER-C (Release C, BP-29): Abgabe-Schnappschuss OSS (nur Worker schreibt users/{uid}/oss_meldung) und EZB-Kursvorschlag; beide Feature oss
       if (url.pathname === '/oss-meldung') return regelOssMeldung(body, env, cors, regelAbhaengigkeiten(env));
       if (url.pathname === '/ezb-kurs') return regelEzbKurs(body, env, cors, { ...regelAbhaengigkeiten(env), kv: env.PROFIL_KV });
+      // KASSE-P1b (Baukonzept 2.3): Kassenbuch; nur der Worker schreibt users/{uid}/kassen*, Feature kasse (Standard aus: 503)
+      if (KASSE_PFADE.includes(url.pathname)) return regelKasse(url.pathname, body, env, cors, regelAbhaengigkeiten(env));
+      // KASSE-P5-KI (2.14): Z-Bon lesen. Der Anthropic-Aufruf läuft über den Durchreicher anthropicFetchMitKontingent (ohne Upload-Kontingent, Nr. 28); das Tageslimit 5 zählt
+      // genau einmal das Modul selbst (reserviereKasseZbon, Sammlung kassezbonlimit), nicht zusätzlich reserviereZaehler. Kein Eintrag in GLOBALE_LIMITS wie bei /image (siehe dort).
+      if (url.pathname === KASSE_ZBON_PFAD) return regelKasseZbonLesen(body, env, cors, { ...regelAbhaengigkeiten(env), kiAufruf: (uid, init) => anthropicFetchMitKontingent(uid, env, 'https://api.anthropic.com/v1/messages', init), estimateCostCents, agbMindestfassungKasse: AGB_MINDESTFASSUNG_KASSE });
       if (url.pathname === '/admin/features') return regelAdminFeatures(request, authHeader, env, cors, regelAbhaengigkeiten(env));
       // Bewusst NICHT in protectedPaths: ein Betriebsprüfer hat keinen Firebase-Login, der
       // Zugriffsnachweis ist der Besitz des Tokens selbst (siehe handlePrueferDaten unten).
       if (url.pathname === '/pruefer-daten') return handlePrueferDaten(body, env, cors, authHeader);
+      // H1-Fix: Datei des Prüferzugangs per POST (Token im Header, Pfad im Körper, nichts in der Adresse); gleicher Zugangsnachweis wie /pruefer-daten
+      if (url.pathname === '/pruefer-datei') return handlePrueferDatei(body, env, cors, authHeader, limitIP);
+      // O9a M4: weitere Etappe der Kassendaten (gleicher Zugangsnachweis wie /pruefer-daten)
+      if (url.pathname === '/pruefer-kasse') return handlePrueferKasse(body, env, cors, authHeader, limitIP);
       if (url.pathname === '/freigabe-status') {
         return new Response(JSON.stringify({ status: (await freigabeStatus(verifiedUid, env)) || 'frei' }), {
           status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
@@ -812,71 +873,37 @@ export default {
   }
 };
 
-// ── Upload Limit (50/Monat) via KV ──────────────────────────
-const UPLOAD_LIMIT = 50;
-function uploadLimitKey(userId, jetzt) {
+// ── Kein monatliches Upload-Kontingent mehr (Kassenbuch P1b-4; Entscheidung Jona 21.11.2026, Kap. 6 Nr. 28, konzept-kassenbuch.md Abschnitt 14) ──────────
+// Früher: 50 Uploads je Monat (KV-Zähler uploads:{uid}:{JJJJ-MM}, atomare Reservierung uploadlimit/{uid}_{JJJJ-MM}, Vorab-Prüfung vor jedem Upload, 429
+// "Upload-Limit erreicht"). Das gibt es technisch nicht mehr: nichts zählt, nichts sperrt. Begrenzt wird weiter
+//   - das Tageslimit der KI-Aktionen (checkNachrichtenLimit, atomar, 15 je Tag): Chat (auch mit Anhang), /image, /document mit Datei, Monatsabschluss-PDF;
+//     „Z-Bon lesen“ (KI-Paket W) bekommt zusätzlich ein eigenes Tageslimit von 5 (reserviereZaehler unten);
+//   - die technischen Anfrage-Raten je Nutzer (UID_LIMITS je 10 Minuten) und die Bremse je IP (kein Upload-Limit, Schutz vor Schleifen).
+// Belegarchiv-Speichern ohne KI (BELEG_MANUELL, BELEG_SPEICHERN) und Steuerprofil-Nachweise kosten nichts und zählen nirgends.
+// Altlasten: bestehende KV-Schlüssel uploads:… laufen mit ihrer TTL (35 Tage) aus; beim Löschen eines Kontos werden sie und die Firestore-Dokumente
+// uploadlimit/… trotzdem entfernt (Konto-Löschung unten, regel/loeschlaeufe-konto.js uploadlimitLoeschen).
+function uploadLimitKey(userId, jetzt) { // nur noch für die Altlast-Löschung beim Entfernen eines Kontos
   return `uploads:${userId}:${jetzt.getFullYear()}-${String(jetzt.getMonth() + 1).padStart(2, '0')}`;
 }
 
-// Nur lesen, NICHT hochzählen — für den Vorab-Check vor dem Storage-Upload
-// und vor dem eigentlichen Speichern (kein Zählen von Versuchen, die scheitern).
-async function peekUploadLimit(userId, env) {
-  if (!userId) return { erlaubt: false };
-  const jetzt = new Date();
-  const key = uploadLimitKey(userId, jetzt);
-
-  try {
-    const val = await env.PROFIL_KV.get(key);
-    const anzahl = val ? parseInt(val) : 0;
-    return { erlaubt: anzahl < UPLOAD_LIMIT, anzahl };
-  } catch(e) {
-    return { erlaubt: false }; // Fail-closed: ohne Zähler kein Upload
-  }
-}
-
-// Zählt hoch — nur aufrufen, NACHDEM der Beleg erfolgreich gespeichert wurde.
-async function incrementUploadLimit(userId, env) {
-  if (!userId) return;
-  const jetzt = new Date();
-  const key = uploadLimitKey(userId, jetzt);
-  const ttlSeconds = 35 * 86400; // 35 Tage — überlebt sicher den ganzen Kalendermonat
-
-  try {
-    const val = await env.PROFIL_KV.get(key);
-    const anzahl = val ? parseInt(val) : 0;
-    await env.PROFIL_KV.put(key, String(anzahl + 1), { expirationTtl: ttlSeconds });
-  } catch(e) {
-    // Im Zweifel nicht zählen
-  }
-}
-
-// G6-M5: Atomare Kontingent-Reservierung unmittelbar vor dem kostenpflichtigen Anthropic-Aufruf. Der KV-Zähler (peek/increment) ist
-// nicht atomar (get+put, eventuell konsistent): 100 parallele Uploads würden alle an der Grenze vorbeikommen. Deshalb zählt zusätzlich
-// ein Firestore-Dokument je Nutzer und Monat (uploadlimit/{uid}_{JJJJ-MM}) mit Vorbedingung currentDocument.updateTime (wie
-// checkNachrichtenLimit): nur wer den Zähler wirklich fortschreibt, darf aufrufen. Scheitert der Aufruf, gibt gibUploadZurueck die
-// Reservierung (Firestore und KV) wieder frei. Fail-closed: ohne Zähler kein Anthropic-Aufruf.
-const UPLOAD_FS_COLLECTION = 'uploadlimit';
-export function uploadReservierungsKey(userId, jetzt = new Date()) {
-  return `${userId}_${berlinDatumAlsString(jetzt).slice(0, 7)}`;
-}
-export async function reserviereUpload(userId, env, optionen = {}) {
-  const limit = Number.isInteger(optionen.limit) ? optionen.limit : UPLOAD_LIMIT;
-  const key = uploadReservierungsKey(userId, optionen.jetzt instanceof Date ? optionen.jetzt : new Date()); // NL-F: Zeitpunkt der Reservierung (für die Freigabe am Monatswechsel)
-  const maxVersuche = 6;
-  if (!userId) return { erlaubt: false, grund: 'infra' };
+// Atomarer Zähler mit Obergrenze (Firestore-Dokument {sammlung}/{key}, Feld anzahl, Vorbedingung currentDocument.updateTime wie checkNachrichtenLimit): nur wer den
+// Zähler wirklich fortschreitet, darf weitermachen. Allgemeiner Baustein, übrig aus der früheren Upload-Reservierung und für Limits wie das Tageslimit „Z-Bon lesen“
+// (KI-Paket W: reserviereZaehler('kassezbonlimit', `${uid}_${tag}`, 5, env)). Fail-closed: ohne Zähler { erlaubt: false, grund: 'infra' }.
+export async function reserviereZaehler(sammlung, key, limit, env, { maxVersuche = 6 } = {}) {
+  if (!sammlung || !key || !Number.isInteger(limit)) return { erlaubt: false, grund: 'infra' };
   let token;
-  try { token = await getGoogleAccessToken(env, FIRESTORE_SCOPE); } catch (e) { console.error('reserviereUpload: Token fehlgeschlagen:', e.message); return { erlaubt: false, grund: 'infra' }; }
-  const basis = `${NACHRICHT_FS}/${UPLOAD_FS_COLLECTION}`;
+  try { token = await getGoogleAccessToken(env, FIRESTORE_SCOPE); } catch (e) { console.error('reserviereZaehler: Token fehlgeschlagen:', e.message); return { erlaubt: false, grund: 'infra' }; }
+  const basis = `${NACHRICHT_FS}/${sammlung}`;
   for (let versuch = 0; versuch < maxVersuche; versuch++) {
     let doc;
-    try { doc = await nachrichtenDocLesenIn(UPLOAD_FS_COLLECTION, key, token); } catch (e) { console.error('reserviereUpload lesen:', e.message, 'key=', kurz(key)); return { erlaubt: false, grund: 'infra' }; }
+    try { doc = await nachrichtenDocLesenIn(sammlung, key, token); } catch (e) { console.error('reserviereZaehler lesen:', e.message, 'key=', kurz(key)); return { erlaubt: false, grund: 'infra' }; }
     if (!doc) {
       const res = await fetch(`${basis}?documentId=${encodeURIComponent(key)}`, {
         method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ fields: { anzahl: { integerValue: '1' } } })
       });
       if (res.ok) return { erlaubt: true, anzahl: 1 };
-      if (res.status !== 409) { console.error('reserviereUpload INSERT:', res.status, 'key=', kurz(key)); return { erlaubt: false, grund: 'infra' }; }
+      if (res.status !== 409) { console.error('reserviereZaehler INSERT:', res.status, 'key=', kurz(key)); return { erlaubt: false, grund: 'infra' }; }
       continue;
     }
     const anzahl = parseInt(doc.fields?.anzahl?.integerValue || '0', 10);
@@ -887,66 +914,34 @@ export async function reserviereUpload(userId, env, optionen = {}) {
     });
     if (res.ok) return { erlaubt: true, anzahl: anzahl + 1 };
     if (res.status === 400 || res.status === 409 || res.status === 412) continue; // paralleler Aufruf hat gezählt: neu lesen
-    console.error('reserviereUpload PATCH:', res.status, 'key=', kurz(key));
+    console.error('reserviereZaehler PATCH:', res.status, 'key=', kurz(key));
     return { erlaubt: false, grund: 'infra' };
   }
-  return { erlaubt: false, grund: 'ausgelastet' }; // N3: alle Versuche an parallelen Aufrufen gescheitert (Wettlauf), kein Infrastrukturfehler
+  return { erlaubt: false, grund: 'ausgelastet' }; // alle Versuche an parallelen Aufrufen gescheitert (Wettlauf), kein Infrastrukturfehler
 }
-// NL-F: reserviertAm = Zeitpunkt der Reservierung. Die Freigabe zählt im Monat der Reservierung zurück, nicht im (inzwischen neuen) Monat.
-export async function gibUploadZurueck(userId, env, reserviertAm = null) {
-  if (!userId) return;
-  const bezug = reserviertAm instanceof Date ? reserviertAm : new Date();
+// Gibt eine Reservierung zurück (ein gescheiterter Aufruf zählt nicht). Wirft nie.
+export async function gibZaehlerZurueck(sammlung, key, env) {
   try {
-    const key = uploadReservierungsKey(userId, bezug);
     const token = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
     for (let versuch = 0; versuch < 4; versuch++) {
-      const doc = await nachrichtenDocLesenIn(UPLOAD_FS_COLLECTION, key, token);
+      const doc = await nachrichtenDocLesenIn(sammlung, key, token);
       if (!doc) break;
       const anzahl = Math.max(0, parseInt(doc.fields?.anzahl?.integerValue || '0', 10) - 1);
-      const res = await fetch(`${NACHRICHT_FS}/${UPLOAD_FS_COLLECTION}/${encodeURIComponent(key)}?updateMask.fieldPaths=anzahl&currentDocument.updateTime=${encodeURIComponent(doc.updateTime)}`, {
+      const res = await fetch(`${NACHRICHT_FS}/${sammlung}/${encodeURIComponent(key)}?updateMask.fieldPaths=anzahl&currentDocument.updateTime=${encodeURIComponent(doc.updateTime)}`, {
         method: 'PATCH', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ fields: { anzahl: { integerValue: String(anzahl) } } })
       });
       if (res.ok) break;
       if (!(res.status === 400 || res.status === 409 || res.status === 412)) break;
     }
-  } catch (e) { console.warn('gibUploadZurueck (Firestore):', e.message); }
-  try { // KV-Zähler: der Aufrufer hat ihn vorab hochgezählt, ein gescheiterter Aufruf zählt nicht
-    const kvKey = uploadLimitKey(userId, bezug);
-    const val = await env.PROFIL_KV.get(kvKey);
-    const n = val ? parseInt(val) : 0;
-    if (n > 0) await env.PROFIL_KV.put(kvKey, String(n - 1), { expirationTtl: 35 * 86400 });
-  } catch (_) { /* im Zweifel stehen lassen */ }
+  } catch (e) { console.warn('gibZaehlerZurueck:', e.message); }
 }
-// Ersetzt fetch() an den Anthropic-Aufrufen mit Datei: reserviert vorher atomar, gibt bei Fehler (Netz, 4xx/5xx) zurück.
-// kontoUid = null: ohne Reservierung (Chat ohne Anhang). Gesperrt: 429-Antwort im Textformat, ohne Anthropic-Aufruf.
-export async function anthropicFetchMitKontingent(kontoUid, env, url, init, optionen = {}) {
+// Anthropic-Aufruf mit Datei. Früher mit atomarer Monats-Reservierung; jetzt ohne Kontingent ein reiner Durchreicher (das Tageslimit der KI-Aktionen prüfen die
+// Aufrufer vorher über checkNachrichtenLimit). Der Name und die Signatur bleiben, damit weitere KI-Aufrufstellen (Z-Bon lesen, KI-Paket W) nicht brechen;
+// optionen.fetchFn für Tests. kontoUid und env sind ohne Kontingent ohne Wirkung.
+export async function anthropicFetchMitKontingent(kontoUid, env, url, init, optionen = {}) { // eslint-disable-line no-unused-vars
   const fetchFn = optionen.fetchFn || fetch;
-  if (!kontoUid) return fetchFn(url, init);
-  const reserviertAm = new Date(); // NL-F: Monat der Reservierung merken
-  const r = await reserviereUpload(kontoUid, env, { ...optionen, jetzt: reserviertAm });
-  if (!r.erlaubt) {
-    await gibKvZaehlerZurueck(kontoUid, env);
-    const text = r.grund === 'limit'
-      ? 'Du hast dein monatliches Upload-Limit erreicht. Du kannst Kontolux AI weiterhin vollständig nutzen — Chat, Finanzkalender und manuelle Monatsabschlüsse funktionieren wie gewohnt.'
-      : r.grund === 'ausgelastet'
-        ? 'Zu viele Uploads gerade, bitte kurz warten und noch einmal versuchen.'
-        : 'Kontolux ist gerade nicht erreichbar. Bitte versuche es in ein paar Minuten noch einmal.';
-    // N3: X-Kx-Sperre kennzeichnet die Antwort als Nutzertext; die Aufrufer geben ihn weiter statt "Claude API Error: 429"
-    return new Response(text, { status: r.grund === 'limit' || r.grund === 'ausgelastet' ? 429 : 503, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'X-Kx-Sperre': r.grund } });
-  }
-  let res;
-  try { res = await fetchFn(url, init); } catch (e) { await gibUploadZurueck(kontoUid, env, reserviertAm); throw e; }
-  if (!res.ok) await gibUploadZurueck(kontoUid, env, reserviertAm);
-  return res;
-}
-async function gibKvZaehlerZurueck(userId, env) {
-  try {
-    const kvKey = uploadLimitKey(userId, new Date());
-    const val = await env.PROFIL_KV.get(kvKey);
-    const n = val ? parseInt(val) : 0;
-    if (n > 0) await env.PROFIL_KV.put(kvKey, String(n - 1), { expirationTtl: 35 * 86400 });
-  } catch (_) { /* im Zweifel stehen lassen */ }
+  return fetchFn(url, init);
 }
 
 // ── Datei-Upload serverseitig validieren (Größe + Typ) ────
@@ -1417,8 +1412,15 @@ const SACHKONTO_MAPPING = {
   'Einnahmen steuerfrei':       { SKR03: '8200', SKR04: '4200', euer_zeile: 'Z.12' },
   // OSS-FORM 3: Verkauf an Privatkunden in anderen EU-Ländern (Satz des Kundenlands), gleich wie index.html; der DATEV-Export mit Feature oss nimmt das
   // Konto aus dem Steuerteil (regel/datev-oss.js), dies ist nur der Altpfad
-  'Einnahmen EU-Privatkunden (OSS)': { SKR03: '8320', SKR04: '4320', euer_zeile: 'Z.15' }
+  'Einnahmen EU-Privatkunden (OSS)': { SKR03: '8320', SKR04: '4320', euer_zeile: 'Z.15' },
+  // Kassenbuch P1b-5 (12-steuer-vertiefung 3.4 SB-4, DATEV-Kontenrahmen 2026 Art.-Nr. 11174/11175, geprüft 21.11.2026): ein eigenes Konto "Kassendifferenz" gibt es nicht,
+  // der Kassenfehlbetrag steht auf 4900/6300 "Sonstige betriebliche Aufwendungen" (Konto Konfidenz A, Zuordnung C: der Steuerberater bestätigt die Kontowahl). Z.61 = Kz 183
+  // wie 'Sonstiges'. Nur für den Export des Kassenbuchs; keine Auswahlkategorie (KATEGORIEN_NUR_KASSE) und nicht im KI-Kontenplan. Das Kassenüberschuss-Konto kommt vom
+  // Steuerfall (Erlöskonto 8400/4400 bzw. Kleinunternehmer 8192/4184), nicht aus der Kategorie, deshalb hier kein Eintrag.
+  'Kassendifferenz (Fehlbetrag)': { SKR03: '4900', SKR04: '6300', euer_zeile: 'Z.61' }
 };
+// Kategorien, die nur das Kassenbuch setzt: nicht als Auswahl in Formularen (App) und nicht im Kontenplan der KI.
+const KATEGORIEN_NUR_KASSE = ['Kassendifferenz (Fehlbetrag)'];
 
 function resolveSachkonto(kategorie, skr) {
   const eintrag = SACHKONTO_MAPPING[kategorie];
@@ -1428,6 +1430,7 @@ function resolveSachkonto(kategorie, skr) {
 
 function buildSachkontoTabelleText() {
   return Object.entries(SACHKONTO_MAPPING)
+    .filter(([kategorie]) => !KATEGORIEN_NUR_KASSE.includes(kategorie))
     .map(([kategorie, konten]) => `- ${kategorie}: ${konten.SKR03} (SKR04: ${konten.SKR04})`)
     .join('\n');
 }
@@ -1789,8 +1792,8 @@ WICHTIG: Der Befehl MUSS in der bestätigenden Antwort stehen, sonst wird nichts
 Hochgeladene Rechnung → jeden Punkt ✅/❌: vollständiger Name+Anschrift beider Parteien, Steuernummer/USt-ID, Ausstellungsdatum, fortlaufende Rechnungsnummer, Menge/Art der Leistung, Leistungsdatum/-zeitraum, Nettobetrag, Steuersatz+-betrag in €, Bruttobetrag, KU-Hinweis (§19) statt Steuerausweis. Am Ende: fehlende Pflichtangaben + Korrekturvorschläge (kein Gesamturteil wie "konform"). Warnung wenn KU trotzdem USt ausweist (schuldet sie dann dem Finanzamt).`;
 
 // ── Modul TOOLS — Dokument-Upload, Zeiterfassung, Reisekosten (~2.200 T) ──
-const _KI_TOOLS = `## DOKUMENT-UPLOAD ERKENNUNG
-${kiKassenberichtText()}
+const _KI_TOOLS_BAUEN = (kasseText) => `## DOKUMENT-UPLOAD ERKENNUNG
+${kasseText}
 
 PDF/Bild hochgeladen: Inhalt direkt lesen, nicht nach Infos fragen die im Dokument stehen.
 Rechnung erkannt → Betrag/Absender-Name/Empfänger-Name/Datum/Rechnungsnummer/MwSt-Satz lesen.
@@ -1844,6 +1847,8 @@ WICHTIG: Der Befehl MUSS in der bestätigenden Antwort (Schritt 2) stehen, sonst
 "Berechne die Reisekosten an [Kunde] weiter" → die IDs aus "Offene, noch nicht weiterberechnete Reisekosten pro Kunde" im Profilkontext nehmen, MwSt-Satz UND Format (PDF/XRechnung/Beides) wie bei RECHNUNG ERSTELLEN erfragen falls unklar, dann "Reisekosten an [Kunde] abrechnen? (j/n)", bei j:
 REISE_ABRECHNEN:kunde=[Name],reise_ids=[id1;id2],rechnungsnummer=[auto oder eigene Nr.],mwst_satz=[19/7/0],format=[pdf/xrechnung/beide]
 `;
+// W2-W3: _KI_TOOLS = Fassung ohne Kassenbuch (P0-Text, byte-gleich wie bisher); bei Feature kasse an baut buildStaticForModules die Fassung mit kiKasseText.
+const _KI_TOOLS = _KI_TOOLS_BAUEN(kiKassenberichtText());
 
 // ── Modul INTEGRATIONEN — Stripe, PayPal, SumUp, Shopify, Webhooks (~400 T) ──
 const _KI_INTEGRATIONEN = `## ZAHLUNGSPLATTFORMEN & WEBHOOKS
@@ -1860,7 +1865,7 @@ function buildStaticForModules(modules, stand = KI_FEATURES_AUS) {
   if (modules.includes('euer'))          mit('euer', _KI_EUER);
   if (modules.includes('rechnungen'))    mit('rechnungen', _KI_RECHNUNGEN);
   if (modules.includes('integrationen')) mit('integrationen', _KI_INTEGRATIONEN);
-  if (modules.includes('tools'))         mit('tools', _KI_TOOLS);
+  if (modules.includes('tools'))         mit('tools', stand && stand.kasse === true ? _KI_TOOLS_BAUEN(kiKasseText(stand)) : _KI_TOOLS);
   return parts.join('\n\n');
 }
 
@@ -2504,15 +2509,7 @@ async function handleChat(body, env, cors = {}, ctx) {
     if (!dateiCheck.ok) {
       return new Response(dateiCheck.error, { status: 400, headers: { ...cors, 'Content-Type': 'text/plain' } });
     }
-    // Anhänge zählen gegen das monatliche Upload-Limit wie bei /image und /document
-    // (Security-Audit 2026-10-16: vorher umging ein Chat-PDF das Limit).
-    const uploadLimit = await peekUploadLimit(userId, env);
-    if (!uploadLimit.erlaubt) {
-      return new Response('Du hast dein monatliches Upload-Limit erreicht. Chat ohne Anhang funktioniert weiterhin.', {
-        status: 429, headers: { ...cors, 'Content-Type': 'text/plain' }
-      });
-    }
-    await incrementUploadLimit(userId, env);
+    // Anhänge zählen als Chat-Nachricht im Tageslimit (checkNachrichtenLimit weiter oben), ein monatliches Upload-Limit gibt es nicht mehr (Kap. 6 Nr. 28)
     const mediaType = Datei.type === 'application/pdf' ? 'application/pdf' : Datei.type;
     const userContent = [];
     if (mediaType === 'application/pdf') {
@@ -2766,22 +2763,13 @@ async function handleImage(body, env, cors = {}, ctx) {
 
   // KX-SPEED: Wissensbasis und Feature-Stand (reine Lesezugriffe, werfen nie) laufen parallel zu den Limit-Prüfungen statt danach.
   const kxSpeedVorab = Promise.all([loadSteuerrechtContext(env), kiFeatureStandFuer(env, userId)]);
-  // Upload Limit prüfen
-  const uploadLimit = await peekUploadLimit(userId, env);
-  if (!uploadLimit.erlaubt) {
-    return new Response('Du hast dein monatliches Upload-Limit erreicht. Du kannst Kontolux AI weiterhin vollständig nutzen — Chat, Finanzkalender und manuelle Monatsabschlüsse funktionieren wie gewohnt. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand. 📊', {
-      headers: { ...cors, 'Content-Type': 'text/plain' }
-    });
-  }
-
+  // Kein monatliches Upload-Limit mehr (Kap. 6 Nr. 28): das Tageslimit der KI-Aktionen begrenzt
   const limit = await checkNachrichtenLimit(Nutzername, env, userId, ctx);
   if (!limit.erlaubt) {
     return new Response(limit.grund === 'infra' ? 'Kontolux ist gerade nicht erreichbar. Bitte versuche es in ein paar Minuten noch einmal.' : 'Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
       headers: { ...cors, 'Content-Type': 'text/plain' }
     });
   }
-  // Erst zählen, wenn die Anfrage tatsächlich bearbeitet wird (vorher kostete eine abgelehnte Anfrage ein Upload)
-  await incrementUploadLimit(userId, env);
 
   const dynamicContext = buildDynamicContext(Profil, Datum);
   const [kbText, kiStand] = await kxSpeedVorab; // BP-22B; KX-SPEED: oben gestartet
@@ -3201,6 +3189,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
   if (textEingabenUngueltig(body)) return ungueltigeEingabeAntwort(cors);
   let { Nachricht, Verlauf, Nutzername, Profil, Datum, userId, Datei, chatId, token, betrag, absender, rechnungsnr, typ, storageUrl, name, type, size, bezahlt, mwst_satz, datum, content, sellerNameHint, e_rechnung_format, duplikatBestaetigt, kategorie, sachkonto, buchungstext, betrag_netto, bezahlt_am: bezahlt_am_client } = body;
   const belegAnfrageId = belegAnfrageIdAus(body); // ZUV-G5 M3
+  if (typeof rechnungsnr === 'string') rechnungsnr = rechnungsnr.trim(); // O11 N2: Rechnungsnummer ohne Leerzeichen am Rand speichern und vergleichen
   // Grenzen gegen überlange Eingaben und unrealistische Beträge (Security-Audit 2026-10-16).
   const MAX_BETRAG = 10000000;
   if (betrag !== undefined && betrag !== null && betrag !== '' && Math.abs(parseFloat(betrag)) > MAX_BETRAG) {
@@ -3265,13 +3254,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
     }
 
     try {
-      const uploadLimit = await peekUploadLimit(userId, env);
-      if (!uploadLimit.erlaubt) {
-        return new Response(JSON.stringify({ error: 'Upload-Limit erreicht' }), {
-          status: 429,
-          headers: { ...cors, 'Content-Type': 'application/json' }
-        });
-      }
+      // Kein monatliches Upload-Limit mehr (Kap. 6 Nr. 28): Speichern ohne KI kostet nichts und zählt nirgends.
 
       // Enges 10-Minuten-Fenster als serverseitiges Backstop gegen Doppel-Klick/Netzwerk-Retry
       // (Race Condition — der eigentliche, umfassende Duplikat-Check läuft bereits client-seitig
@@ -3389,8 +3372,6 @@ async function handleDocument(body, env, cors = {}, ctx) {
         });
       }
 
-      // Erst jetzt zählen — Beleg ist tatsächlich gespeichert
-      await incrementUploadLimit(userId, env);
       // Steuerkern-Warnmodus (AP1.8): nur zählen/loggen, ändert nichts (fail-open, bei 'aus' ohne Kernaufruf)
       steuerkernWarnung(env, 'beleg_manuell', { typ, betrag, mwst_satz, datum, bezahlt, bezahlt_am: bezahlt_am_client }, v2 ? (v2.profil || null) : await steuerkernProfilLaden(env, userId, token));
 
@@ -3466,14 +3447,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
     }
 
     try {
-      // Upload Limit prüfen
-      const uploadLimit = await peekUploadLimit(userId, env);
-      if (!uploadLimit.erlaubt) {
-        return new Response(JSON.stringify({ error: 'Upload-Limit erreicht' }), {
-          status: 429,
-          headers: { ...cors, 'Content-Type': 'application/json' }
-        });
-      }
+      // Kein monatliches Upload-Limit mehr (Kap. 6 Nr. 28)
 
       // Enges 10-Minuten-Fenster als serverseitiges Backstop (gleiche Begründung wie bei
       // BELEG_MANUELL oben) — client-seitig läuft bereits der umfassende Duplikat-Check über
@@ -3609,8 +3583,6 @@ async function handleDocument(body, env, cors = {}, ctx) {
         });
       }
 
-      // Erst jetzt zählen — Beleg ist tatsächlich gespeichert
-      await incrementUploadLimit(userId, env);
       // Steuerkern-Warnmodus (AP1.8): nur zählen/loggen, ändert nichts (fail-open, bei 'aus' ohne Kernaufruf)
       steuerkernWarnung(env, 'beleg_speichern', { typ, betrag, mwst_satz, datum, bezahlt, bezahlt_am: bezahlt_am_client }, v2 ? (v2.profil || null) : await steuerkernProfilLaden(env, userId, token));
 
@@ -3676,14 +3648,13 @@ async function handleDocument(body, env, cors = {}, ctx) {
     if (!dateiCheckMa.ok) {
       return new Response(dateiCheckMa.error, { status: 400, headers: { ...cors, 'Content-Type': 'text/plain' } });
     }
-    // Upload Limit prüfen
-    const uploadLimitMa = await peekUploadLimit(userId, env);
-    if (!uploadLimitMa.erlaubt) {
-      return new Response('Du hast dein monatliches Upload-Limit erreicht. Du kannst Kontolux AI weiterhin vollständig nutzen — Chat, Finanzkalender und manuelle Monatsabschlüsse funktionieren wie gewohnt. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand. 📊', {
+    // Kein monatliches Upload-Limit mehr (Kap. 6 Nr. 28): die KI-Extraktion zählt als Aktion im Tageslimit (vorher begrenzte sie nur das Monatskontingent)
+    const limitMa = await checkNachrichtenLimit(Nutzername, env, userId, ctx);
+    if (!limitMa.erlaubt) {
+      return new Response(limitMa.grund === 'infra' ? 'Kontolux ist gerade nicht erreichbar. Bitte versuche es in ein paar Minuten noch einmal.' : 'Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
         headers: { ...cors, 'Content-Type': 'text/plain' }
       });
     }
-    await incrementUploadLimit(userId, env);
     const systemPrompt = `Du bist ein Datenextraktions-Assistent. Extrahiere aus dem Dokument die Finanzdaten und antworte NUR mit einem JSON-Objekt ohne Backticks oder Markdown, in diesem Format: {"monat": "Januar", "jahr": ${berlinDatumAlsString().slice(0, 4)}, "einnahmen_gesamt": 0, "ausgaben_gesamt": 0, "einnahmen_positionen": [{"bezeichnung": "...", "betrag": 0}], "ausgaben_positionen": [{"bezeichnung": "...", "betrag": 0}]}`;
 
     const messages = [{
@@ -3740,14 +3711,7 @@ async function handleDocument(body, env, cors = {}, ctx) {
   }
   // KX-SPEED: Wissensbasis und Feature-Stand (reine Lesezugriffe, werfen nie) laufen parallel zu den Limit-Prüfungen statt danach.
   const kxSpeedVorab = Promise.all([loadSteuerrechtContext(env), kiFeatureStandFuer(env, userId)]);
-  const uploadLimit = await peekUploadLimit(userId, env);
-  if (!uploadLimit.erlaubt) {
-    return new Response('Du hast dein monatliches Upload-Limit erreicht. Du kannst Kontolux AI weiterhin vollständig nutzen — Chat, Finanzkalender und manuelle Monatsabschlüsse funktionieren wie gewohnt. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand. 📊', {
-      headers: { ...cors, 'Content-Type': 'text/plain' }
-    });
-  }
-  await incrementUploadLimit(userId, env);
-
+  // Kein monatliches Upload-Limit mehr (Kap. 6 Nr. 28): das Tageslimit der KI-Aktionen begrenzt
   const limit = await checkNachrichtenLimit(Nutzername, env, userId, ctx);
   if (!limit.erlaubt) {
     return new Response(limit.grund === 'infra' ? 'Kontolux ist gerade nicht erreichbar. Bitte versuche es in ein paar Minuten noch einmal.' : 'Du hast dein heutiges Nachrichtenlimit erreicht. Kontolux steht dir morgen früh wieder vollständig zur Verfügung. In den Einstellungen ⚙️ siehst du jederzeit deinen aktuellen Nutzungsstand.', {
@@ -3894,15 +3858,6 @@ async function handleKontakt(body, env, cors) {
 async function handleUsage(body, env, cors) {
   const { userId, nutzername } = body;
 
-  // Uploads aus KV (monatlich)
-  let uploads = 0;
-  try {
-    if (userId && env.PROFIL_KV) {
-      const val = await env.PROFIL_KV.get(uploadLimitKey(userId, new Date()));
-      uploads = val ? parseInt(val) : 0;
-    }
-  } catch(e) { uploads = 0; }
-
   // Nachrichten-Zähler aus Firestore (nur lesen)
   let nachrichten = 0;
   try {
@@ -3919,7 +3874,8 @@ async function handleUsage(body, env, cors) {
 
   return new Response(JSON.stringify({
     nachrichten: { used: nachrichten, limit: 15, pct: Math.min(100, Math.round((nachrichten / 15) * 100)) },
-    uploads: { used: uploads, limit: UPLOAD_LIMIT, pct: Math.min(100, Math.round(uploads * 100 / UPLOAD_LIMIT)) }
+    // Kein Upload-Kontingent mehr (Kap. 6 Nr. 28). Die Form bleibt für ältere App-Stände, die den Balken noch zeichnen (limit 0, pct 0 = nichts begrenzt).
+    uploads: { used: 0, limit: 0, pct: 0, unbegrenzt: true }
   }), { headers: { ...cors, 'Content-Type': 'application/json' } });
 }
 
@@ -4149,8 +4105,10 @@ async function handleDeleteAccountData(body, env, cors = {}) {
       })
     });
     if (queryRes.ok) {
-      const rowsRoh = await queryRes.json().catch(() => []);
-      for (const row of Array.isArray(rowsRoh) ? rowsRoh : []) {
+      // O19-1: Bricht der Strom ab, wird KEIN Feedback-Dokument gelöscht (auch keines der schon gelieferten): fail-closed und gewollt. Der Fehler wird nur geloggt;
+      // den Rest räumt der spätere Archiv-/Sperrlauf ab, der handleDeleteAccountData erneut aufruft.
+      const rowsRoh = abfrageStrom(await queryRes.json().catch(() => null), 'Feedback suchen'); // O18a M1: abgebrochener Strom -> Fehler (unten geloggt), nicht "nichts mehr da"
+      for (const row of rowsRoh) {
         if (!row.document?.name) continue;
         await fetch(`https://firestore.googleapis.com/v1/${row.document.name}`, {
           method: 'DELETE',
@@ -4365,23 +4323,243 @@ async function sha256Hex(text) {
 }
 
 async function prueferZugangSuchen(adminToken, feld, wert) {
-  const res = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      structuredQuery: {
-        from: [{ collectionId: 'profil', allDescendants: true }],
-        where: { fieldFilter: { field: { fieldPath: feld }, op: 'EQUAL', value: { stringValue: wert } } },
-        limit: 1
-      }
-    })
+  // O19-3: reiner Lesepfad; ein einziger Wiederholungsversuch bei vorübergehendem UNAVAILABLE im Strom, danach fail-closed wie bisher
+  const rows = await lesenMitEinerWiederholung(async () => {
+    const res = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        structuredQuery: {
+          from: [{ collectionId: 'profil', allDescendants: true }],
+          where: { fieldFilter: { field: { fieldPath: feld }, op: 'EQUAL', value: { stringValue: wert } } },
+          limit: 1
+        }
+      })
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Query fehlgeschlagen: ${res.status} ${apiFehlerKlasse(errText)}`);
+    }
+    return abfrageStrom(await res.json(), 'Prüferzugang suchen');
   });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`Query fehlgeschlagen: ${res.status} ${apiFehlerKlasse(errText)}`);
+  return rows.find(r => r.document?.name) || null;
+}
+
+// ── Dateien im Prüferzugang (H1-Fix, ersetzt die signierten Kurzlinks aus N5) ────────────────────────────────────────────────────
+// Firebase-Download-URLs tragen ein dauerhaftes token; signierte Kurzlinks trugen sig/exp in der Adresse, und Cloudflare-Observability protokolliert jede
+// Anfrage-URL. Deshalb gibt es keine Datei-Adresse mehr: Die Prüfer-Ausgabe enthält nur den Speicherpfad (users/{uid}/…), und die Prüfer-Seite holt die Datei per
+// POST /pruefer-datei mit dem Prüfer-Token im Authorization-Header und dem Pfad im JSON-Körper (gleiche Zugangsprüfung wie /pruefer-daten). Kein Zugangsdatum,
+// kein Pfad und keine Signatur stehen in einer Adresse oder im Protokoll. Die Generation des Zugangs ist der Token selbst: eine neue Erteilung erzeugt einen neuen
+// Token (neuer token_hash), der alte findet keinen Zugang mehr.
+// Nur Ordner, deren Dateien in den Prüfer-Daten vorkommen; alles andere (logo, chats …) bleibt gesperrt.
+// uploads: Chat-Uploads (index.html: users/{uid}/uploads/…); E-Rechnungen aus dem Chat tragen sie als storage_url, Chat-Belege als url (F2-Fix A-H1).
+// O20w N3 (bewusst so gelassen): Der Abruf prüft nur Konto und Ordner, nicht, ob der Pfad in der Prüfer-Ausgabe steht. Eine Mitgliedschaftsprüfung hieße, bei jedem Klick die
+// Belege des Kontos zu durchsuchen (storage_url/url/anhaenge[].pfad in drei Adressformen und mehreren Buckets, bei Tausenden Belegen mehr als das Budget von 50 Unteranfragen)
+// und träfe bei einem verpassten Fall einen echten Prüfer (kein Dateizugriff mehr). Der Gewinn ist gering: Zugang hat nur, wem das Konto den Zugang erteilt hat (eigener
+// Steuerberater, Prüfer), der Zugang ist befristet und widerrufbar, die Pfade sind nicht erratbar (Zeitstempel plus Dateiname) und es gibt kein Verzeichnis zum Auflisten.
+// angebote bleibt draußen: Angebote liegen in der Sammlung angebote, nicht in den Prüfer-Daten; es gibt dort nichts zu verlinken.
+// Die Liste begrenzt den Abruf per Pfad (POST /pruefer-datei) auf diese Ordner des eigenen Kontos.
+const PRUEFER_DATEI_ORDNER = ['kasse', 'belege', 'rechnungen', 'mahnungen', 'sammelbelege', 'uploads'];
+const PRUEFER_UID_FORMAT = /^[A-Za-z0-9]{10,40}$/;
+
+// Erlaubter Speicherpfad: users/{uid}/{erlaubter Ordner}/…, ohne Backslash, Steuerzeichen, leere, „.“- oder „..“-Segmente.
+// G2-Fix M-1: #, %, ? und Leerzeichen sind im Dateinamen erlaubt (Chat-Uploads speichern den rohen Namen, z. B. „1732_Rechnung #1001.pdf“). Der Pfad ist immer der
+// dekodierte Objektname; er reist im JSON-Körper (nie in einer Adresse), der Storage-Abruf kodiert ihn genau einmal. Gegen eine spätere zweite Dekodierung irgendwo: ein Segment, das nach weiterem Dekodieren zu „.“/„..“
+// wird oder einen Schrägstrich, Backslash oder ein Steuerzeichen enthält (%2e%2e, %2f, %5c, %252e …), wird abgelehnt.
+const prueferSegmentOk = (t) => {
+  if (t === '' || t === '.' || t === '..') return false;
+  let x = t;
+  for (let i = 0; i < 3 && /%[0-9a-f]{2}/i.test(x); i++) {
+    let y;
+    try { y = decodeURIComponent(x); } catch { y = x.replace(/%(2e|2f|5c|00)/gi, (m) => decodeURIComponent(m)); } // „100% Rabatt“ ist kein gültiges Escape: nur die gefährlichen Escapes auflösen
+    if (y === x) break;
+    x = y;
+    if (x === '.' || x === '..' || /[\u0000-\u001f\u007f/\\]/.test(x)) return false;
   }
-  const rows = await res.json();
-  return Array.isArray(rows) ? rows.find(r => r.document?.name) || null : null;
+  return true;
+};
+export function prueferDateiPfadOk(uid, pfad) {
+  if (typeof uid !== 'string' || !PRUEFER_UID_FORMAT.test(uid) || typeof pfad !== 'string' || pfad.length > 400) return false;
+  if (/[\u0000-\u001f\u007f\\]/.test(pfad)) return false;
+  const praefix = `users/${uid}/`;
+  if (!pfad.startsWith(praefix)) return false;
+  const teile = pfad.slice(praefix.length).split('/');
+  return teile.length >= 2 && PRUEFER_DATEI_ORDNER.includes(teile[0]) && teile.every(prueferSegmentOk);
+}
+
+function storageUrlZuPfad(wert, uid) {
+  for (const bucket of STORAGE_BUCKETS) {
+    const praefix = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/`;
+    if (!wert.startsWith(praefix)) continue;
+    const m = /^[^?#]+/.exec(wert.slice(praefix.length));
+    let pfad = null;
+    try { pfad = m ? decodeURIComponent(m[0]) : null; } catch { pfad = null; }
+    return prueferDateiPfadOk(uid, pfad) ? pfad : null;
+  }
+  return null;
+}
+
+// Ersetzt in der Prüfer-Ausgabe jede Firebase-/Storage-Adresse durch ihren geprüften Speicherpfad (users/{uid}/{erlaubter Ordner}/…) oder, wenn der Pfad nicht
+// erlaubt ist, durch null; in { pfad, url }-Anhängen wird url zum geprüften pfad. Es bleibt nie eine Adresse mit token, sig oder exp stehen.
+const PRUEFER_STORAGE_ADRESSE = /^https?:\/\/(?:[a-z0-9-]+\.)*(?:firebasestorage\.googleapis\.com|storage\.googleapis\.com|firebasestorage\.app)\//i;
+function prueferLinksErsetzen(wert, uid) {
+  const geh = (v, tiefe) => {
+    if (typeof v === 'string') return PRUEFER_STORAGE_ADRESSE.test(v) ? storageUrlZuPfad(v, uid) : v;
+    if (v === null || typeof v !== 'object') return v;
+    if (tiefe > 12) return null;
+    if (Array.isArray(v)) return v.map((x) => geh(x, tiefe + 1));
+    const o = {};
+    const istAnhang = typeof v.pfad === 'string' && 'url' in v;
+    for (const [k, x] of Object.entries(v)) o[k] = (istAnhang && k === 'url') ? (prueferDateiPfadOk(uid, v.pfad) ? v.pfad : null) : geh(x, tiefe + 1);
+    return o;
+  };
+  return geh(wert, 0);
+}
+
+// Zugangsnachweis des Prüfers (für /pruefer-daten und /pruefer-datei gleich): Token-Hash trifft einen aktiven, nicht abgelaufenen Zugang; die UID kommt nur aus
+// dem Dokumentpfad des Zugangs. Ergebnis { uid, felder } oder null; Infrastrukturfehler werfen.
+async function prueferZugangPruefen(token, env) {
+  const tokenHash = await sha256Hex(token);
+  const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
+  const match = await prueferZugangSuchen(adminToken, 'token_hash', tokenHash);
+  const zugang = (() => {
+    if (!match) return null;
+    const felder = match.document?.fields || {};
+    const ablaufIso = firestoreValue(felder.ablauf);
+    const ablaufMs = ablaufIso ? new Date(ablaufIso).getTime() : NaN;
+    if (firestoreValue(felder.aktiv) !== true || !Number.isFinite(ablaufMs) || ablaufMs <= Date.now()) return null;
+    const m = /\/documents\/users\/([^/]+)\/profil\/prueferZugang$/.exec(match.document?.name || '');
+    return m ? { uid: m[1], felder, adminToken } : null;
+  })();
+  if (zugang) prueferZugangMerken(tokenHash); else prueferZugangVergessen(tokenHash);
+  return zugang;
+}
+
+// I1-Fix N-5: Begrenzung von POST /pruefer-datei. Jeder Aufruf kostet vor der Antwort eine Firestore-Abfrage (collectionGroup über profil), auch mit falschem Token.
+// Bewusst kein Zähler in GLOBALE_LIMITS: der schreibt bei jedem Aufruf ins KV (Free-Plan 1.000 Schreibvorgänge am Tag, dasselbe KV trägt Profile und andere Grenzen),
+// und jeder legitime Klick eines Prüfers würde mitzählen. Stattdessen im Speicher des Isolats (Muster checkRateLimit, wie ROUTEN_LIMITS und UID_LIMITS):
+//   1. je IP: ROUTEN_LIMITS['/pruefer-datei'] (120 je 10 min), davor das allgemeine 20 je 10 s;
+//   2. je Prüfer-Zugang (Schlüssel: Hash des Tokens, nur für Tokens, die in diesem Isolat schon als gültig bestätigt wurden): 300 je 10 min;
+//   3. K1-Fix M-2 (Gegenlesung E): Fehlversuche JE QUELLE (IP) statt je Isolat. Vorher sperrten 200 erfundene Tokens in 10 min (zwei IPs genügten) jeden Prüfer, dessen
+//      Zugang im Isolat nicht bestätigt war. Jetzt: nach 10 abgelehnten Tokens in 10 min fragt der Worker für unbekannte Tokens DIESER IP nicht mehr bei Firestore nach
+//      (429 bitte_neu_oeffnen: das erneute Öffnen des Prüfer-Links bestätigt den Zugang über /pruefer-daten). Andere Quellen bleiben frei: ein Angreifer sperrt nur sich.
+//      Über alle Quellen gibt es keine Sperre mehr, nur eine Drosselung: ab 200 Fehlversuchen je Isolat in 10 min wartet jede Abfrage eines unbekannten Tokens
+//      PRUEFER_FEHL_ISOLAT.verzoegerungMs, bevor sie Firestore fragt (verlangsamt, sperrt nie). Brute-Force bleibt aussichtslos (Token 192 Bit, 32 Zeichen Base64Url);
+//      die Kosten begrenzen die Grenzen je IP, wie bei /pruefer-daten (dieselbe Abfrage, nur je IP begrenzt).
+//      Bereits bestätigte Zugänge (auch über /pruefer-daten beim Laden der Seite) laufen weiter, der Merker gilt 2 Stunden ab dem letzten Erfolg (Lesezeit einer Prüfung);
+//      die Prüfung selbst (aktiv, Ablauf) geschieht trotzdem bei jedem Aufruf.
+// Schlüssel sind nie der Token selbst, nur sein SHA-256. Die Prüfer-Route hat keine Firebase-Anmeldung, UID_LIMITS greift dort nicht (verifiedUid fehlt).
+const PRUEFER_DATEI_JE_ZUGANG = { limit: 300, windowMs: 10 * 60 * 1000 };
+const PRUEFER_FEHL_JE_QUELLE = { limit: 10, windowMs: 10 * 60 * 1000 };
+const PRUEFER_FEHL_ISOLAT = { schwelle: 200, windowMs: 10 * 60 * 1000, verzoegerungMs: 500 };
+const PRUEFER_FEHL_SCHLUESSEL = '/pruefer-datei|fehlversuche';
+const PRUEFER_MERKER_MS = 2 * 60 * 60 * 1000;
+const prueferZugangBestaetigt = new Map(); // Token-Hash -> gültig bis (ms); nur Merker gegen die Fehlversuchsgrenze, ersetzt keine Prüfung
+function prueferZugangMerken(hash) {
+  prueferZugangBestaetigt.delete(hash);
+  prueferZugangBestaetigt.set(hash, Date.now() + PRUEFER_MERKER_MS);
+  while (prueferZugangBestaetigt.size > 1000) prueferZugangBestaetigt.delete(prueferZugangBestaetigt.keys().next().value);
+}
+function prueferZugangVergessen(hash) { prueferZugangBestaetigt.delete(hash); }
+function prueferZugangBekannt(hash) {
+  const bis = prueferZugangBestaetigt.get(hash);
+  if (bis && bis > Date.now()) return true;
+  if (bis) prueferZugangBestaetigt.delete(hash);
+  return false;
+}
+// Zähler nur lesen, nicht zählen (Muster checkRateLimit)
+function prueferZaehlerVoll(schluessel, limit, windowMs) {
+  const e = rateLimitMap.get(schluessel);
+  return !!e && Date.now() - e.start <= windowMs && e.count >= limit;
+}
+const prueferQuelleSchluessel = (quelle) => `/pruefer-datei|fehl-quelle|${String(quelle || 'unknown').slice(0, 64)}`;
+const prueferBearer = (authHeader) => String(authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '').trim();
+
+// POST /pruefer-datei { pfad } mit Authorization: Bearer {Prüfer-Token}. Antwort: die Datei selbst. Nur PDF und Rasterbilder mit ihrem Typ (die Seite zeigt sie),
+// alles andere als application/octet-stream zum Herunterladen; nosniff, kein Cache. Fehler ohne Hinweis auf den Grund: 400 (Form), 404 (Token, Zugang, Pfad),
+// 404 nicht_gefunden (Datei fehlt), 502 (Speicher). Bewusst nicht in protectedPaths: Prüfer haben keinen Firebase-Login, der Nachweis ist der Token.
+const PRUEFER_DATEI_INLINE = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+async function handlePrueferDatei(body, env, cors, authHeader, quelle = 'unknown') {
+  const fehler = (status, code) => new Response(JSON.stringify({ error: code }), { status, headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+  const token = prueferBearer(authHeader);
+  const pfad = body && typeof body.pfad === 'string' ? body.pfad : '';
+  if (!token || token.length < 16 || token.length > 64 || !pfad || pfad.length > 400) return fehler(400, 'invalid');
+  // I1-Fix N-5: je Zugang und Fehlversuche je Isolat (siehe PRUEFER_DATEI_JE_ZUGANG), vor der Firestore-Abfrage
+  const tokenHash = await sha256Hex(token);
+  const zugangSchluessel = `/pruefer-datei|zugang|${tokenHash}`;
+  const bekannt = prueferZugangBekannt(tokenHash);
+  const quelleSchluessel = prueferQuelleSchluessel(quelle);
+  if (bekannt && !checkRateLimit(zugangSchluessel, PRUEFER_DATEI_JE_ZUGANG.limit, PRUEFER_DATEI_JE_ZUGANG.windowMs)) return fehler(429, 'zu_viele');
+  // K1-Fix M-2: unbekannte Tokens nur je Quelle sperren (nie für alle), über alle Quellen nur drosseln
+  if (!bekannt && prueferZaehlerVoll(quelleSchluessel, PRUEFER_FEHL_JE_QUELLE.limit, PRUEFER_FEHL_JE_QUELLE.windowMs)) return fehler(429, 'bitte_neu_oeffnen');
+  if (!bekannt && prueferZaehlerVoll(PRUEFER_FEHL_SCHLUESSEL, PRUEFER_FEHL_ISOLAT.schwelle, PRUEFER_FEHL_ISOLAT.windowMs)) await new Promise((r) => setTimeout(r, PRUEFER_FEHL_ISOLAT.verzoegerungMs));
+  try {
+    const zugang = await prueferZugangPruefen(token, env);
+    if (!zugang) {
+      checkRateLimit(quelleSchluessel, PRUEFER_FEHL_JE_QUELLE.limit, PRUEFER_FEHL_JE_QUELLE.windowMs);
+      checkRateLimit(PRUEFER_FEHL_SCHLUESSEL, PRUEFER_FEHL_ISOLAT.schwelle, PRUEFER_FEHL_ISOLAT.windowMs);
+      return fehler(404, 'invalid');
+    }
+    if (!bekannt && !checkRateLimit(zugangSchluessel, PRUEFER_DATEI_JE_ZUGANG.limit, PRUEFER_DATEI_JE_ZUGANG.windowMs)) return fehler(429, 'zu_viele');
+    if (!prueferDateiPfadOk(zugang.uid, pfad)) return fehler(404, 'invalid');
+    const storageToken = await getGoogleAccessToken(env, STORAGE_SCOPE);
+    let res = null; let infraFehler = false;
+    for (const bucket of STORAGE_BUCKETS) {
+      const r = await fetch(`https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodeURIComponent(pfad)}?alt=media`, { headers: { 'Authorization': `Bearer ${storageToken}` } });
+      if (r.ok) { res = r; break; }
+      if (r.status !== 404) infraFehler = true;
+    }
+    if (!res) return fehler(infraFehler ? 502 : 404, infraFehler ? 'nicht_verfuegbar' : 'nicht_gefunden');
+    const typ = String(res.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+    const inline = PRUEFER_DATEI_INLINE.includes(typ);
+    // Nur bekannte, nicht aktive Typen werden angezeigt; alles andere (HTML, SVG, XML …) nur als Download
+    return new Response(res.body, { status: 200, headers: {
+      ...cors,
+      'Content-Type': inline ? typ : 'application/octet-stream',
+      'Content-Disposition': inline ? 'inline' : 'attachment',
+      'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store', 'Referrer-Policy': 'no-referrer',
+      'Content-Security-Policy': "default-src 'none'; sandbox",
+    } });
+  } catch (e) {
+    console.error('Prüfer-Datei Fehler'); // bewusst ohne Meldungstext: nichts mit Pfad, Token oder Adresse ins Protokoll
+    return fehler(502, 'nicht_verfuegbar');
+  }
+}
+
+// O9a M4: /pruefer-kasse liest die Kassendaten an den Cursorn aus kassen_fortsetzung weiter (vorige Antwort von /pruefer-daten oder /pruefer-kasse). Gleicher
+// Zugangsnachweis wie /pruefer-daten (Token im Authorization-Header, gleiche generische Antwort bei unbekanntem Token), eigenes Ratenlimit, eigenes Budget je Etappe.
+// Nur Lesen; Dateiadressen wie bei /pruefer-daten durch Speicherpfade ersetzt.
+// O10 M5/N1: Grenzen wie /pruefer-datei (siehe dort): je IP ROUTEN_LIMITS['/pruefer-kasse'] (60 je 10 min); je Zugang (Hash des Tokens) PRUEFER_KASSE_JE_ZUGANG, damit
+// ein gültiger Link nicht beliebig viele teure Etappen (bis etwa 12.000 Lesevorgänge je Etappe) über viele IPs auslösen kann; Fehlversuche unbekannter Tokens je Quelle
+// (gemeinsamer Zähler mit /pruefer-datei: nach 10 abgelehnten Tokens in 10 min fragt der Worker für unbekannte Tokens dieser IP nicht mehr bei Firestore nach) und
+// über alle Quellen nur gedrosselt. Die App lädt automatisch höchstens 15 Etappen, danach auf Knopfdruck; 60 je 10 min reichen für eine Prüfung.
+const PRUEFER_KASSE_JE_ZUGANG = { limit: 60, windowMs: 10 * 60 * 1000 };
+async function handlePrueferKasse(body, env, cors = {}, authHeader = null, quelle = 'unknown') {
+  const json = (o, status) => new Response(JSON.stringify(o), { status, headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+  const token = prueferBearer(authHeader);
+  if (!token || token.length < 16 || token.length > 64) return json({ error: 'invalid' }, 400);
+  const tokenHash = await sha256Hex(token);
+  const zugangSchluessel = `/pruefer-kasse|zugang|${tokenHash}`;
+  const bekannt = prueferZugangBekannt(tokenHash);
+  const quelleSchluessel = prueferQuelleSchluessel(quelle);
+  if (bekannt && !checkRateLimit(zugangSchluessel, PRUEFER_KASSE_JE_ZUGANG.limit, PRUEFER_KASSE_JE_ZUGANG.windowMs)) return json({ error: 'zu_viele' }, 429);
+  if (!bekannt && prueferZaehlerVoll(quelleSchluessel, PRUEFER_FEHL_JE_QUELLE.limit, PRUEFER_FEHL_JE_QUELLE.windowMs)) return json({ error: 'bitte_neu_oeffnen' }, 429);
+  if (!bekannt && prueferZaehlerVoll(PRUEFER_FEHL_SCHLUESSEL, PRUEFER_FEHL_ISOLAT.schwelle, PRUEFER_FEHL_ISOLAT.windowMs)) await new Promise((r) => setTimeout(r, PRUEFER_FEHL_ISOLAT.verzoegerungMs));
+  try {
+    const zugang = await prueferZugangPruefen(token, env);
+    if (!zugang) {
+      checkRateLimit(quelleSchluessel, PRUEFER_FEHL_JE_QUELLE.limit, PRUEFER_FEHL_JE_QUELLE.windowMs);
+      checkRateLimit(PRUEFER_FEHL_SCHLUESSEL, PRUEFER_FEHL_ISOLAT.schwelle, PRUEFER_FEHL_ISOLAT.windowMs);
+      return json({ error: 'invalid' }, 404);
+    }
+    if (!bekannt && !checkRateLimit(zugangSchluessel, PRUEFER_KASSE_JE_ZUGANG.limit, PRUEFER_KASSE_JE_ZUGANG.windowMs)) return json({ error: 'zu_viele' }, 429);
+    const kasse = await kassenPrueferFortsetzung(zugang.uid, zugang.adminToken, (...a) => fetch(...a), body && body.kassen_fortsetzung);
+    if (kasse.fehler) return json({ error: 'format' }, 400);
+    return json(prueferLinksErsetzen(kasse, zugang.uid), 200);
+  } catch (e) {
+    console.error('Prüfer-Kasse Fehler');
+    return json({ error: 'server_error' }, 500);
+  }
 }
 
 // Token kommt bevorzugt als "Authorization: Bearer …" (vom Link-Fragment im Client). Das Feld
@@ -4398,8 +4576,6 @@ async function handlePrueferDaten(body, env, cors = {}, authHeader = null) {
   }
 
   try {
-    const adminToken = await getGoogleAccessToken(env, FIRESTORE_SCOPE);
-
     // Bug-Fund 2026-09-18: "prueferZugang" ist in der Datenstruktur (siehe generierePrueferToken
     // in index.html) KEINE Collection, sondern nur die Dokument-ID INNERHALB der "profil"-
     // Collection — derselben Collection wie "settings"/"kalender"/"rechnungsCounter". Eine
@@ -4411,27 +4587,16 @@ async function handlePrueferDaten(body, env, cors = {}, authHeader = null) {
     // prueferZugang-förmigen Dokumente ein, weil settings/kalender nie ein "token"-Feld haben.
     // Die UID des Nutzers ist aus der Prüfer-URL NICHT bekannt, deshalb über alle
     // users/*/profil-Dokumente hinweg suchen statt einen bekannten Pfad direkt zu lesen.
-    const match = await prueferZugangSuchen(adminToken, 'token_hash', await sha256Hex(token));
-
     // Absichtlich dieselbe generische Fehlermeldung für "kein Token-Treffer" UND "Treffer, aber
     // inaktiv/abgelaufen" — sonst könnte ein Angreifer aus der Antwort ablesen, ob ein geratener
-    // Token je existiert hat.
-    const generischerFehler = () => new Response(JSON.stringify({ error: 'invalid' }), {
+    // Token je existiert hat. Gleiche Prüfung wie /pruefer-datei (prueferZugangPruefen).
+    const zugang = await prueferZugangPruefen(token, env);
+    if (!zugang) return new Response(JSON.stringify({ error: 'invalid' }), {
       status: 404, headers: { ...cors, 'Content-Type': 'application/json' }
     });
-
-    if (!match) return generischerFehler();
-
-    const zugangFields = match.document.fields || {};
-    const aktiv = firestoreValue(zugangFields.aktiv);
-    const ablaufIso = firestoreValue(zugangFields.ablauf);
-    const ablaufMs = ablaufIso ? new Date(ablaufIso).getTime() : NaN;
-    if (aktiv !== true || !Number.isFinite(ablaufMs) || ablaufMs <= Date.now()) return generischerFehler();
-
-    // UID aus dem vollen Dokumentpfad extrahieren: .../documents/users/{uid}/profil/prueferZugang
-    const pfadMatch = /\/documents\/users\/([^/]+)\/profil\/prueferZugang$/.exec(match.document.name || '');
-    if (!pfadMatch) return generischerFehler();
-    const uid = pfadMatch[1];
+    const zugangFields = zugang.felder;
+    const uid = zugang.uid;
+    const adminToken = zugang.adminToken;
     // Jeder Abruf eines Prüferlinks wird vermerkt (ohne IP-Adresse, nur Zeitpunkt, Konto und Herkunft)
     if (env.PROFIL_KV) {
       const jetzt = new Date().toISOString();
@@ -4464,8 +4629,12 @@ async function handlePrueferDaten(body, env, cors = {}, authHeader = null) {
       if (f && f.sperre) delete f.sperre.offen;
       return { id: dokIdAusPfad(d.name), ...f };
     });
-    return new Response(JSON.stringify({ dokumente, monatsabschluesse, sammelbelege, festschreibungen }), {
-      status: 200, headers: { ...cors, 'Content-Type': 'application/json' }
+    // KASSE-P1b (2.12 H8): Kassenbuch (alle Fassungen, vollständiger verlauf, Bewegungen); nur Lesen, auch bei ausgeschaltetem Feature (Notaus: Daten bleiben lesbar)
+    const kasse = await kassenPrueferDaten(uid, adminToken, (...a) => fetch(...a));
+    // H1-Fix: keine Datei-Adressen an den Prüfer (weder Download-Token noch Signatur): nur geprüfte Speicherpfade, die Seite holt die Datei per POST /pruefer-datei
+    const ausgabe = prueferLinksErsetzen({ dokumente, monatsabschluesse, sammelbelege, festschreibungen, ...kasse }, uid);
+    return new Response(JSON.stringify(ausgabe), {
+      status: 200, headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
     });
   } catch (e) {
     console.error('Prüfer-Zugriff Fehler:', e.message);
@@ -4630,7 +4799,9 @@ async function handleStripeGebuehren(body, env, cors, uid) {
 function datevText(val, maxLen) {
   let s = String(val ?? '').replace(/[\r\n]+/g, ' ');
   if (/^[=+\-@\t]/.test(s)) s = `'${s}`;
-  if (maxLen) s = s.slice(0, maxLen);
+  // E-F1: Längengrenze nach Zeichen (Codepunkten), nicht nach UTF-16-Einheiten: ein Emoji an der Grenze wird sonst zerschnitten (U+FFFD).
+  // Für Texte ohne Zeichen außerhalb der Grundebene (BMP) ist das Ergebnis byte-gleich zu slice.
+  if (maxLen) s = Array.from(s).slice(0, maxLen).join('');
   return `"${s.replace(/"/g, '""')}"`;
 }
 
@@ -4747,7 +4918,8 @@ function datevBelegNr(fields, id, fallbackDatum) {
 
 // Buchungstext einer Mischsatz-Zeile: Satzmarke am Ende, der Beleg-Text wird gekürzt statt die Marke abzuschneiden (DATEV: 60 Zeichen).
 function buchungstextBasisKurz(text, marke) {
-  return String(text).slice(0, Math.max(0, 60 - marke.length)) + marke;
+  // E-F1: nach Zeichen (Codepunkten) kürzen, damit ein Emoji an der Grenze nicht zerschnitten wird (BMP-Texte: byte-gleich)
+  return Array.from(String(text)).slice(0, Math.max(0, 60 - Array.from(marke).length)).join('') + marke;
 }
 
 // Gegenkonto aus der Kategorie nur dann übernehmen, wenn sie zur Buchungsrichtung passt.
@@ -4782,31 +4954,34 @@ async function belegeSeit(userId, token, seitMs) {
     } })
   });
   if (!res.ok) throw new Error(`Firestore-Abfrage fehlgeschlagen (${res.status})`);
-  const rows = await res.json();
-  return Array.isArray(rows) ? rows.filter(r => r.document).map(r => r.document) : [];
+  const rows = abfrageStrom(await res.json(), 'Belege seit');
+  return rows.filter(r => r.document).map(r => r.document);
 }
 
-// Kassen-P0 0.5(c): Belege mit derselben Rechnungsnummer (Gleichheitsfilter auf ein Feld, kein zusammengesetzter Index nötig), höchstens 20.
-async function belegeMitRechnungsnr(userId, token, rechnungsnr) {
-  const res = await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${encodeURIComponent(userId)}:runQuery`, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ structuredQuery: {
-      from: [{ collectionId: 'dokumente' }],
-      where: { fieldFilter: { field: { fieldPath: 'rechnungsnr' }, op: 'EQUAL', value: { stringValue: String(rechnungsnr) } } },
-      limit: 20
-    } })
-  });
-  if (!res.ok) throw new Error(`Firestore-Abfrage fehlgeschlagen (${res.status})`);
-  const rows = await res.json();
-  return Array.isArray(rows) ? rows.filter(r => r.document).map(r => r.document) : [];
+// Kassen-P0 0.5(c): Belege mit derselben Rechnungsnummer (nur Gleichheits-/IN-Filter, kein zusammengesetzter Index nötig).
+// O11 N2 (wie die App): (1) gezielt Nummer + Absender, höchstens 20, damit viele Belege anderer Absender mit kurzer Nummer den richtigen nicht verdrängen;
+// (2) breit über die Schreibweisen der Nummer (Leerzeichen am Rand, Groß/Klein), höchstens 100.
+async function belegeMitRechnungsnr(userId, token, rechnungsnr, absender) {
+  const lauf = async (where, limit) => {
+    const res = await fetch(`https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${encodeURIComponent(userId)}:runQuery`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'dokumente' }], where, limit } })
+    });
+    if (!res.ok) throw new Error(`Firestore-Abfrage fehlgeschlagen (${res.status})`);
+    const rows = abfrageStrom(await res.json(), 'Belege je Rechnungsnummer');
+    return rows.filter(r => r.document).map(r => r.document);
+  };
+  // O12a N1: die Abfragen stehen in regel/duplikat.js (rechnungsnrAbfragen), dieselben nutzt die Ausgabe aus der Kasse
+  const ergebnisse = await Promise.all(rechnungsnrAbfragen(rechnungsnr, absender).map((q) => lauf(q.where, q.limit)));
+  return ergebnisse.flat();
 }
 
 // Warnung (nie Ablehnung), wenn dieselbe Nummer vom selben Absender mit gleichem Typ schon liegt. Fehler beim Lesen = keine Warnung.
 async function rechnungsnrDuplikatWarnung(userId, token, { rechnungsnr, absender, typ, mwst_satz }) {
   try {
     if (!rechnungsnr || !absender) return null;
-    const vorhanden = await belegeMitRechnungsnr(userId, token, String(rechnungsnr).trim());
+    const vorhanden = await belegeMitRechnungsnr(userId, token, rechnungsnr, absender);
     return rechnungsnrDuplikat(vorhanden, { rechnungsnr, absender, typ, mwst_satz }) ? RECHNUNGSNR_DUPLIKAT_WARNUNG : null;
   } catch (e) { console.warn('Duplikat-Check (Rechnungsnummer):', e.message); return null; }
 }
@@ -4818,14 +4993,120 @@ async function firestoreListAll(baseUrl, authHeader) {
     const url = `${baseUrl}?pageSize=300${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
     const res = await fetch(url, { headers: { 'Authorization': `Bearer ${authHeader}` } });
     if (!res.ok) {
-      const errorText = await res.text();
-      throw new Error(`Firestore read failed (${res.status}): ${errorText}`);
+      // O19-7: nur der Statuscode in der Meldung, nie der Firestore-Fehlertext (wie firestore-strom.js); das Präfix "Firestore read failed (403)" wertet der DATEV-Export aus
+      throw new Error(`Firestore read failed (${res.status})`);
     }
     const data = await res.json();
     if (Array.isArray(data.documents)) allDocs.push(...data.documents);
     pageToken = data.nextPageToken || null;
   } while (pageToken);
   return allDocs;
+}
+
+// F2-Fix B-M1: Lesefehler bei Kassendaten, die Buchungen bestimmen, brechen den Export ab (503 mit klarer Meldung), statt einen unvollständigen Stapel zu liefern
+class DatevLesefehler extends Error {}
+const ISTKASSEOBJ = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
+
+// F2-Fix B-M1: Dokumente einer Sammlung per Abfrage auf ein Feld (kein zusammengesetzter Index nötig), je 500 pro Anfrage mit Cursor, sortiert nach sortFeld (oder nur __name__).
+// Eine Anfrage je 500 Dokumente statt einer Liste über alle Jahre (Free-Plan: 50 Unteranfragen je Aufruf). Jeder Fehler wird geworfen.
+async function firestoreAbfrageAlle(userBasis, sammlung, filters, sortFeld, authHeader, { select = null, seite: seitenGroesse = 500 } = {}) {
+  const alle = [];
+  let cursor = null;
+  const reihenfolge = [...(sortFeld ? [{ field: { fieldPath: sortFeld }, direction: 'ASCENDING' }] : []), { field: { fieldPath: '__name__' }, direction: 'ASCENDING' }];
+  for (let seite = 0; seite < 200; seite++) {
+    // O19-3: Lesepfad (nur Export); ein einziger Wiederholungsversuch je Seite bei vorübergehendem UNAVAILABLE im Strom
+    const zeilen = await lesenMitEinerWiederholung(async () => {
+    const res = await fetch(`${userBasis}:runQuery`, {
+      method: 'POST', headers: { 'Authorization': `Bearer ${authHeader}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ structuredQuery: {
+        from: [{ collectionId: sammlung }],
+        // W3 DATEV: ohne Filter (Vorab-Lesen mit Projektion) steht kein where in der Abfrage; select: nur diese Felder (oberste Ebene) zurückgeben
+        ...(filters.length ? { where: filters.length === 1 ? filters[0] : { compositeFilter: { op: 'AND', filters } } } : {}),
+        ...(select ? { select: { fields: select.map((fieldPath) => ({ fieldPath })) } } : {}),
+        orderBy: reihenfolge,
+        limit: seitenGroesse,
+        ...(cursor ? { startAt: { values: cursor, before: false } } : {})
+      } })
+    });
+    if (!res.ok) throw new Error(`Abfrage ${sammlung} fehlgeschlagen (${res.status})`);
+    // O18a M1: ein Fehlerelement im Strom (Status bleibt 200) oder eine Antwort ohne Liste bricht ab; sonst gälte eine abgeschnittene Seite als letzte Seite
+    return abfrageStrom(await res.json(), `Abfrage ${sammlung}`);
+    });
+    const docs = zeilen.filter((z) => z.document).map((z) => z.document);
+    alle.push(...docs);
+    if (docs.length < seitenGroesse) return alle;
+    const letzte = docs[docs.length - 1];
+    const wert = sortFeld ? datevDekodiereFelder(letzte.fields || {})[sortFeld] : null;
+    if (sortFeld && typeof wert !== 'string') throw new Error(`Abfrage ${sammlung}: Cursor nicht möglich`);
+    cursor = [...(sortFeld ? [{ stringValue: wert }] : []), { referenceValue: letzte.name }];
+  }
+  throw new Error(`Abfrage ${sammlung}: zu viele Seiten`);
+}
+const firestoreFeldFilter = (feld, op, wert) => ({ fieldFilter: { field: { fieldPath: feld }, op, value: { stringValue: wert } } });
+// Dokumente mit geschaeftstag im Jahr (ein ungültiges Jahr ergibt keine)
+async function firestoreJahresListe(userBasis, sammlung, jahr, authHeader) {
+  if (!/^\d{4}$/.test(String(jahr))) return [];
+  return firestoreAbfrageAlle(userBasis, sammlung, [firestoreFeldFilter('geschaeftstag', 'GREATER_THAN_OR_EQUAL', `${jahr}-01-01`), firestoreFeldFilter('geschaeftstag', 'LESS_THAN', `${Number(jahr) + 1}-01-01`)], 'geschaeftstag', authHeader);
+}
+
+// ── W3 DATEV: Belege nur für das Exportjahr lesen (regel/datev-lesen.js) ─────────────────────────
+// Anzahl der Belege, höchstens bis (Zählabfrage, eine Unteranfrage); null bei jedem Fehler (der Export liest dann wie bisher alles).
+async function datevDokumenteZaehlen(userBasis, authHeader, bis) {
+  try {
+    const res = await fetch(`${userBasis}:runAggregationQuery`, {
+      method: 'POST', headers: { 'Authorization': `Bearer ${authHeader}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ structuredAggregationQuery: { structuredQuery: { from: [{ collectionId: 'dokumente' }] }, aggregations: [{ alias: 'n', count: { upTo: String(bis) } }] } })
+    });
+    if (!res.ok) return null;
+    const zeilen = await res.json();
+    const f = (Array.isArray(zeilen) ? zeilen : []).map((z) => z && z.result && z.result.aggregateFields).find(Boolean);
+    const n = f && f.n && f.n.integerValue !== undefined ? Number(f.n.integerValue) : NaN;
+    return Number.isSafeInteger(n) && n >= 0 ? n : null;
+  } catch (e) { console.warn('DATEV-Export Belegzahl:', e?.message); return null; }
+}
+// Dokumente (dokumente oder kunden) einzeln per batchGet nach ID (100 je Anfrage). Nur IDs, die als Dokument-ID möglich sind (ein Pfadteil); fehlende Dokumente fehlen auch hier.
+// O18a N3: Firestore begrenzt die Dokument-ID auf 1500 BYTES (UTF-8), nicht auf Zeichen; eine längere ID bräche den ganzen batchGet (400) und damit den Export
+const datevIdMoeglich = (id) => typeof id === 'string' && id.length > 0 && id.length <= 1500 && new TextEncoder().encode(id).length <= 1500 && !id.includes('/') && id !== '.' && id !== '..' && !/^__.*__$/.test(id);
+async function datevNachladen(userId, sammlung, ids, authHeader) {
+  const wurzel = 'projects/kontolux-ai/databases/(default)/documents';
+  const liste = [...new Set(ids.filter(datevIdMoeglich))];
+  const aus = [];
+  for (let i = 0; i < liste.length; i += 100) {
+    // O19-3: Lesepfad (nur Export); ein einziger Wiederholungsversuch bei vorübergehendem UNAVAILABLE im Strom
+    const zeilen = await lesenMitEinerWiederholung(async () => {
+      const res = await fetch(`https://firestore.googleapis.com/v1/${wurzel}:batchGet`, {
+        method: 'POST', headers: { 'Authorization': `Bearer ${authHeader}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ documents: liste.slice(i, i + 100).map((id) => `${wurzel}/users/${userId}/${sammlung}/${id}`) })
+      });
+      if (!res.ok) throw new Error(`Nachladen ${sammlung} fehlgeschlagen (${res.status})`);
+      return batchGetStrom(await res.json(), `Nachladen ${sammlung}`);
+    });
+    for (const z of zeilen) if (z.found) aus.push(z.found);
+  }
+  return aus;
+}
+// Zeitraum-Modus, Schritt 1: Vorab-Lesen aller Belege (wenige Felder) und volle Dokumente für alles, was der Stapel dieses Jahres anfassen kann
+// (Begründung und Beweis: regel/datev-lesen.js, docs/kassenbuch/w3-datev-bericht.md). Ergebnis: { vorab, dokDocs } mit dokDocs nach Name sortiert.
+// Die Originale, auf die Korrekturbelege zeigen, lädt der Aufrufer nach (datevNachladen), sobald er die Korrekturbelege ausgewertet hat.
+async function datevDokumenteZeitraum(userBasis, userId, jahr, authHeader) {
+  const vorab = await firestoreAbfrageAlle(userBasis, 'dokumente', [], null, authHeader, { select: DOK_VORAB_FELDER, seite: DOK_VORAB_SEITE });
+  const jahrNamen = datevJahrNamen(vorab, jahr, firestoreValue);
+  const geladen = new Map();
+  const merke = (docs) => { for (const d of docs) geladen.set(d.name, d); };
+  const bereich = (feld) => [firestoreFeldFilter(feld, 'GREATER_THAN_OR_EQUAL', String(jahr)), firestoreFeldFilter(feld, 'LESS_THAN', String(Number(jahr) + 1))];
+  // Kassenbelege aller Jahre, Korrekturbelege (Storno, Gutschrift) und Stornos alter Form aller Jahre, Zahlungen im Jahr
+  const abfragen = [
+    firestoreAbfrageAlle(userBasis, 'dokumente', bereich('bezahlt_am'), 'bezahlt_am', authHeader),
+    firestoreAbfrageAlle(userBasis, 'dokumente', [firestoreFeldFilter('quelle', 'EQUAL', 'kasse')], null, authHeader),
+    firestoreAbfrageAlle(userBasis, 'dokumente', [firestoreFeldFilter('typ', 'EQUAL', 'storno')], null, authHeader),
+    ...KORREKTUR_BELEG_ARTEN.map((art) => firestoreAbfrageAlle(userBasis, 'dokumente', [firestoreFeldFilter('steuer.beleg_art', 'EQUAL', art)], null, authHeader))
+  ];
+  for (const docs of await Promise.all(abfragen)) merke(docs);
+  // Belege des Jahres ohne Zahlungsdatum (offene Rechnungen mit Belegdatum im Jahr): viele per Bereichsabfrage auf datum, wenige einzeln
+  let fehlt = [...jahrNamen].filter((n) => !geladen.has(n));
+  if (fehlt.length > 300) { merke(await firestoreAbfrageAlle(userBasis, 'dokumente', bereich('datum'), 'datum', authHeader)); fehlt = fehlt.filter((n) => !geladen.has(n)); }
+  if (fehlt.length) merke(await datevNachladen(userId, 'dokumente', fehlt.map((n) => datevDokId({ name: n })), authHeader));
+  return { vorab, dokDocs: datevNachName([...geladen.values()]) };
 }
 
 // ── /datev-export Handler ─────────────────────────────────────────
@@ -4881,23 +5162,55 @@ async function handleDatevExport(body, env, cors = {}) {
   try {
     const base = `https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents/users/${userId}`;
 
+    // W3 DATEV: Lesemodus. 'voll' (bisher): Belegarchiv und Kundenstamm vollständig lesen. 'zeitraum': nur die Belege, die der Stapel dieses Jahres anfassen kann, und
+    // nur die Kunden, auf die sie zeigen (regel/datev-lesen.js). Automatisch ab DOK_VOLL_MAX Belegen und ohne aktive Kern-Option oss (der Kern rechnet die
+    // OSS-Zuordnung über alle Jahre), sonst voll. env.DATEV_LESEMODUS = 'voll' erzwingt den bisherigen Weg (Notschalter), 'zeitraum' den neuen (Tests).
+    const ossDeps = { adminToken: () => getGoogleAccessToken(env, FIRESTORE_SCOPE), fetchFn: (...a) => fetch(...a) };
+    const ossLesefehler = () => new Response(JSON.stringify({ error: 'Export vorübergehend nicht möglich', details: 'Die Angaben zu Verkäufen ins Ausland konnten nicht gelesen werden. Bitte den Export gleich noch einmal starten.' }), { status: 503, headers: { ...cors, 'Content-Type': 'application/json' } });
+    let lesemodus = 'voll';
+    let ossVorbereitet; // undefined = Option noch nicht geprüft
+    const modusWunsch = String(env?.DATEV_LESEMODUS || '').toLowerCase();
+    if (/^\d{4}$/.test(String(jahr)) && modusWunsch !== 'voll') {
+      let viele = modusWunsch === 'zeitraum';
+      // O18a N7 (bewusst belassen): die Zählabfrage kostet jedem Export eine von 50 Unteranfragen. Sparen ließe sich das nur, indem man die erste Listenseite vorab liest und bei kleinen Konten weiterverwendet;
+      // bei Konten über 300 Belegen (genau die am Free-Plan-Rand) kostete das aber eine Unteranfrage MEHR. Der Gewinn für kleine Konten ist ohne Bedeutung, daher unverändert.
+      if (!viele) { const n = await datevDokumenteZaehlen(base, authHeader, DOK_VOLL_MAX + 1); viele = n !== null && n > DOK_VOLL_MAX; }
+      if (viele) {
+        try { ossVorbereitet = await datevOssVorbereiten(userId, ossDeps); } catch (e) { console.error('DATEV-Export OSS:', e?.message); return ossLesefehler(); }
+        if (!ossVorbereitet) lesemodus = 'zeitraum';
+      }
+    }
+
     // Profil (DATEV-Einstellungen + Kleinunternehmer-Status) + Belegarchiv + Kundenstamm
     // (für die Debitorennummer im Feld "Diverse Adressnummer") parallel laden.
-    const [profilRes, dokDocs, kundenDocs] = await Promise.all([
-      fetch(`${base}/profil/settings`, { headers: { 'Authorization': `Bearer ${authHeader}` } }),
-      firestoreListAll(`${base}/dokumente`, authHeader),
-      firestoreListAll(`${base}/kunden`, authHeader)
-    ]);
+    let dokDocs; let vorabDocs = null; let kundenDocs = null;
+    const lesenZeitraum = lesemodus === 'zeitraum';
+    let profilRes;
+    if (lesemodus === 'zeitraum') {
+      let zeitraum;
+      [profilRes, zeitraum] = await Promise.all([
+        fetch(`${base}/profil/settings`, { headers: { 'Authorization': `Bearer ${authHeader}` } }),
+        datevDokumenteZeitraum(base, userId, jahr, authHeader)
+      ]);
+      dokDocs = zeitraum.dokDocs; vorabDocs = zeitraum.vorab;
+    } else {
+      [profilRes, dokDocs, kundenDocs] = await Promise.all([
+        fetch(`${base}/profil/settings`, { headers: { 'Authorization': `Bearer ${authHeader}` } }),
+        firestoreListAll(`${base}/dokumente`, authHeader),
+        firestoreListAll(`${base}/kunden`, authHeader)
+      ]);
+    }
 
     // kunde_id (Beleg) -> Kundennummer (Kundenstamm), nur wenn eine Kundennummer gepflegt ist —
     // DATEV erwartet in "Diverse Adressnummer" eine reine Zahl, daher wie beim Bankkonto robust
     // die erste Zahl aus dem Feld extrahieren statt den Rohwert zu übernehmen.
     const kundenNummerById = {};
-    for (const kDoc of kundenDocs) {
+    const kundeEintragen = (kDoc) => {
       const kId = kDoc.name?.split('/').pop();
       const kNummer = extractKontoNummer(firestoreValue((kDoc.fields || {}).kundennummer));
       if (kId && kNummer) kundenNummerById[kId] = kNummer;
-    }
+    };
+    for (const kDoc of kundenDocs || []) kundeEintragen(kDoc); // Zeitraum-Modus: nur die referenzierten Kunden, nach dem Nachladen der Originale (unten)
 
     const profilFields = profilRes.ok ? ((await profilRes.json()).fields || {}) : {};
     const kleinunternehmer = isKleinunternehmer(profilFields);
@@ -4981,21 +5294,18 @@ async function handleDatevExport(body, env, cors = {}) {
 
     // Steuersatz je Integration aus deren Einnahmen (zuletzt verwendeter Satz, wie
     // berechneUstSchaetzwert in index.html) — für Erstattungen, die ohne Satz gespeichert werden.
-    const satzJeQuelle = {};
-    dokDocs
-      .map(d => d.fields || {})
-      .filter(f => firestoreValue(f.typ) === 'rechnung_ausgehend' && firestoreValue(f.deleted) !== true
-        && DATEV_WEBHOOK_QUELLEN.includes(firestoreValue(f.quelle)))
-      .sort((a, b) => String(firestoreValue(a.bezahlt_am) || firestoreValue(a.datum) || '').localeCompare(String(firestoreValue(b.bezahlt_am) || firestoreValue(b.datum) || '')))
-      .forEach(f => { satzJeQuelle[firestoreValue(f.quelle)] = String(firestoreValue(f.mwst_satz) ?? ''); });
+    // W3 DATEV: im Zeitraum-Modus aus dem Vorab-Lesen aller Belege (alle Jahre, gleiche Funktion wie im vollen Modus).
+    const satzJeQuelle = datevSatzJeQuelle(vorabDocs || dokDocs, firestoreValue, DATEV_WEBHOOK_QUELLEN);
 
     // KX-WC2 (BP-30): OSS-Umsätze nach dem Fall des Kerns (regel/datev-oss.js). null = Kern-Option oss aus, dann bleibt der Export wie vorher.
     let ossPlan = null;
-    try {
-      ossPlan = await datevOssPlanLaden(userId, dokDocs, { adminToken: () => getGoogleAccessToken(env, FIRESTORE_SCOPE), fetchFn: (...a) => fetch(...a) });
-    } catch (e) {
-      console.error('DATEV-Export OSS:', e?.message);
-      return new Response(JSON.stringify({ error: 'Export vorübergehend nicht möglich', details: 'Die Angaben zu Verkäufen ins Ausland konnten nicht gelesen werden. Bitte den Export gleich noch einmal starten.' }), { status: 503, headers: { ...cors, 'Content-Type': 'application/json' } });
+    if (lesemodus !== 'zeitraum') { // Zeitraum-Modus nur bei ausgeschalteter Option (ossVorbereitet null): kein Plan
+      try {
+        ossPlan = await datevOssPlanLaden(userId, dokDocs, { ...ossDeps, ...(ossVorbereitet !== undefined ? { vorbereitet: ossVorbereitet } : {}) });
+      } catch (e) {
+        console.error('DATEV-Export OSS:', e?.message);
+        return ossLesefehler();
+      }
     }
     const ossOffen = [];
 
@@ -5023,7 +5333,6 @@ async function handleDatevExport(body, env, cors = {}) {
     const ossStorniert = [];
     const korrekturOffen = [];
     const korrekturOhneRueckzahlung = [];
-    const dokById = new Map(dokDocs.map((d) => [String(d.name || '').split('/').pop(), d]));
     // Vorlauf über die Korrekturbelege (A-H1, A-N2): stornoWirksam = Originale, auf die ein nicht gelöschter v2-Storno zeigt (der Korrektur-Dialog löscht das
     // Original weich und markiert es storniert; der Kern lässt es wirksam, bis zurückgezahlt ist, der Export hält es genauso im Stapel).
     // rzTraeger = Originale, zu denen mindestens ein Korrekturbeleg eine Rückzahlung trägt (dann kein Hinweis „ohne Rückzahlung“ bei einem anderen).
@@ -5046,12 +5355,7 @@ async function handleDatevExport(body, env, cors = {}) {
     }
     // G3-N3: Storno nach voller Gutschrift (Rest 0) bekommt keinen Steuerteil (Altform: typ storno + storniert_rechnungsnr), das Original muss trotzdem wirksam
     // bleiben, wenn zu ihm schon ein v2-Korrekturbeleg (die Gutschrift) existiert.
-    const belegIdZuNr = new Map();
-    for (const d of dokDocs) {
-      const f = d.fields || {};
-      const nr0 = firestoreValue(f.rechnungsnr) || firestoreValue(f.rechnungsnummer);
-      if (nr0 && (firestoreValue(f.typ) === 'rechnung_ausgehend' || firestoreValue(f.typ) === 'rechnung_eingehend')) belegIdZuNr.set(String(nr0), String(d.name || '').split('/').pop());
-    }
+    const belegIdZuNr = datevBelegIdZuNr(vorabDocs || dokDocs, firestoreValue); // W3 DATEV: Zeitraum-Modus aus dem Vorab-Lesen aller Belege
     const hatV2Korrektur = new Set([...korrekturSteuer.values()].map((st) => String(st.bezug.storniert_beleg_id || st.bezug.korrigiert_beleg_id)));
     for (const d of dokDocs) {
       const f = d.fields || {};
@@ -5060,22 +5364,44 @@ async function handleDatevExport(body, env, cors = {}) {
       const origId = belegIdZuNr.get(String(firestoreValue(f.storniert_rechnungsnr) || ''));
       if (origId && hatV2Korrektur.has(origId)) stornoWirksam.add(origId);
     }
+    // W3 DATEV, Zeitraum-Modus: die Originale, auf die Korrekturbelege (auch Kassen-Stornos) zeigen, und die aufgelösten Originale alter Stornos liegen oft in einem
+    // anderen Jahr und fehlen noch: gezielt nachladen (batchGet), dann wieder nach Name ordnen (Reihenfolge wie die Liste des vollen Modus).
+    if (lesenZeitraum) {
+      const vorhanden = new Set(dokDocs.map(datevDokId));
+      const noetig = new Set(stornoWirksam);
+      for (const st of korrekturSteuer.values()) noetig.add(String(st.bezug.storniert_beleg_id || st.bezug.korrigiert_beleg_id));
+      for (const d of dokDocs) {
+        const f = d.fields || {};
+        if (firestoreValue(f.quelle) !== 'kasse' || !firestoreValue(f.kassentag_id)) continue;
+        const kd = datevDekodiereFelder(f);
+        if (kd.steuer && kd.steuer.bezug && kd.steuer.bezug.storniert_beleg_id) noetig.add(String(kd.steuer.bezug.storniert_beleg_id));
+      }
+      const fehlend = [...noetig].filter((id) => !vorhanden.has(id));
+      if (fehlend.length) dokDocs = datevNachName([...dokDocs, ...await datevNachladen(userId, 'dokumente', fehlend, authHeader)]);
+      // Kunden: nur die, auf die ein geladener Beleg zeigt (die Nummer steht nur in "Diverse Adressnummer" bei Einnahmen, die Menge der Verweise ist ein Obermaß)
+      const kundenIds = new Set();
+      // O18a N2: auch eine nicht-Text-kunde_id (Zahl) zählt: der volle Modus findet den Kunden über die Textumwandlung des Schlüssels (kundenNummerById[k]), also hier ebenso
+      for (const d of dokDocs) { const k = firestoreValue((d.fields || {}).kunde_id); if (k !== null && k !== undefined && k !== '') kundenIds.add(String(k)); }
+      for (const kDoc of await datevNachladen(userId, 'kunden', [...kundenIds], authHeader)) kundeEintragen(kDoc);
+    }
+    const dokById = new Map(dokDocs.map((d) => [String(d.name || '').split('/').pop(), d]));
     const nrBelegt = new Map(); // A-N3: Belegfeld 1 der Gegenbuchungen ohne Belegnummer eindeutig machen
     const ossOriginal = (id, of) => !!(ossPlan && ossPlan.get(String(id))) || !!(of && of.steuer && of.steuer.mapValue && of.steuer.mapValue.fields && of.steuer.mapValue.fields.oss);
 
     // Buchungszeilen je Satz-Gruppe (Mischsatz und Rückzahlung). gruppen: [{ satz: '19'|'7'|'keine', brutto_cent }], korrektur: Gegenbuchung (Richtung umgekehrt,
     // Textmarke [Storno]), ku: Kleinunternehmer (Konto ohne Steuer, kein Schlüssel). Bewirtung (70 %): je Gruppe 70/30 (abziehbar / nicht abziehbar) mit dem Schlüssel
     // des Satzes der Gruppe, Rundung wie im Einzelpfad.
-    const bucheGruppen = ({ gruppen, korrektur, ku, istEinnahme, kategorie, importKonto, belegDatum, belegfeld1, textBasis, diverseAdressnummer }) => {
+    const bucheGruppen = ({ gruppen, korrektur, ku, istEinnahme, kategorie, importKonto, belegDatum, belegfeld1, textBasis, diverseAdressnummer, buchungskonto = bankkonto, markeZusatz = '', korrekturMarke = ' [Storno]' }) => {
       const skrK = skr === 'SKR04' ? 'SKR04' : 'SKR03';
       const bewirtungKonten = DATEV_BEWIRTUNG_KONTEN[skrK];
       for (const g of gruppen) {
         if (g.brutto_cent <= 0) continue;
-        let konto = importKonto || (istEinnahmeKategorie(istEinnahme, kategorie) ? resolveSachkonto(kategorie, skr) : null)
+        const festKonto = g.konto || importKonto; // g.konto: Konto je Gruppe (Kassenzweig, 0 % auf 8290/4290), wie ein Konto der Quelldatei ohne Tausch
+        let konto = festKonto || (istEinnahmeKategorie(istEinnahme, kategorie) ? resolveSachkonto(kategorie, skr) : null)
           || (istEinnahme ? erloeskontoExport(g.satz, ku, skr, jahr) : ausgabenGegenkonto);
-        if (ku && !importKonto && istEinnahme && alleErloeskonten.has(String(konto))) konto = erloeskontoExport('keine', true, skr, jahr);
+        if (ku && !festKonto && istEinnahme && alleErloeskonten.has(String(konto))) konto = erloeskontoExport('keine', true, skr, jahr);
         let hinweis = '';
-        if (importKonto) { /* Konto der Quelldatei bleibt, kein Tausch */ } else if (!ku && (g.satz === '19' || g.satz === '7')) {
+        if (festKonto) { /* Konto der Quelldatei bleibt, kein Tausch */ } else if (!ku && (g.satz === '19' || g.satz === '7')) {
           const tausch = DATEV_AUTOMATIK_SATZ_TAUSCH[skrK][String(konto)];
           if (tausch && tausch.satz !== g.satz) konto = tausch.partner; // erwarteter Wechsel (Konto der Kategorie hat den anderen Satz), keine Warnung
         } else if (!ku && DATEV_AUTOMATIKKONTEN_EXPORT[skrK].has(String(konto))) {
@@ -5084,9 +5410,9 @@ async function handleDatevExport(body, env, cors = {}) {
         }
         const ohneSchl = ku || (alleErloeskonten.has(String(konto)) && !istEinnahme);
         const satzBu = ku ? '' : buSchluesselExport(ohneSchl ? 'keine' : g.satz, false, istEinnahme, konto, skr);
-        const marke = ` ${g.satz === 'keine' ? '0' : g.satz} %${korrektur ? ' [Storno]' : ''}${hinweis}`;
+        const marke = ` ${g.satz === 'keine' ? '0' : g.satz} %${markeZusatz}${korrektur ? korrekturMarke : ''}${hinweis}`;
         const sh = istEinnahme === !korrektur ? 'S' : 'H';
-        const zeile = (betragCent, kontoZeile, zusatz) => buchungen.push({ betrag: betragCent / 100, sollHaben: sh, konto: bankkonto, gegenkonto: kontoZeile, bu: satzBu, belegDatum, belegfeld1, belegfeld2: '', buchungstext: buchungstextBasisKurz(textBasis, marke + zusatz), diverseAdressnummer });
+        const zeile = (betragCent, kontoZeile, zusatz) => buchungen.push({ betrag: betragCent / 100, sollHaben: sh, konto: buchungskonto, gegenkonto: kontoZeile, bu: satzBu, belegDatum, belegfeld1, belegfeld2: '', buchungstext: buchungstextBasisKurz(textBasis, marke + zusatz), diverseAdressnummer });
         // F1: auch ein importiertes Bewirtungskonto (4650/6640) wird 70/30 gebucht (der Kern rechnet für "Bewirtung (70%)" immer 70/30, der Import fasst das Paar zu einem Beleg zusammen)
         if (!istEinnahme && kategorie === 'Bewirtung (70%)' && String(konto) === bewirtungKonten.abziehbar) {
           const abz = Math.floor((2 * g.brutto_cent * 70 + 100) / 200);
@@ -5098,7 +5424,147 @@ async function handleDatevExport(body, env, cors = {}) {
       }
     };
 
+    // ── Kassenbuch P1b-5: DATEV-Kassenzweig (regel/datev-kasse.js). Greift nur bei quelle 'kasse' (Belege), zahlweg 'kasse' (Privatvorgänge) und den Kassenbewegungen
+    // Geldtransit Bank; alle anderen Belege laufen unverändert. Bar gegen das Kassenkonto (Profil datev_kassenkonto, je Kasse datev_konto, Standard SKR03 1000 / SKR04 1600),
+    // Karte gegen das Geldtransitkonto (datev_geldtransitkonto, Standard 1360 / 1460), Belegfeld 1 = Kassennummer. Kontenquellen: 12-steuer-vertiefung 3.4.
+    const hatKasseDok = dokDocs.some((d) => firestoreValue((d.fields || {}).quelle) === 'kasse');
+    const kasseStandard = DATEV_KASSE_KONTEN[skr === 'SKR04' ? 'SKR04' : 'SKR03'];
+    const kasseWahl = kassenKontoWahl(firestoreValue(profilFields.datev_kassenkonto), kasseStandard.kasse);
+    const transitWahl = kassenKontoWahl(firestoreValue(profilFields.datev_geldtransitkonto), kasseStandard.transit);
+    const geldtransitkonto = transitWahl.konto;
+    const kasseOffen = []; // Kassenbelege ohne sichere Buchung (Nummer und Grund in der Warnung)
+    const kasseOhneBewegung = [];
+    const kasseKontoUngueltig = new Set();
+    const kasseEinloesung = []; // Tagesabschlüsse mit Einlösung von Mehrzweck-Gutscheinen: { nr, cent }
+    let kasseSumupBar = 0; let kasseSumupMehrere = 0; let kasseSumupUnbekannt = 0; // A-H2: SumUp-Barbelege auf dem Kassenkonto bzw. ohne eindeutige Kasse; K1-Fix M-1: Datenquelle am Tag unbekannt
+    let kasseMehrzweck = 0; let kasseAusgabeJahr = 0; let kasseBewGebucht = 0; let kassePrivat = 0;
+    const userBasis = base; // users/{uid}
+    let kassenDocs = null;
+    let kassenVerweigert = false; // G2-Fix H-1: 403 auf kassen bei einem Konto ohne Kassenbelege (Regeln noch alt) als „keine Kassen“ gewertet
+    // G2-Fix H-1: ohneKassenbuch = der Aufrufer weiß, dass das Konto keine Kassenbelege hat (SumUp-Pfad bei !hatKasseDok). Nur dann gilt ein 403 als „keine Kassen“:
+    // Die Live-Regeln vor dem Kassenbuch-Release haben keinen kassen-Block (Standard-Verweigerung), ohne Kassenbuch gibt es dort nichts zu lesen. Jeder andere Fehler,
+    // und jeder Aufruf aus einem Kassenbuch-Pfad (Kassenbelege, Privatvorgänge aus der Kasse, Kassenbewegungen), bleibt fail-closed (503), auch nach einem früheren 403.
+    const kassenLaden = async ({ ohneKassenbuch = false } = {}) => {
+      if (kassenDocs === null) {
+        const m = new Map();
+        // O20a N6: Lesepfad; ein vorübergehender Fehler (429/500/502/503/504, Netzfehler) wird genau einmal wiederholt (wie die übrigen Export-Lesepfade, lesenMitEinerWiederholung).
+        // 403 wird nie wiederholt (Regeln, siehe oben). Die Meldung bleibt unverändert, sodass die 403-Prüfung unten und der 503 des Exports gleich bleiben.
+        const kassenListe = () => lesenMitEinerWiederholung(async () => {
+          try { return await firestoreListAll(`${base}/kassen`, authHeader); } catch (e) {
+            if (e instanceof TypeError || /^Firestore read failed \((429|500|502|503|504)\)/.test(String(e?.message || ''))) throw new StromAbbruch(String(e?.message || 'Netzfehler').slice(0, 80), 'UNAVAILABLE');
+            throw e;
+          }
+        });
+        try { for (const k of await kassenListe()) m.set(String(k.name || '').split('/').pop(), datevDekodiereFelder(k.fields || {})); } catch (e) {
+          if (ohneKassenbuch && /^Firestore read failed \(403\)/.test(String(e?.message || ''))) { console.warn('DATEV-Export Kassen: 403 ohne Kassenbelege, als keine Kassen gewertet'); kassenVerweigert = true; kassenDocs = m; return kassenDocs; }
+          console.error('DATEV-Export Kassen:', e?.message); throw new DatevLesefehler('Die Kassen des Kassenbuchs konnten nicht gelesen werden.');
+        }
+        kassenDocs = m;
+      }
+      if (kassenVerweigert && !ohneKassenbuch) throw new DatevLesefehler('Die Kassen des Kassenbuchs konnten nicht gelesen werden.');
+      return kassenDocs;
+    };
+    // O18a N1: zaehlt = false: der Beleg liegt außerhalb des Exportjahres und trägt nicht zur Warnung „Konto der Kasse ungültig“ bei (der Zeitraum-Modus lädt solche Belege gar nicht,
+    // beide Modi nennen die Warnung so nur noch für Belege des Jahres)
+    // O19-4 (nur Doku, bewusst so): Nur der SumUp-Zweig übergibt zaehlt (Jahr aus bezahlt_am || datum). Kassenausgaben anderer Jahre zählen weiter zur Warnung; das gilt in
+    // beiden Lesemodi gleich (der Zeitraum-Modus lädt alle Kassenbelege) und betrifft nur den Warntext, nie Konto oder Stapel. Eine Angleichung wäre eine Textänderung ohne Buchungswirkung.
+    const kassenKonto = async (kasseId, zaehlt = true) => {
+      await kassenLaden();
+      const k = kassenDocs.get(String(kasseId || ''));
+      if (k && k.datev_konto) {
+        const w = kassenKontoWahl(k.datev_konto, kasseWahl.konto);
+        if (w.ungueltig && zaehlt) kasseKontoUngueltig.add(String(k.bezeichnung || kasseId));
+        return w.konto;
+      }
+      return kasseWahl.konto;
+    };
+    // F2-Fix B-M1/B-N1/B-N2: Kassentage und Fassungen mit so wenigen Unteranfragen wie möglich.
+    //  - Tagesplätze nur des Exportjahres (Bereichsabfrage auf geschaeftstag, 500 je Anfrage), nicht aller Jahre.
+    //  - Fassungen einzeln per batchGet nach Name (100 je Anfrage; allDescendants erlaubt die Regel dem Nutzertoken nicht), und nur die gebrauchten:
+    //    die aktive Fassung jedes abgeschlossenen Tages des Jahres (Tagesposten), dazu die Fassung, auf die ein Umsatzbeleg zeigt (kassentag_id und kassen_fassung stehen im Beleg:
+    //    Satz einer Mehrzweck-Einlösung, Tagesposten eines stornierten Tages, auch wenn der Tag in einem anderen Jahr liegt).
+    //  - Lesefehler brechen den Export ab (DatevLesefehler, 503): kein stiller Verlust von Buchungen.
+    const jahrVon = (x) => String(x || '').slice(0, 4);
+    const kasseTagDok = new Map(); // Beleg-ID -> dekodierter Beleg (quelle kasse mit kassentag_id)
+    if (hatKasseDok) for (const d of dokDocs) { const f = d.fields || {}; if (firestoreValue(f.quelle) === 'kasse' && firestoreValue(f.kassentag_id)) kasseTagDok.set(String(d.name || '').split('/').pop(), datevDekodiereFelder(f)); }
+    const istUmsatzBeleg = (o) => !!o && ISTKASSEOBJ(o.steuer) && o.steuer.beleg_art === 'tagesabschluss' && KASSE_UMSATZ_STEUERFAELLE.includes(o.steuer.steuerfall) && typeof o.kassentag_id === 'string' && Number.isSafeInteger(o.kassen_fassung) && o.kassen_fassung > 0;
+    const hatEinloesung = (o) => !!o && ISTKASSEOBJ(o.steuer) && Array.isArray(o.steuer.zahlungen) && o.steuer.zahlungen.some((z) => z && z.kanal === 'gutschein_mehrzweck');
+    const kasseStornoPaare = []; // Umsatzbeleg mit Storno: { tagId, n, kasseId, origDatum, stornoDatum, stornoNr }
+    const kasseFassungBedarf = new Map(); // `${tagId}|${n}` -> { tagId, n }
+    const bedarf = (o) => { if (o && typeof o.kassentag_id === 'string' && Number.isSafeInteger(o.kassen_fassung) && o.kassen_fassung > 0) kasseFassungBedarf.set(`${o.kassentag_id}|${o.kassen_fassung}`, { tagId: o.kassentag_id, n: o.kassen_fassung }); };
+    const kasseDatumOk = (x) => /^\d{4}-\d{2}-\d{2}$/.test(String(x || ''));
+    for (const d of kasseTagDok.values()) {
+      if (d.deleted === true || !ISTKASSEOBJ(d.steuer)) continue;
+      if (d.steuer.beleg_art === 'storno') {
+        const o = ISTKASSEOBJ(d.steuer.bezug) ? kasseTagDok.get(String(d.steuer.bezug.storniert_beleg_id)) : null;
+        if (!o || o.deleted === true || !kasseDatumOk(d.steuer.wirkdatum)) continue;
+        const imJahr = jahrVon(d.steuer.wirkdatum) === String(jahr);
+        if (imJahr && hatEinloesung(o)) bedarf(o);
+        if (istUmsatzBeleg(o) && kasseDatumOk(o.bezahlt_am) && (imJahr || jahrVon(o.bezahlt_am) === String(jahr))) {
+          kasseStornoPaare.push({ tagId: o.kassentag_id, n: o.kassen_fassung, kasseId: o.kasse_id, origDatum: o.bezahlt_am, stornoDatum: d.steuer.wirkdatum, stornoNr: String(d.kassennummer || '').trim() });
+          bedarf(o);
+        }
+      } else if (hatEinloesung(d) && jahrVon(d.bezahlt_am) === String(jahr)) bedarf(d);
+    }
+    let kassenTageDaten = null;
+    const kassenTageLesen = async () => {
+      if (kassenTageDaten === null) {
+        const daten = { tage: new Map(), fassungen: new Map() };
+        try {
+          const gesucht = new Map(kasseFassungBedarf);
+          for (const t of await firestoreJahresListe(userBasis, 'kassentage', jahr, authHeader)) {
+            const tagId = String(t.name || '').split('/').pop();
+            const d = datevDekodiereFelder(t.fields || {});
+            daten.tage.set(tagId, d);
+            if (d.status === 'abgeschlossen' && Number.isSafeInteger(d.fassung_aktiv) && d.fassung_aktiv > 0) gesucht.set(`${tagId}|${d.fassung_aktiv}`, { tagId, n: d.fassung_aktiv });
+          }
+          const wurzel = 'projects/kontolux-ai/databases/(default)/documents';
+          const liste = [...gesucht.values()];
+          for (let i = 0; i < liste.length; i += 100) {
+            // O19-3: Lesepfad (Export); ein einziger Wiederholungsversuch bei vorübergehendem UNAVAILABLE im Strom
+            const fassZeilen = await lesenMitEinerWiederholung(async () => {
+              const res = await fetch(`https://firestore.googleapis.com/v1/${wurzel}:batchGet`, {
+                method: 'POST', headers: { 'Authorization': `Bearer ${authHeader}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ documents: liste.slice(i, i + 100).map((x) => `${wurzel}/users/${userId}/kassentage/${x.tagId}/fassungen/${x.n}`) })
+              });
+              if (!res.ok) throw new Error(`Fassungen lesen fehlgeschlagen (${res.status})`);
+              return batchGetStrom(await res.json(), 'Fassungen lesen');
+            });
+            for (const z of fassZeilen) {
+              if (!z.found) continue;
+              const seg = String(z.found.name || '').split('/documents/').pop().split('/');
+              if (seg[2] === 'kassentage' && seg[4] === 'fassungen') daten.fassungen.set(`${seg[3]}|${Number(seg[5])}`, datevDekodiereFelder(z.found.fields || {}));
+            }
+          }
+        } catch (e) { console.error('DATEV-Export Kassentage:', e?.message); throw new DatevLesefehler('Die Kassentage des Kassenbuchs konnten nicht gelesen werden.'); }
+        kassenTageDaten = daten;
+      }
+      return kassenTageDaten;
+    };
+    let kassenBew = null;
+    const kassenBewegungen = async () => {
+      if (kassenBew === null) {
+        const m = new Map();
+        // Bewegungen des Jahres plus alle Storno-Bewegungen (wenige, aller Jahre): ein stornierter Beleg findet seine Storno-Bewegung auch im anderen Jahr
+        try { for (const b of [...await firestoreJahresListe(userBasis, 'kassenbewegungen', jahr, authHeader), ...await firestoreAbfrageAlle(userBasis, 'kassenbewegungen', [firestoreFeldFilter('art', 'EQUAL', 'storno')], null, authHeader)]) m.set(String(b.name || '').split('/').pop(), datevDekodiereFelder(b.fields || {})); } catch (e) { console.error('DATEV-Export Kassenbewegungen:', e?.message); throw new DatevLesefehler('Die Kassenbewegungen des Kassenbuchs konnten nicht gelesen werden.'); }
+        kassenBew = m;
+      }
+      return kassenBew;
+    };
+    // Stornierte Kassenausgabe (Eingangsbeleg mit storniert: true): Original bleibt im Stapel, am Tag der Storno-Bewegung folgt die Gegenbuchung (Soll/Haben vertauscht).
+    // Die Zeilen des Belegs entstehen im allgemeinen Pfad; kasseMarke merkt, wo sie in buchungen beginnen (Abschluss am nächsten Beleg bzw. nach der Schleife).
+    const kasseSpiegel = [];
+    let kasseMarke = null;
+    const kasseMarkeAbschliessen = () => {
+      if (!kasseMarke) return;
+      const neu = buchungen.splice(kasseMarke.start);
+      kasseSpiegel.push({ ...kasseMarke, neu });
+      kasseMarke = null;
+    };
+
+    const kasseTageVorab = hatKasseDok ? await kassenTageLesen() : null;
     for (const doc of dokDocs) {
+      kasseMarkeAbschliessen();
       const fields = doc.fields || {};
       // Soft-gelöschte/stornierte Belege (weicheLoeschung() in index.html setzt deleted:true)
       // dürfen nicht mit exportiert werden — sonst bucht der Steuerberater eine stornierte,
@@ -5115,6 +5581,63 @@ async function handleDatevExport(body, env, cors = {}) {
       }
       if (wirksamGeloescht) wirksamGeloeschtAnzahl++;
       if (firestoreValue(fields.deleted) === true && !wirksamGeloescht) continue;
+      // Kassenbuch P1b-5: Tagesabschluss, Mehrzweck-Verkauf, Kassendifferenz und Kassen-Storno (vor dem allgemeinen Pfad und vor dem Korrekturzweig darunter)
+      if (firestoreValue(fields.quelle) === 'kasse' && firestoreValue(fields.kassentag_id)) {
+        const kd = datevDekodiereFelder(fields);
+        const bezugId = kd.steuer && kd.steuer.bezug ? kd.steuer.bezug.storniert_beleg_id : null;
+        const origDoc = bezugId ? dokById.get(String(bezugId)) : null;
+        const plan = kasseBelegPlan(kd, origDoc ? datevDekodiereFelder(origDoc.fields || {}) : null, kasseTageVorab ? kasseTageVorab.fassungen : null);
+        const nrKasse = String(kd.kassennummer || docId);
+        if (plan.offen) {
+          const jahrDes = String((kd.steuer && kd.steuer.wirkdatum) || kd.bezahlt_am || kd.datum || '').slice(0, 4);
+          if (jahrDes === String(jahr) || !/^\d{4}$/.test(jahrDes)) kasseOffen.push(`${nrKasse} (${plan.grund})`);
+          continue;
+        }
+        if (plan.datum.slice(0, 4) !== String(jahr)) continue;
+        const datumKasse = new Date(plan.datum + 'T00:00:00');
+        const kasseKto = await kassenKonto(kd.kasse_id);
+        const absenderKasse = String(kd.absender || '').trim();
+        const textKasse = ({ umsatz: 'Tagesabschluss', mehrzweck: 'Mehrzweck-Gutscheine', fehlbetrag: 'Kassendifferenz (Fehlbetrag)', ueberschuss: 'Kassendifferenz (Überschuss)', retoure: plan.art_detail === 'pfand' ? 'Pfandrückgabe' : 'Rückgabe' })[plan.art]; // O15 N-3: Pfand sprachlich richtig
+        for (const k of plan.kanaele) {
+          // A-N1: 0 % auf 8290/4290 (Konto je Gruppe); A-H1: Einlösung eines Mehrzweck-Gutscheins als Umbuchung vom Mehrzweck-Konto auf das Erlöskonto des Satzes
+          const gruppenKasse = k.gruppen.map((g) => (g.konto0 ? { ...g, konto: KASSE_ERLOES_0_KONTO[skrK0] } : g));
+          const kanalKonto = k.kanal === 'karte' ? geldtransitkonto : k.kanal === 'gutschein' ? KASSE_MEHRZWECK_KONTO[skrK0] : kasseKto;
+          bucheGruppen({
+            gruppen: gruppenKasse, korrektur: plan.korrektur, ku: plan.ku, istEinnahme: plan.einnahme, kategorie: plan.kategorie, belegDatum: datumKasse, belegfeld1: plan.kassennummer,
+            textBasis: `${textKasse} ${absenderKasse}`.trim(), diverseAdressnummer: '', buchungskonto: kanalKonto, markeZusatz: k.kanal === 'karte' ? ' Karte' : k.kanal === 'gutschein' ? ' Gutschein-Einlösung' : '',
+            ...(plan.art === 'retoure' ? { korrekturMarke: ' [Rückgabe]' } : {}) // O14 N3: Rückgabe ist kein Erfassungsstorno
+          });
+        }
+        // R1.5: stornierte Retoure: die Retoure bleibt im Stapel, die Gegenbuchung (Richtung des Verkaufs) folgt am selben Tag mit der Kassennummer des Stornos
+        if (plan.art === 'retoure' && plan.storno) {
+          for (const k of plan.kanaele) {
+            const gruppenKasse = k.gruppen.map((g) => (g.konto0 ? { ...g, konto: KASSE_ERLOES_0_KONTO[skrK0] } : g));
+            bucheGruppen({
+              gruppen: gruppenKasse, korrektur: false, ku: plan.ku, istEinnahme: true, kategorie: '', belegDatum: new Date(plan.storno.datum + 'T00:00:00'), belegfeld1: plan.storno.kassennummer,
+              textBasis: `Storno ${textKasse} ${absenderKasse}`.trim(), diverseAdressnummer: '', buchungskonto: k.kanal === 'karte' ? geldtransitkonto : kasseKto, markeZusatz: k.kanal === 'karte' ? ' Karte' : ''
+            });
+          }
+        }
+        if (plan.gutschein_cent > 0 && !plan.korrektur) kasseEinloesung.push({ nr: plan.kassennummer, cent: plan.gutschein_cent });
+        if (plan.art === 'mehrzweck') kasseMehrzweck++;
+        continue;
+      }
+      // Kassenausgabe (Eingangsbeleg aus der Kasse, ohne kassentag_id): allgemeiner Pfad mit Kassenkonto und Kassennummer als Belegfeld 1
+      const istKasseAusgabe = firestoreValue(fields.quelle) === 'kasse';
+      // A-H2: SumUp-Barbeleg einer Kasse mit Datenquelle sumup_integration: gegen deren Kassenkonto statt gegen die Bank (Belegfeld 1 bleibt der Transaktionscode)
+      let sumupKasse = null;
+      if (!istKasseAusgabe && firestoreValue(fields.quelle) === 'sumup_webhook' && istSumupBarbeleg({ quelle: 'sumup_webhook', typ: firestoreValue(fields.typ), deleted: firestoreValue(fields.deleted), storniert: firestoreValue(fields.storniert), buchungstext: firestoreValue(fields.buchungstext), name: firestoreValue(fields.name) })) {
+        sumupKasse = sumupKasseWahl(await kassenLaden({ ohneKassenbuch: !hatKasseDok }), String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || ''));
+        if (sumupKasse && firestoreValue(fields.bezahlt) === true && String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || '').slice(0, 4) === String(jahr)) { if (sumupKasse.mehrere) kasseSumupMehrere++; else if (sumupKasse.unbekannt) kasseSumupUnbekannt++; else kasseSumupBar++; }
+      }
+      const kasseKonto = istKasseAusgabe ? await kassenKonto(firestoreValue(fields.kasse_id)) : (sumupKasse && sumupKasse.id ? await kassenKonto(sumupKasse.id, String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || '').slice(0, 4) === String(jahr)) : bankkonto);
+      if (istKasseAusgabe && String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || '').slice(0, 4) === String(jahr)) kasseAusgabeJahr++;
+      if (istKasseAusgabe && firestoreValue(fields.storniert) === true && firestoreValue(fields.bewegung_id)) {
+        const bewAlle = await kassenBewegungen();
+        const stornoBew = [...bewAlle.values()].find((b) => b && b.art === 'storno' && b.storno_von === firestoreValue(fields.bewegung_id)) || null;
+        const stornoJahr = stornoBew ? String(stornoBew.geschaeftstag || '').slice(0, 4) : '';
+        kasseMarke = { start: buchungen.length, docId, stornoBew, stornoImJahr: stornoJahr === String(jahr), originalJahr: String(firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum) || '').slice(0, 4), nr: String(firestoreValue(fields.kassennummer) || docId) };
+      }
       // B-1 (Gegenlesung 21.11.): Korrekturbelege (Storno, Gutschrift, Preisnachlass) sind nie bezahlt, die Bank-Bewegung steht in steuer.rueckzahlung.
       // Gegenbuchung zum Original (Konto, Kunde, Text vom Original): Datum der Rückzahlung, Betrag der Rückzahlung, je Satz aufgeteilt, Richtung umgekehrt.
       // Nur wenn das Original im Stapel steht (nicht gelöscht, bezahlt, kein OSS). Alle anderen Belege laufen unverändert weiter.
@@ -5193,18 +5716,9 @@ async function handleDatevExport(body, env, cors = {}) {
       // Belegdatum und Exportjahr nach Zahlungsdatum (Konzept 7.2, Spalte 10 'Belegdatum': Zahlungsdatum, EÜR-/Bank-Sicht, § 11 EStG),
       // bei Soll- wie bei Istversteuerung. Das Rechnungsdatum (datum) dient nur als Rückfall, dann createdAt (TR-euer-006).
       // Leistungsdatum und Steuerperiode für die Soll-USt kommen in die Spalten 115/116 (Phase 5, noch nicht gebaut).
-      const datumStr = firestoreValue(fields.bezahlt_am) || firestoreValue(fields.datum);
-      let belegDatum;
-      if (datumStr && /^\d{4}-\d{2}-\d{2}/.test(datumStr)) {
-        belegDatum = new Date(datumStr + 'T00:00:00');
-      } else if (firestoreValue(fields.createdAt)) {
-        belegDatum = new Date(firestoreValue(fields.createdAt));
-      } else {
-        belegDatum = new Date();
-      }
-      if (isNaN(belegDatum.getTime())) belegDatum = new Date();
+      const belegDatum = datevBelegDatum(fields, firestoreValue); // W3 DATEV: dieselbe Regel nutzt das Vorab-Lesen (regel/datev-lesen.js)
 
-      if (String(belegDatum.getFullYear()) !== String(jahr)) continue;
+      if (String(belegDatum.getFullYear()) !== String(jahr) && !(kasseMarke && kasseMarke.stornoImJahr)) continue; // stornierte Kassenausgabe aus dem Vorjahr: Gegenbuchung dieses Jahres
 
       if (!bezahlt) { skippedUnpaid++; continue; }
 
@@ -5232,6 +5746,8 @@ async function handleDatevExport(body, env, cors = {}) {
         const idMatch = /^beleg_(?:rechnung|mahnung)_(.+)_\d+$/.exec(doc.name?.split('/').pop() || '');
         if (idMatch) rechnungsnr = idMatch[1];
       }
+      // Kassenbuch P1b-5: Belegfeld 1 einer Kassenausgabe ist die Kassennummer (von der Rechnungsnummern-Sperre ausgenommen)
+      if (istKasseAusgabe && firestoreValue(fields.kassennummer)) rechnungsnr = String(firestoreValue(fields.kassennummer));
       // Belegfeld 1 ist Pflicht (DATEV EXTF) — ohne jede Rechnungsnummer wird ersatzweise
       // das Belegdatum als TTMMJJ eingesetzt, statt das Feld leer zu lassen.
       // Rechnungsnummer ist Pflicht: Ohne Nummer würde das Datum als Belegnummer dienen, und mehrere Belege am
@@ -5285,7 +5801,7 @@ async function handleDatevExport(body, env, cors = {}) {
           bucheGruppen({
             gruppen: ms.gruppen, korrektur: ms.korrektur, ku: false, istEinnahme, kategorie, belegDatum, belegfeld1: rechnungsnr,
             textBasis: (() => { const f = firestoreValue(fields.buchungstext) || ''; const b = istEinnahme ? `Rechnung ${absender}`.trim() : `Beleg ${absender}`.trim(); return f ? `${b} ${f}`.trim() : b; })(),
-            diverseAdressnummer: istEinnahme ? (kundenNummerById[firestoreValue(fields.kunde_id) || ''] || '') : ''
+            diverseAdressnummer: istEinnahme ? (kundenNummerById[firestoreValue(fields.kunde_id) || ''] || '') : '', buchungskonto: kasseKonto
           });
           if (!istEinnahme && kategorie === GWG_KATEGORIE) mischsatzGwg.push(rechnungsnr);
           mischsatzGebucht++;
@@ -5344,7 +5860,7 @@ async function handleDatevExport(body, env, cors = {}) {
       // wie bisher im Stapel, trägt eine Textmarke und steht mit Nummer in der Warnung.
       const skrK = skr === 'SKR04' ? 'SKR04' : 'SKR03';
       let ohneBuErzwingen = false;
-      let konto1 = bankkonto; // Buchungskonto der Zeile: Bank, bei Pauschalen die Privateinlage
+      let konto1 = kasseKonto; // Buchungskonto der Zeile: Bank (Kassenausgabe: Kassenkonto), bei Pauschalen die Privateinlage
       let rcMarke = '';
       let ustIdSpalte = '';
       if (!importKontoGilt) {
@@ -5400,7 +5916,7 @@ async function handleDatevExport(body, env, cors = {}) {
         ];
         for (const t of teile) {
           if (t.betrag <= 0) continue;
-          buchungen.push({ betrag: t.betrag, sollHaben: 'H', konto: bankkonto, gegenkonto: t.konto, bu, belegDatum, belegfeld1: rechnungsnr, belegfeld2, buchungstext: t.text, diverseAdressnummer });
+          buchungen.push({ betrag: t.betrag, sollHaben: 'H', konto: konto1, gegenkonto: t.konto, bu, belegDatum, belegfeld1: rechnungsnr, belegfeld2, buchungstext: t.text, diverseAdressnummer });
         }
         continue;
       }
@@ -5427,6 +5943,18 @@ async function handleDatevExport(body, env, cors = {}) {
         buchungen.push({ betrag: (cent - vst) / 100, sollHaben: 'S', konto: GWG_KONTEN[skrK].sofort, gegenkonto: GWG_KONTEN[skrK].anlage, bu: '', belegDatum, belegfeld1: rechnungsnr, belegfeld2: '', buchungstext: buchungstextBasisKurz(buchungstextOhneHinweis, ' Sofortabschreibung GWG'), diverseAdressnummer: '' });
         gwgGebucht++;
       }
+    }
+
+    kasseMarkeAbschliessen();
+    // Stornierte Kassenausgaben: Original (nur im Jahr des Belegs) und Gegenbuchung am Tag der Storno-Bewegung (nur in deren Jahr); ohne Storno-Bewegung bleibt das Original
+    // stehen und der Beleg steht in der Warnung (das Datum der Gegenbuchung wird nicht geraten).
+    for (const sp of kasseSpiegel) {
+      const gegen = sp.stornoBew && /^\d{4}-\d{2}-\d{2}$/.test(String(sp.stornoBew.geschaeftstag || '')) && String(sp.stornoBew.kassennummer || '').trim() ? sp.stornoBew : null;
+      if (sp.originalJahr === String(jahr) || !gegen) buchungen.push(...sp.neu);
+      if (!gegen) { if (sp.originalJahr === String(jahr)) kasseOffen.push(`${sp.nr} (storno_ohne_bewegung)`); continue; }
+      if (gegen.geschaeftstag.slice(0, 4) !== String(jahr)) continue;
+      const datumStorno = new Date(gegen.geschaeftstag + 'T00:00:00');
+      for (const b of sp.neu) buchungen.push({ ...b, sollHaben: b.sollHaben === 'S' ? 'H' : 'S', belegDatum: datumStorno, belegfeld1: String(gegen.kassennummer).trim(), buchungstext: buchungstextBasisKurz(b.buchungstext, ' [Storno]') });
     }
 
     if (ohneRechnungsnr.length) {
@@ -5483,14 +6011,138 @@ async function handleDatevExport(body, env, cors = {}) {
       datevWarning = (datevWarning ? datevWarning + ' ' : '') + `${ossOffen.length} Verkauf/Verkäufe an Privatkunden im Ausland wurden NICHT exportiert (Steuerfall offen): ${ossOffen.slice(0, 10).join(', ')}${ossOffen.length > 10 ? ', …' : ''}. Bitte in der App klären und erneut exportieren.`;
     }
 
+    // O18a N4: ein Privatvorgang gehört zum Jahr nur mit einem Datum als TEXT, dessen erste vier Zeichen das Jahr sind. Ein Datum als Zeitstempel (schreibt kein Schreiber) gilt in beiden
+    // Lesemodi als nicht im Jahr: der Zeitraum-Modus fragt per Textbereich, und gebucht würde ein solches Datum ohnehin nie (privatvorgangBuchung verlangt JJJJ-MM-TT als Text).
+    // N5: bei Jahr 9999 wäre die obere Grenze "10000" kleiner als jeder Text "9999-…"; die Abfrage bliebe leer. Ohne Bedeutung (es gibt keine Belege in diesem Jahr), daher keine Sonderbehandlung.
+    const privatImJahr = (f) => !!f.datum && f.datum.stringValue !== undefined && String(f.datum.stringValue).slice(0, 4) === String(jahr);
     // Privatentnahmen/-einlagen des Jahres (Storno-Vorgänge bleiben draußen)
-    const privatDocs = await firestoreListAll(`${base}/privatvorgaenge`, authHeader).catch(() => []);
+    // F2-Fix B-M1: kein stilles Verschlucken (vorher .catch(() => [])): ein Lesefehler bricht den Export ab, sonst fehlten Entnahmen und Einlagen ohne Hinweis
+    let privatDocs;
+    // W3 DATEV, Zeitraum-Modus: nur Vorgänge mit Datum im Jahr (Textbereich auf datum; die Schleife unten prüft ohnehin die ersten vier Zeichen), wieder nach Name geordnet
+    try { privatDocs = lesenZeitraum ? datevNachName(await firestoreAbfrageAlle(userBasis, 'privatvorgaenge', [firestoreFeldFilter('datum', 'GREATER_THAN_OR_EQUAL', String(jahr)), firestoreFeldFilter('datum', 'LESS_THAN', String(Number(jahr) + 1))], 'datum', authHeader)) : await firestoreListAll(`${base}/privatvorgaenge`, authHeader); } catch (e) { console.error('DATEV-Export Privatvorgänge:', e?.message); throw new DatevLesefehler('Die Privatentnahmen und -einlagen konnten nicht gelesen werden.'); }
+    // Bewegungen, auf die Privatvorgänge des Jahres aus der Kasse zeigen (Belegfeld 1), aber nicht im Jahres-Bestand stehen: einzeln per batchGet nachladen
+    {
+      const fehlende = [...new Set(privatDocs.filter((d) => firestoreValue((d.fields || {}).zahlweg) === 'kasse' && privatImJahr(d.fields || {})).map((d) => firestoreValue((d.fields || {}).kassenbewegung_id)).filter(Boolean))];
+      if (fehlende.length) {
+        const bewMap = await kassenBewegungen();
+        const nachladen = fehlende.filter((id) => !bewMap.has(String(id)) && /^[A-Za-z0-9_-]{1,200}$/.test(String(id)));
+        const wurzel = 'projects/kontolux-ai/databases/(default)/documents';
+        try {
+          for (let i = 0; i < nachladen.length; i += 100) {
+            // O19-3: Lesepfad (Export); ein einziger Wiederholungsversuch bei vorübergehendem UNAVAILABLE im Strom
+            const bewZeilen = await lesenMitEinerWiederholung(async () => {
+              const res = await fetch(`https://firestore.googleapis.com/v1/${wurzel}:batchGet`, { method: 'POST', headers: { 'Authorization': `Bearer ${authHeader}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ documents: nachladen.slice(i, i + 100).map((id) => `${wurzel}/users/${userId}/kassenbewegungen/${id}`) }) });
+              if (!res.ok) throw new Error(`Bewegungen lesen fehlgeschlagen (${res.status})`);
+              return batchGetStrom(await res.json(), 'Bewegungen lesen');
+            });
+            for (const z of bewZeilen) if (z.found) bewMap.set(String(z.found.name).split('/').pop(), datevDekodiereFelder(z.found.fields || {}));
+          }
+        } catch (e) { console.error('DATEV-Export Kassenbewegungen:', e?.message); throw new DatevLesefehler('Die Kassenbewegungen des Kassenbuchs konnten nicht gelesen werden.'); }
+      }
+    }
     for (const pDoc of privatDocs) {
       const f = pDoc.fields || {};
       const v = { art: firestoreValue(f.art), datum: firestoreValue(f.datum), betrag: firestoreValue(f.betrag), notiz: firestoreValue(f.notiz), storniert: firestoreValue(f.storniert) === true };
-      if (String(v.datum || '').slice(0, 4) !== String(jahr)) continue;
-      const b = privatvorgangBuchung(v, skr, bankkonto);
-      if (b) buchungen.push(b);
+      if (!privatImJahr(f)) continue;
+      // Kassenbuch P1b-5: Privatvorgang aus der Kasse (zahlweg 'kasse') läuft gegen das Kassenkonto statt gegen die Bank
+      const ausKasse = firestoreValue(f.zahlweg) === 'kasse';
+      const b = privatvorgangBuchung(v, skr, ausKasse ? await kassenKonto(firestoreValue(f.kasse_id)) : bankkonto);
+      if (b && ausKasse) {
+        // A-N2 (Gegenlesung o-p1c): Belegfeld 1 eines Privatvorgangs aus der Kasse ist die Kassennummer der Bewegung (der Prüfer findet die Kassenbuch-Zeile direkt); ohne Bewegung PRIV-JJJJMMTT
+        const bewId = firestoreValue(f.kassenbewegung_id);
+        const bw = bewId ? (await kassenBewegungen()).get(String(bewId)) : null;
+        if (bw && typeof bw.kassennummer === 'string' && bw.kassennummer.trim()) b.belegfeld1 = bw.kassennummer.trim();
+      }
+      if (b) { buchungen.push(b); if (ausKasse) kassePrivat++; }
+    }
+
+    // Kassenbuch P1b-5: Kassenbewegungen Geldtransit Bank (Kassenkonto an bzw. von Geldtransitkonto). Gelesen nur, wenn das Konto Kassendaten hat.
+    const kasseAktiv = hatKasseDok || kassePrivat > 0 || kasseSumupBar > 0;
+    if (kasseAktiv) {
+      for (const [bewId, b] of await kassenBewegungen()) {
+        const bu = kasseBewegungBuchung(b);
+        const jahrBew = String((b && b.geschaeftstag) || '').slice(0, 4);
+        // _ein-Bein des Geldtransits zwischen Kassen: keine eigene Buchung (das _aus-Bein der anderen Kasse bucht); Warnung nur, wenn dieses fehlt
+        if (bu === null) { if (kasseBewegungOhneBuchung(b) && b.art !== 'storno' && jahrBew === String(jahr) && !kasseGeldtransitGegenbein(b, (await kassenBewegungen()).values())) kasseOhneBewegung.push(String((b && b.kassennummer) || bewId)); continue; }
+        if (bu.offen) { if (jahrBew === String(jahr)) kasseOffen.push(`${(b && b.kassennummer) || bewId} (${bu.grund})`); continue; }
+        if (jahrBew !== String(jahr)) continue;
+        // _aus-Bein zwischen Kassen: Kasse Haben an die Kasse der Gegenseite; bei gleichem DATEV-Konto (gemeinsames Standardkonto) wirkt es nicht, keine Zeile
+        if (bu.gegen === 'kasse') {
+          const alleKassen = await kassenLaden();
+          if (!alleKassen.has(String(bu.gegenkasse_id))) { kasseOffen.push(`${bu.kassennummer} (gegenkasse_unbekannt)`); continue; }
+          const eigenKto = await kassenKonto(bu.kasse_id);
+          const gegenKto = await kassenKonto(bu.gegenkasse_id);
+          if (eigenKto === gegenKto) continue;
+          buchungen.push({ betrag: bu.betrag_cent / 100, sollHaben: bu.sollHaben, konto: eigenKto, gegenkonto: gegenKto, bu: '', belegDatum: new Date(bu.datum + 'T00:00:00'), belegfeld1: bu.kassennummer, belegfeld2: '', buchungstext: buchungstextBasisKurz(bu.text, bu.storno ? ' [Storno]' : ''), diverseAdressnummer: '' });
+          kasseBewGebucht++;
+          continue;
+        }
+        buchungen.push({ betrag: bu.betrag_cent / 100, sollHaben: bu.sollHaben, konto: await kassenKonto(bu.kasse_id), gegenkonto: bu.gegen === 'durchlauf' ? KASSE_DURCHLAUF_KONTO[skrK0] : geldtransitkonto, bu: '', belegDatum: new Date(bu.datum + 'T00:00:00'), belegfeld1: bu.kassennummer, belegfeld2: '', buchungstext: buchungstextBasisKurz(bu.text, bu.storno ? ' [Storno]' : ''), diverseAdressnummer: '' });
+        kasseBewGebucht++;
+      }
+    }
+    // A-M1: Posten eines Tagesabschlusses außerhalb des Umsatzbelegs (Bareingang auf Rechnung, Durchlaufendes, Trinkgeld der Mitarbeiter), aus der aktiven Fassung des Tages.
+    // F2-Fix B-N2: Ein Umsatzbeleg, der storniert wurde, trägt seine Posten weiter: Original aus der Fassung des Belegs (kassentag_id, kassen_fassung) am Tag des Belegs,
+    // gespiegelt (Soll/Haben vertauscht) am wirkdatum des Stornos. G2-Fix N-1: das wirkdatum ist der Geschäftstag des Originals (steuerkern/kasse.js, Storno-Beleg
+    // wirkdatum = o.geschaeftstag), nicht der Kalendertag, an dem storniert wurde: Original und Spiegel stehen also am selben Tag im selben Jahr (wie der Haupt-Storno des
+    // Umsatzbelegs). Ein Spiegel in einem anderen Jahr entsteht nur aus Altdaten oder von Hand gesetztem wirkdatum; dann steht jede Seite in ihrem Jahr.
+    // Original und Storno ergeben auch für die Posten null, das Kassenkonto entspricht danach wieder dem Kassenbuch (der Tag
+    // ist weg, ein neu abgeschlossener Tag bucht seine eigene aktive Fassung). Ein stornierter Tag ohne Umsatzbeleg hat keine Posten.
+    let kasseTagesPostenGebucht = 0;
+    if (kasseAktiv) {
+      const td = await kassenTageLesen();
+      const postenBuchen = async (pl, kasseId, datum, belegNr, spiegeln) => {
+        for (const po of pl.posten) {
+          const sh = spiegeln ? (po.sollHaben === 'S' ? 'H' : 'S') : po.sollHaben;
+          buchungen.push({ betrag: po.betrag_cent / 100, sollHaben: sh, konto: po.konto === 'kasse' ? await kassenKonto(kasseId) : geldtransitkonto,
+            gegenkonto: po.gegen === 'bank' ? bankkonto : po.gegen === 'transit' ? geldtransitkonto : KASSE_DURCHLAUF_KONTO[skrK0], bu: '', belegDatum: new Date(datum + 'T00:00:00'), belegfeld1: `${belegNr}-Z`, belegfeld2: '',
+            buchungstext: buchungstextBasisKurz(po.text, spiegeln ? ' [Storno]' : ''), diverseAdressnummer: '' });
+          kasseTagesPostenGebucht++;
+        }
+      };
+      for (const [tagId, tag] of td.tage) {
+        if (!tag || tag.status !== 'abgeschlossen' || !Number.isSafeInteger(tag.fassung_aktiv) || String(tag.geschaeftstag || '').slice(0, 4) !== String(jahr) || !/^\d{4}-\d{2}-\d{2}$/.test(String(tag.geschaeftstag))) continue;
+        const fass = td.fassungen.get(`${tagId}|${tag.fassung_aktiv}`);
+        const nrTag = String((fass && fass.kassennummer) || '').trim();
+        const pl = nrTag ? kasseTagesPosten(fass, (await kassenLaden()).get(String(tag.kasse_id || ''))) : { offen: true, grund: fass ? 'kassennummer_fehlt' : 'fassung_fehlt' };
+        if (pl.offen) { kasseOffen.push(`${nrTag || tagId} (${pl.grund})`); continue; }
+        await postenBuchen(pl, tag.kasse_id, tag.geschaeftstag, nrTag, false);
+      }
+      const gebuchtOrig = new Set(); const gebuchtSpiegel = new Set();
+      for (const pr of kasseStornoPaare) {
+        const schluessel = `${pr.tagId}|${pr.n}`;
+        const tag = td.tage.get(pr.tagId);
+        const origNochAktiv = !!tag && tag.status === 'abgeschlossen' && tag.fassung_aktiv === pr.n; // dann bucht schon die Schleife oben
+        const origImJahr = jahrVon(pr.origDatum) === String(jahr) && !origNochAktiv && !gebuchtOrig.has(schluessel);
+        const spiegelImJahr = jahrVon(pr.stornoDatum) === String(jahr) && !gebuchtSpiegel.has(`${schluessel}|${pr.stornoDatum}`);
+        if (!origImJahr && !spiegelImJahr) continue;
+        const fass = td.fassungen.get(schluessel);
+        const nrOrig = String((fass && fass.kassennummer) || '').trim();
+        const kasseObj = (await kassenLaden()).get(String(pr.kasseId || ''));
+        const pl = nrOrig ? kasseTagesPosten(fass, kasseObj) : { offen: true, grund: fass ? 'kassennummer_fehlt' : 'fassung_fehlt' };
+        if (pl.offen) { kasseOffen.push(`${nrOrig || pr.tagId} (${pl.grund})`); gebuchtOrig.add(schluessel); gebuchtSpiegel.add(`${schluessel}|${pr.stornoDatum}`); continue; }
+        if (origImJahr) { gebuchtOrig.add(schluessel); await postenBuchen(pl, pr.kasseId, pr.origDatum, nrOrig, false); }
+        if (spiegelImJahr && pr.stornoNr) { gebuchtSpiegel.add(`${schluessel}|${pr.stornoDatum}`); await postenBuchen(pl, pr.kasseId, pr.stornoDatum, pr.stornoNr, true); }
+        else if (spiegelImJahr) kasseOffen.push(`${nrOrig} (kassennummer_fehlt)`);
+      }
+    }
+    if (kasseAktiv || kasseSumupMehrere > 0 || kasseSumupUnbekannt > 0) {
+      const kasseZeilen = kasseAusgabeJahr + kasseBewGebucht + kassePrivat + kasseSumupBar + kasseTagesPostenGebucht + buchungen.filter((x) => /^K-/.test(String(x.belegfeld1))).length;
+      if (kasseOffen.length) warnen(`${kasseOffen.length} Beleg(e) und Bewegung(en) aus dem Kassenbuch stehen NICHT im Stapel (Grund in Klammern): ${nummern(kasseOffen)}. Bitte nenne sie deinem Steuerberater, er bucht sie von Hand.`);
+      if (kasseEinloesung.length) warnen(`${kasseEinloesung.length} Tagesabschluss/-abschlüsse mit Einlösung von Mehrzweck-Gutscheinen (zusammen ${(kasseEinloesung.reduce((a, x) => a + x.cent, 0) / 100).toFixed(2).replace('.', ',')} €): ${nummern(kasseEinloesung.map((x) => x.nr))}. Bar und Karte stehen voll im Stapel, die Einlösung steht als Umbuchung von ${KASSE_MEHRZWECK_KONTO[skrK0]} auf das Erlöskonto des Satzes (die Umsatzsteuer rechnet das Erlöskonto). Diese Buchung muss dein Steuerberater bestätigen.`);
+      if (kasseSumupBar > 0) warnen(`${kasseSumupBar} SumUp-Barzahlung(en) stehen auf dem Kassenkonto der SumUp-Kasse statt auf der Bank (Bareinnahmen der Kasse mit SumUp-Anbindung). SumUp-Rückerstattungen und Rückbuchungen stehen weiter auf der Bank, weil nicht erkennbar ist, ob bar zurückgezahlt wurde: bitte beim Steuerberater prüfen.`);
+      if (kasseSumupUnbekannt > 0) warnen(`${kasseSumupUnbekannt} SumUp-Barzahlung(en) stehen auf der Bank, nicht auf dem Kassenkonto: für ihren Tag ist die Datenquelle der Kasse nicht eindeutig (Verlauf der Kassen-Stammdaten fehlt, ist unlesbar oder der Beleg hat kein gültiges Datum). Bitte prüfe die Kasse und lass die Barzahlungen beim Steuerberater umbuchen, wenn sie in die Kasse gehören.`);
+      if (kasseSumupMehrere > 0) warnen(`${kasseSumupMehrere} SumUp-Barzahlung(en) konnten keiner Kasse eindeutig zugeordnet werden (mehr als eine Kasse mit SumUp-Anbindung) und stehen auf der Bank, nicht auf dem Kassenkonto. Bitte beim Steuerberater umbuchen.`);
+      if (kasseMehrzweck > 0) warnen(`${kasseMehrzweck} Verkauf/Verkäufe von Mehrzweck-Gutscheinen aus dem Kassenbuch stehen auf ${erloeskontoExport('keine', false, skr)} (Erlöse, ohne Umsatzsteuer). Diese Kontowahl muss dein Steuerberater bestätigen.`);
+      if (kasseOhneBewegung.length) warnen(`${kasseOhneBewegung.length} Kassenbewegung(en) „Geldtransit von einer anderen Kasse“ stehen nicht im Stapel, weil die passende Ausgabe der anderen Kasse (gleicher Tag, gleicher Betrag) fehlt: ${nummern(kasseOhneBewegung)}. Bitte beim Steuerberater von Hand buchen.`);
+      if (kasseZeilen > 0) {
+        if (kasseWahl.ungueltig) warnen(`Das Kassenkonto in den Einstellungen ist keine vierstellige Kontonummer. Es wurde das Standardkonto ${kasseStandard.kasse} verwendet. Bitte korrigieren.`);
+        if (transitWahl.ungueltig) warnen(`Das Geldtransitkonto in den Einstellungen ist keine vierstellige Kontonummer. Es wurde das Standardkonto ${kasseStandard.transit} verwendet. Bitte korrigieren.`);
+        if (kasseKontoUngueltig.size) warnen(`Das DATEV-Konto der Kasse „${[...kasseKontoUngueltig].slice(0, 3).join('“, „')}“ ist keine vierstellige Kontonummer, es wurde ${kasseWahl.konto} verwendet.`);
+        const skrKasse = skr === 'SKR04' ? 'SKR04' : 'SKR03';
+        if (!datevGeldkontoImBereich(kasseWahl.konto, skrKasse) || !datevGeldkontoImBereich(geldtransitkonto, skrKasse)) warnen(`Kassenkonto ${kasseWahl.konto} oder Geldtransitkonto ${geldtransitkonto} liegt nicht im üblichen Bereich für Kasse oder Geldtransit im ${skr === 'SKR04' ? 'SKR04' : 'SKR03'}. Bitte prüfen.`);
+        warnen('Kassenbuch: Im Stapel stehen die Tageseinnahmen (bar gegen das Kassenkonto, Karte gegen das Geldtransitkonto, Einlösungen von Mehrzweck-Gutscheinen als Umbuchung), Ausgaben, Privatvorgänge, Kassendifferenzen, der Geldtransit zur Bank, Bareingänge auf Rechnungen (Kasse an Bank), Durchlaufendes und Trinkgeld der Mitarbeiter (an Durchlaufende Posten). Bareingänge auf Rechnungen setzen voraus, dass die Rechnung als bezahlt markiert ist (sie steht im Export sonst nicht auf der Bank). Weicht der Kassenstand in DATEV vom Kassenbuch ab, nenne es deinem Steuerberater.');
+      }
     }
 
     buchungen.sort((a, b) => a.belegDatum - b.belegDatum);
@@ -5498,7 +6150,7 @@ async function handleDatevExport(body, env, cors = {}) {
     if (buchungen.length === 0) {
       return new Response(JSON.stringify({
         error: 'Keine buchbaren Belege gefunden',
-        details: `Für ${jahr} wurden keine als bezahlt markierten Belege mit Betrag gefunden.${skippedUnpaid ? ` (${skippedUnpaid} unbezahlte Belege wurden übersprungen.)` : ''}`
+        details: `Für ${jahr} wurden keine als bezahlt markierten Belege mit Betrag gefunden.${skippedUnpaid ? ` (${skippedUnpaid} unbezahlte Belege wurden übersprungen.)` : ''}${kasseOffen.length ? ` Aus dem Kassenbuch konnten ${kasseOffen.length} Beleg(e) nicht gebucht werden (Grund in Klammern): ${nummern(kasseOffen)}.` : ''}${datevWarning ? ` Hinweise: ${datevWarning.length > 1500 ? datevWarning.slice(0, 1500) + ' …' : datevWarning}` : ''}` // W3 DATEV: die Warnungen (zum Beispiel Einnahmen ohne Steuersatz) erschienen bei 404 nirgends
       }), {
         status: 404,
         headers: { ...cors, 'Content-Type': 'application/json' }
@@ -5536,8 +6188,12 @@ async function handleDatevExport(body, env, cors = {}) {
       belegfeldWerte.get(bf.wert).add(String(b.belegfeld1 ?? ''));
       if (bf.geaendert) { belegfeldGeaendert++; if (!belegfeldBeispiel) belegfeldBeispiel = `„${Array.from(String(b.belegfeld1 ?? '')).slice(0, 40).join('')}“ wurde zu „${bf.wert}“`; }
       const zeile = [
+      // E-F3: Beträge entstehen als Cent-Ganzzahl / 100 (alle Sonderpfade) oder als gespeicherter Beleg-Betrag mit höchstens zwei Stellen;
+      // toFixed(2) rundet Fließkommarauschen (0,1 + 0,2) sauber auf zwei Stellen. Mehr echte Nachkommastellen sind kein Betriebsfall (kein Cent-Bruchteil in Belegen);
+      // die übrigen Pfade runden mit Math.round(betrag * 100), also gleich (1,005 wird dort wie hier 1,00).
       b.betrag.toFixed(2).replace('.', ','),
-      b.sollHaben,
+      // E-F2: Soll/Haben-Kennzeichen ist im DATEV-Format ein Textfeld ("S"/"H", so schreibt DATEV selbst)
+      datevText(b.sollHaben),
       '', '', '', '',
       b.konto,
       b.gegenkonto,
@@ -5591,11 +6247,15 @@ async function handleDatevExport(body, env, cors = {}) {
         'X-Datev-Skipped-Unpaid-Count': String(skippedUnpaid),
         // encodeURIComponent, da HTTP-Header-Werte kein Latin1-Freitext mit Umlauten zuverlässig
         // transportieren — Frontend deodiert mit decodeURIComponent() wieder.
-        ...(datevWarning ? { 'X-Datev-Warning': encodeURIComponent(datevWohlgeformt(datevWarning)) } : {})
+        ...(datevWarning ? { 'X-Datev-Warning': datevWarnHeader(datevWohlgeformt(datevWarning)).wert } : {}) // A-N2 (d): auf 8.000 Zeichen kodiert gekürzt (Cloudflare-Headerlimit)
       }
     });
 
   } catch (err) {
+    if (err instanceof DatevLesefehler) {
+      console.error('DATEV-Export Lesefehler:', err.message);
+      return new Response(JSON.stringify({ error: 'Export vorübergehend nicht möglich', details: `${err.message} Es wurde kein unvollständiger Stapel erzeugt. Bitte den Export gleich noch einmal starten.` }), { status: 503, headers: { ...cors, 'Content-Type': 'application/json' } });
+    }
     console.error('DATEV Export Error:', err);
     return new Response(JSON.stringify({ error: 'Interner Fehler' }), {
       status: 500,
@@ -5671,15 +6331,19 @@ export async function fristErinnerungenSenden(env, optionen = {}) {
   const abfragen = async (mitDatum) => fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(fristAbfrage(heute, mitDatum)) });
   // Datum in der Abfrage eingrenzen (nur Fristen der nächsten 8 Tage). Braucht den zusammengesetzten Index (firestore.indexes.json, erinnerung_mail + datum, Sammlungsgruppe);
   // ist er noch nicht angelegt, antwortet Firestore mit FAILED_PRECONDITION und der Lauf liest wie bisher alle Fristen mit eingeschalteter Erinnerung.
-  let res = await abfragen(true);
-  if (!res.ok) res = await abfragen(false);
-  if (!res.ok) throw new Error(`Fristen-Abfrage fehlgeschlagen (${res.status})`);
+  // O19-3: reiner Lesepfad; ein einziger Wiederholungsversuch bei vorübergehendem UNAVAILABLE im Strom (die Abfrage läuft dann komplett neu), danach wie bisher abbrechen
+  const fristZeilen = await lesenMitEinerWiederholung(async () => {
+    let res = await abfragen(true);
+    if (!res.ok) res = await abfragen(false);
+    if (!res.ok) throw new Error(`Fristen-Abfrage fehlgeschlagen (${res.status})`);
+    return abfrageStrom(await res.json(), 'Fristen-Abfrage');
+  });
 
   let gesendet = 0;
   const jeKonto = new Map();
   const fehlerJeKonto = new Map();
   const mailCache = new Map();
-  const zeilen = ((await res.json()) || []).filter((z) => z && z.document);
+  const zeilen = fristZeilen.filter((z) => z.document);
   zeilen.sort((a, b) => String(a.document.fields?.datum?.stringValue || '').localeCompare(String(b.document.fields?.datum?.stringValue || ''))); // früheste Frist zuerst
   for (const zeile of zeilen) {
     if (gesendet >= FRIST_MAILS_JE_LAUF) break;
@@ -5864,34 +6528,42 @@ async function archivKontoLoeschen(uid, env, adminToken) {
 }
 
 // Löscht alle Firestore-Sammlungen, Feedback, Dateien und KV-Spuren eines Kontos (ohne das Login selbst).
+// O19-2: Ein Wurf nach dem Löschen des Profil-Bereichs (Sammlungen, Feedback-Abfrage, Storage) ließ die Markierung früher verloren gehen. Mit markerBehalten wird sie
+// jetzt auch im Fehlerfall wiederhergestellt (finally); der ursprüngliche Fehler bleibt der geworfene. (Weg ist derzeit tot: archivLoeschlauf hat loeschenAktiv = false.)
 export async function archivDatenLoeschen(uid, env, adminToken, { markerBehalten = false } = {}) {
   let marker = null;
   if (markerBehalten) marker = await firestoreGetDoc(`users/${uid}/profil/konto_archiv`, adminToken);
-  // BP-13: zuerst die Unterkollektionen (steuerprofil/*/verlauf, dokumente/*/versionen): Firestore löscht sie nicht mit dem Elterndokument
-  await untersammlungenLoeschen(uid, adminToken);
-  for (const coll of ARCHIV_SAMMLUNGEN) {
-    await loescheAlleUnterPfad(`users/${uid}/${coll}`, adminToken, coll === 'chats' ? 'messages' : null);
-  }
-  // Feedback liegt top-level und ist über das Feld userId zugeordnet (siehe handleDeleteAccountData)
-  const fbRes = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'feedback' }], where: { fieldFilter: { field: { fieldPath: 'userId' }, op: 'EQUAL', value: { stringValue: uid } } } } })
-  });
-  if (fbRes.ok) {
-    const fbZeilen = await fbRes.json().catch(() => []);
-    for (const zeile of Array.isArray(fbZeilen) ? fbZeilen : []) {
-      if (!zeile.document?.name) continue;
-      await fetch(`https://firestore.googleapis.com/v1/${zeile.document.name}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${adminToken}` } });
+  let wurf = null;
+  try {
+    // BP-13: zuerst die Unterkollektionen (steuerprofil/*/verlauf, dokumente/*/versionen): Firestore löscht sie nicht mit dem Elterndokument
+    await untersammlungenLoeschen(uid, adminToken);
+    for (const coll of ARCHIV_SAMMLUNGEN) {
+      await loescheAlleUnterPfad(`users/${uid}/${coll}`, adminToken, coll === 'chats' ? 'messages' : null);
+    }
+    // Feedback liegt top-level und ist über das Feld userId zugeordnet (siehe handleDeleteAccountData).
+    // O19-1: Bricht der Strom der Feedback-Abfrage ab, löscht der Lauf KEIN Feedback-Dokument (auch keines der schon gelieferten): fail-closed und gewollt, der Lauf wird wiederholt.
+    const fbRes = await fetch('https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents:runQuery', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'feedback' }], where: { fieldFilter: { field: { fieldPath: 'userId' }, op: 'EQUAL', value: { stringValue: uid } } } } })
+    });
+    if (fbRes.ok) {
+      const fbZeilen = abfrageStrom(await fbRes.json().catch(() => null), 'Feedback suchen'); // O18a M1: unvollständiger Strom bricht ab, der Lauf wiederholt
+      for (const zeile of fbZeilen) {
+        if (!zeile.document?.name) continue;
+        await fetch(`https://firestore.googleapis.com/v1/${zeile.document.name}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${adminToken}` } });
+      }
+    }
+    await archivStorage(uid, env, true);
+  } catch (e) { wurf = e; throw e; } finally {
+    if (markerBehalten && marker?.fields) {
+      // Markierung wiederherstellen (sie lag im gelöschten Profil-Bereich); der Aufrufer entfernt sie nach dem Löschen des Logins.
+      // Scheitert die Wiederherstellung ohne vorherigen Fehler, wirft sie wie bisher; nach einem Fehler wird sie nur geloggt, der erste Fehler bleibt der geworfene.
+      try { await firestorePatchFields(`users/${uid}/profil/konto_archiv`, marker.fields, adminToken); }
+      catch (e2) { if (!wurf) throw e2; console.error('Archiv-Markierung wiederherstellen:', e2?.message); }
     }
   }
-  await archivStorage(uid, env, true);
-  if (markerBehalten) {
-    // Markierung wiederherstellen (sie lag im gelöschten Profil-Bereich); der Aufrufer entfernt sie nach dem Löschen des Logins
-    if (marker?.fields) await firestorePatchFields(`users/${uid}/profil/konto_archiv`, marker.fields, adminToken);
-  } else {
-    await loescheKvSpuren(uid, env, { archivMarkerAuch: true });
-  }
+  if (!markerBehalten) await loescheKvSpuren(uid, env, { archivMarkerAuch: true });
 }
 
 async function archivLoeschlauf(env) {
@@ -6048,8 +6720,8 @@ async function handleAdminSpeicherUmzug(request, authHeader, env, cors = {}) {
         body: JSON.stringify({ structuredQuery: { from: [{ collectionId: coll, allDescendants: true }], limit: 20000 } })
       });
       if (!res.ok) throw new Error(`Abfrage ${coll} fehlgeschlagen (${res.status})`);
-      const zeilen = await res.json();
-      for (const z of Array.isArray(zeilen) ? zeilen : []) {
+      const zeilen = abfrageStrom(await res.json(), `Abfrage ${coll}`);
+      for (const z of zeilen) {
         const d = z.document;
         if (!d?.name || !d.fields) continue;
         bericht.dokumente_geprueft++;
@@ -6276,7 +6948,7 @@ async function handleAdminProtokoll(request, authHeader, env, cors = {}) {
       body: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'admin_protokoll' }], orderBy: [{ field: { fieldPath: 'zeit' }, direction: 'DESCENDING' }], limit: 300 } })
     });
     if (!res.ok) throw new Error(`Protokoll lesen fehlgeschlagen (${res.status})`);
-    const eintraege = (await res.json()).filter(z => z.document).map(z => {
+    const eintraege = abfrageStrom(await res.json(), 'Protokoll lesen').filter(z => z.document).map(z => {
       const f = z.document.fields || {};
       const feld = (k) => f[k]?.stringValue || '';
       return { zeit: feld('zeit') || f.zeit?.timestampValue || '', admin: feld('admin'), aktion: feld('aktion'), uid: feld('uid'), grund: feld('grund'), details: feld('details') };
@@ -6872,7 +7544,21 @@ function regelAbhaengigkeiten(env) {
     adminLog: (email, aktion, details) => adminLogEintragen(env, email, aktion, '-', details),
     storageUrlOk: storageUrlGehoertDemNutzer,
     heute: () => berlinDatumAlsString(),
+    kassenAusgabeBeleg, // KASSE-P1b-4 (2.12 M16): Eingangsbeleg zur Kassenausgabe (v2Entscheiden, Altfelder, legacy_hash, Duplikat-Backstop), schreibt nichts
+    // O9a N4: liegt das ELSTER-Protokoll wirklich im Speicher? Nur Metadaten (fields=name), beide Buckets; 404 überall = false, andere Fehler werfen (503, fail-closed)
+    storageVorhanden: (pfad) => storageObjektVorhanden(env, pfad),
   };
+}
+async function storageObjektVorhanden(env, pfad) {
+  const t = await getGoogleAccessToken(env, STORAGE_SCOPE);
+  let infra = false;
+  for (const bucket of STORAGE_BUCKETS) {
+    const r = await fetch(`https://storage.googleapis.com/storage/v1/b/${bucket}/o/${encodeURIComponent(pfad)}?fields=name`, { headers: { Authorization: `Bearer ${t}` } });
+    if (r.ok) return true;
+    if (r.status !== 404) infra = true;
+  }
+  if (infra) throw new Error('Speicher nicht erreichbar');
+  return false;
 }
 
 // ── Steuerkern im WARNMODUS (Regelbesteuerung AP1.8, Konzept 2.3/2.5/2.6) ───────────────────────────
@@ -6974,52 +7660,10 @@ async function handleMigrationAusfuehren(body, env, cors) {
   return regelMigration(body, env, cors, regelAbhaengigkeiten(env));
 }
 
-// R1 (Zuruf E2, Upload-Monatslimit): Der Ist-Nachweis aus dem Steuerprofil wird von der App hochgeladen (kxHochladen prüft vorher
-// GET /check-upload-limit); hochzählen kann nur der Worker. Gezählt wird je NEUER Nachweis-Adresse (genehmigung.storage_url), wenn
-// POST /steuerprofil sie angenommen hat (200, ok, nicht idempotent). Nicht gezählt: unveränderte Adresse (steht schon im Profil),
-// Wiederholung derselben anfrage_id, abgelehnte Anfragen. Der zusätzliche Lesezugriff passiert nur, wenn die Anfrage eine Adresse trägt.
-// Lesefehler: zählen (Kostengrenze, im Zweifel streng). Logik bleibt in regel/steuerprofil.js unverändert.
-function nachweisUrlsSammeln(verlauf, ziel) {
-  if (!Array.isArray(verlauf)) return ziel;
-  for (const e of verlauf.slice(0, 50)) {
-    const u = e && typeof e === 'object' && e.genehmigung && typeof e.genehmigung === 'object' ? e.genehmigung.storage_url : null;
-    if (typeof u === 'string' && u) ziel.add(u);
-  }
-  return ziel;
-}
-export function steuerprofilNachweisUrls(body) {
-  const s = new Set();
-  if (!body || typeof body !== 'object') return s;
-  if (body.aktion === 'eintrag' && body.bereich === 'versteuerung') nachweisUrlsSammeln([body.eintrag], s);
-  if (body.aktion === 'anlegen' && body.profil && typeof body.profil === 'object') nachweisUrlsSammeln(body.profil.versteuerung_verlauf, s);
-  return s;
-}
-export function steuerprofilNeueNachweise(body, altProfil) {
-  const alt = nachweisUrlsSammeln(altProfil && typeof altProfil === 'object' ? altProfil.versteuerung_verlauf : null, new Set());
-  return [...steuerprofilNachweisUrls(body)].filter((u) => !alt.has(u));
-}
+// R1 (Zuruf E2) zählte den Ist-Nachweis aus dem Steuerprofil gegen das Upload-Monatslimit. Das Kontingent gibt es nicht mehr (Kassenbuch P1b-4, Kap. 6 Nr. 28).
 async function handleSteuerprofil(body, env, cors) {
-  const deps = regelAbhaengigkeiten(env);
-  const urls = steuerprofilNachweisUrls(body);
-  let alt = null;
-  let altGelesen = false;
-  if (urls.size && body && typeof body.userId === 'string') {
-    try {
-      const d = await firestoreGetDoc(`users/${encodeURIComponent(body.userId)}/steuerprofil/aktuell`, await deps.adminToken());
-      alt = d && d.fields ? firestoreFieldsToObject(d.fields) : null;
-      altGelesen = true;
-    } catch { altGelesen = false; }
-  }
-  const antwortSp = await regelSteuerprofil(body, env, cors, deps);
-  if (!urls.size || antwortSp.status !== 200) return antwortSp;
-  try {
-    const j = await antwortSp.clone().json();
-    if (j && j.ok === true && j.idempotent !== true) {
-      const neu = altGelesen ? steuerprofilNeueNachweise(body, alt) : [...urls];
-      for (let i = 0; i < Math.min(neu.length, 5); i++) await incrementUploadLimit(body.userId, env);
-    }
-  } catch { /* Antwort unverändert zurückgeben */ }
-  return antwortSp;
+  // Nachweis-Dateien der Steuerprofil-Versteuerung zählten früher gegen das Upload-Kontingent; das gibt es nicht mehr (Kap. 6 Nr. 28)
+  return regelSteuerprofil(body, env, cors, regelAbhaengigkeiten(env));
 }
 
 // ── R2: Zustimmung zu den Nutzungsbedingungen beweisbar speichern (Anwaltsfragen Frage 5, Bedingung 3) ─────────────────────────────────
@@ -7339,10 +7983,9 @@ async function markAsProcessed(userId, externalEventId, adminToken) {
 
 /**
  * Rein informativer Zähler für webhook-erzeugte Belege — läuft bewusst NICHT über
- * PROFIL_KV/UPLOAD_LIMIT (siehe peekUploadLimit/incrementUploadLimit oben): dieser Zähler
+ * PROFIL_KV (früher gab es daneben ein Upload-Kontingent, seit Kap. 6 Nr. 28 nicht mehr): dieser Zähler
  * blockiert NIE. Ein Nutzer mit vielen Bestellungen/Monat darf nicht plötzlich keine
- * automatischen Belege mehr bekommen, nur weil sein manuelles Upload-Kontingent (OCR/Foto-
- * Belege) ausgeschöpft ist. Fehler werden bewusst verschluckt (best effort, nie kritischer Pfad).
+ * automatischen Belege mehr bekommen. Fehler werden bewusst verschluckt (best effort, nie kritischer Pfad).
  */
 async function incrementWebhookBelegCount(userId, env) {
   if (!userId) return;

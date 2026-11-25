@@ -38,7 +38,7 @@ async function exportiere(skr, belege) {
     body: JSON.stringify({ userId: USER, jahr: 2026, token: 'tok' }),
   }), env, { waitUntil() {} });
   const text = new TextDecoder('utf-8').decode(new Uint8Array(await r.arrayBuffer()));
-  const zeilen = r.status === 200 ? text.replace(/^﻿/, '').split('\r\n').filter(Boolean).slice(2).map((x) => x.split(';')) : [];
+  const zeilen = r.status === 200 ? text.replace(/^﻿/, '').split('\r\n').filter(Boolean).slice(2).map((x) => x.split(';').map((f, i) => (i === 1 ? f.replace(/^"|"$/g, '') : f))) : [];
   return { status: r.status, zeilen, warnung: decodeURIComponent(r.headers.get('X-Datev-Warning') || ''), text };
 }
 const beleg = (typ, betrag, kat, satz) => ({ typ: S(typ), betrag: N(betrag), bezahlt: B(true), bezahlt_am: S('2026-05-10'), datum: S('2026-05-10'), mwst_satz: S(satz), kategorie: S(kat) });

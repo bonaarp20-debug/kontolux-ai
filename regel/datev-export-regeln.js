@@ -100,3 +100,32 @@ export const GWG_KATEGORIE = 'GWG bis 800€';
 export const FA_EST_ART = 'est_nicht_abziehbar';
 // Kategorien der Umsatzsteuer-Durchlaufposten (Mapping, 1776/1780 bzw. 3806/3820): kein Erlös, keine Betriebsausgabe im Sinn der Rechnungsnummer-Pflicht
 export const UST_KATEGORIEN = Object.freeze(['Umsatzsteuer-Erstattung', 'Vereinnahmte Umsatzsteuer', 'Gezahlte Umsatzsteuer']);
+
+// ── DK-FIX (A-N2 d): Länge des Warn-Headers X-Datev-Warning ───────────────────────────────────────────────
+// Der Text steht prozentkodiert (encodeURIComponent) im Antwort-Header; Leerzeichen und Umlaute werden dabei zwei- bis dreimal so lang. Ein Header über etwa 16 KB wird
+// von Cloudflare und vielen Zwischenstellen abgelehnt (die Antwort ginge dann ganz verloren). Darum kürzen: ganze Sätze, solange sie samt Kürzungshinweis in die Grenze
+// passen (Standard 8.000 Zeichen kodiert, weit unter 16 KB, Platz für die übrigen Header). Rückgabe: { wert (kodiert), gekuerzt, saetze, behalten }.
+export const WARN_HEADER_MAX = 8000;
+export function datevWarnHeader(text, max = WARN_HEADER_MAX) {
+  const roh = String(text ?? '').replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '�');
+  const kodiert = encodeURIComponent(roh);
+  const saetze = roh.split(/(?<=[.!?])\s+/).filter(Boolean);
+  if (kodiert.length <= max) return { wert: kodiert, gekuerzt: false, saetze: saetze.length, behalten: saetze.length };
+  const hinweis = (rest) => ` … (${rest} weitere Hinweise wegen der Länge gekürzt: bitte den Export mit deinem Steuerberater durchsehen und nach Korrekturen erneut starten.)`;
+  let behalten = 0;
+  let acc = '';
+  for (const s of saetze) {
+    const probe = acc ? `${acc} ${s}` : s;
+    if (encodeURIComponent(probe + hinweis(saetze.length - behalten - 1)).length > max) break;
+    acc = probe;
+    behalten += 1;
+  }
+  if (!behalten) {
+    // schon der erste Satz ist zu lang: nach Zeichen (Codepoints) kürzen
+    const marke = hinweis(Math.max(saetze.length - 1, 0));
+    const zeichen = [...(saetze[0] || roh)];
+    while (zeichen.length && encodeURIComponent(zeichen.join('') + marke).length > max) zeichen.length = Math.max(0, zeichen.length - Math.ceil(zeichen.length / 20));
+    acc = zeichen.join('').trimEnd();
+  }
+  return { wert: encodeURIComponent(acc + hinweis(saetze.length - behalten)), gekuerzt: true, saetze: saetze.length, behalten };
+}

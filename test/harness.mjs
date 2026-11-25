@@ -85,6 +85,9 @@ export function mockExterneDienste({ users = {}, firestoreStatus = 200, supabase
         return json([{ document: { name: 'projects/kontolux-ai/databases/(default)/documents/users/uid-x/profil/prueferZugang', fields: mockOptionen.prueferDoc } }]);
       }
       log.firestore.push({ url, method: init.method || 'GET', auth: (init.headers || {}).Authorization });
+      // O18a M1: runQuery/batchGet liefern einen Strom (Liste). Leere Antwort wie bei Firestore: [{ readTime }] bzw. je Dokument ein missing. Andere Aufrufe bleiben {}.
+      if (firestoreStatus === 200 && url.endsWith(':runQuery')) return json([{ readTime: '2026-01-01T00:00:00Z' }]);
+      if (firestoreStatus === 200 && url.endsWith(':batchGet')) return json((JSON.parse(body || '{}').documents || []).map((d) => ({ missing: d, readTime: '2026-01-01T00:00:00Z' })));
       return new Response(JSON.stringify({}), { status: firestoreStatus, headers: { 'Content-Type': 'application/json' } });
     }
     if (url.startsWith('https://api.anthropic.com/')) {

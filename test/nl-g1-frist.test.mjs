@@ -161,3 +161,30 @@ test('SCHLUSS-FIX2 N4: Rücknahme bei vorhandener Frist läuft normal (Marke ent
   const q = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
   assert.ok(q.includes('bewusste at-most-once-Entscheidung'));
 });
+
+// O19-3: ein vorübergehendes UNAVAILABLE im Strom der Fristen-Abfrage wird einmal wiederholt (Lesepfad), zweimal bleibt fail-closed
+test('Frist-Mails: Strom einmal mit UNAVAILABLE abgebrochen: eine Wiederholung, dann läuft der Versand; zweimal: Abbruch ohne Versand', async () => {
+  const env = await erzeugeTestEnv({ RESEND_API_KEY: 'x' });
+  const fehler = { error: { code: 14, status: 'UNAVAILABLE', message: 'x' } };
+  for (const [kaputte, erwartetOk] of [[1, true], [2, false]]) {
+    const a = aufbauen([frist('u1', 'f4', '2026-11-24')]);
+    const kette = globalThis.fetch;
+    let n = 0;
+    globalThis.fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.endsWith(':runQuery') && init.body && /eigenefristen/.test(String(init.body)) && n < kaputte) { n++; return new Response(JSON.stringify([fehler]), { status: 200 }); }
+      return kette(input, init);
+    };
+    try {
+      if (erwartetOk) {
+        assert.equal(await fristErinnerungenSenden(env, { heute: '2026-11-20' }), 1);
+        assert.equal(a.log.mails, 1);
+      } else {
+        await assert.rejects(() => fristErinnerungenSenden(env, { heute: '2026-11-20' }), /Strom abgebrochen \(UNAVAILABLE\)/);
+        assert.equal(a.log.mails, 0);
+        assert.equal(a.log.patches.length, 0);
+      }
+      assert.equal(n, kaputte);
+    } finally { globalThis.fetch = kette; a.restore(); }
+  }
+});

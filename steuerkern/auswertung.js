@@ -37,6 +37,9 @@ function umsatzPosten(wirkungen, jahr) {
   const offen = new Set();
   const J = String(jahr);
   for (const w of pruefeWirkungen(wirkungen).ok) {
+    // KERN-26 (SB-3): Einlösung eines Mehrzweck-Gutscheins beim Kleinunternehmer: steuerbarer Umsatz ohne Einnahme (Vermerk aus wirkung.js kuWirkungen)
+    // R1.5 (08 2.13): Retoure eines Kleinunternehmers auf einen Kassen-Tagesabschluss mindert den Gesamtumsatz im Jahr der Rückzahlung (Vermerk ku_umsatz_minderung, negativ)
+    if (w.welt === 'euer' && w.periode === J && w.status === 'information' && (w.rolle === 'ku_umsatz_mehrzweck' || w.rolle === 'ku_umsatz_minderung') && istDatum(w.datum_wirk) && istCent(w.betrag_cent)) { posten.push({ datum: w.datum_wirk, netto_cent: w.betrag_cent, beleg_id: w.beleg_id }); continue; }
     if (w.welt !== 'euer' || w.periode !== J || w.spalte !== 'einnahme') continue;
     const datum = istDatum(w.datum_wirk) ? w.datum_wirk : null;
     if (w.status === 'berechnet' && UMSATZ_KZ.includes(w.kz) && UMSATZ_STEUERFAELLE.includes(w.steuerfall)) {

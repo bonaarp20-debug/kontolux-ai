@@ -21,7 +21,7 @@
 import { istCent, ustAusBrutto, ustAusNetto, teile, mulDivRund } from './geld.js';
 import { istDatum, jahrVon, addiereMonate, monatsende, periodenEnde, periodenArt, quartalVon, frist10Tag, zehnTageRegelVorjahr, ustPeriodeFuer } from './daten.js';
 import { voranmeldungsperiodeFuer, voranmeldungAm, versteuerungAm, statusAm, statusFuerAusgangsumsatz, gwgWahlFuer } from './steuerprofil.js';
-import { regelNachId, afaKennzahl, KATEGORIEN, GRENZEN, USTVA_ZEILEN, EUER_ZEILEN, STEUERSAETZE, BELEG_ARTEN, KORREKTUR_GRUENDE, basisKzFuerSatz, anbieterLage, SATZ_REGEL_BP, SATZ_ERMAESSIGT_BP } from './tabellen.js';
+import { regelNachId, afaKennzahl, KATEGORIEN, GRENZEN, USTVA_ZEILEN, EUER_ZEILEN, STEUERSAETZE, BELEG_ARTEN, KORREKTUR_GRUENDE, basisKzFuerSatz, anbieterLage, SATZ_REGEL_BP, SATZ_ERMAESSIGT_BP, KASSEN_BELEG_PRAEFIX, KASSEN_KATEGORIEN_LISTE } from './tabellen.js';
 import { KORREKTUR_ARTEN, tagVonZeit, normalisiereAlt } from './beleg.js';
 import { ossBelegeVorbereiten, ossSatzPruefung, ossNettoEuro, ossSchwellenSpanne, OSS_FAELLE } from './oss.js';
 
@@ -393,8 +393,29 @@ function istTeilleistung(s) {
   return Array.isArray(s.positionen) && s.positionen.some((p) => istObjekt(p) && istObjekt(p.leistung) && istDatum(p.leistung.bis) && p.leistung.bis !== bis);
 }
 
+// O20k M1: Eingangsbeleg (kein Korrekturbeleg) mit ausgeschlossenem Vorsteuerabzug (ausschluss.vorsteuer 'nein': kein_vorsteuerabzug, Kleinbetrag über 250 EUR,
+// Bewirtung ohne Nachweis, Geschenk über 50 EUR, E_INLAND_OHNE_VORSTEUER). Der Beleg selbst bucht nie Vorsteuer (mitVorsteuer in eingangWirkungen); abziehbar ist 0.
+function ohneVorsteuerAbzug(s) {
+  return istObjekt(s) && s.richtung === 'eingang' && !KORREKTUR_ARTEN.includes(s.beleg_art) && istObjekt(s.ausschluss) && s.ausschluss.vorsteuer === 'nein';
+}
+
+// O21 N1: Geschenk, dessen Vorsteuer schon zurückgenommen ist (geschenk.ruecknahme_datum, R-VS-02: Freigrenze 50 EUR je Empfänger und Jahr später
+// überschritten), und zwar spätestens am frühesten Buchungstag der Korrektur (Wirkdatum, ggf. früheres Rückzahlungsdatum). Dann steht am Tag der Korrektur
+// kein Vorsteuerabzug mehr, die Korrektur mindert Kz 66 nicht noch einmal. Liegt die Rücknahme später, bleibt die Korrektur unverändert (Minderung im
+// Zeitraum der Korrektur; die spätere Rücknahme nimmt dann zu viel zurück: Zahllast höchstens zu hoch, nie zu niedrig; Grenze in ABWEICHUNGEN 5.42).
+function geschenkVorsteuerZurueck(os, s) {
+  if (!istObjekt(os) || !istObjekt(s) || os.richtung !== 'eingang' || !istObjekt(os.geschenk) || !istDatum(os.geschenk.ruecknahme_datum) || !istDatum(s.wirkdatum)) return false;
+  const rz = rueckzahlungVon(s);
+  const frueh = rz && rz.datum < s.wirkdatum ? rz.datum : s.wirkdatum;
+  return os.geschenk.ruecknahme_datum <= frueh;
+}
+
 function gruppiere(s, mitBis) {
   const map = new Map();
+  // O20k M1: Ausschluss am Original -> abziehbar 0 je Gruppe. Wirkt nur dort, wo die abziehbare Steuer des Originals ohne Vorsteuer-Wächter gelesen wird
+  // (Korrektur-Zerlegung Fall A, Rundungsabgleich korrekturPlan); der eigene Weg des Belegs liest sie nur mit mitVorsteuer/mitVst (dort false): byte-gleich.
+  // Korrekturbelege bleiben unverändert (ihre abziehbare Steuer setzt korrekturPlanRoh aus dem Original).
+  const keinAbzug = ohneVorsteuerAbzug(s);
   for (const p of s.positionen) {
     const bis = mitBis ? positionBis(s, p) : null;
     const k = (p.satz_bp === null || p.satz_bp === undefined ? 'null' : String(p.satz_bp)) + (mitBis ? `|${bis}` : '');
@@ -404,7 +425,7 @@ function gruppiere(s, mitBis) {
     g.ust_cent += p.ust_cent;
     // KERN-25: Versicherungsposition mit Umsatzsteuerbetrag: je Position keine abziehbare Vorsteuer (gemischter Beleg: die übrigen Positionen behalten ihre Vorsteuer)
     const vp = versicherungPosition(s, p);
-    g.abziehbar_cent += vp ? 0 : (istCent(p.vorsteuer_abziehbar_cent) ? p.vorsteuer_abziehbar_cent : p.ust_cent);
+    g.abziehbar_cent += vp || keinAbzug ? 0 : (istCent(p.vorsteuer_abziehbar_cent) ? p.vorsteuer_abziehbar_cent : p.ust_cent);
     if (vp) g.vers_n = (g.vers_n || 0) + 1;
     else if (!(istCent(p.ust_cent) && p.ust_cent === 0)) g.vers_fremd = true;
   }
@@ -454,7 +475,7 @@ function belegHinweise(s, profil) {
 // Hinweis ausgeschlossen, nie still falsch gerechnet und nie als Ausnahme geworfen.
 // ---------------------------------------------------------------------------------------------
 export const ZULAESSIGE_SAETZE_BP = Object.freeze(STEUERSAETZE.map((x) => x.bp)); // 1900, 700, 0 (tabellen.js)
-const STEUERFAELLE_GERECHNET = Object.freeze(['A_KU', 'A_INLAND_19', 'A_INLAND_7', 'A_INLAND_0_PV', 'E_INLAND_VORSTEUER', 'E_INLAND_OHNE_VORSTEUER']);
+const STEUERFAELLE_GERECHNET = Object.freeze(['A_KU', 'A_INLAND_19', 'A_INLAND_7', 'A_INLAND_0_PV', 'E_INLAND_VORSTEUER', 'E_INLAND_OHNE_VORSTEUER', 'A_GUTSCHEIN_MEHRZWECK']);
 // Kategorien, unter denen üblicherweise Anlagegüter (Computer, Möbel, Software-Lizenz) landen (wie AFA_HINWEIS_KATEGORIEN im Altpfad)
 const ANLAGEGUT_VERDAECHTIG = Object.freeze(['Bürobedarf', 'Software/EDV/SaaS']);
 const KORREKTUR_GRUENDE_NICHT_UNTERSTUETZT = Object.freeze(['uneinbringlich', 'ust_falsch_ausgewiesen', 'geschenk_nachtraeglich', 'skonto']);
@@ -952,7 +973,7 @@ function nichtUnterstuetzt(s, opt, profil) {
     if (brutto > 0 && gezahlt > brutto) return { grund: 'ueberzahlung', hinweise: ['W_UEBERZAHLUNG'] };
   }
   // F1: Satz-Whitelist (19 %, 7 %, 0 % nur nach bestätigter § 12 Abs. 3)
-  if (sf !== 'A_KU' && sf !== 'E_INLAND_OHNE_VORSTEUER') {
+  if (sf !== 'A_KU' && sf !== 'E_INLAND_OHNE_VORSTEUER' && sf !== 'A_GUTSCHEIN_MEHRZWECK') {
     for (const p of pos) { const g = satzGrund(s, p); if (g) return { grund: g, hinweise: [] }; }
   }
   // M5: ausgewiesene Steuer weicht vom Satz ab: bei Ausgang schuldet der Unternehmer die ausgewiesene Steuer (§ 14c), nicht gerechnet
@@ -1116,6 +1137,8 @@ export function belegWirkungen(beleg, profil, optionen) {
       faWirkungen(s, profil, ctx, out);
     } else if (KORREKTUR_ARTEN.includes(s.beleg_art)) {
       korrekturWirkungen(s, profil, ctx, opt, out, beleg);
+    } else if (sf === 'A_GUTSCHEIN_MEHRZWECK') {
+      mehrzweckVerkaufWirkungen(s, profil, ctx, out);
     } else if (sf === 'A_KU') {
       kuWirkungen(s, profil, ctx, out);
     } else if (sf === 'A_INLAND_19' || sf === 'A_INLAND_7' || sf === 'A_INLAND_0_PV') {
@@ -1192,6 +1215,57 @@ function schliesseAus(s, profil, ctx, out, grund, extraHinweise) {
   const per = datum ? ustPeriode(profil, datum, ctx.hinweise) : null;
   out.push(mk(ctx, { welt: 'ust', periode: per, datum_wirk: datum, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: grund, euer_zahlungen: gesperrteZahlungen(s) }));
   if (per) weitereHinweisWirkungen(s, profil, ctx, out, per, { status: 'ausgeschlossen', regel_id: 'R-ZP-01', hinweis_detail: grund });
+}
+
+// K3-Fix (K-N3, ABWEICHUNGEN 5.40; § 4 Abs. 3, § 11 Abs. 1 EStG, § 3 Abs. 15 UStG): Tagesabschluss mit Mehrzweck-Einlösung je Satz (Zahlungen kanal
+// gutschein_mehrzweck mit mehrzweck_satz_bp, kasse.js kassentagZuBelegEingabe). Eingenommenes Geld je Satz = Brutto des Satzes minus Einlösung des Satzes
+// (negativ möglich: Barrückgabe in diesem Satz); Steuer daraus je Satz wie bei einem eigenen Barbeleg (ustAusBrutto). Netto und Steuer über alle Sätze
+// werden auf die Geldzahlungen verteilt (Steuer nach Betragsanteil, die letzte Geldzahlung bekommt den Rest: Summen auf den Cent). Ohne Geldzahlung
+// (Geld zusammen 0) gibt es keine EÜR-Zeile (eine Verschiebung zwischen den Sätzen fällt unter F1-Fix A-1). Die Voranmeldung bleibt
+// bei zahlungsAnteile (Summen je Satz gleich, alle Zahlungen am Geschäftstag). Rückgabe: Map Zahlungsindex -> { netto_cent, ust_cent } (nur Zahlungen mit
+// EÜR-Zufluss) oder null (keine Zuordnung je Satz wie im Bestand, Satz unbekannt, Skonto/Rabatt, Teilleistung, Summe der Geldzahlungen passt nicht zum Geld
+// je Satz): dann gilt die anteilige Verteilung wie bisher.
+// F1-Fix A-1 (K20, Standard „nie negativ ausgeben“, nachrecherche/k4-k20-standardregel.md): Bekäme eine Geldzahlung eine Steuer unter 0 (Kz 140 negativ) oder
+// über ihrem Betrag (Kz 112 negativ), etwa weil Netto oder Steuer über alle Sätze negativ ist (Barrückgabe in einem Satz, bezahlt mit Umsatz in einem anderen),
+// gibt die Funktion MZ_NEGATIV zurück:
+// Rückfall auf die anteilige Verteilung (nie negativ) mit Hinweis HN_KASSE_MEHRZWECK_SAETZE. Summe 112 + 140, Gewinn und Voranmeldung bleiben gleich.
+const MZ_NEGATIV = Symbol('mz_negativ');
+const MZ_SAETZE = Object.freeze(STEUERSAETZE.map((x) => x.bp));
+function kassenMehrzweckGeld(s, gruppen, zahlungen, teil) {
+  if (s.beleg_art !== 'tagesabschluss' || teil) return null;
+  const mz = zahlungen.filter((z) => z.kanal === KANAL_MEHRZWECK);
+  if (!mz.length || !mz.every((z) => MZ_SAETZE.includes(z.mehrzweck_satz_bp))) return null;
+  if (zahlungen.some((z) => !istCent(z.betrag_cent) || z.betrag_cent <= 0 || (istCent(z.skonto_cent) && z.skonto_cent !== 0) || (istCent(z.rabatt_cent) && z.rabatt_cent !== 0))) return null;
+  const geld = new Map(); // Satz -> Brutto des Satzes - Einlösung des Satzes
+  for (const g of gruppen) {
+    if (!MZ_SAETZE.includes(g.satz_bp)) return null;
+    geld.set(g.satz_bp, (geld.get(g.satz_bp) || 0) + g.netto_cent + g.ust_cent);
+  }
+  for (const z of mz) geld.set(z.mehrzweck_satz_bp, (geld.get(z.mehrzweck_satz_bp) || 0) - z.betrag_cent);
+  let netto = 0;
+  let ust = 0;
+  for (const [satz, b] of geld) {
+    const u = satz === 0 ? 0 : ustAusBrutto(b, satz);
+    netto += b - u;
+    ust += u;
+  }
+  const geldIdx = [];
+  let summe = 0;
+  zahlungen.forEach((z, zi) => { if (z.kanal !== KANAL_MEHRZWECK) { geldIdx.push(zi); summe += z.betrag_cent; } });
+  if (summe !== netto + ust) return null;
+  // F1-Fix A-1: 0 <= Steuer <= Betrag je Geldzahlung ist gleichwertig mit netto >= 0 und ust >= 0 über alle Sätze (Summen), schließt aber auch Rundungsreste aus.
+  // Ohne Geldzahlung ist netto + ust = 0: keine EÜR-Zeile (eine Verschiebung zwischen den Sätzen wäre ein Paar mit einem negativen Wert).
+  const out = new Map();
+  let uAcc = 0;
+  for (let k = 0; k < geldIdx.length; k++) {
+    const zi = geldIdx[k];
+    const b = zahlungen[zi].betrag_cent;
+    const u = k === geldIdx.length - 1 ? ust - uAcc : mulDivRund(b, ust, summe);
+    if (u < 0 || u > b) return MZ_NEGATIV;
+    uAcc += u;
+    out.set(zi, { netto_cent: b - u, ust_cent: u });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1353,12 +1427,29 @@ function ausgangWirkungen(s, profil, ctx, out, opt) {
       gruppen.forEach((g, gi) => { if (je[gi].netto_cent !== 0 || je[gi].ust_cent !== 0) ustW(g, 'minderung', z.datum, 0 - je[gi].netto_cent, 0 - je[gi].ust_cent, 'R-KOR-02', z.id); });
     });
   }
+  // K3-Fix (K-N3, ABWEICHUNGEN 5.40): Mehrzweck-Einlösung je Satz zugeordnet (mehrzweck_satz_bp): EÜR aus dem Geld je Satz (kassenMehrzweckGeld)
+  const mzRoh = kassenMehrzweckGeld(s, gruppen, zahlungen, teil);
+  const mzNegativ = mzRoh === MZ_NEGATIV; // F1-Fix A-1: genaue Aufteilung wäre negativ, Rückfall anteilig (K20)
+  const mzGeld = mzNegativ ? null : mzRoh;
+  // O2-Fix K-N3: Restfall ohne Zuordnung je Satz (eine Gutschein-Zahlung ohne mehrzweck_satz_bp, von kassentagZuBelegEingabe seit dem K3-Fix nicht mehr
+  // erzeugt): die Geldzahlungen werden anteilig auf alle Sätze verteilt, die Aufteilung EÜR Kz 112/140 ist dann eine Näherung (Summe, Gewinn und
+  // Voranmeldung stimmen). Nur Hinweis an den EÜR-Zeilen, keine Zahl.
+  if (!mzGeld && s.beleg_art === 'tagesabschluss' && zahlungen.some((z) => z.kanal === KANAL_MEHRZWECK) && zahlungen.some((z) => z.kanal !== KANAL_MEHRZWECK)
+    && (mzNegativ || gruppen.filter((g) => g.netto_cent !== 0 || g.ust_cent !== 0).length > 1) && !ctx.hinweise.includes('HN_KASSE_MEHRZWECK_SAETZE')) ctx.hinweise.push('HN_KASSE_MEHRZWECK_SAETZE');
   // EÜR: Zufluss je Zahlung (R-ZP-20), unabhängig von Soll und Ist
   zahlungen.forEach((z, zi) => {
-    const jahr = String(jahrVon(z.datum));
     let nettoS = 0;
     let ustS = 0;
-    for (let gi = 0; gi < gruppen.length; gi++) { nettoS += anteile[zi][gi].netto_cent; ustS += anteile[zi][gi].ust_cent; }
+    if (mzGeld) {
+      const a = mzGeld.get(zi);
+      if (!a) return; // K3-Fix: Gutschein-Zahlung ohne Zufluss (wie unten), Geld je Satz aus kassenMehrzweckGeld
+      nettoS = a.netto_cent;
+      ustS = a.ust_cent;
+    } else {
+      if (z.kanal === KANAL_MEHRZWECK && s.beleg_art === 'tagesabschluss') return; // KERN-26 (SB-3), O2 N2 nur am Kassenbeleg: Einlösung eines Mehrzweck-Gutscheins: Umsatzsteuer ja, aber kein Zufluss (stand beim Verkauf in Kz 103)
+      for (let gi = 0; gi < gruppen.length; gi++) { nettoS += anteile[zi][gi].netto_cent; ustS += anteile[zi][gi].ust_cent; }
+    }
+    const jahr = String(jahrVon(z.datum));
     if (nettoS === 0 && ustS === 0) return;
     if (s.steuerfall === 'A_INLAND_0_PV') {
       out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: z.datum, kz: 103, netto_cent: nettoS, betrag_cent: nettoS, rolle: 'einnahme', spalte: 'einnahme', satz_bp: 0, regel_id: 'R-EUER-03', ereignis_id: z.id }));
@@ -1485,11 +1576,33 @@ function kuWirkungen(s, profil, ctx, out) {
     for (let gi = 0; gi < gruppen.length; gi++) b += anteile[zi][gi].netto_cent + anteile[zi][gi].ust_cent;
     if (b === 0) return;
     const nachWechsel = statusAm(profil, z.datum).status === 'regel';
+    // KERN-26 (SB-3): Einlösung eines Mehrzweck-Gutscheins beim Kleinunternehmer: keine Einnahme (stand beim Verkauf in Kz 111), aber steuerbarer Umsatz
+    // nach § 19 Abs. 2 UStG im Jahr der Einlösung (Vermerk für die Grenzprüfung, auswertung.js umsatzPosten)
+    // KERN-26 (SB-5): Kassen-Tagesabschluss als Kleinunternehmer, Geschäftstag nach dem Wechsel zur Regelbesteuerung: der ganze Tag ist regelbesteuert
+    // (08 2.11 B.7). Nicht still in Kz 103: Warnung „Tagesabschluss stornieren und mit Steuersätzen neu erfassen“ (O2 N4: auch bei reiner Gutschein-Einlösung).
+    if (nachWechsel && s.beleg_art === 'tagesabschluss' && !ctx.hinweise.includes('W_KASSE_KU_NACH_WECHSEL')) ctx.hinweise.push('W_KASSE_KU_NACH_WECHSEL');
+    if (z.kanal === KANAL_MEHRZWECK && s.beleg_art === 'tagesabschluss') {
+      out.push(mk(ctx, { welt: 'euer', periode: String(jahrVon(z.datum)), datum_wirk: z.datum, kz: null, netto_cent: b, betrag_cent: b, rolle: 'ku_umsatz_mehrzweck', status: 'information', regel_id: 'R-KU-02', ereignis_id: z.id }));
+      return;
+    }
     out.push(mk(ctx, {
       welt: 'euer', periode: String(jahrVon(z.datum)), datum_wirk: z.datum, kz: nachWechsel ? 103 : 111, netto_cent: b, betrag_cent: b, rolle: 'einnahme', spalte: 'einnahme',
       regel_id: nachWechsel ? 'R-EUER-03' : 'R-EUER-01', hinweise: nachWechsel ? ['HN_KU_UMSATZ_NACH_WECHSEL'] : [], ereignis_id: z.id,
     }));
   });
+}
+
+// KERN-26 (Kassenbuch, 12-steuer-vertiefung SB-3): Verkauf eines Mehrzweck-Gutscheins: keine Voranmeldung (nicht steuerbar, § 3 Abs. 15 UStG); EÜR beim
+// Zufluss: Regelbesteuerung Kz 103, Kleinunternehmer (Status am Zahlungstag) Kz 111 und Davon-Vermerk Kz 119. Zählt nicht zum Gesamtumsatz (§ 19 Abs. 2).
+const KANAL_MEHRZWECK = 'gutschein_mehrzweck';
+function mehrzweckVerkaufWirkungen(s, profil, ctx, out) {
+  for (const z of aktiveZahlungen(s)) {
+    if (z.betrag_cent === 0) continue;
+    const ku = statusAm(profil, z.datum).status === 'ku';
+    const jahr = String(jahrVon(z.datum));
+    out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: z.datum, kz: (ku ? 111 : 103), netto_cent: z.betrag_cent, betrag_cent: z.betrag_cent, rolle: 'einnahme', spalte: 'einnahme', regel_id: ku ? 'R-EUER-01' : 'R-EUER-03', ereignis_id: z.id }));
+    if (ku) out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: z.datum, kz: 119, netto_cent: z.betrag_cent, betrag_cent: z.betrag_cent, rolle: 'vermerk', spalte: null, regel_id: 'R-EUER-01', ereignis_id: z.id }));
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1934,6 +2047,37 @@ function origStand(orig) {
   return { o, gruppen: gruppiere(o, false), zahlungen: aktiveZahlungen(o) };
 }
 
+// KERN-26 (Fund NIEDRIG der Abschlussprüfung Regelbesteuerung, ABWEICHUNGEN 5.39): Eine Korrektur trägt keine Kategorie und hätte ihre Vorsteuer-Minderung
+// mit der vollen Steuer gerechnet (abziehbar = ust in gruppiere der Korrektur). Das Original hat aus seinen Versicherungspositionen nie Vorsteuer abgezogen
+// (versicherungPosition). Je Satzgruppe wird die abziehbare Steuer der Korrektur deshalb mit (ust - Versicherungs-ust) / ust des Originals skaliert. Nur
+// wenn die Korrektur selbst keine eigene Aufteilung trägt (abziehbar = ust) und das Original in dieser Gruppe Versicherungspositionen mit Steuer hat;
+// jede andere Korrektur bleibt byte-gleich (Rückfall -25 gegen -26). Reine Versicherungsgruppe: Faktor 0 (keine Minderung ohne früheren Abzug).
+function versAnteilKorrektur(gk, os) {
+  if (!Array.isArray(os.positionen)) return;
+  const vers = new Map();
+  for (const p of os.positionen) {
+    if (!versicherungPosition(os, p)) continue;
+    const k = p.satz_bp === null || p.satz_bp === undefined ? 'null' : String(p.satz_bp);
+    vers.set(k, (vers.get(k) || 0) + p.ust_cent);
+  }
+  if (!vers.size) return;
+  const og = gruppiere(os, false);
+  for (const g of gk) {
+    const k = satzKey(g);
+    const vu = vers.get(k) || 0;
+    const o = og.find((x) => satzKey(x) === k);
+    if (!o || vu <= 0 || o.ust_cent <= 0 || vu > o.ust_cent || g.ust_cent === 0 || g.abziehbar_cent !== g.ust_cent) continue;
+    g.abziehbar_cent = mulDivRund(g.ust_cent, o.ust_cent - vu, o.ust_cent);
+  }
+}
+
+// O2-Fix K-N1: Eingangsbeleg mit Versicherungsposition (Umsatzsteuerbetrag ohne abziehbare Vorsteuer) UND einer anderen Position mit Umsatzsteuer
+function versGemischterBeleg(os) {
+  if (!istObjekt(os) || os.richtung !== 'eingang' || !Array.isArray(os.positionen)) return false;
+  const mitUst = os.positionen.filter((p) => istObjekt(p) && istCent(p.ust_cent) && p.ust_cent > 0);
+  return mitUst.some((p) => versicherungPosition(os, p)) && mitUst.some((p) => !versicherungPosition(os, p));
+}
+
 function rueckzahlungVon(s) {
   const rzRoh = istObjekt(s.rueckzahlung) ? s.rueckzahlung : null;
   return rzRoh !== null && istDatum(rzRoh.datum) && istCent(rzRoh.betrag_cent) && rzRoh.betrag_cent > 0 ? rzRoh : null;
@@ -1949,7 +2093,7 @@ function vorLeistungKorrektur(os, wirk, eingang, istOrig) {
 
 // Zerlegung einer Korrektur: je Gruppe des Korrekturbelegs { unbezahlt: {netto, ust}, bezahlt: {netto, ust} } (vorzeichenbehaftet wie der Beleg:
 // Minderung negativ; ust bei Eingang die abziehbare Vorsteuer), dazu Summen in Brutto. vorher = Brutto der früheren Korrekturen zum selben Original.
-function korrekturPlanRoh(s, orig, vorherInfo) {
+function korrekturPlanRoh(s, orig, vorherInfo, ohneVersAnteil) {
   const vorher = vorherInfo.brutto;
   const tol = vorherInfo.anzahl; // Rundung: jede frühere Korrektur weist ihre eigene gerundete Steuer aus (höchstens 1 ct Abweichung)
   const gk = gruppiere(s);
@@ -1958,6 +2102,15 @@ function korrekturPlanRoh(s, orig, vorherInfo) {
   const rzBetrag = rz ? rz.betrag_cent : 0;
   const wirk = s.wirkdatum;
   const st = origStand(orig);
+  // KERN-26: Korrektur auf einen Eingangsbeleg mit Versicherungsposition (Umsatzsteuerbetrag ohne abziehbare Vorsteuer, KERN-24/-25): die Vorsteuer-Minderung
+  // der Korrektur nur im abziehbaren Anteil des Originals (abziehbar/ust je Satzgruppe, soweit die Lücke aus Versicherungspositionen stammt)
+  // O20k N1: ohneVersAnteil (nur für den Hinweiswert „Korrektur nur für die Positionen mit Vorsteuer“) rechnet ohne diese Skalierung.
+  if (eingang && st && !ohneVersAnteil) versAnteilKorrektur(gk, st.o);
+  // O20k M1 (§ 17 Abs. 1 S. 2 UStG: berichtigt wird der in Anspruch genommene Vorsteuerabzug): Hat das Original keinen Vorsteuerabzug (ausschluss.vorsteuer
+  // 'nein'), mindert die Korrektur Kz 66 nicht. Abziehbar 0 in jeder Gruppe, auch wenn die Korrektur eine eigene Aufteilung trägt (der Abzug war 0).
+  if (eingang && st && ohneVorsteuerAbzug(st.o)) for (const g of gk) g.abziehbar_cent = 0;
+  // O21 N1: Geschenk mit schon zurückgenommener Vorsteuer: Korrektur und Zerlegung über die Zahlungen des Originals (Fall A) ohne abziehbare Steuer
+  if (eingang && st && geschenkVorsteuerZurueck(st.o, s)) { for (const g of gk) g.abziehbar_cent = 0; st.gruppen = st.gruppen.map((g) => ({ ...g, abziehbar_cent: 0 })); }
   const gew = gk.map((g) => Math.abs(g.netto_cent + g.ust_cent));
   let bk = 0;
   for (const x of gew) bk += x;
@@ -2060,8 +2213,8 @@ function korrekturPlanRoh(s, orig, vorherInfo) {
 
 // Rundung (TR-korrektur-003): Schließt die Korrektur das Netto einer Gruppe des Originals ab, darf die Steuer aller Korrekturen zusammen die Steuer des Originals
 // nicht übersteigen; die abschließende Korrektur nimmt nur den Rest der Steuer (ein Cent Rundungsunterschied je Teilgutschrift).
-function korrekturPlan(s, orig, vorherInfo) {
-  const plan = korrekturPlanRoh(s, orig, vorherInfo);
+function korrekturPlan(s, orig, vorherInfo, ohneVersAnteil) {
+  const plan = korrekturPlanRoh(s, orig, vorherInfo, ohneVersAnteil);
   const st = origStand(orig);
   if (!st || !vorherInfo.gruppen || vorherInfo.anzahl === 0) return plan;
   const eingang = s.richtung === 'eingang';
@@ -2087,7 +2240,114 @@ function korrekturPlan(s, orig, vorherInfo) {
   return plan;
 }
 
+// KERN-26 (Kassenbuch, Baukonzept 08 Kap. 6 Nr. 22, 2.12 M18): Kassen-Storno-Zweig. Ein Storno eines Kassenbelegs (Tagesabschluss oder Kassendifferenz,
+// vom Worker vergebene ID mit Präfix 'kasse_') berichtigt einen Erfassungsfehler: genaue Gegenwirkung des Originals am Wirkdatum (= Geschäftstag des
+// Originals), ohne Rückzahlungslogik (R-KOR-13), auch für A_KU (Kz 111, Umsatzgrenze) und E_INLAND_OHNE_VORSTEUER (Kz 183). Voraussetzung: Grund
+// 'rueckabwicklung', Original gefunden (gleiche ID) und Kassenbeleg, Positionen spiegeln das Original je Satz genau. Alle übrigen Korrekturen laufen
+// unverändert über R-KOR-01/05 (Rückfall -25 gegen -26 byte-gleich).
+function kassenStornoOriginal(s, opt, beleg) {
+  if (s.beleg_art !== 'storno' || s.korrektur_grund !== 'rueckabwicklung' || !istObjekt(s.bezug)) return null;
+  const id = s.bezug.storniert_beleg_id;
+  if (typeof id !== 'string' || id.slice(0, KASSEN_BELEG_PRAEFIX.length) !== KASSEN_BELEG_PRAEFIX) return null;
+  const orig = opt.korrekturOriginal instanceof Map && opt.korrekturOriginal.has(beleg)
+    ? opt.korrekturOriginal.get(beleg)
+    : (istObjekt(opt.originale) && typeof opt.originale.get === 'function' ? opt.originale.get(id) : null);
+  if (!istObjekt(orig) || orig.id !== id || !istObjekt(orig.steuer)) return null;
+  const os = orig.steuer;
+  return os.beleg_art === 'tagesabschluss' || KASSEN_KATEGORIEN_LISTE.includes(os.kategorie) ? orig : null;
+}
+function kassenStornoSpiegelt(s, os) {
+  if (s.steuerfall !== os.steuerfall || s.richtung !== os.richtung || !Array.isArray(s.positionen) || !Array.isArray(os.positionen) || !s.positionen.length) return false;
+  for (const p of s.positionen.concat(os.positionen)) if (!istObjekt(p) || !istCent(p.netto_cent) || !istCent(p.ust_cent)) return false;
+  const gs = gruppiere(s, false);
+  const go = gruppiere(os, false);
+  return gs.length === go.length && go.every((o) => gs.some((g) => satzKey(g) === satzKey(o) && g.netto_cent === 0 - o.netto_cent && g.ust_cent === 0 - o.ust_cent));
+}
+function kassenStornoWirkungen(s, profil, ctx, opt, out, orig) {
+  const wirk = s.wirkdatum;
+  // O2 N1: Das Wirkdatum muss der Geschäftstag des Originals sein (Kap. 6 Nr. 22), sonst stünden Original und Gegenwirkung in verschiedenen Zeiträumen
+  const os = orig.steuer;
+  const tagOrig = istObjekt(os.leistung) && istDatum(os.leistung.bis) ? os.leistung.bis : (istDatum(os.rechnungsdatum) ? os.rechnungsdatum : null);
+  const grund = !istDatum(wirk) || !kassenStornoSpiegelt(s, os) ? 'kassen_storno_nicht_gespiegelt' : (wirk !== tagOrig ? 'kassen_storno_wirkdatum' : null);
+  if (grund) {
+    ctx.beleg_status = 'ausgeschlossen';
+    if (!ctx.hinweise.includes('HN_NOCH_NICHT_UNTERSTUETZT')) ctx.hinweise.push('HN_NOCH_NICHT_UNTERSTUETZT');
+    out.push(mk(ctx, { welt: 'ust', periode: istDatum(wirk) ? ustPeriode(profil, wirk, ctx.hinweise) : null, datum_wirk: istDatum(wirk) ? wirk : null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-KOR-01', hinweis_detail: grund }));
+    return;
+  }
+  const hinw = [];
+  const perUst = ustPeriode(profil, wirk, hinw);
+  const perEuer = String(jahrVon(wirk));
+  for (const w of belegWirkungen(orig, profil, nurRegeln(opt))) {
+    // O2 M2: Vermerk der Mehrzweck-Einlösung beim Kleinunternehmer (Gesamtumsatz § 19 Abs. 2, Status information, ohne Kennzahl) mitspiegeln
+    if (w.welt === 'euer' && w.status === 'information' && w.rolle === 'ku_umsatz_mehrzweck') {
+      out.push(mk(ctx, { welt: 'euer', periode: perEuer, datum_wirk: wirk, kz: null, netto_cent: 0 - w.netto_cent, betrag_cent: 0 - w.betrag_cent, rolle: w.rolle, status: 'information', regel_id: w.regel_id, hinweise: hinw.slice() }));
+      continue;
+    }
+    if (w.status !== 'berechnet' || w.kz === null || w.kz === undefined) continue;
+    if (w.welt === 'ust') {
+      out.push(mk(ctx, { welt: 'ust', periode: perUst, datum_wirk: wirk, kz: w.kz, netto_cent: 0 - w.netto_cent, ust_cent: 0 - w.ust_cent, rolle: w.rolle === 'vorsteuer' ? 'vorsteuer_minderung' : 'minderung', satz_bp: w.satz_bp, regel_id: 'R-KOR-01', hinweise: hinw.slice() }));
+    } else if (w.welt === 'euer') {
+      out.push(mk(ctx, { welt: 'euer', periode: perEuer, datum_wirk: wirk, kz: w.kz, netto_cent: 0 - w.netto_cent, ust_cent: 0 - w.ust_cent, betrag_cent: 0 - w.betrag_cent, rolle: w.rolle, spalte: w.spalte, satz_bp: w.satz_bp, regel_id: w.regel_id, hinweise: hinw.slice() }));
+    }
+  }
+}
+
+// R1.5 (Baukonzept 08 2.13, Retoure auf Vortag): enger Kleinunternehmer-Zweig für eine Retoure auf einen Kassen-Tagesabschluss mit A_KU. Ohne ihn schlösse
+// korrekturWirkungen jede A_KU-Korrektur aus (HN_NOCH_NICHT_UNTERSTUETZT). Der Kleinunternehmer hat keine Umsatzsteuer berechnet (§ 19 Abs. 1 UStG), es gibt also
+// nichts nach § 17 UStG zu berichtigen. Die Rückzahlung ist eine Betriebsausgabe im Jahr der Rückzahlung (§ 11 Abs. 2 EStG; Ausweis Kz 183 wie R-ZP-25 aller
+// Rückzahlungen im Kern, sb-antworten.md SB-8: Zeitpunkt A, Ausweis C, Gewinn gleich) und mindert den Gesamtumsatz nach § 19 Abs. 2 UStG (vereinnahmte Entgelte)
+// im Jahr der Rückzahlung, aber nur bei einem Verkauf im selben Kalenderjahr (O14 M1, sonst Hinweis HN_KU_RETOURE_VORJAHR; Vermerk ku_umsatz_minderung, Status
+// information, auswertung.js umsatzPosten). Greift nur, wenn ALLES zutrifft: beleg_art 'korrektur',
+// Grund rueckabwicklung oder preisnachlass, Ausgang, Steuerfall A_KU, Bezug korrigiert_beleg_id mit Präfix 'kasse_' auf ein gefundenes Original (gleiche ID)
+// mit Belegart tagesabschluss und A_KU, eigene ID eine Retouren-ID des Workers (kasse_<Kasse>_<Tag>_r<NNN>), Positionen ohne Steuer und nie positiv, Summe < 0, Rückzahlung am Wirkdatum in Höhe der Summe. Jede andere
+// A_KU-Korrektur bleibt unverändert ausgeschlossen (Rückfall test-steuerkern-r15.mjs).
+const KASSEN_RETOURE_GRUENDE_K = Object.freeze(['rueckabwicklung', 'preisnachlass']);
+const KASSEN_RETOURE_ID = /^kasse_k[a-z0-9]{8}_\d{4}-\d{2}-\d{2}_r\d{3}$/; // Retouren-ID (kassenRetoureBelegId); IDs mit Präfix kasse_ vergibt nur der Worker (Rules, hyg N1)
+function kuKassenRetoureOriginal(s, opt, beleg) {
+  if (!istObjekt(beleg) || typeof beleg.id !== 'string' || !KASSEN_RETOURE_ID.test(beleg.id)) return null;
+  if (s.steuerfall !== 'A_KU' || s.beleg_art !== 'korrektur' || s.richtung !== 'ausgang' || !KASSEN_RETOURE_GRUENDE_K.includes(s.korrektur_grund) || !istObjekt(s.bezug)) return null;
+  const id = s.bezug.korrigiert_beleg_id;
+  if (typeof id !== 'string' || id.slice(0, KASSEN_BELEG_PRAEFIX.length) !== KASSEN_BELEG_PRAEFIX || (typeof s.bezug.storniert_beleg_id === 'string' && s.bezug.storniert_beleg_id !== '')) return null;
+  const orig = opt.korrekturOriginal instanceof Map && opt.korrekturOriginal.has(beleg)
+    ? opt.korrekturOriginal.get(beleg)
+    : (istObjekt(opt.originale) && typeof opt.originale.get === 'function' ? opt.originale.get(id) : null);
+  if (!istObjekt(orig) || orig.id !== id || !istObjekt(orig.steuer)) return null;
+  const os = orig.steuer;
+  return os.beleg_art === 'tagesabschluss' && os.steuerfall === 'A_KU' && os.richtung === 'ausgang' ? orig : null;
+}
+function kuKassenRetoureWirkungen(s, profil, ctx, out, orig) {
+  const rz = rueckzahlungVon(s);
+  const pos = Array.isArray(s.positionen) ? s.positionen : [];
+  let brutto = 0;
+  let form = pos.length > 0;
+  for (const p of pos) {
+    if (!istObjekt(p) || !istCent(p.netto_cent) || !istCent(p.ust_cent) || p.ust_cent !== 0 || p.netto_cent > 0) { form = false; break; }
+    brutto += 0 - p.netto_cent;
+  }
+  if (!form || brutto <= 0 || !rz || rz.datum !== s.wirkdatum || rz.betrag_cent !== brutto) {
+    // Form passt nicht (z. B. Rückzahlung an einem anderen Tag oder in anderer Höhe): ausgeschlossen wie jede andere A_KU-Korrektur, nie still halb gerechnet
+    ctx.beleg_status = 'ausgeschlossen';
+    if (!ctx.hinweise.includes('HN_NOCH_NICHT_UNTERSTUETZT')) ctx.hinweise.push('HN_NOCH_NICHT_UNTERSTUETZT');
+    out.push(mk(ctx, { welt: 'ust', periode: istDatum(s.wirkdatum) ? ustPeriode(profil, s.wirkdatum, ctx.hinweise) : null, datum_wirk: istDatum(s.wirkdatum) ? s.wirkdatum : null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-KOR-01', hinweis_detail: 'kassen_retoure_ku_ungueltig' }));
+    return;
+  }
+  const jahr = String(jahrVon(rz.datum));
+  out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: rz.datum, kz: 183, netto_cent: brutto, betrag_cent: brutto, rolle: 'ausgabe', spalte: 'ausgabe', regel_id: 'R-ZP-25', hinweise: ['HN_EUER_RUECKZAHLUNG_K20'] }));
+  // O14 M1 (vorsichtig bis zur Antwort des Steuerberaters): den Gesamtumsatz § 19 Abs. 2 mindert nur eine Retoure auf einen Verkauf DESSELBEN Kalenderjahres.
+  // Ob die Rückgewähr eines Vorjahresentgelts den Gesamtumsatz des laufenden Jahres mindert, ist nicht belegt (UStAE 19.2 Abs. 1: vereinnahmte Entgelte „für“
+  // Umsätze; 19.7 Abs. 3 S. 2 schließt nur eine Rückwirkung aus). Ohne Minderung bleibt die laufende Summe höher, die Grenze greift höchstens früher, nie später.
+  const tagOrig = istObjekt(orig) && istObjekt(orig.steuer) && istObjekt(orig.steuer.leistung) && istDatum(orig.steuer.leistung.bis) ? orig.steuer.leistung.bis : null;
+  if (tagOrig !== null && jahrVon(tagOrig) === jahrVon(rz.datum)) {
+    out.push(mk(ctx, { welt: 'euer', periode: jahr, datum_wirk: rz.datum, kz: null, netto_cent: 0 - brutto, betrag_cent: 0 - brutto, rolle: 'ku_umsatz_minderung', status: 'information', regel_id: 'R-KU-02' }));
+  } else if (!ctx.hinweise.includes('HN_KU_RETOURE_VORJAHR')) ctx.hinweise.push('HN_KU_RETOURE_VORJAHR');
+}
+
 function korrekturWirkungen(s, profil, ctx, opt, out, beleg) {
+  const kassenOrig = kassenStornoOriginal(s, opt, beleg);
+  if (kassenOrig) { kassenStornoWirkungen(s, profil, ctx, opt, out, kassenOrig); return; }
+  const kuRetoureOrig = kuKassenRetoureOriginal(s, opt, beleg);
+  if (kuRetoureOrig) { kuKassenRetoureWirkungen(s, profil, ctx, out, kuRetoureOrig); return; }
   if (s.korrektur_grund === 'tippfehler_berichtigung') { ctx.hinweise.push('HN_BERICHTIGUNG_OHNE_UST_WIRKUNG'); return; }
   if (s.steuerfall !== 'A_INLAND_19' && s.steuerfall !== 'A_INLAND_7' && s.steuerfall !== 'A_INLAND_0_PV' && s.steuerfall !== 'E_INLAND_VORSTEUER') {
     ctx.beleg_status = 'ausgeschlossen';
@@ -2109,11 +2369,18 @@ function korrekturWirkungen(s, profil, ctx, opt, out, beleg) {
   const vorher = opt.vorherKorrekturen instanceof Map && opt.vorherKorrekturen.has(beleg) ? opt.vorherKorrekturen.get(beleg) : { brutto: 0, anzahl: 0 };
   const plan = korrekturPlan(s, orig, vorher);
   const gruppen = plan.gruppen;
+  // O2-Fix K-N1 (ABWEICHUNGEN 5.39): Teilkorrektur auf einen gemischten Versicherungsbeleg. Die Korrektur kennt keine Position (Korrekturdialog ohne Kategorie
+  // und ohne Positionsbezug), versAnteilKorrektur verteilt sie anteilig; betrifft sie nur eine Position, stimmt Kz 66 nicht genau. Nur Hinweis, keine Zahl
+  // (gesetzt am Ende, nur bei eigener Wirkung: keine zusätzliche Hinweis-Zeile für eine vor der Leistung verrechnete Korrektur).
+  const versAnteilHinweis = eingang && s.beleg_art !== 'storno' && orig && versGemischterBeleg(orig.steuer);
   const origId = orig && typeof orig.id === 'string' ? orig.id : bezug;
   const origPer = istObjekt(opt.originalPerioden) && typeof opt.originalPerioden.get === 'function' ? opt.originalPerioden.get(origId) : null;
   // Warnung bei Storno und Rückabwicklung; Preisnachlass, Skonto und Bonus sind gewöhnliche Minderungen (T-S2-012)
   const stornoGrund = s.korrektur_grund === 'rueckabwicklung' || s.korrektur_grund === 'leistung_nicht_erbracht' || s.beleg_art === 'storno';
-  const warneAbgeschlossen = (per) => { if (stornoGrund && origPer && origPer < per && periodenArt(origPer) === periodenArt(per) && !ctx.hinweise.includes('W_STORNO_ABGESCHLOSSENER_ZEITRAUM')) ctx.hinweise.push('W_STORNO_ABGESCHLOSSENER_ZEITRAUM'); };
+  // O14 N5: eine Kassen-Retoure (Retouren-ID des Workers) bekommt statt der Storno-Warnung einen ruhigen Hinweis (Rückgabe, nicht Storno einer Rechnung)
+  const istRetoure = istObjekt(beleg) && typeof beleg.id === 'string' && KASSEN_RETOURE_ID.test(beleg.id);
+  const hinweisAbgeschlossen = istRetoure ? 'HN_RETOURE_FRUEHERER_ZEITRAUM' : 'W_STORNO_ABGESCHLOSSENER_ZEITRAUM';
+  const warneAbgeschlossen = (per) => { if (stornoGrund && origPer && origPer < per && periodenArt(origPer) === periodenArt(per) && !ctx.hinweise.includes(hinweisAbgeschlossen)) ctx.hinweise.push(hinweisAbgeschlossen); };
   // Unbezahlter Teil: Wirkdatum, in voller Höhe (Soll). Bei Ist wurde nichts vereinnahmt (keine Wirkung). Vor der Leistung (TR-orakel-002) hat
   // alleWirkungen den Betrag schon vom Leistungsposten des Originals abgezogen.
   const verrechnet = opt.vorLeistungKorrekturen instanceof Set && opt.vorLeistungKorrekturen.has(beleg);
@@ -2157,6 +2424,43 @@ function korrekturWirkungen(s, profil, ctx, opt, out, beleg) {
     out.push(mk(ctx, { welt: 'euer', periode: String(jahrVon(rz.datum)), datum_wirk: rz.datum, kz: null, rolle: 'hinweis', status: 'ausgeschlossen', regel_id: 'R-ZP-25', hinweis_detail: 'gutschrift_erhalten_rueckzahlung' }));
   }
   if (eingang) anlagegutKorrekturEuer(s, profil, ctx, opt, out, orig, rz);
+  // O20k M1: Original ohne Vorsteuerabzug: Hinweis, warum die Korrektur Kz 66 nicht mindert (nur wenn die Korrektur eine Wirkung hat)
+  if (eingang && orig && ohneVorsteuerAbzug(orig.steuer) && out.length && !ctx.hinweise.includes('HN_KORREKTUR_OHNE_VORSTEUERABZUG')) ctx.hinweise.push('HN_KORREKTUR_OHNE_VORSTEUERABZUG');
+  // O21 N1: Geschenk mit schon zurückgenommener Vorsteuer (nicht doppelt mindern)
+  if (eingang && orig && !ohneVorsteuerAbzug(orig.steuer) && geschenkVorsteuerZurueck(orig.steuer, s) && out.length && !ctx.hinweise.includes('HN_KORREKTUR_GESCHENK_ZURUECKGENOMMEN')) ctx.hinweise.push('HN_KORREKTUR_GESCHENK_ZURUECKGENOMMEN');
+  if (versAnteilHinweis && out.length && !ctx.hinweise.includes('HN_KORREKTUR_VERSICHERUNG_ANTEILIG')) {
+    ctx.hinweise.push('HN_KORREKTUR_VERSICHERUNG_ANTEILIG'); // O2-Fix K-N1, F4 hängt ihn an alle Wirkungen
+    // O20k N1: konkrete Zahlen für den Hinweis (Platzhalter in hinweise.js, hinweisFuer(code, w.hinweis_werte)). Die Zahlen der Voranmeldung bleiben anteilig.
+    // minderung_cent: was Kontolux mindert (Kz 66, Beträge positiv); minderung_nur_vorsteuer_cent: dieselbe Korrektur ohne Versicherungsanteil (gilt sie nur für
+    // die Positionen mit Vorsteuer), je Satzgruppe höchstens die abgezogene Vorsteuer des Originals abzüglich der Minderung früherer Korrekturen (vorher.gruppen,
+    // aus deren Plan); differenz: um so viel ist Kz 66 dann zu hoch. Eine reine Versicherungsgruppe (Abzug 0) bekommt so nie einen höheren Wert.
+    const jeGruppe = (p) => {
+      const m = new Map();
+      p.gruppen.forEach((g, gi) => {
+        let u = 0;
+        if (unbezahltBuchen && p.unbezahlt_brutto > 0) u += p.je[gi].unbezahlt.ust;
+        if (rz && p.gebucht_bezahlt_brutto > 0) u += p.je[gi].bezahlt.ust;
+        m.set(satzKey(g), (m.get(satzKey(g)) || 0) - u);
+      });
+      return m;
+    };
+    const gb = jeGruppe(plan);
+    const roh = jeGruppe(korrekturPlan(s, orig, vorher, true));
+    const st = origStand(orig);
+    let gebucht = 0;
+    let nurVst = 0;
+    for (const [k, u] of gb) {
+      const o = st ? st.gruppen.find((x) => satzKey(x) === k) : null;
+      const frueher = vorher.gruppen instanceof Map && vorher.gruppen.has(k) ? vorher.gruppen.get(k).ust : 0;
+      const rest = o ? Math.max(0, o.abziehbar_cent - frueher) : 0;
+      gebucht += u;
+      nurVst += Math.max(u, Math.min(roh.get(k) || 0, rest));
+    }
+    if (nurVst > gebucht) {
+      const werte = { minderung_cent: gebucht, minderung_nur_vorsteuer_cent: nurVst, minderung_differenz_cent: nurVst - gebucht };
+      for (const w of out) if (w.beleg_id === ctx.id) w.hinweis_werte = { ...werte };
+    }
+  }
 }
 
 // KERN-E (G-KD-6): Korrektur (Storno, Gutschrift, Preisnachlass) auf ein Original, dessen Anschaffungskosten der Anlagegut-Weg als GWG (Kz 132) oder
@@ -2230,6 +2534,8 @@ function uneinbringlichkeitsWirkung(s, profil, ctx, opt, out, beleg) {
   if (plan.bezahlt_brutto > 0) ctx.hinweise.push('W_UNEINBRINGLICH_TEIL_BEZAHLT');
   if (plan.unbezahlt_brutto <= 0) return;
   const per = ustPeriode(profil, wirk, hinw);
+  if (eingang && orig && ohneVorsteuerAbzug(orig.steuer) && !ctx.hinweise.includes('HN_KORREKTUR_OHNE_VORSTEUERABZUG')) ctx.hinweise.push('HN_KORREKTUR_OHNE_VORSTEUERABZUG'); // O20k M1
+  if (eingang && orig && !ohneVorsteuerAbzug(orig.steuer) && geschenkVorsteuerZurueck(orig.steuer, { ...s, rueckzahlung: null }) && !ctx.hinweise.includes('HN_KORREKTUR_GESCHENK_ZURUECKGENOMMEN')) ctx.hinweise.push('HN_KORREKTUR_GESCHENK_ZURUECKGENOMMEN'); // O21 N1
   plan.gruppen.forEach((g, gi) => {
     const w = plan.je[gi].unbezahlt;
     if (w.netto === 0 && w.ust === 0) return;

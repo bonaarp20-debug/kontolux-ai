@@ -1,10 +1,10 @@
 // REVIEW-FIX (20.11.2026), Worker: N1 (kfz_privatnutzung im Steuerprofil), N2 (Kern-Option bei profilPruefen), N3 (Upload-Sperre mit Klartext),
-// N6 (Profil-Präfix vor filterProfilForModules). Kein Netz, Firestore ist eine Attrappe.
+// N6 (Profil-Präfix vor filterProfilForModules). Kein Netz, Firestore ist eine Attrappe. (N3 prüfte die Monats-Reservierung; die gibt es seit Kassenbuch P1b-4 nicht mehr.)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { erzeugeTestEnv } from './harness.mjs';
-import { reserviereUpload, anthropicFetchMitKontingent, filterProfilForModules } from '../worker.js';
+import { filterProfilForModules } from '../worker.js';
 import { stammdatenBereinigen, neuesProfil, PROFIL_KERN_FELDER, KFZ_PRIVATNUTZUNG_WERTE } from '../regel/steuerprofil.js';
 
 const QUELLE = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
@@ -32,40 +32,9 @@ test('N2: der Worker übergibt die Kern-Optionen (kz39_verzicht) an profilPruefe
   assert.ok(SP.includes('Steuerkern.profilPruefen(r.profil, kernOptionenFuer(config))'));
 });
 
-function umgebungMitFirestore({ patchStatus }) {
-  const original = globalThis.fetch; let patches = 0;
-  globalThis.fetch = async (input, init = {}) => {
-    const url = typeof input === 'string' ? input : input.url;
-    if (url.startsWith('https://oauth2.googleapis.com/token')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }), { status: 200 });
-    if (!/\/uploadlimit\//.test(url)) throw new Error('unerwartet: ' + url);
-    if ((init.method || 'GET') === 'GET') return new Response(JSON.stringify({ name: 'x', fields: { anzahl: { integerValue: '0' } }, updateTime: '2026-11-20T10:00:00Z' }), { status: 200 });
-    patches++; return new Response('{}', { status: patchStatus });
-  };
-  return { restore: () => { globalThis.fetch = original; }, patches: () => patches };
-}
-
-test('N3: Wettlauf an der Grenze (alle Versuche scheitern an parallelen Aufrufen): Grund ausgelastet, Klartext, 429, Kennzeichnung', async () => {
-  const env = await erzeugeTestEnv(); const fs = umgebungMitFirestore({ patchStatus: 412 });
-  try {
-    const r = await reserviereUpload('uid-n3', env, {});
-    assert.deepEqual([r.erlaubt, r.grund], [false, 'ausgelastet']);
-    assert.equal(fs.patches(), 6);
-    const res = await anthropicFetchMitKontingent('uid-n3', env, 'u', {}, { fetchFn: async () => { throw new Error('nicht aufrufen'); } });
-    assert.equal(res.status, 429);
-    assert.equal(res.headers.get('X-Kx-Sperre'), 'ausgelastet');
-    assert.match(await res.text(), /Zu viele Uploads gerade, bitte kurz warten/);
-  } finally { fs.restore(); }
-});
-test('N3: Infrastrukturfehler bleibt 503 mit eigenem Text; Chat, Bild/Dokument und Monatsabschluss geben den Text weiter', async () => {
-  const env = await erzeugeTestEnv(); const fs = umgebungMitFirestore({ patchStatus: 500 });
-  try {
-    const res = await anthropicFetchMitKontingent('uid-n3b', env, 'u', {}, { fetchFn: async () => { throw new Error('nicht aufrufen'); } });
-    assert.equal(res.status, 503);
-    assert.equal(res.headers.get('X-Kx-Sperre'), 'infra');
-    assert.match(await res.text(), /nicht erreichbar/);
-  } finally { fs.restore(); }
-  assert.equal((QUELLE.match(/X-Kx-Sperre/g) || []).length >= 5, true);
-  assert.ok(/code: 'upload_'/.test(QUELLE), 'Chat: JSON mit Klartext statt "Claude API Error"');
+test('N3 (entfallen): Es gibt keine Upload-Reservierung mehr, also auch keine Sperre „ausgelastet“ oder „limit“ im Wrapper; die Aufrufer geben weiter Sperrtexte durch, falls je einer käme', () => {
+  assert.ok(!/reserviereUpload|gibUploadZurueck|X-Kx-Sperre.*ausgelastet/.test(QUELLE.slice(QUELLE.indexOf('export async function anthropicFetchMitKontingent'), QUELLE.indexOf('export async function anthropicFetchMitKontingent') + 600)));
+  assert.equal((QUELLE.match(/X-Kx-Sperre/g) || []).length >= 4, true, 'Aufrufer lesen die Kennzeichnung weiterhin (harmlos)');
 });
 
 test('N6: filterProfilForModules greift auch für den ersten Abschnitt hinter dem Präfix der App', () => {

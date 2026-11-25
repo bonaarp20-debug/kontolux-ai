@@ -8,8 +8,11 @@
 //   await fs.batchGet([pfad, ...])                        -> Map pfad -> { pfad, daten, updateTime } | null   (eine Unteranfrage)
 //   await fs.list('users/u/migration', { pageSize })      -> { dokumente: [...], naechste }
 //   await fs.runQuery('users/u', structuredQuery)         -> [{ pfad, daten, updateTime, roh }]
+//   await fs.runAggregationQuery('users/u', structuredQuery, [{ alias: 'n', count: {} }]) -> { n: Zahl }
 //   await fs.commit(writes)                               -> { updateTimes: [...], commitTime }   (atomar, höchstens 500 Schreibvorgänge)
 //   schreibe.setzen / schreibe.aendern / schreibe.anlegen erzeugen die Schreibvorgänge.
+
+import { abfrageStrom, batchGetStrom } from './firestore-strom.js'; // O18a M1
 
 export const FIRESTORE_BASIS = 'https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents';
 const NAME_PRAEFIX = 'projects/kontolux-ai/databases/(default)/documents/';
@@ -36,8 +39,15 @@ export class BudgetFehler extends Error {
 // ---------------------------------------------------------------------------------------------
 // Werte kodieren/dekodieren (Firestore-REST-Format)
 // ---------------------------------------------------------------------------------------------
+// KASSE-P1b: echter Firestore-Zeitstempel (timestampValue). Die App liest createdAt mit .toDate(); ein Text würde dort scheitern.
+export class Zeitstempel {
+  constructor(iso) { this.iso = String(iso); }
+}
+export const zeitstempel = (iso) => new Zeitstempel(iso);
+
 export function kodiereWert(v) {
   if (v === null) return { nullValue: null };
+  if (v instanceof Zeitstempel) return { timestampValue: v.iso };
   if (typeof v === 'boolean') return { booleanValue: v };
   if (typeof v === 'number') {
     if (!Number.isFinite(v)) throw new TypeError('Zahl nicht endlich');
@@ -114,6 +124,17 @@ export const schreibe = {
     if (vorbedingung) w.currentDocument = vorbedingung;
     return w;
   },
+  // KASSE-P1b: atomares Hochzählen (wie buchTagesBewegung): Felder in 'felder' werden mit 'maske' gesetzt, 'inkremente' ({ feld: Zahl }, auch negativ)
+  // per increment-Transform addiert (legt Dokument und Feld bei Bedarf an). Ganze Zahlen als integerValue, sonst doubleValue (Euro-Beträge).
+  erhoehen(pfad, felder, maske, inkremente, vorbedingung = null) {
+    const w = {
+      update: { name: vollerName(pfad), fields: kodiereFelder(felder) },
+      updateMask: { fieldPaths: maske.map(feldPfad) },
+      updateTransforms: Object.entries(inkremente).map(([f, n]) => ({ fieldPath: feldPfad(f), increment: Number.isSafeInteger(n) ? { integerValue: String(n) } : { doubleValue: n } })),
+    };
+    if (vorbedingung) w.currentDocument = vorbedingung;
+    return w;
+  },
   // Neues Dokument, scheitert wenn es existiert
   anlegen(pfad, daten) {
     return schreibe.setzen(pfad, daten, { exists: false });
@@ -171,10 +192,10 @@ export function erzeugeSchicht({ token, fetchFn, basis = FIRESTORE_BASIS, budget
       if (!pfade.length) return ergebnis;
       const res = await rufe(`${wurzel}:batchGet`, { method: 'POST', headers: kopf(), body: JSON.stringify({ documents: pfade.map(vollerName) }) });
       if (!res.ok) throw await fehlerAus(res, false);
-      const zeilen = await res.json();
+      const zeilen = batchGetStrom(await res.json(), 'batchGet'); // O18a M1: Fehlerelement im Strom oder Antwort ohne Liste bricht ab
       for (const p of pfade) ergebnis.set(p, null);
-      for (const z of Array.isArray(zeilen) ? zeilen : []) {
-        if (z && z.found) { const d = dokAusRoh(z.found); if (d) ergebnis.set(d.pfad, d); }
+      for (const z of zeilen) {
+        if (z.found) { const d = dokAusRoh(z.found); if (d) ergebnis.set(d.pfad, d); }
       }
       return ergebnis;
     },
@@ -190,8 +211,26 @@ export function erzeugeSchicht({ token, fetchFn, basis = FIRESTORE_BASIS, budget
       const url = elternPfad ? `${wurzel}/${elternPfad}:runQuery` : `${wurzel}:runQuery`;
       const res = await rufe(url, { method: 'POST', headers: kopf(), body: JSON.stringify({ structuredQuery }) });
       if (!res.ok) throw await fehlerAus(res, false);
+      const zeilen = abfrageStrom(await res.json(), 'runQuery'); // O18a M1
+      return zeilen.filter((z) => z.document).map((z) => dokAusRoh(z.document));
+    },
+    // hyg M5: Aggregation (count/sum/avg) über eine Abfrage, EINE Unteranfrage. aggregationen: [{ alias, count: { upTo } } | { alias, sum: { field } } ...].
+    // Ergebnis: { alias: Zahl }. Fehlt ein Alias in der Antwort oder ist der Wert keine Zahl: Fehler (der Aufrufer bleibt fail-closed).
+    // Nur gegen den Emulator oder echtes Firestore prüfbar; die Tests nutzen die Nachbildung in test/regel-fake-firestore.mjs (count).
+    async runAggregationQuery(elternPfad, structuredQuery, aggregationen) {
+      const url = elternPfad ? `${wurzel}/${elternPfad}:runAggregationQuery` : `${wurzel}:runAggregationQuery`;
+      const res = await rufe(url, { method: 'POST', headers: kopf(), body: JSON.stringify({ structuredAggregationQuery: { structuredQuery, aggregations: aggregationen } }) });
+      if (!res.ok) throw await fehlerAus(res, false);
       const zeilen = await res.json();
-      return (Array.isArray(zeilen) ? zeilen : []).filter((z) => z && z.document).map((z) => dokAusRoh(z.document));
+      const felder = (Array.isArray(zeilen) ? zeilen : []).map((z) => z && z.result && z.result.aggregateFields).find(Boolean) || {};
+      const aus = {};
+      for (const { alias } of aggregationen) {
+        const w = felder[alias];
+        const n = w && w.integerValue !== undefined ? Number(w.integerValue) : w && w.doubleValue !== undefined ? Number(w.doubleValue) : NaN;
+        if (!Number.isFinite(n)) throw new FirestoreFehler(res.status, 'AGGREGATION_UNVOLLSTAENDIG');
+        aus[alias] = n;
+      }
+      return aus;
     },
     async commit(writes) {
       if (!Array.isArray(writes) || writes.length === 0) return { updateTimes: [], commitTime: null };

@@ -10,25 +10,27 @@ const jetzt = new Date();
 const uploadKey = (uid) => `uploads:${uid}:${jetzt.getFullYear()}-${String(jetzt.getMonth() + 1).padStart(2, '0')}`;
 const pdfChat = { Nachricht: 'Hallo', Nutzername: 'a', Profil: '', Datum: '2026-10-16', Datei: { type: 'application/pdf', base64: 'JVBERi0xLjQK' } };
 
-test('/chat: Anhang bei erreichtem Upload-Limit wird mit 429 abgewiesen, Anthropic nicht aufgerufen', async () => {
+test('/chat: Anhang wird auch bei altem Zählerstand 50 nicht abgewiesen (kein monatliches Upload-Limit mehr, Kap. 6 Nr. 28)', async () => {
   const env = await erzeugeTestEnv();
-  await env.PROFIL_KV.put(uploadKey('uid-a'), '50');
+  await env.PROFIL_KV.put(uploadKey('uid-a'), '50'); // Altlast aus der Zeit mit Kontingent
   const dienste = mockExterneDienste({ users });
   try {
     const r = await anfrage(env, { path: '/chat', body: pdfChat, headers: { Authorization: 'Bearer tok-a' }, ip: '203.0.113.50' });
-    assert.equal(r.status, 429);
-    assert.equal(dienste.log.anthropic, 0);
+    assert.notEqual(r.status, 429);
+    assert.equal(dienste.log.anthropic, 1, 'Anthropic wird aufgerufen');
+    assert.equal(env.PROFIL_KV._m.get(uploadKey('uid-a')), '50', 'der Altzähler wird weder gelesen noch verändert');
   } finally { dienste.restore(); }
 });
 
-test('/chat: Anhang zählt gegen das Upload-Limit', async () => {
+test('/chat: Anhang zählt als Nachricht im Tageslimit (nachrichtenlimit), nirgends in einem Upload-Zähler', async () => {
   const env = await erzeugeTestEnv();
   const dienste = mockExterneDienste({ users });
   try {
     await anfrage(env, { path: '/chat', body: pdfChat, headers: { Authorization: 'Bearer tok-a' }, ip: '203.0.113.51' });
-    // G6-M5: der Mock-Anthropic antwortet mit 500, der gescheiterte Aufruf gibt die Reservierung zurück (Zähler zählt nur gelungene Uploads)
-    assert.equal(env.PROFIL_KV._m.get(uploadKey('uid-a')), '0');
     assert.equal(dienste.log.anthropic, 1);
+    assert.equal(env.PROFIL_KV._m.get(uploadKey('uid-a')), undefined, 'kein KV-Upload-Zähler');
+    assert.ok(dienste.log.firestore.some((f) => /nachrichtenlimit/.test(f.url)), 'Tageslimit der KI-Aktionen wurde geprüft');
+    assert.ok(!dienste.log.firestore.some((f) => /uploadlimit/.test(f.url)), 'keine Upload-Reservierung in Firestore');
   } finally { dienste.restore(); }
 });
 

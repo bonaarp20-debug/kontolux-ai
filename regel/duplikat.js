@@ -6,16 +6,37 @@ const ja = (f) => !!(f && f.booleanValue === true);
 
 // dokumente: Firestore-REST-Dokumente ({ name, fields }), schon über rechnungsnr gefiltert. Liefert das erste passende Dokument oder null.
 // Tragen beide Belege einen mwst_satz und die Sätze weichen ab, ist es kein Duplikat (ein Z-Bon mit 19 % und 7 % = zwei Belege mit derselben Z-Nummer).
+// O11 N2 (wie findeBelegDuplikat in der App): Nummer und Absender ohne Rand-Leerzeichen, mehrfache Leerzeichen und Groß/Klein vergleichen; Bestandsdaten bleiben unverändert.
+export const dupNorm = (x) => String(x ?? '').trim().replace(/\s+/g, ' ').toLocaleLowerCase('de-DE');
+// Gespeicherte Schreibweisen einer Nummer, die eine reine Gleichheitsabfrage sonst verfehlt (Leerzeichen am Rand aus älteren Belegen, Groß/Klein); höchstens 10 (Firestore IN).
+export function rechnungsnrVarianten(rechnungsnr) {
+  const roh = String(rechnungsnr ?? '');
+  const nr = roh.trim();
+  if (!nr) return [];
+  return [...new Set([nr, roh, nr + ' ', ' ' + nr, ' ' + nr + ' ', nr.toUpperCase(), nr.toLowerCase()])].filter(Boolean).slice(0, 10);
+}
+// O11 N2 / O12a N1: die beiden Abfragen der Duplikat-Prüfung (Chat, Belegarchiv und Ausgabe aus der Kasse gleich; nur Gleichheits-/IN-Filter, kein Index nötig):
+// (1) gezielt Nummer + Absender, höchstens 20, damit viele Belege anderer Absender mit kurzer Nummer den richtigen nicht verdrängen;
+// (2) breit über die Schreibweisen der Nummer (Leerzeichen am Rand, Groß/Klein), höchstens 100. Rückgabe: Liste von { where, limit } (structuredQuery-Teile).
+export function rechnungsnrAbfragen(rechnungsnr, absender) {
+  const nr = String(rechnungsnr ?? '').trim();
+  if (!nr) return [];
+  const gleich = (feld, wert) => ({ fieldFilter: { field: { fieldPath: feld }, op: 'EQUAL', value: { stringValue: wert } } });
+  return [
+    { where: { compositeFilter: { op: 'AND', filters: [gleich('rechnungsnr', nr), gleich('absender', String(absender ?? '').trim())] } }, limit: 20 },
+    { where: { fieldFilter: { field: { fieldPath: 'rechnungsnr' }, op: 'IN', value: { arrayValue: { values: rechnungsnrVarianten(rechnungsnr).map((v) => ({ stringValue: v })) } } } }, limit: 100 },
+  ];
+}
 export function rechnungsnrDuplikat(dokumente, { rechnungsnr, absender, typ, mwst_satz } = {}) {
-  const nr = String(rechnungsnr || '').trim();
-  const ab = String(absender || '').trim();
+  const nr = dupNorm(rechnungsnr);
+  const ab = dupNorm(absender);
   if (!nr || !ab) return null;
   const art = typ || 'rechnung_eingehend';
   for (const d of Array.isArray(dokumente) ? dokumente : []) {
     const f = (d && d.fields) || {};
     if (ja(f.deleted) || ja(f.storniert)) continue;
-    if (text(f.rechnungsnr).trim() !== nr) continue;
-    if (text(f.absender).trim() !== ab) continue;
+    if (dupNorm(text(f.rechnungsnr)) !== nr) continue;
+    if (dupNorm(text(f.absender)) !== ab) continue;
     if ((text(f.typ) || 'rechnung_eingehend') !== art) continue;
     const alt = text(f.mwst_satz);
     if (alt !== '' && mwst_satz != null && String(mwst_satz) !== '' && alt !== String(mwst_satz)) continue;

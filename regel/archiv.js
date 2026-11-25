@@ -5,11 +5,15 @@
 // steuerprofil/aktuell/verlauf/* und dokumente/*/versionen/* nach dem Löschlauf (Ablauf der Aufbewahrungsfrist) als Datenrest zurück.
 // Darum werden sie über eine Abfrage über alle Nachfahren (allDescendants) unter users/{uid} gefunden: eine Unteranfrage je 300 Dokumente,
 // unabhängig von der Zahl der Elterndokumente (Free-Plan: 50 Unteranfragen; eine Liste je Beleg wäre bei 5.000 Belegen nicht machbar).
+import { abfrageStrom } from './firestore-strom.js'; // O18a M1
+
 export const FIRESTORE_WURZEL = 'https://firestore.googleapis.com/v1/projects/kontolux-ai/databases/(default)/documents';
 // FIX-RB N6 (G-RB): zaehler (benannte Zähler, regel/zaehler.js) gehört mit in Archiv, Löschlauf, Speicher-Umzug und Export
 // WORKER-C (Release C, Q-5): oss_meldung (Abgabe-Schnappschüsse der OSS-Quartale, regel/oss-meldung.js), Aufbewahrung zehn Jahre ab Ende des
 // Kalenderjahres der Abgabe (§ 22 Abs. 1 S. 4 UStG); Unterkollektion oss_meldung/{periode}/verlauf läuft über REGEL_UNTERSAMMLUNGEN ('verlauf').
-export const REGEL_SAMMLUNGEN = Object.freeze(['steuerprofil', 'festschreibung', 'audit_v2', 'migration', 'rechnungsnummern', 'zaehler', 'oss_meldung']);
+export const REGEL_SAMMLUNGEN = Object.freeze(['steuerprofil', 'festschreibung', 'audit_v2', 'migration', 'rechnungsnummern', 'zaehler', 'oss_meldung',
+  // KASSE-P1a (Baukonzept 08 2.3 Nr. 4): Kassenbuch, zehn Jahre (§ 147 AO); Unterkollektionen kassentage/fassungen und kassen/verlauf über REGEL_UNTERSAMMLUNGEN
+  'kassen', 'kassentage', 'kassenbewegungen', 'betriebsstaetten', 'kassenmeldungen']);
 // FIX-L (G-RECHT-B F-D3): Profil-Dokumente ohne Aufbewahrungspflicht, die schon die Kontolöschung (/konto-archivieren) entfernt.
 // selbsttest: Ergebnis des Abgleichs im Hintergrund (Zählwerte, Zeitpunkt, Version, Fingerabdruck), keine Unterlage nach § 147 AO.
 // Für vorher archivierte Konten räumt der Nachlauf nach der Kontolöschung es ab (NACHLAUF_PROFIL in regel/loeschlaeufe-konto.js).
@@ -25,9 +29,9 @@ export async function profilRestLoeschen(uid, token, fetchFn = globalThis.fetch)
   return ARCHIV_LOESCHEN_PROFIL.length;
 }
 // Unterkollektionen je Sammlung (chats/messages räumt der Löschlauf schon heute je Chat ab)
-export const UNTERSAMMLUNGEN = Object.freeze({ chats: ['messages'], steuerprofil: ['verlauf'], dokumente: ['versionen'], oss_meldung: ['verlauf'] });
+export const UNTERSAMMLUNGEN = Object.freeze({ chats: ['messages'], steuerprofil: ['verlauf'], dokumente: ['versionen'], oss_meldung: ['verlauf'], kassentage: ['fassungen'], kassen: ['verlauf'] });
 // Für den Löschlauf und den Export über allDescendants (messages bleibt beim bisherigen Weg je Chat)
-export const REGEL_UNTERSAMMLUNGEN = Object.freeze(['verlauf', 'versionen']);
+export const REGEL_UNTERSAMMLUNGEN = Object.freeze(['verlauf', 'versionen', 'fassungen']);
 const SEITE = 300;
 const RUNDEN_MAX = 100;
 
@@ -52,22 +56,30 @@ function gehoertZu(uid, name, dokName) {
   return seg[0] === 'users' && seg[1] === uid && seg.length >= 6 && seg.length % 2 === 0 && seg[seg.length - 2] === name;
 }
 
-// Alle Dokumente einer Unterkollektion (beliebiger Elterndokumente) unter users/{uid}; Rohform wie die Firestore-REST-Liste { name, fields }
-export async function untersammlungLesen(uid, name, token, fetchFn = globalThis.fetch, { nurName = false } = {}) {
+// Alle Dokumente einer Unterkollektion (beliebiger Elterndokumente) unter users/{uid}; Rohform wie die Firestore-REST-Liste { name, fields }.
+// teil: true (O9a M3, Prüfer-Daten): wirft nie, sondern liefert { dokumente, vollstaendig } mit allen schon gelesenen Seiten (wie listeTeil in kasse-daten.js);
+// ohne teil wie bisher alles oder ein Fehler (Löschlauf und Export brauchen alles).
+export async function untersammlungLesen(uid, name, token, fetchFn = globalThis.fetch, { nurName = false, teil = false } = {}) {
   const alle = [];
   let cursor = null;
-  for (let runde = 0; runde < RUNDEN_MAX; runde++) {
-    const res = await fetchFn(`${FIRESTORE_WURZEL}/users/${uid}:runQuery`, {
-      method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(abfrage(name, nurName, cursor)),
-    });
-    if (!res.ok) throw new Error(`Abfrage ${name} fehlgeschlagen (${res.status})`);
-    const zeilen = await res.json();
-    const docs = (Array.isArray(zeilen) ? zeilen : []).map((z) => z && z.document).filter((d) => d && d.name);
-    for (const d of docs) if (gehoertZu(uid, name, d.name)) alle.push(d);
-    if (docs.length < SEITE) return alle;
-    cursor = docs[docs.length - 1].name;
+  try {
+    for (let runde = 0; runde < RUNDEN_MAX; runde++) {
+      const res = await fetchFn(`${FIRESTORE_WURZEL}/users/${uid}:runQuery`, {
+        method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(abfrage(name, nurName, cursor)),
+      });
+      if (!res.ok) throw new Error(`Abfrage ${name} fehlgeschlagen (${res.status})`);
+      const zeilen = abfrageStrom(await res.json(), `Abfrage ${name}`); // O18a M1: abgebrochener Strom (Fehlerelement bei Status 200) gälte sonst als letzte Seite
+      const docs = zeilen.map((z) => z.document).filter((d) => d && d.name);
+      for (const d of docs) if (gehoertZu(uid, name, d.name)) alle.push(d);
+      if (docs.length < SEITE) return teil ? { dokumente: alle, vollstaendig: true } : alle;
+      cursor = docs[docs.length - 1].name;
+    }
+    throw new Error(`Abfrage ${name}: zu viele Seiten`);
+  } catch (e) {
+    if (!teil) throw e;
+    console.warn('untersammlung_teil ' + JSON.stringify({ name, art: String(e?.name || 'Error').slice(0, 40) }));
+    return { dokumente: alle, vollstaendig: false };
   }
-  throw new Error(`Abfrage ${name}: zu viele Seiten`);
 }
 
 // Löscht alle Dokumente der genannten Unterkollektionen unter users/{uid} (batchWrite, je 400). Gibt die Anzahl je Name zurück.
@@ -96,5 +108,6 @@ export async function untersammlungenExport(uid, token, fetchFn = globalThis.fet
   return {
     steuerprofil_verlauf: await untersammlungLesen(uid, 'verlauf', token, fetchFn),
     dokumente_versionen: await untersammlungLesen(uid, 'versionen', token, fetchFn),
+    kassentage_fassungen: await untersammlungLesen(uid, 'fassungen', token, fetchFn), // KASSE-P1a
   };
 }

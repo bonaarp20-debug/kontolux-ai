@@ -15,7 +15,15 @@ export const AUDIT_AKTIONEN = ['steuerprofil_anlegen', 'steuerprofil_eintrag', '
   // E1 (Zuruf BP-14): Sammelklärung unklarer migrierter Belege (regel/migration.js aktion 'klaerung')
   'migration_klaerung',
   // WORKER-C (Release C, BP-29): Abgabe-Schnappschuss eines OSS-Quartals (regel/oss-meldung.js), details ohne Beträge
-  'oss_abgabe'];
+  'oss_abgabe',
+  // KASSE-P1b (Baukonzept 2.12 M13): Kassenbuch, details nur mit Zählern und IDs, keine Beträge
+  'kasse_anlegen', 'kasse_aendern', 'kasse_system_wechseln', 'kassentag_abschluss', 'kassentag_storno', 'kassentag_ruhetag', 'kassentag_ruhetage', 'kassentag_ruhetag_aufgehoben',
+  'kassentag_aehnlich_trotzdem', 'kassenbewegung', 'kassenbewegung_storno', 'kassenmeldung',
+  'kassentag_retoure', 'kassentag_retoure_storno', // R1.5 (Baukonzept 08 2.13): Retoure auf Vortag und ihr Storno
+  // W2-W2 (welle2-konzept 3.5): Außerbetriebnahme und Rücknahme, Betriebsstätten (details nur mit IDs und Gründen, keine Beträge)
+  'kasse_ausser_betrieb', 'kasse_ausser_betrieb_aufgehoben', 'betriebsstaette_anlegen', 'betriebsstaette_aendern',
+  // O8 N1: ELSTER-Protokoll an eine bestehende Meldung nachgereicht (einmalig, details nur mit der ID)
+  'kassenmeldung_protokoll'];
 
 export function kopfPfad(uid) {
   return `users/${uid}/audit_v2/_kopf`;

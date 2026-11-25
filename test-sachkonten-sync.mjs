@@ -9,7 +9,25 @@
 //
 // Nutzung: node test-sachkonten-sync.mjs
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+// K1-Fix N-7 (Gegenlesung E): der Wächter liest den App-Checkout daneben (../Kontolux). Fehlt er ganz (zum Beispiel ein einzelner Worker-Checkout), wird
+// ÜBERSPRUNGEN mit Warnung (Exit 0, wie scripts/test-skripte.mjs). Liegt er daneben, aber eine gebrauchte Datei fehlt (App-Checkout nicht auf dem Kassenbuch-Stand),
+// bleibt der Wächter ROT (Exit 1) mit klarer Meldung statt ENOENT: die Vorprüfung (npm test, der App-Checkout liegt dort immer daneben) wird nicht schwächer.
+const APP = new URL('../Kontolux/', import.meta.url);
+if (!existsSync(new URL('index.html', APP))) {
+  console.warn(`ÜBERSPRUNGEN test-sachkonten-sync: App-Checkout nicht gefunden (${fileURLToPath(APP)}index.html). Der Wächter braucht das App-Repo neben dem Worker-Repo.`);
+  process.exit(0);
+}
+const appLesen = (pfad) => {
+  const u = new URL(pfad, APP);
+  if (!existsSync(u)) {
+    console.error(`✗ test-sachkonten-sync: ${fileURLToPath(u)} fehlt. Der App-Checkout neben dem Worker ist nicht auf dem passenden Stand (Kassenbuch-Dokumente); bitte den App-Zweig auschecken, der zu diesem Worker gehört.`);
+    process.exit(1);
+  }
+  return readFileSync(u, 'utf8');
+};
 
 const extrahiere = (src) => {
   const i = src.indexOf('SACHKONTO_MAPPING = {');
@@ -19,7 +37,7 @@ const extrahiere = (src) => {
   return new Function('return ' + src.slice(start, j + 1))();
 };
 const worker = extrahiere(readFileSync(new URL('./worker.js', import.meta.url), 'utf8'));
-const app = extrahiere(readFileSync(new URL('../Kontolux/index.html', import.meta.url), 'utf8'));
+const app = extrahiere(appLesen('index.html'));
 
 // Kategorie → [SKR03-Konto + DATEV-Bezeichnung, SKR04-Konto + DATEV-Bezeichnung]
 const DATEV_2026 = {
@@ -49,6 +67,8 @@ const DATEV_2026 = {
   'Einnahmen 19%': [['8400', 'Erlöse 19 % USt (Automatik)'], ['4400', 'Erlöse 19 % USt (Automatik)']],
   'Einnahmen 7%': [['8300', 'Erlöse 7 % USt (Automatik)'], ['4300', 'Erlöse 7 % USt (Automatik)']],
   'Einnahmen steuerfrei': [['8200', 'Erlöse'], ['4200', 'Erlöse']],
+  // Kassenbuch P1b-5 (12-steuer-vertiefung 3.4 SB-4, Kontenrahmen 2026 Art.-Nr. 11174/11175): kein eigenes Konto "Kassendifferenz", der Fehlbetrag steht auf dem Konto "Sonstige betriebliche Aufwendungen"
+  'Kassendifferenz (Fehlbetrag)': [['4900', 'Sonstige betriebliche Aufwendungen'], ['6300', 'Sonstige betriebliche Aufwendungen']],
   // OSS-FORM 3: Kontenrahmen 2026 (regel/datev-oss.js, Fußnote 3: BU-Schlüssel 10, EU-Land und Satz über das EU-Fenster)
   'Einnahmen EU-Privatkunden (OSS)': [['8320', 'Erlöse aus im anderen EU-Land steuerpflichtigen Lieferungen, im Inland nicht steuerbar'], ['4320', 'Erlöse aus im anderen EU-Land steuerpflichtigen Lieferungen, im Inland nicht steuerbar']]
 };
@@ -74,7 +94,7 @@ for (const [kat, [k03, k04]] of Object.entries(DATEV_2026)) {
   pruefe(`${kat}: SKR04 ${k04[0]} (${k04[1]})`, app[kat]?.SKR04 === k04[0], `Mapping hat ${app[kat]?.SKR04}`);
 }
 // SKR03-Konten, die gegen die DATEV-Kontenrahmen-PDF (Bau-Paket 2026, Dok. 19606) wörtlich geprüft sind.
-// SKR04 ist hier NICHT geprüft (keine PDF vorliegend).
+// SKR04 siehe SKR04_PDF unten.
 const SKR03_PDF = {
   'Vereinnahmte Umsatzsteuer': ['1776', 'Umsatzsteuer 19 %'],
   'Vorsteuer': ['1576', 'Abziehbare Vorsteuer 19 %'],
@@ -107,6 +127,10 @@ const WEITERE = {
     '0480': 'Geringwertige Wirtschaftsgüter', '4855': 'Sofortabschreibung geringwertiger Wirtschaftsgüter',
     '4654': 'Nicht abzugsfähige Bewirtungskosten', '4650': 'Bewirtungskosten', '4900': 'Sonstige betriebliche Aufwendungen',
     '1800': 'F Privatentnahmen allgemein', '1890': 'F Privateinlagen', '4530': 'Laufende Fahrzeug-Betriebskosten',
+    // Kassenbuch P1b-5 (12-steuer-vertiefung 3.4, Kontenrahmen 2026, Bezeichnung wörtlich)
+    '1000': 'Kasse', '1360': 'Geldtransit', '8200': 'Erlöse', '8400': 'Erlöse 19 % USt (Automatik)',
+    // DK-FIX (12-steuer-vertiefung 3.4, Bezeichnung wörtlich; am 22.11.2026 gegen Kontenrahmen 2026 SKR03 11174 / SKR04 11175 geprüft, sb-antworten.md SB-4)
+    '8290': 'Erlöse 0 % USt', '1590': 'Durchlaufende Posten',
   },
   SKR04: {
     '5923': 'U AV Sonstige Leistungen eines im anderen EU-Land ansässigen Unternehmers 19 % Vorsteuer und 19 % Umsatzsteuer',
@@ -120,6 +144,8 @@ const WEITERE = {
     '0670': 'Geringwertige Wirtschaftsgüter', '6260': 'Sofortabschreibungen geringwertiger Wirtschaftsgüter',
     '6644': 'Nicht abzugsfähige Bewirtungskosten', '6640': 'Bewirtungskosten', '6300': 'Sonstige betriebliche Aufwendungen',
     '2100': 'F Privatentnahmen allgemein', '2180': 'F Privateinlagen', '6530': 'Laufende Fahrzeug-Betriebskosten',
+    '1600': 'Kasse', '1460': 'Geldtransit', '4200': 'Erlöse', '4400': 'Erlöse 19 % USt (Automatik)',
+    '4290': 'Erlöse 0 % USt', '1370': 'Durchlaufende Posten',
   },
 };
 for (const skr of ['SKR03', 'SKR04']) {
@@ -128,6 +154,15 @@ for (const skr of ['SKR03', 'SKR04']) {
   pruefe(`${skr}: § 13b-, GWG- und Erlöskonten des Exports stehen im Kontenrahmen 2026 (Tabelle WEITERE)`, benutzt.every(k => WEITERE[skr][k]), benutzt.filter(k => !WEITERE[skr][k]).join(', '));
   pruefe(`${skr}: § 13b-Eingangskonten sind Automatikkonten (AV), Erlöskonten AM`, [rc.eu.rb, rc.eu.ku, rc.drittland.rb, rc.drittland.ku].every(k => /^U AV /.test(WEITERE[skr][k])) && [ra.eu, ra.drittland, ra.inland].every(k => /^U AM /.test(WEITERE[skr][k])));
   pruefe(`${skr}: Kleinunternehmer-Konto 2026 ist AM, das Vorjahreskonto ${KU_KONTO[skr].bis2025} ist im Kontenrahmen 2026 reserviert (nicht in der Tabelle)`, /^U AM /.test(WEITERE[skr][KU_KONTO[skr].ab2026]) && !WEITERE[skr][KU_KONTO[skr].bis2025]);
+}
+// Kassenzweig des Exports (regel/datev-kasse.js): Kassen- und Geldtransitkonto stehen in der Tabelle WEITERE (Kontenrahmen 2026), die Standardwerte sind genau diese Konten
+import { DATEV_KASSE_KONTEN, KASSE_DURCHLAUF_KONTO, KASSE_ERLOES_0_KONTO, KASSE_MEHRZWECK_KONTO } from './regel/datev-kasse.js';
+for (const skr of ['SKR03', 'SKR04']) {
+  const k = DATEV_KASSE_KONTEN[skr];
+  pruefe(`${skr}: Kassenkonto ${k.kasse} (Kasse) und Geldtransitkonto ${k.transit} (Geldtransit) laut Kontenrahmen 2026`, WEITERE[skr][k.kasse] === 'Kasse' && WEITERE[skr][k.transit] === 'Geldtransit');
+  pruefe(`${skr}: Konten des Kassenzweigs ${KASSE_DURCHLAUF_KONTO[skr]} (Durchlaufende Posten), ${KASSE_ERLOES_0_KONTO[skr]} (Erlöse 0 % USt), ${KASSE_MEHRZWECK_KONTO[skr]} (Erlöse) stehen in der Tabelle`,
+    WEITERE[skr][KASSE_DURCHLAUF_KONTO[skr]] === 'Durchlaufende Posten' && WEITERE[skr][KASSE_ERLOES_0_KONTO[skr]] === 'Erlöse 0 % USt' && WEITERE[skr][KASSE_MEHRZWECK_KONTO[skr]] === 'Erlöse');
+  pruefe(`${skr}: Kassendifferenz (Fehlbetrag) steht auf dem Konto ${app['Kassendifferenz (Fehlbetrag)'][skr]} (Sonstige betriebliche Aufwendungen)`, app['Kassendifferenz (Fehlbetrag)'][skr] === app['Sonstiges'][skr]);
 }
 // Der Export darf die Konten nicht von Hand verdrahten: die Konstanten im Worker stehen in der Tabelle (4654/6644, 1800/1890, 2100/2180, 4900/6300)
 const workerQuelle = readFileSync(new URL('./worker.js', import.meta.url), 'utf8');
@@ -139,5 +174,49 @@ const reserviert = { SKR03: ['1583', '1775', '8195', '8196'], SKR04: ['4185', '4
 const verwendet = { SKR03: new Set(Object.values(app).map(e => e.SKR03)), SKR04: new Set(Object.values(app).map(e => e.SKR04)) };
 for (const skr of ['SKR03', 'SKR04']) pruefe(`${skr}: kein reserviertes/gelöschtes Konto im Mapping`, reserviert[skr].every(k => !verwendet[skr].has(k)));
 
+// ── Wächter Kassenbuch (SB-4, sb-antworten.md 22.11.2026, Kontenrahmen 2026 SKR03 11174 / SKR04 11175 im Wortlaut gelesen): nur Konten, die der Code tatsächlich benutzt.
+// Was rot wird (J1-Fix N-c, vorher stand hier fälschlich „auch bei Doku-Änderung“):
+//  a) eine Nummer im Code (Kassenzweig, KU-Konto, Mapping) weicht von KASSE_BELEGT ab;
+//  b) Nummer und Bezeichnung aus KASSE_BELEGT (und Bankgebühren 4970/6855 aus DATEV_2026) stehen nicht genau so in der Kontentabelle von
+//     ../Kontolux/docs/kassenbuch/sb-antworten.md (SB-4, die im Wortlaut gelesene Quelle); die Tabellen in dieser Datei sind von dort abgeschrieben;
+//  c) ein Kontenpaar „SKR03/SKR04“ in den Hilfetexten stand-kasse.md 7a fehlt in dieser Kontentabelle (oder seine genannte Bezeichnung weicht ab).
+// 8519/4569 (Provision Lotto/Post) nutzt der Code nicht (nur ein optionaler Export-Hinweis in 7a): geprüft wird es nur über c), nicht gegen den Code.
+// Die DATEV-PDFs selbst liest der Test nicht.
+import { KU_KONTO as KU_K } from './regel/datev-export-regeln.js';
+const KASSE_BELEGT = {
+  SKR03: { kasse: ['1000', 'Kasse'], transit: ['1360', 'Geldtransit'], durchlauf: ['1590', 'Durchlaufende Posten'], erloese: ['8200', 'Erlöse'], erloese0: ['8290', 'Erlöse 0 % USt'], ku: ['8192', 'U AM Steuerfreie Erlöse Kleinunternehmer nach § 19 Abs. 1 UStG'], fehlbetrag: ['4900', 'Sonstige betriebliche Aufwendungen'] },
+  SKR04: { kasse: ['1600', 'Kasse'], transit: ['1460', 'Geldtransit'], durchlauf: ['1370', 'Durchlaufende Posten'], erloese: ['4200', 'Erlöse'], erloese0: ['4290', 'Erlöse 0 % USt'], ku: ['4184', 'U AM Steuerfreie Erlöse Kleinunternehmer nach § 19 Abs. 1 UStG'], fehlbetrag: ['6300', 'Sonstige betriebliche Aufwendungen'] },
+};
+for (const skr of ['SKR03', 'SKR04']) {
+  const b = KASSE_BELEGT[skr], k = DATEV_KASSE_KONTEN[skr];
+  const imCode = { kasse: k.kasse, transit: k.transit, durchlauf: KASSE_DURCHLAUF_KONTO[skr], erloese: KASSE_MEHRZWECK_KONTO[skr], erloese0: KASSE_ERLOES_0_KONTO[skr], ku: KU_K[skr].ab2026, fehlbetrag: app['Kassendifferenz (Fehlbetrag)'][skr] };
+  for (const [name, [nr, bez]] of Object.entries(b)) {
+    pruefe(`${skr}: Kassenbuch-Konto ${name} im Code = ${nr} (${bez}, Kontenrahmen 2026)`, imCode[name] === nr && WEITERE[skr][nr] === bez, `Code ${imCode[name]}, Tabelle ${WEITERE[skr][nr]}`);
+  }
+  // Kein Konto „Kassendifferenz“ im Kontenrahmen 2026; die aus Ratgebern bekannten 2370/6972 sind falsch und dürfen nirgends als Kassenkonto stehen
+  pruefe(`${skr}: keine Tabelle enthält ein Konto „Kassendifferenz“ und 2370/6972 sind nicht im Einsatz`, !Object.values(WEITERE[skr]).some(v => /Kassendifferenz/i.test(v)) && !Object.values(imCode).some(v => v === '2370' || v === '6972') && !Object.values(app).some(e => e[skr] === '2370' || e[skr] === '6972'));
+}
+// b) und c): Kontentabelle aus sb-antworten.md (Zeilen „| Zweck | SKR03 | SKR04 | Bezeichnung | … |“ des Blocks mit „Gebühr Kartenanbieter“)
+const sbText = appLesen('docs/kassenbuch/sb-antworten.md').split('\n');
+const sbStart = sbText.findIndex(z => z.startsWith('| Gebühr Kartenanbieter |'));
+let sbVon = sbStart, sbBis = sbStart;
+while (sbVon > 0 && sbText[sbVon - 1].startsWith('|')) sbVon--;
+while (sbBis + 1 < sbText.length && sbText[sbBis + 1].startsWith('|')) sbBis++;
+const ohneMarke = (t) => String(t).replace(/^(U AM|U AV|F|R)\s+/, '').trim();
+const sbZeilen = sbStart < 0 ? [] : sbText.slice(sbVon, sbBis + 1).map(z => z.split('|').slice(1, -1).map(x => x.trim())).filter(c => c.length >= 4)
+  .map(c => ({ skr03: c[1].match(/\d{4}/g) || [], skr04: c[2].match(/\d{4}/g) || [], bez: ohneMarke(c[3]) }));
+pruefe('sb-antworten.md: Kontentabelle SB-4 gefunden und gelesen', sbZeilen.length >= 10, `${sbZeilen.length} Zeilen`);
+const sbHat = (n03, n04, bez) => sbZeilen.some(z => z.skr03.includes(n03) && z.skr04.includes(n04) && (bez === null || z.bez === ohneMarke(bez)));
+for (const name of Object.keys(KASSE_BELEGT.SKR03)) {
+  const [n03, b03] = KASSE_BELEGT.SKR03[name], [n04, b04] = KASSE_BELEGT.SKR04[name];
+  pruefe(`Kassenbuch-Konto ${name} ${n03}/${n04} (${ohneMarke(b03)}) steht so in sb-antworten.md`, ohneMarke(b03) === ohneMarke(b04) && sbHat(n03, n04, b03));
+}
+const [bank03, bank04] = DATEV_2026['Bankgebühren'];
+pruefe(`Gebühr Kartenanbieter ${bank03[0]}/${bank04[0]} (${bank03[1]}) steht so in sb-antworten.md`, bank03[1] === bank04[1] && sbHat(bank03[0], bank04[0], bank03[1]));
+const standText = appLesen('docs/kassenbuch/stand-kasse.md');
+const abschnitt7a = standText.slice(standText.indexOf('## 7a.'), standText.indexOf('## 8.'));
+const paare7a = [...abschnitt7a.matchAll(/(\d{4})\/(\d{4})(?:\s*„([^“]+)“)?/g)];
+pruefe('stand-kasse.md 7a: Kontenpaare gefunden', paare7a.length >= 3, `${paare7a.length}`);
+for (const m of paare7a) pruefe(`stand-kasse.md 7a: ${m[1]}/${m[2]}${m[3] ? ` „${m[3]}“` : ''} steht in sb-antworten.md`, sbHat(m[1], m[2], m[3] ?? null));
 console.log(`\n${ok} bestanden, ${fehler} fehlgeschlagen`);
 process.exit(fehler ? 1 : 0);

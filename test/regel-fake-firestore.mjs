@@ -1,7 +1,7 @@
 // In-Memory-Firestore (REST v1, nur was regel/*.js nutzt) für die Tests der Endpunkte /steuerprofil, /festschreibung, /migration,
 // /admin/features. Keine Netzanfrage. Unterstützt: GET Dokument, GET Liste, :batchGet, :commit (atomar, updateMask, currentDocument
 // exists/updateTime, delete, updateTransforms arrayUnion/arrayRemove), :runQuery (collectionId, allDescendants, where fieldFilter EQUAL/
-// ARRAY_CONTAINS/IN, orderBy __name__, startAt, limit), :batchWrite (delete), DELETE Dokument. Zählt jede Anfrage (Free-Plan-Grenze).
+// ARRAY_CONTAINS/IN, orderBy __name__ oder Textfeld, startAt, limit), :runAggregationQuery (nur count mit upTo; hyg M5), :batchWrite (delete), DELETE Dokument. Zählt jede Anfrage (Free-Plan-Grenze).
 // Haken: vorCommit(writes) für gleichzeitige Änderungen, fehler(url, init) für Fehlerinjektion.
 const PRAEFIX = 'projects/kontolux-ai/databases/(default)/documents/';
 const BASIS = 'https://firestore.googleapis.com/v1/' + PRAEFIX.slice(0, -1);
@@ -18,6 +18,59 @@ export function fakeFirestore() {
   const fehler = (status, st) => json({ error: { code: status, status: st, message: st } }, status);
   const pfadVon = (name) => String(name).startsWith(PRAEFIX) ? String(name).slice(PRAEFIX.length) : null;
   const ungeschuetzt = (fp) => fp.replace(/^`|`$/g, '').replace(/\\`/g, '`').replace(/\\\\/g, '\\');
+
+  // Abfrage (runQuery und runAggregationQuery): Treffer-Pfade in Reihenfolge, nach startAt und limit
+  function abfrage(eltern, sq) {
+    const coll = sq.from[0].collectionId;
+    const praefix = (eltern ? eltern + '/' : '') + coll + '/';
+    let treffer;
+    if (sq.from[0].allDescendants) {
+      // alle Sammlungen dieses Namens unterhalb des Elternpfads (beliebige Tiefe)
+      const basis = eltern ? eltern + '/' : '';
+      treffer = [...docs.keys()].filter((p) => { if (!p.startsWith(basis)) return false; const seg = p.slice(basis.length).split('/'); return seg.length >= 2 && seg.length % 2 === 0 && seg[seg.length - 2] === coll; }).sort();
+    } else treffer = [...docs.keys()].filter((p) => p.startsWith(praefix) && !p.slice(praefix.length).includes('/')).sort();
+    const filter = !sq.where ? [] : sq.where.fieldFilter ? [sq.where.fieldFilter] : ((sq.where.compositeFilter && sq.where.compositeFilter.filters) || []).map((x) => x.fieldFilter).filter(Boolean); // REST-G3: UND-Filter
+    for (const ff of filter) {
+      if (ff.field.fieldPath === '__name__') { // KASSE-P1b: ID-Bereich (Listen je Kasse und Tag ohne Index)
+        const ref = pfadVon(ff.value.referenceValue);
+        treffer = treffer.filter((p) => (ff.op === 'GREATER_THAN_OR_EQUAL' ? p >= ref : ff.op === 'LESS_THAN_OR_EQUAL' ? p <= ref : ff.op === 'GREATER_THAN' ? p > ref : ff.op === 'LESS_THAN' ? p < ref : ff.op === 'EQUAL' ? p === ref : false));
+        continue;
+      }
+      treffer = treffer.filter((p) => {
+        // KERN-C3: verschachtelte Feldpfade (a.b.c) über mapValue, wie Firestore; ein flacher Schlüssel gleichen Namens hat Vorrang (ältere Tests)
+        const felder = docs.get(p).fields;
+        const f = Object.hasOwn(felder, ff.field.fieldPath) ? felder[ff.field.fieldPath] : ff.field.fieldPath.split('.').reduce((w, k) => (w && w.mapValue && w.mapValue.fields ? w.mapValue.fields[k] : undefined), { mapValue: { fields: felder } });
+        if (ff.op === 'ARRAY_CONTAINS') return (f?.arrayValue?.values || []).some((x) => JSON.stringify(x) === JSON.stringify(ff.value));
+        if (ff.op === 'EQUAL') return JSON.stringify(f) === JSON.stringify(ff.value);
+        if (ff.op === 'IN') return f !== undefined && (ff.value?.arrayValue?.values || []).some((x) => JSON.stringify(x) === JSON.stringify(f)); // G1
+        if (ff.op === 'GREATER_THAN_OR_EQUAL') return typeof f?.stringValue === 'string' && f.stringValue >= ff.value.stringValue; // REST-G3
+        if (ff.op === 'LESS_THAN') return typeof f?.stringValue === 'string' && f.stringValue < ff.value.stringValue;
+        return false;
+      });
+    }
+    if (Array.isArray(sq.orderBy) && sq.orderBy[0] && sq.orderBy[0].field && sq.orderBy[0].field.fieldPath !== '__name__') { // REST-G3: Sortierung nach einem Textfeld
+      const fp = sq.orderBy[0].field.fieldPath;
+      const richtung = sq.orderBy[0].direction === 'DESCENDING' ? -1 : 1;
+      const wert = (p) => docs.get(p).fields[fp]?.stringValue ?? '';
+      treffer = [...treffer].sort((a, b) => (wert(a) < wert(b) ? -richtung : wert(a) > wert(b) ? richtung : 0));
+    }
+    const absteigend = Array.isArray(sq.orderBy) && sq.orderBy[0] && sq.orderBy[0].field && sq.orderBy[0].field.fieldPath === '__name__' && sq.orderBy[0].direction === 'DESCENDING';
+    if (absteigend) treffer = [...treffer].reverse(); // KASSE-P1b
+    const textSortierung = Array.isArray(sq.orderBy) && sq.orderBy[0] && sq.orderBy[0].field && sq.orderBy[0].field.fieldPath !== '__name__';
+    if (sq.startAt && textSortierung) { // hyg M5: Cursor (Textfeld, __name__) nach orderBy [feld ASC, __name__ ASC]
+      if (sq.orderBy[0].direction === 'DESCENDING' || sq.startAt.values.length !== 2) throw new Error('Fake: Cursor nur [Textfeld, __name__] aufsteigend');
+      const fp = sq.orderBy[0].field.fieldPath;
+      const v = sq.startAt.values[0].stringValue;
+      const ab = pfadVon(sq.startAt.values[1].referenceValue);
+      const wert = (p) => docs.get(p).fields[fp]?.stringValue ?? '';
+      treffer = treffer.filter((p) => wert(p) > v || (wert(p) === v && (sq.startAt.before ? p >= ab : p > ab)));
+    } else if (sq.startAt) {
+      const ab = pfadVon(sq.startAt.values[0].referenceValue);
+      treffer = treffer.filter((p) => (absteigend ? (sq.startAt.before ? p <= ab : p < ab) : (sq.startAt.before ? p >= ab : p > ab)));
+    }
+    if (sq.limit) treffer = treffer.slice(0, sq.limit);
+    return treffer;
+  }
 
   async function fetchFn(input, init = {}) {
     const url = typeof input === 'string' ? input : input.url;
@@ -67,6 +120,12 @@ export function fakeFirestore() {
             const neu = [...vorhanden];
             for (const v of tr.appendMissingElements.values || []) if (!neu.some((x) => gleich(x, v))) neu.push(v);
             fields[tr.fieldPath] = { arrayValue: { values: neu } };
+          } else if (tr.increment) { // KASSE-P1b: increment (integerValue oder doubleValue), Feld fehlt = 0
+            const alt0 = fields[tr.fieldPath];
+            const basis = alt0 ? Number(alt0.integerValue ?? alt0.doubleValue ?? 0) : 0;
+            const zu = Number(tr.increment.integerValue ?? tr.increment.doubleValue);
+            const summe = Math.round((basis + zu) * 1e6) / 1e6;
+            fields[tr.fieldPath] = Number.isSafeInteger(summe) && tr.increment.integerValue !== undefined && (!alt0 || alt0.integerValue !== undefined) ? { integerValue: String(summe) } : { doubleValue: summe };
           } else if (tr.removeAllFromArray) {
             fields[tr.fieldPath] = { arrayValue: { values: vorhanden.filter((x) => !(tr.removeAllFromArray.values || []).some((v) => gleich(x, v))) } };
           }
@@ -86,47 +145,33 @@ export function fakeFirestore() {
       docs.delete(decodeURIComponent(rest.slice(1).split('?')[0]));
       return json({});
     }
+    const qa = rest.indexOf(':runAggregationQuery');
+    if (qa >= 0 && methode === 'POST') { // hyg M5: nur count (mit upTo), wie REST RunAggregationQueryResponse
+      log.methoden.push('runAggregationQuery');
+      const sag = body.structuredAggregationQuery;
+      const treffer = abfrage(rest.slice(1, qa), { ...sag.structuredQuery, limit: undefined });
+      const aggregateFields = {};
+      for (const ag of sag.aggregations) {
+        if (!ag.count) return fehler(400, 'NUR_COUNT_NACHGEBILDET');
+        const bis = ag.count.upTo !== undefined ? Number(ag.count.upTo) : Infinity;
+        aggregateFields[ag.alias] = { integerValue: String(Math.min(treffer.length, bis)) };
+      }
+      return json([{ result: { aggregateFields }, readTime: zeit() }]);
+    }
     const q = rest.indexOf(':runQuery');
     if (q >= 0 && methode === 'POST') {
       log.methoden.push('runQuery');
-      const eltern = rest.slice(1, q);
-      const sq = body.structuredQuery;
-      const coll = sq.from[0].collectionId;
-      const praefix = (eltern ? eltern + '/' : '') + coll + '/';
-      let treffer;
-      if (sq.from[0].allDescendants) {
-        // alle Sammlungen dieses Namens unterhalb des Elternpfads (beliebige Tiefe)
-        const basis = eltern ? eltern + '/' : '';
-        treffer = [...docs.keys()].filter((p) => { if (!p.startsWith(basis)) return false; const seg = p.slice(basis.length).split('/'); return seg.length >= 2 && seg.length % 2 === 0 && seg[seg.length - 2] === coll; }).sort();
-      } else treffer = [...docs.keys()].filter((p) => p.startsWith(praefix) && !p.slice(praefix.length).includes('/')).sort();
-      const filter = !sq.where ? [] : sq.where.fieldFilter ? [sq.where.fieldFilter] : ((sq.where.compositeFilter && sq.where.compositeFilter.filters) || []).map((x) => x.fieldFilter).filter(Boolean); // REST-G3: UND-Filter
-      for (const ff of filter) {
-        treffer = treffer.filter((p) => {
-          // KERN-C3: verschachtelte Feldpfade (a.b.c) über mapValue, wie Firestore; ein flacher Schlüssel gleichen Namens hat Vorrang (ältere Tests)
-          const felder = docs.get(p).fields;
-          const f = Object.hasOwn(felder, ff.field.fieldPath) ? felder[ff.field.fieldPath] : ff.field.fieldPath.split('.').reduce((w, k) => (w && w.mapValue && w.mapValue.fields ? w.mapValue.fields[k] : undefined), { mapValue: { fields: felder } });
-          if (ff.op === 'ARRAY_CONTAINS') return (f?.arrayValue?.values || []).some((x) => JSON.stringify(x) === JSON.stringify(ff.value));
-          if (ff.op === 'EQUAL') return JSON.stringify(f) === JSON.stringify(ff.value);
-          if (ff.op === 'IN') return f !== undefined && (ff.value?.arrayValue?.values || []).some((x) => JSON.stringify(x) === JSON.stringify(f)); // G1
-          if (ff.op === 'GREATER_THAN_OR_EQUAL') return typeof f?.stringValue === 'string' && f.stringValue >= ff.value.stringValue; // REST-G3
-          if (ff.op === 'LESS_THAN') return typeof f?.stringValue === 'string' && f.stringValue < ff.value.stringValue;
-          return false;
-        });
-      }
-      if (Array.isArray(sq.orderBy) && sq.orderBy[0] && sq.orderBy[0].field && sq.orderBy[0].field.fieldPath !== '__name__') { // REST-G3: Sortierung nach einem Textfeld
-        const fp = sq.orderBy[0].field.fieldPath;
-        const richtung = sq.orderBy[0].direction === 'DESCENDING' ? -1 : 1;
-        const wert = (p) => docs.get(p).fields[fp]?.stringValue ?? '';
-        treffer = [...treffer].sort((a, b) => (wert(a) < wert(b) ? -richtung : wert(a) > wert(b) ? richtung : 0));
-      }
-      if (sq.startAt) {
-        const ab = pfadVon(sq.startAt.values[0].referenceValue);
-        treffer = treffer.filter((p) => (sq.startAt.before ? p >= ab : p > ab));
-      }
-      if (sq.limit) treffer = treffer.slice(0, sq.limit);
+      const treffer = abfrage(rest.slice(1, q), body.structuredQuery);
       const t = zeit();
       if (!treffer.length) return json([{ readTime: t }]);
-      return json(treffer.map((p) => ({ document: roh(p, docs.get(p)), readTime: t })));
+      // W3 DATEV: select (Projektion auf Felder der obersten Ebene), wie REST StructuredQuery.select; verschachtelte Pfade kennt die Nachbildung nicht
+      const sel = body.structuredQuery.select && Array.isArray(body.structuredQuery.select.fields) ? body.structuredQuery.select.fields.map((x) => x.fieldPath) : null;
+      if (sel && sel.some((fp) => fp.includes('.'))) return fehler(400, 'FAKE_SELECT_NUR_OBERSTE_EBENE');
+      return json(treffer.map((p) => {
+        const r = roh(p, docs.get(p));
+        if (sel) r.fields = Object.fromEntries(Object.entries(r.fields).filter(([k]) => sel.includes(k)));
+        return { document: r, readTime: t };
+      }));
     }
     if (methode === 'GET') {
       const [pfadTeil, query] = rest.slice(1).split('?');

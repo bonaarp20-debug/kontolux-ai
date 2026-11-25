@@ -72,7 +72,7 @@ const csv = new TextDecoder('utf-8').decode(csvBytes);
   pruefe('Kopf: 31 Felder, Spaltenkopf 125 Spalten (Format 13)', kopf.length === 31 && kz[1].split(';').length === 125, `${kopf.length}/${kz[1].split(';').length}`);
 }
 pruefe('Export liefert 200 und 7 bezahlte Buchungen', res.status === 200 && res.headers.get('X-Datev-Exported-Count') === '7', `${res.status} ${csv.slice(0, 200)}`);
-const zeilen = csv.replace(/^﻿/, '').split('\r\n').filter(Boolean).slice(2).map(z => z.split(';'));
+const zeilen = csv.replace(/^﻿/, '').split('\r\n').filter(Boolean).slice(2).map(z => z.split(';').map((f, i) => (i === 1 ? f.replace(/^"|"$/g, '') : f)));
 const zeileMit = (betrag) => zeilen.find(z => z[0] === betrag);
 pruefe('Einnahme 19 % auf Automatikkonto 8400 ohne Steuerschlüssel (vorher 9 = Vorsteuer)', zeileMit('1190,00')?.[7] === '8400' && zeileMit('1190,00')?.[8] === '', zeileMit('1190,00')?.join(';'));
 pruefe('Einnahme 7 % auf Automatikkonto 8300 ohne Steuerschlüssel', zeileMit('107,00')?.[7] === '8300' && zeileMit('107,00')?.[8] === '');
@@ -105,7 +105,7 @@ async function exportiere(profil, belege) {
     body: JSON.stringify({ userId: USER, jahr: 2026, token: 'tok' })
   }), env, { waitUntil() {} });
   const text = new TextDecoder('utf-8').decode(new Uint8Array(await r.arrayBuffer()));
-  const z = text.replace(/^﻿/, '').split('\r\n').filter(Boolean).slice(2).map(x => x.split(';'));
+  const z = text.replace(/^﻿/, '').split('\r\n').filter(Boolean).slice(2).map(x => x.split(';').map((f, i) => (i === 1 ? f.replace(/^"|"$/g, '') : f)));
   return (betrag) => z.find(x => x[0] === betrag) || [];
 }
 const plattform = {

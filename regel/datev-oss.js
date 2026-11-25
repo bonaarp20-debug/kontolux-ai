@@ -26,6 +26,7 @@ import * as Steuerkern from '../steuerkern/index.js';
 import { istObjekt, CONFIG_PFAD, configBereinigen, kernOptionenFuer, kernOptionenFuerKontoLaden, schichtFuer, UID_MUSTER } from './gemeinsam.js';
 import { dekodiereFelder } from './firestore.js';
 import { datevKuKonto } from './datev-export-regeln.js';
+import { lesenMitEinerWiederholung } from './firestore-strom.js'; // O19-3
 
 export const DATEV_OSS_KONTEN = Object.freeze({
   SKR03: Object.freeze({ ware: '8320', ware_korrektur: '8727', tbe: '8331', drittland: '8338', inland: Object.freeze({ 1900: '8400', 700: '8300' }), kleinunternehmer: '8192' }),
@@ -127,17 +128,27 @@ export function datevOssBuchungen(eintrag, ctx) {
   return { buchungen: out.filter((b) => b.betrag > 0) };
 }
 
-// Plan für den Export laden: null = Kern-Option oss aus (Export wie vorher). Wirft bei Lesefehlern (Aufrufer antwortet 503).
-// dokDocs: Firestore-REST-Dokumente der Sammlung dokumente (wie handleDatevExport sie liest). deps: { schicht } (Tests) oder { adminToken, fetchFn }.
-export async function datevOssPlanLaden(uid, dokDocs, deps = {}) {
+// Option prüfen, ohne Belege zu lesen (W3 DATEV: der Export entscheidet damit, ob er die Belege nur für das Exportjahr lesen darf; bei aktiver Option rechnet
+// der Kern über alle Jahre). null = Kern-Option oss aus. Sonst { profil } für datevOssPlan. Wirft bei Lesefehlern (Aufrufer antwortet 503).
+export async function datevOssVorbereiten(uid, deps = {}) {
   if (!UID_MUSTER.test(String(uid || ''))) return null;
   const fs = await schichtFuer({ budget: 4, ...deps });
-  const docs = await fs.batchGet([CONFIG_PFAD, steuerprofilPfad(uid)]);
+  // O19-3: Lesepfad (Export): ein einziger Wiederholungsversuch bei vorübergehendem UNAVAILABLE im Strom, danach wie bisher fail-closed (503)
+  const docs = await lesenMitEinerWiederholung(() => fs.batchGet([CONFIG_PFAD, steuerprofilPfad(uid)]));
   const config = configBereinigen(docs.get(CONFIG_PFAD)?.daten);
   if (kernOptionenFuer(config).regeln.oss !== true) return null;
   const optionen = await kernOptionenFuerKontoLaden(uid, config, { fs, streng: true });
   if (!optionen || !optionen.regeln || optionen.regeln.oss !== true) return null;
-  const profil = docs.get(steuerprofilPfad(uid))?.daten || null;
+  return { profil: docs.get(steuerprofilPfad(uid))?.daten || null };
+}
+
+// Plan für den Export laden: null = Kern-Option oss aus (Export wie vorher). Wirft bei Lesefehlern (Aufrufer antwortet 503).
+// dokDocs: Firestore-REST-Dokumente der Sammlung dokumente (wie handleDatevExport sie liest). deps: { schicht } (Tests) oder { adminToken, fetchFn }.
+// deps.vorbereitet: Ergebnis von datevOssVorbereiten (spart die zweite Prüfung der Option).
+export async function datevOssPlanLaden(uid, dokDocs, deps = {}) {
+  const { vorbereitet, ...schichtDeps } = deps;
+  const v = vorbereitet !== undefined ? vorbereitet : await datevOssVorbereiten(uid, schichtDeps);
+  if (!v) return null;
   const zeilen = (Array.isArray(dokDocs) ? dokDocs : []).map((d) => ({ id: String(d?.name || '').split('/').pop(), daten: dekodiereFelder(d?.fields || {}) }));
-  return datevOssPlan(zeilen, profil);
+  return datevOssPlan(zeilen, v.profil);
 }
